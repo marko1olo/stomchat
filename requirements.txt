@@ -1,0 +1,12 @@
+html-telegraph-poster
+telethon
+python-dotenv
+aiosqlite
+google-genai
+groq
+ddgs
+tavily-python
+httpx
+openai
+Pillow
+opencv-python

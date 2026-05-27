@@ -1,0 +1,60 @@
+# Secrets and local identity
+.env
+.env.*
+!.env.example
+config.py
+id.py
+*.session
+*.session-journal
+
+# Runtime state and logs
+*.log
+*.log.*
+bot_heartbeat.json
+bot_state.json
+bot_summary_status.json
+bot_watchdog_dump.txt
+temp_media/
+uploaded_media/
+
+# Databases and backups
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+
+# Generated/cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local media and binary tools
+*.mp4
+*.mov
+*.MOV
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+ffmpeg.exe
+
+# Archives and scratch
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.tmp
+*~
