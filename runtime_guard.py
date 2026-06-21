@@ -113,6 +113,8 @@ def _watchdog_loop():
                     dump_file.write(
                         f"utc={utc_now_text()} pid={os.getpid()} reason=event_loop_heartbeat_stale_{age:.1f}s\n"
                     )
+                    faulthandler.dump_traceback(file=dump_file, all_threads=True)
+                    dump_file.write("=== END WATCHDOG EXIT ===\n")
                     dump_file.flush()
             except Exception:
                 pass

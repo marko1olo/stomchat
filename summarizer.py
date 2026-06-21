@@ -1,18 +1,19 @@
 import asyncio  # Добавлено
 import config
-import gemini_client
 import database
 import logging
 import random
-import search_engine
+import search_engine_safe as search_engine
 import re
 import html
 import runtime_guard
+from blocking_tools import create_telegraph_page_async, generate_gemini_text_async
 from html_telegraph_poster import TelegraphPoster
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 TELEGRAPH_TIMEOUT_SECONDS = 60
+GEMINI_GENERATION_TIMEOUT_SECONDS = 2100
 TELEGRAM_SEND_TIMEOUT_SECONDS = 90
 PIN_TIMEOUT_SECONDS = 30
 RECENT_DELIVERY_SCAN_LIMIT = 20
@@ -145,13 +146,13 @@ async def _generate_text_singleflight(prompt, kind, chat_id, topic_id, message_c
     _write_summary_stage("waiting_for_generation_slot", **context)
     async with _summary_generation_lock:
         _write_summary_stage("gemini_generation_start", **context)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            gemini_client.generate_text,
+        response, error = await generate_gemini_text_async(
             prompt,
             context,
+            timeout=GEMINI_GENERATION_TIMEOUT_SECONDS,
         )
+        if error:
+            logger.error("Gemini subprocess failed: %s", error)
         return response
 
 
@@ -498,7 +499,6 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         final_html = ""
 
         # Генерация в отдельном потоке (не блокирует бота)
-        loop = asyncio.get_running_loop()
         logger.info(f"summary gemini start chat={chat_id} prompt_chars={len(prompt)}")
         response = await _generate_text_singleflight(
             prompt,
@@ -579,10 +579,13 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 message_count=len(messages),
                 html_chars=len(final_html),
             )
-            page_url = await asyncio.wait_for(
-                loop.run_in_executor(None, create_telegraph_page, title, final_html),
+            page_url, telegraph_error = await create_telegraph_page_async(
+                title,
+                final_html,
                 timeout=TELEGRAPH_TIMEOUT_SECONDS,
             )
+            if telegraph_error:
+                logger.error("Telegraph subprocess failed: %s", telegraph_error)
             logger.info(f"summary telegraph done chat={chat_id} ok={bool(page_url)}")
             
             if page_url:
@@ -837,7 +840,6 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         logger.info("⏳ Генерируем МАСШТАБНЫЙ Weekly Digest (Longread)...")
         
         # Используем executor для асинхронности, так как генерация длинная
-        loop = asyncio.get_running_loop()
         response = await _generate_text_singleflight(
             prompt,
             "weekly",
@@ -881,10 +883,13 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             message_count=len(messages),
             html_chars=len(final_html),
         )
-        page_url = await asyncio.wait_for(
-            loop.run_in_executor(None, create_telegraph_page, title, final_html),
+        page_url, telegraph_error = await create_telegraph_page_async(
+            title,
+            final_html,
             timeout=TELEGRAPH_TIMEOUT_SECONDS,
         )
+        if telegraph_error:
+            logger.error("Telegraph subprocess failed: %s", telegraph_error)
         
         if not page_url:
             logger.error("❌ Не удалось создать Telegraph страницу (Weekly). Проверь валидность HTML.")

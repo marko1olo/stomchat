@@ -32,16 +32,19 @@ if not os.path.exists(UPLOADED_DIR):
 
 def extract_frame(video_path):
     """Вырезает первый кадр из видео с помощью OpenCV."""
+    vid_cap = None
     try:
         vid_cap = cv2.VideoCapture(video_path)
         success, image = vid_cap.read()
-        vid_cap.release()
         if success:
             frame_path = video_path + ".jpg"
-            cv2.imwrite(frame_path, image)
-            return frame_path
+            if cv2.imwrite(frame_path, image):
+                return frame_path
     except Exception as e:
         logger.error(f"❌ Ошибка извлечения кадра (OpenCV): {e}")
+    finally:
+        if vid_cap is not None:
+            vid_cap.release()
     return None
 
 def resize_and_save_final(source_path, dest_dir, max_size=768):
@@ -68,6 +71,14 @@ def resize_and_save_final(source_path, dest_dir, max_size=768):
         except Exception as copy_err:
             logger.error(f"Ошибка копирования файла: {copy_err}")
     return None
+
+
+async def download_video_media(client, media, destination):
+    with open(destination, 'wb') as f:
+        async for chunk in client.iter_download(media, request_size=1024*1024, limit=50):
+            f.write(chunk)
+    return destination
+
 
 # Функция process_with_groq удалена в пользу vision.describe_image
 
@@ -118,7 +129,7 @@ async def main():
 
             try:
                 # 1. Получаем объект сообщения с таймаутом
-                msg = await asyncio.wait_for(client.get_messages(config.SOURCE_CHAT_ID, ids=msg_id), timeout=20)
+                msg = await asyncio.wait_for(client.get_messages(config.SOURCE_CHAT_ID, ids=msg_id), timeout=30)
                 if not msg or not msg.media:
                     logger.warning(f"Медиа в MSG_{msg_id} не найдено.")
                     await db.execute('UPDATE archive_messages SET vision_description = "SKIP_EMPTY", vision_processed = 1 WHERE msg_id = ?', (msg_id,))
@@ -131,48 +142,17 @@ async def main():
                     await db.commit()
                     continue
 
-                # 2. Скачиваем (лимит 50 МБ для уверенного захвата метаданных видео)
+                # 2. Скачиваем один раз (лимит 50 МБ для уверенного захвата метаданных видео)
                 if m_type == 'video':
                     temp_video_path = os.path.join(TEMP_DIR, f"{msg_id}.mp4")
-                    with open(temp_video_path, 'wb') as f:
-                        async for chunk in client.iter_download(msg.media, request_size=1024*1024, limit=50):
-                            f.write(chunk)
                     file_path = temp_video_path
-                    
+                    await asyncio.wait_for(download_video_media(client, msg.media, temp_video_path), timeout=120)
                     if os.path.exists(file_path):
-                        final_img_path = extract_frame(file_path)
+                        final_img_path = await asyncio.wait_for(
+                            asyncio.to_thread(extract_frame, file_path),
+                            timeout=60,
+                        )
                         
-                elif m_type == 'photo':
-                    file_path = await asyncio.wait_for(msg.download_media(file=os.path.join(TEMP_DIR, "")), timeout=60)
-                    final_img_path = file_path
-                try:
-                    msg = await asyncio.wait_for(client.get_messages(config.SOURCE_CHAT_ID, ids=msg_id), timeout=30)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Таймаут получения MSG_{msg_id}")
-                    continue
-
-                if not msg or not msg.media:
-                    logger.warning(f"Медиа в MSG_{msg_id} не найдено.")
-                    await db.execute('UPDATE archive_messages SET vision_description = "SKIP_EMPTY", vision_processed = 1 WHERE msg_id = ?', (msg_id,))
-                    await db.commit()
-                    continue
-
-                # ФИЛЬТР ССЫЛОК (WebPage), которые Телетон видит как медиа
-                if isinstance(msg.media, MessageMediaWebPage):
-                    logger.info(f"MSG_{msg_id} — это ссылка, файл отсутствует. Пропускаю.")
-                    await db.execute('UPDATE archive_messages SET vision_description = "SKIP_LINK", vision_processed = 1 WHERE msg_id = ?', (msg_id,))
-                    await db.commit()
-                    continue
-
-                # 2. Скачивание (уже существующий у тебя код)
-                if m_type == 'video':
-                    temp_video_path = os.path.join(TEMP_DIR, f"{msg_id}.mp4")
-                    with open(temp_video_path, 'wb') as f:
-                        async for chunk in client.iter_download(msg.media, request_size=1024*1024, limit=50):
-                            f.write(chunk)
-                    file_path = temp_video_path
-                    if os.path.exists(file_path):
-                        final_img_path = extract_frame(file_path)
                 elif m_type == 'photo':
                     file_path = await asyncio.wait_for(msg.download_media(file=os.path.join(TEMP_DIR, "")), timeout=60)
                     final_img_path = file_path

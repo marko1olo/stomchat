@@ -14,13 +14,21 @@ import database
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-import cv2
-import numpy as np
 import summarizer
+from media_tools import extract_first_frame_async
 try:
     import psutil
 except Exception:
     psutil = None
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 MY_ID = 7716348189
 HEALTH_CHECK_INTERVAL_SECONDS = 300
 HEALTH_FAILURE_LIMIT = 3
@@ -32,6 +40,13 @@ SYNC_HISTORY_TIMEOUT_SECONDS = 300
 TELEGRAM_REQUEST_TIMEOUT_SECONDS = 60
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 120
 MEDIA_ANALYSIS_TIMEOUT_SECONDS = 180
+MEDIA_FRAME_TIMEOUT_SECONDS = 60
+MEDIA_WORKER_COUNT = max(1, _env_int("STOMCHAT_MEDIA_WORKERS", 1))
+MEDIA_QUEUE_MAX_SIZE = max(MEDIA_WORKER_COUNT, _env_int("STOMCHAT_MEDIA_QUEUE_MAX", 128))
+MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
+MEDIA_RECOVERY_LIMIT = max(0, _env_int("STOMCHAT_MEDIA_RECOVERY_LIMIT", 5))
+_media_queue = None
+_media_worker_tasks = []
 
 async def get_my_id():
     global MY_ID
@@ -389,6 +404,172 @@ bot_client = TelegramClient(
     retry_delay=5,
     auto_reconnect=True,
 )
+
+
+def start_media_analysis_workers():
+    global _media_queue, _media_worker_tasks
+    if _media_queue is None:
+        _media_queue = asyncio.Queue(maxsize=MEDIA_QUEUE_MAX_SIZE)
+
+    _media_worker_tasks = [task for task in _media_worker_tasks if not task.done()]
+    while len(_media_worker_tasks) < MEDIA_WORKER_COUNT:
+        worker_id = len(_media_worker_tasks) + 1
+        _media_worker_tasks.append(
+            runtime_guard.create_task(media_analysis_worker(worker_id), f"media_analysis_{worker_id}")
+        )
+
+
+async def stop_media_analysis_workers():
+    global _media_worker_tasks
+    if not _media_worker_tasks:
+        return
+
+    for task in _media_worker_tasks:
+        task.cancel()
+    await asyncio.gather(*_media_worker_tasks, return_exceptions=True)
+    _media_worker_tasks = []
+
+
+async def enqueue_media_analysis(message, msg_id, text, media_type_hint=None):
+    if _media_queue is None:
+        start_media_analysis_workers()
+
+    try:
+        _media_queue.put_nowait((message, msg_id, text, media_type_hint))
+        logger.info("media analysis queued msg_id=%s queue_size=%s", msg_id, _media_queue.qsize())
+    except asyncio.QueueFull:
+        logger.error(
+            "media analysis queue full; skipped msg_id=%s queue_size=%s max_size=%s",
+            msg_id,
+            _media_queue.qsize(),
+            MEDIA_QUEUE_MAX_SIZE,
+        )
+
+
+async def recover_pending_media_analysis():
+    if MEDIA_RECOVERY_LIMIT <= 0:
+        return
+
+    try:
+        pending = await asyncio.wait_for(
+            database.get_pending_media_message_ids(MEDIA_RECOVERY_LIMIT),
+            timeout=30,
+        )
+    except Exception:
+        logger.exception("pending media recovery lookup failed")
+        return
+
+    if not pending:
+        return
+
+    id_to_text = {msg_id: text for msg_id, text, _media_type in pending}
+    id_to_media_type = {msg_id: media_type for msg_id, _text, media_type in pending}
+    ids = list(id_to_text.keys())
+    try:
+        messages = await asyncio.wait_for(
+            client.get_messages(config.SOURCE_CHAT_ID, ids=ids),
+            timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("pending media recovery telegram fetch failed")
+        return
+
+    if not isinstance(messages, list):
+        messages = [messages]
+
+    queued = 0
+    for message in messages:
+        if not message:
+            continue
+        msg_id = message.id
+        media_type_hint = id_to_media_type.get(msg_id)
+        if not (message.photo or message.video or media_type_hint):
+            logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
+            continue
+        await enqueue_media_analysis(
+            message,
+            msg_id,
+            id_to_text.get(msg_id) or message.message or "",
+            media_type_hint=media_type_hint,
+        )
+        queued += 1
+
+    logger.info("pending media recovery queued=%s scanned=%s", queued, len(pending))
+
+
+async def media_analysis_worker(worker_id):
+    while True:
+        message, msg_id, text, media_type_hint = await _media_queue.get()
+        try:
+            await process_media_message(message, msg_id, text, media_type_hint=media_type_hint)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("media analysis worker failed worker=%s msg_id=%s", worker_id, msg_id)
+        finally:
+            _media_queue.task_done()
+
+
+def _remove_temp_file(path):
+    if not path:
+        return
+    try:
+        path = os.fspath(path)
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        logger.warning("temporary media cleanup failed path=%s: %s", path, exc)
+
+
+async def process_media_message(message, msg_id, text, media_type_hint=None):
+    file_to_analyze = None
+    is_video = False
+    media_description = None
+    temp_path = None
+
+    try:
+        os.makedirs(MEDIA_TEMP_DIR, exist_ok=True)
+        temp_path = await asyncio.wait_for(
+            message.download_media(file=os.path.join(MEDIA_TEMP_DIR, "")),
+            timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+        )
+
+        if message.photo or media_type_hint == "photo":
+            file_to_analyze = temp_path
+        elif message.video or media_type_hint == "video":
+            is_video = True
+            logger.info(f"🎞️ Извлечение первого кадра из видео {msg_id}...")
+            file_to_analyze = await extract_first_frame_async(
+                temp_path,
+                timeout=MEDIA_FRAME_TIMEOUT_SECONDS,
+            )
+
+        if file_to_analyze:
+            logger.info(f"📸 Анализ медиа в сообщении {msg_id}...")
+            media_description = await asyncio.wait_for(
+                vision.describe_image(file_to_analyze, caption=text),
+                timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
+            )
+            if media_description:
+                await asyncio.wait_for(
+                    database.update_media_description(msg_id, media_description),
+                    timeout=30,
+                )
+                logger.info(f"📝 Описание готово: {media_description}")
+                logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
+            else:
+                logger.info("media analysis returned empty description msg_id=%s", msg_id)
+
+    except asyncio.TimeoutError:
+        logger.warning("media processing timeout msg_id=%s", msg_id)
+    except Exception:
+        logger.exception("Ошибка обработки медиа %s", msg_id)
+    finally:
+        _remove_temp_file(temp_path)
+        if is_video and file_to_analyze != temp_path:
+            _remove_temp_file(file_to_analyze)
+
+
 @client.on(events.NewMessage(chats=config.SOURCE_CHAT_ID))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
@@ -431,8 +612,13 @@ async def handle_new_message(event):
             reply_to_msg_id = event.message.reply_to.reply_to_msg_id
 
         # Проверка медиа
-        has_media = event.message.photo is not None
-        media_type = "photo" if has_media else None
+        has_media = event.message.photo is not None or event.message.video is not None
+        if event.message.photo:
+            media_type = "photo"
+        elif event.message.video:
+            media_type = "video"
+        else:
+            media_type = None
         media_description = None
 
         # Сохраняем расширенный набор данных (базовая запись)
@@ -453,50 +639,7 @@ async def handle_new_message(event):
 
         # Анализ медиа (фото, видео), игнорируя стикеры/гифки
         if event.photo or event.video:
-            file_to_analyze = None
-            is_video = False
-            temp_path = None # Инициализируем переменную
-            
-            try:
-                # 1. СКАЧИВАНИЕ
-                temp_path = await asyncio.wait_for(
-                    event.download_media(),
-                    timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
-                )
-                
-                # 2. ПОДГОТОВКА ФАЙЛА ДЛЯ АНАЛИЗА
-                if event.photo:
-                    file_to_analyze = temp_path
-                elif event.video:
-                    is_video = True
-                    logger.info(f"🎞️ Извлечение первого кадра из видео {event.id}...")
-                    loop = asyncio.get_running_loop() # Получаем loop здесь
-                    file_to_analyze = await asyncio.wait_for(
-                        loop.run_in_executor(None, extract_first_frame, temp_path),
-                        timeout=60,
-                    )
-                
-                # 3. АНАЛИЗ (если есть что анализировать)
-                if file_to_analyze:
-                    logger.info(f"📸 Анализ медиа в сообщении {msg_id}...")
-                    media_description = await asyncio.wait_for(
-                        vision.describe_image(file_to_analyze, caption=text),
-                        timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
-                    )
-                    await asyncio.wait_for(
-                        database.update_media_description(msg_id, media_description),
-                        timeout=30,
-                    )
-                    logger.info(f"📝 Описание готово: {media_description}")
-
-            except Exception as e:
-                logger.error(f"Ошибка обработки медиа {msg_id}: {e}")
-            finally:
-                # 4. ОЧИСТКА ВРЕМЕННЫХ ФАЙЛОВ
-                if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
-                if is_video and file_to_analyze and os.path.exists(file_to_analyze):
-                    os.remove(file_to_analyze)
+            await enqueue_media_analysis(event.message, msg_id, text)
 
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
@@ -622,17 +765,24 @@ async def manual_weekly_test(event):
         logger.error(f"Manual Weekly Error: {e}")
         await event.edit(f"❌ Ошибка: {e}")
 def extract_first_frame(video_path):
+    path, error = __import__("media_tools")._extract_frame_sync(video_path)
+    if error:
+        logger.error("frame extraction failed: %s", error)
+    return path
     """Извлекает первый кадр из видео и сохраняет как JPEG."""
+    vid_cap = None
     try:
         vid_cap = cv2.VideoCapture(video_path)
         success, image = vid_cap.read()
-        vid_cap.release()
         if success:
             frame_path = video_path + ".jpg"
-            cv2.imwrite(frame_path, image)
-            return frame_path
+            if cv2.imwrite(frame_path, image):
+                return frame_path
     except Exception as e:
         logger.error(f"❌ Ошибка извлечения кадра: {e}")
+    finally:
+        if vid_cap is not None:
+            vid_cap.release()
     return None
 async def sync_history():
     """Докачивает сообщения, пропущенные во время офлайна."""
@@ -756,16 +906,19 @@ async def start_bot():
     
     logger.info("🔗 Подключение к Telegram...")
     await asyncio.wait_for(client.start(), timeout=START_TIMEOUT_SECONDS)
+    start_media_analysis_workers()
     logger.info("🤖 Подключение bot client...")
     try:
         await asyncio.wait_for(bot_client.start(bot_token=config.BOT_TOKEN), timeout=START_TIMEOUT_SECONDS)
     except Exception:
         logger.exception("❌ Bot client не подключился. Выход для перезапуска через start.bat.")
+        await stop_media_analysis_workers()
         await client.disconnect()
         raise
     await asyncio.wait_for(get_my_id(), timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS)
     # СИНХРОНИЗАЦИЯ ПЕРЕД ЗАПУСКОМ СЛУШАТЕЛЯ
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
+    await recover_pending_media_analysis()
     
     runtime_guard.create_task(heartbeat_task(), "heartbeat")
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
@@ -776,6 +929,7 @@ async def start_bot():
     try:
         await client.run_until_disconnected()
     finally:
+        await stop_media_analysis_workers()
         runtime_guard.stop_watchdog()
 if __name__ == '__main__':
     try:
