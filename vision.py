@@ -78,13 +78,10 @@ def prepare_image_for_groq(file_path):
 
 
 async def describe_image(file_path: str, caption: str = None) -> str:
-    """Анализирует изображение через Llama Vision на Groq с учетом контекста подписи."""
+    """Анализирует изображение через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
     global GROQ_COOLDOWN_UNTIL
 
     if time.time() < GROQ_COOLDOWN_UNTIL:
-        return None
-    if not config.GROQ_KEYS:
-        logger.error("GROQ keys are not configured; media analysis skipped.")
         return None
 
     async with _get_vision_semaphore():
@@ -102,17 +99,18 @@ async def describe_image(file_path: str, caption: str = None) -> str:
 
             image_url = f"data:image/jpeg;base64,{base64.b64encode(resized_bytes).decode('utf-8')}"
 
-            # ПОДГОТОВКА ПРОМПТА С КОНТЕКСТОМ
-            # Если есть подпись, даем её нейронке, чтобы она знала, на что смотреть
             context = f" Context from the author: '{caption}'." if caption else ""
             system_prompt = (
                 f"This is a dental image from a professional chat.{context} "
                 f"Describe what you see in Russian (pathology, clinical step, or materials). If there is any text, analyze it (make conclusion). If picture is not medical, describe it briefly."
                 f"Be professional. (Write up to 4-6 sentences). "
             )
+            
+            models_cascade = [
+                ("qwen/qwen3.6-27b", "groq"),
+                ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
+            ]
 
-            keys = config.GROQ_KEYS.copy()
-            random.shuffle(keys)
             timeout = httpx.Timeout(
                 GROQ_HTTP_TIMEOUT_SECONDS,
                 connect=min(10.0, GROQ_HTTP_TIMEOUT_SECONDS),
@@ -122,39 +120,53 @@ async def describe_image(file_path: str, caption: str = None) -> str:
             )
 
             async with httpx.AsyncClient(verify=False, timeout=timeout) as http_client:
-                for api_key in keys:
-                    try:
-                        client = AsyncOpenAI(
-                            api_key=api_key,
-                            base_url="https://api.groq.com/openai/v1",
-                            http_client=http_client,
-                            max_retries=0,
-                            timeout=GROQ_HTTP_TIMEOUT_SECONDS,
-                        )
+                for model_name, provider in models_cascade:
+                    if provider == "gemini":
+                        keys = list(config.GOOGLE_KEYS)
+                        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                    else:
+                        keys = list(config.GROQ_KEYS)
+                        base_url = "https://api.groq.com/openai/v1"
+                        
+                    if not keys:
+                        continue
+                        
+                    random.shuffle(keys)
+                    
+                    for api_key in keys:
+                        try:
+                            client = AsyncOpenAI(
+                                api_key=api_key,
+                                base_url=base_url,
+                                http_client=http_client,
+                                max_retries=0,
+                                timeout=GROQ_HTTP_TIMEOUT_SECONDS,
+                            )
 
-                        resp = await client.chat.completions.create(
-                            model=config.GROQ_VISION_MODEL,
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": system_prompt},
-                                        {"type": "image_url", "image_url": {"url": image_url}}
-                                    ]
-                                }
-                            ],
-                            max_tokens=256
-                        )
+                            resp = await client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": system_prompt},
+                                            {"type": "image_url", "image_url": {"url": image_url}}
+                                        ]
+                                    }
+                                ],
+                                max_tokens=256
+                            )
 
-                        content = resp.choices[0].message.content
-                        if content:
-                            return content.strip()
+                            content = resp.choices[0].message.content
+                            if content:
+                                logger.info(f"Vision success via {provider} ({model_name})")
+                                return content.strip()
 
-                    except Exception as e:
-                        err_str = str(e).lower()
-                        if "413" in err_str: return None
-                        if "429" in err_str: continue
-                        logger.warning("Groq vision key failed: %s", e)
+                        except Exception as e:
+                            err_str = str(e).lower()
+                            if "413" in err_str: return None
+                            if "429" in err_str or "rate limit" in err_str or "quota" in err_str: continue
+                            logger.warning(f"Vision {provider} key failed ({model_name}): {e}")
 
             GROQ_COOLDOWN_UNTIL = time.time() + 60
             return None
