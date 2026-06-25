@@ -26,7 +26,7 @@ def _retry_sleep_seconds(attempt):
 
 def _is_retryable_gemini_error(error_text):
     retry_markers = (
-        "403", "429", "500", "502", "503", "504",
+        "429", "500", "502", "503", "504",
         "deadline", "timeout", "timed out", "temporarily",
         "unavailable", "rate", "quota", "failed_precondition",
         "connection", "transport"
@@ -100,7 +100,7 @@ def generate_text(prompt, status_context=None):
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=3000,
+                    max_tokens=8192,
                     temperature=0.95
                 )
 
@@ -139,6 +139,10 @@ def generate_text(prompt, status_context=None):
                 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
                     logger.info(f"{provider.capitalize()} rate limited, switching key without sleeping.")
+                    continue
+                    
+                if "403" in err_msg or "permission" in err_msg:
+                    logger.info(f"{provider.capitalize()} key denied (403), switching key without sleeping.")
                     continue
                     
                 logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
