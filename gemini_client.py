@@ -100,7 +100,6 @@ def generate_text(prompt, status_context=None):
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=8192,
                     temperature=0.95
                 )
 
