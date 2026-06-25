@@ -64,7 +64,9 @@ def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
     models_cascade = [
         (config.GEMINI_MODEL, "gemini"),
+        ("gemini-3-flash-preview", "gemini"),
         ("gemini-3.1-flash-lite", "gemini"),
+        ("qwen/qwen3.6-27b", "groq"),
         (config.GROQ_MODEL, "groq")
     ]
     
