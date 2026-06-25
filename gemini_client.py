@@ -107,8 +107,7 @@ def generate_text(prompt, status_context=None):
                 if response.choices and len(response.choices) > 0:
                     text_result = response.choices[0].message.content
                     if text_result:
-                        import re
-                        text_result = re.sub(r"<think>.*?</think>", "", text_result, flags=re.DOTALL).strip()
+                        text_result = text_result.strip()
                         logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
                         _write_generation_status(
                             status_context, stage=f"{provider}_success",
