@@ -159,6 +159,8 @@ async def describe_image(file_path: str, caption: str = None) -> str:
 
                             content = resp.choices[0].message.content
                             if content:
+                                import re
+                                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
                                 logger.info(f"Vision success via {provider} ({model_name})")
                                 return content.strip()
 
