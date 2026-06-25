@@ -64,11 +64,11 @@ def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
     models_cascade = [
         (config.GEMINI_MODEL, "gemini"),
-        ("gemini-3.0-flash", "gemini"),
+        ("gemini-3.1-flash-lite", "gemini"),
         (config.GROQ_MODEL, "groq")
     ]
     
-    max_attempts = max(1, _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 6))
+    max_attempts = max(15, _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 15))
     
     for model_name, provider in models_cascade:
         if provider == "gemini":
