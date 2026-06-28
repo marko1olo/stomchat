@@ -102,8 +102,9 @@ async def describe_image(file_path: str, caption: str = None) -> str:
             context = f" Context from the author: '{caption}'." if caption else ""
             system_prompt = (
                 f"This is a dental image from a professional chat.{context} "
-                f"Describe what you see in Russian (pathology, clinical step, or materials). If there is any text, analyze it (make conclusion). If picture is not medical, describe it briefly."
+                f"Describe what you see in Russian (pathology, clinical step, or materials). If there is any text, analyze it (make conclusion). If picture is not medical, describe it briefly. "
                 f"Be professional. (Write up to 4-6 sentences). "
+                f"Respond directly. Do not use reasoning/thinking blocks. Do not output <think> tags."
             )
             
             models_cascade = [
@@ -154,15 +155,21 @@ async def describe_image(file_path: str, caption: str = None) -> str:
                                         ]
                                     }
                                 ],
-                                max_tokens=256
+                                max_tokens=1024
                             )
 
                             content = resp.choices[0].message.content
                             if content:
                                 import re
-                                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                                logger.info(f"Vision success via {provider} ({model_name})")
-                                return content.strip()
+                                if "<think>" in content:
+                                    if "</think>" in content:
+                                        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                                    else:
+                                        parts = content.split("<think>", 1)
+                                        content = parts[0].strip()
+                                if content.strip():
+                                    logger.info(f"Vision success via {provider} ({model_name})")
+                                    return content.strip()
 
                         except Exception as e:
                             err_str = str(e).lower()

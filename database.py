@@ -282,6 +282,7 @@ async def get_pending_media_message_ids(limit=5):
                 FROM messages
                 WHERE has_media = 1
                   AND (media_description IS NULL OR media_description = '')
+                  AND date >= datetime('now', '-3 days')
                 ORDER BY msg_id DESC
                 LIMIT ?
                 """,

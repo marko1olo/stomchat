@@ -74,8 +74,10 @@ def generate_text(prompt, status_context=None):
     
     for model_name, provider in models_cascade:
         if provider == "gemini":
+            from google import genai
+            from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: get_openai_client(k, "https://generativelanguage.googleapis.com/v1beta/openai/")
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=60000))
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
@@ -99,24 +101,30 @@ def generate_text(prompt, status_context=None):
                 )
                 logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.95
-                )
+                if provider == "gemini":
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    text_result = response.text
+                else:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.95
+                    )
+                    text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
 
-                if response.choices and len(response.choices) > 0:
-                    text_result = response.choices[0].message.content
-                    if text_result:
-                        import re
-                        text_result = re.sub(r"<think>.*?</think>", "", text_result, flags=re.DOTALL).strip()
-                        logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
-                        _write_generation_status(
-                            status_context, stage=f"{provider}_success",
-                            attempt=attempt + 1, max_attempts=max_attempts,
-                            key=key_id, result_chars=len(text_result)
-                        )
-                        return DummyResponse(text_result)
+                if text_result:
+                    import re
+                    text_result = re.sub(r"<think>.*?</think>", "", text_result, flags=re.DOTALL).strip()
+                    logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
+                    _write_generation_status(
+                        status_context, stage=f"{provider}_success",
+                        attempt=attempt + 1, max_attempts=max_attempts,
+                        key=key_id, result_chars=len(text_result)
+                    )
+                    return DummyResponse(text_result)
 
                 logger.warning(f"{provider.capitalize()} returned empty response attempt={attempt + 1}/{max_attempts} key={key_id}")
                 _write_generation_status(

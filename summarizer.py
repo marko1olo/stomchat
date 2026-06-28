@@ -168,7 +168,37 @@ def get_russian_date(date_input):
     else:
         dt = date_input
     
-    return f"{dt.day} {months[dt.month - 1]} {dt.year}"
+def _safe_truncate_html(html_str, max_len=9200):
+    if len(html_str) <= max_len:
+        return html_str
+        
+    truncated = html_str[:max_len]
+    # Try to find last paragraph tag or line break
+    last_p = truncated.rfind("<p>")
+    if last_p != -1 and last_p > 2000:
+        truncated = truncated[:last_p]
+    else:
+        last_br = truncated.rfind("<br>")
+        if last_br != -1 and last_br > 2000:
+            truncated = truncated[:last_br]
+            
+    # Close any unclosed tags
+    open_tags = []
+    for tag in re.findall(r'<(/?[a-zA-Z0-9]+)(?:\s|>)', truncated):
+        name = tag.lower()
+        if name in ["img", "br", "hr"]:
+            continue
+        if name.startswith('/'):
+            name = name[1:]
+            if open_tags and open_tags[-1] == name:
+                open_tags.pop()
+        else:
+            open_tags.append(name)
+            
+    for tag in reversed(open_tags):
+        truncated += f"</{tag}>"
+        
+    return truncated + "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
 
 def clean_markdown_to_html(text):
     if not text: return ""
@@ -526,6 +556,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
         if msg_count > 0 and "Сообщений за период" not in final_html:
             final_html += f"\n\n<i>Сообщений за период — {msg_count}</i>"
+        
+        final_html = _safe_truncate_html(final_html)
         
         TELEGRAPH_THRESHOLD = 1500 
         sent_msg = None
