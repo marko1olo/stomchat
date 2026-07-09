@@ -2030,6 +2030,27 @@ async def handle_quiz_callback(bot_client, event):
         logger.error(f"Failed to edit quiz message text with live stats: {edit_err}")
 
 
+async def analyze_dispute_need(context_msgs):
+    if not context_msgs:
+        return False
+    context_str = "\n".join(context_msgs)
+    prompt = f"""
+Ты — модератор клинического чата стоматологов. Проанализируй переписку врачей и определи, есть ли в ней активный спор, клиническое разногласие, конфликт мнений или спорное обсуждение, требующее вмешательства клинического рефери для разрядки обстановки или предоставления научной справки.
+
+Переписка врачей:
+{context_str}
+
+Правило: выведи строго одно слово 'YES' (если спор/конфликт есть) или 'NO' (если это обычное мирное обсуждение, шутка или обмен опытом без спора). Никаких других слов или комментариев не пиши.
+"""
+    status_ctx = {"kind": "referee_analyser"}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=15)
+    if response and getattr(response, "text", None):
+        res = response.text.strip().upper()
+        if "YES" in res:
+            return True
+    return False
+
+
 async def check_and_trigger_referee(bot_client, event, text):
     """Пассивный клинический рефери для предотвращения конфликтов."""
     global LAST_REFEREE_RUN
@@ -2054,34 +2075,69 @@ async def check_and_trigger_referee(bot_client, event, text):
         "безрукие", "руки отсохнут", "убожество", "убого"
     ])
     
-    if not has_conflict_kw:
+    should_intervene = has_conflict_kw
+    chain_msgs = []
+    
+    # Автодетект споров по длинным цепочкам реплаев
+    if not should_intervene and event.message.reply_to:
+        try:
+            chain_msgs = await database.get_reply_chain_texts(msg_id, max_depth=5)
+            if len(chain_msgs) >= 4:
+                should_intervene = await analyze_dispute_need(chain_msgs)
+                if should_intervene:
+                    logger.info(f"Dispute auto-detected from reply chain in msg_id={msg_id}.")
+        except Exception as chain_err:
+            logger.error(f"Error checking reply chain dispute: {chain_err}")
+            
+    if not should_intervene:
         return
         
-    if datetime.now() - LAST_REFEREE_RUN < timedelta(hours=1):
+    # Разрешаем интервенции не чаще одного раза в 5 минут
+    if datetime.now() - LAST_REFEREE_RUN < timedelta(minutes=5):
         return
         
     LAST_REFEREE_RUN = datetime.now()
-    logger.info(f"Conflict suspected in group msg_id={msg_id}. Triggering Clinical Referee 2.0...")
+    logger.info(f"Clinical Referee triggered for msg_id={msg_id}. Running style generator...")
     
-    # 2. Extract keywords & search DB to back referee with scientific facts
-    keywords = extract_keywords(text)
-    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+    # 50/50 выбор стиля: либо шутит, либо научно
+    import random
+    style = random.choice(["joke", "scientific"])
     
-    prompt = f"""
+    if style == "scientific":
+        # Поиск по базе RAG
+        keywords = extract_keywords(text + " " + " ".join(chain_msgs))
+        wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+        
+        prompt = f"""
 Ты — клинический рефери стоматологического сообщества "StomChat". 
-В чате назревает конфликт: один из врачей высказался агрессивно/недоверчиво: "{text}".
-
-Твоя задача — написать короткую, ироничную и миролюбивую реплику, чтобы мягко разрядить обстановку, и, ЕСЛИ это уместно, опереться на научную справку из Базы Знаний, примиряя коллег доказательными фактами.
+В чате идет клинический спор. Вот текст текущего сообщения (или обсуждения): "{text}".
 
 Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus or "(нет точных фактов по теме спора, разряди конфликт стоматологическим юмором)"}
+{wiki_corpus or "(справочная информация отсутствует)"}
+
+Твоя задача — написать научно обоснованную, спокойную и примиряющую реплику, опираясь на Базу Знаний. Разъясни доказательный клинический стандарт по теме спора, чтобы миролюбиво разрешить дискуссию.
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Длина — максимум 280 символов! Реплика должна быть короткой, емкой и миролюбивой.
+1. Длина — максимум 280 символов! Будь очень лаконичен.
 2. Никаких приветствий и концовок. Сразу суть.
-3. Тон: дружелюбный, коллегиальный, с тонкой стоматологической иронией (например, про перегретые боры, адгезию, или пульпит).
-4. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
+3. Тон: строго научно-доказательный, коллегиальный, вежливый.
+4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
+    else:
+        prompt = f"""
+Ты — юмористический клинический рефери стоматологического сообщества "StomChat". 
+В чате идет спор. Вот текст текущего сообщения (или обсуждения): "{text}".
+
+Твоя задача — написать короткую, исключительно ироничную и миролюбивую шутку, используя профессиональный юмор стоматологов, чтобы разрядить обстановку.
+Примеры тем для шуток: сравнение спора с перегретым бором, воспаленным пульпитом, усадкой композита, плохой адгезией или удалением без анестезии.
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Длина — максимум 220 символов! Реплика должна быть короткой и меткой.
+2. Никаких приветствий и концовок. Сразу суть.
+3. Тон: дружелюбный, ироничный, призывающий коллег улыбнуться и успокоиться.
+4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+
     status_ctx = {"kind": "group_referee", "chat_id": chat_id}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
     
@@ -2098,7 +2154,7 @@ async def check_and_trigger_referee(bot_client, event, text):
             reply_to=msg_id,
             parse_mode='html'
         )
-        logger.info(f"Referee intervention successfully sent to chat_id={chat_id}")
+        logger.info(f"Referee intervention ({style}) successfully sent to chat_id={chat_id}")
     except Exception as e:
         logger.error(f"Failed to send referee intervention: {e}")
 

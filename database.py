@@ -282,6 +282,27 @@ async def get_texts_by_ids(msg_ids):
             ).fetchall()
             return {row[0]: (row[1], row[2]) for row in rows}
 
+async def get_reply_chain_texts(msg_id, max_depth=5):
+    def operation():
+        with _connection() as db:
+            chain = []
+            curr_id = msg_id
+            for _ in range(max_depth):
+                row = db.execute(
+                    "SELECT reply_to_msg_id, sender_name, text FROM messages WHERE msg_id = ?",
+                    (curr_id,)
+                ).fetchone()
+                if row:
+                    parent_id, sender_name, text = row
+                    if text:
+                        chain.append(f"{sender_name}: {text}")
+                    if parent_id:
+                        curr_id = parent_id
+                    else:
+                        break
+                else:
+                    break
+            return list(reversed(chain))
     return await _run_db(operation)
 
 
