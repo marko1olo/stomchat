@@ -777,8 +777,15 @@ async def handle_new_message(event):
                 # 0. Экстренное удаление сообщений (админское)
                 if cmd_lower in ("/wipe", "/delete", "/del", "удалить", "wipe") and reply_to_msg_id:
                     try:
-                        permissions = await event.client.get_permissions(event.chat_id, event.sender_id)
-                        if permissions.is_admin:
+                        is_super_admin = False
+                        if event.sender_id in (7716348189, 1890028643):
+                            is_super_admin = True
+                        else:
+                            permissions = await event.client.get_permissions(event.chat_id, event.sender_id)
+                            if permissions.is_admin:
+                                is_super_admin = True
+                                
+                        if is_super_admin:
                             await bot_client.delete_messages(event.chat_id, [reply_to_msg_id, msg_id])
                             import database
                             await database.remove_bot_sent_message(reply_to_msg_id)
