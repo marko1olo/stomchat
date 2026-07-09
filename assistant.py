@@ -1837,10 +1837,63 @@ async def handle_quiz_callback(bot_client, event):
         buttons = []
         if nav_row:
             buttons.append(nav_row)
-        buttons.append([Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")])
+        buttons.append([
+            Button.inline("⭐ В закладки", data=f"wiki_save:{subtopic_id}:{page_idx}"),
+            Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
+        ])
         
         await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=buttons, parse_mode='html', link_preview=False)
         await event.answer()
+        return
+
+    # WIKI BOOKMARK SAVE CALLBACK
+    if data_str.startswith("wiki_save:"):
+        parts = data_str.split(":")
+        subtopic_id = parts[1]
+        page_idx = int(parts[2])
+        
+        facts = await query_wiki_subtopic(subtopic_id)
+        subtopic_names = {
+            "ortho_bopt": "🦷 BOPT / Преп без уступа",
+            "ortho_vin": "💎 Виниры и накладки",
+            "ortho_crown": "👑 Коронки и мосты",
+            "endo_irr": "💧 Ирригация каналов",
+            "endo_obt": "🩸 Обтурация каналов",
+            "endo_files": "🔬 Инструменты / Файлы",
+            "perio_dis": "🩹 Болезни пародонта",
+            "perio_clean": "🪥 Кюретаж и чистка",
+            "perio_plast": "🥩 Пластика десны / ССТ",
+            "surg_impl": "🔩 Имплантация",
+            "surg_rem": "🩸 Удаление зубов",
+            "surg_bone": "🦴 Синус-лифтинг / Кость",
+            "gnat_joint": "📐 Окклюзия и сустав",
+            "gnat_splint": "🦷 Сплинты и шины"
+        }
+        subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
+        
+        if facts and page_idx < len(facts):
+            fact_content = facts[page_idx]
+            fact_cleaned = clean_html_formatting(fact_content)
+            
+            bookmark_text = f"📚 <b>{subtopic_title}</b>\n\n{fact_cleaned}"
+            
+            from datetime import datetime
+            import random
+            fake_msg_id = -random.randint(100000000, 999999999)
+            
+            await database.save_clinical_bookmark(
+                saved_by_user_id=event.sender_id,
+                msg_id=fake_msg_id,
+                chat_id=event.chat_id,
+                sender_name="База Знаний",
+                text=bookmark_text,
+                has_media=False,
+                media_description="",
+                date=datetime.now()
+            )
+            await event.answer("⭐ Статья успешно добавлена в ваши закладки!", alert=True)
+        else:
+            await event.answer("❌ Не удалось сохранить статью. Попробуйте еще раз.", alert=True)
         return
 
     if not data_str.startswith("qa:"):
