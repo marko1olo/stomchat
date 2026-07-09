@@ -670,7 +670,8 @@ async def handle_new_message(event):
                     import blocking_tools
                     transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
                     if not error and transcribed:
-                        transcribed_text = transcribed.strip()
+                        raw_trans = transcribed.strip()
+                        transcribed_text = await blocking_tools.correct_dental_transcription_async(raw_trans)
                         silence_hallucinations = {
                             "you", "thank you", "bye", "подпишитесь", 
                             "продолжение следует", "редактор субтитров", "субтитры", 

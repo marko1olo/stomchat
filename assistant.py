@@ -782,7 +782,8 @@ async def handle_private_message(bot_client, event):
                     if error:
                         logger.error(f"Audio transcription error: {error}")
                     elif transcribed:
-                        transcribed_text = transcribed.strip()
+                        raw_transcribed = transcribed.strip()
+                        transcribed_text = await blocking_tools.correct_dental_transcription_async(raw_transcribed)
             except Exception as audio_err:
                 logger.error(f"Error handling voice note: {audio_err}")
             finally:
@@ -2060,19 +2061,25 @@ async def check_and_trigger_referee(bot_client, event, text):
         return
         
     LAST_REFEREE_RUN = datetime.now()
-    logger.info(f"Conflict suspected in group msg_id={msg_id}. Triggering Clinical Referee...")
+    logger.info(f"Conflict suspected in group msg_id={msg_id}. Triggering Clinical Referee 2.0...")
+    
+    # 2. Extract keywords & search DB to back referee with scientific facts
+    keywords = extract_keywords(text)
+    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
     
     prompt = f"""
-Ты — юмористический клинический рефери в чате врачей-стоматологов "StomChat". 
+Ты — клинический рефери стоматологического сообщества "StomChat". 
 В чате назревает конфликт: один из врачей высказался агрессивно/недоверчиво: "{text}".
 
-Напиши короткую, ироничную и миролюбивую реплику, используя профессиональный юмор стоматологов, чтобы мягко разрядить обстановку.
-Примеры тем для шуток: сравнение спора с перегретым бором, воспаленным пульпитом, удалением без анестезии или плохим сцеплением гибридного слоя.
+Твоя задача — написать короткую, ироничную и миролюбивую реплику, чтобы мягко разрядить обстановку, и, ЕСЛИ это уместно, опереться на научную справку из Базы Знаний, примиряя коллег доказательными фактами.
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus or "(нет точных фактов по теме спора, разряди конфликт стоматологическим юмором)"}
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Длина — максимум 180 символов! Реплика должна быть короткой и меткой.
+1. Длина — максимум 280 символов! Реплика должна быть короткой, емкой и миролюбивой.
 2. Никаких приветствий и концовок. Сразу суть.
-3. Тон: дружелюбный, ироничный, призывающий коллег к спокойной дискуссии.
+3. Тон: дружелюбный, коллегиальный, с тонкой стоматологической иронией (например, про перегретые боры, адгезию, или пульпит).
 4. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
 """
     status_ctx = {"kind": "group_referee", "chat_id": chat_id}

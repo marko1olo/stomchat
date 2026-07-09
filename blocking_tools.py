@@ -180,6 +180,27 @@ async def transcribe_audio_async(file_path, timeout):
     return payload.get("text"), None
 
 
+async def correct_dental_transcription_async(raw_text, timeout=20):
+    if not raw_text or len(raw_text) < 4:
+        return raw_text
+        
+    prompt = f"""
+Ты — специализированный стоматологический редактор. Твоя задача — исправить возможные ошибки распознавания речи (опечатки, ослышки) в стоматологических и медицинских терминах.
+Исправь текст, сохранив исходный смысл. Заменяй только искаженные термины (например, 'верти преп' -> 'вертипреп', 'бэо пт' -> 'BOPT', 'гипохлорид' -> 'гипохлорит', 'кафердам' -> 'коффердам' и т.д.).
+
+Исходный распознанный текст:
+"{raw_text}"
+
+Правило: выведи ИСКЛЮЧИТЕЛЬНО исправленный текст, без каких-либо комментариев, кавычек или пояснений. Если исправлений не требуется, выведи исходный текст без изменений.
+"""
+    response, error = await generate_gemini_text_async(prompt, {"kind": "transcription_corrector"}, timeout=timeout)
+    if response and getattr(response, "text", None):
+        corrected = response.text.strip().strip('"').strip("'")
+        if corrected:
+            return corrected
+    return raw_text
+
+
 def _transcribe_audio_sync(file_path):
     import gemini_client
     return gemini_client.transcribe_audio_bytes_or_file(file_path)
