@@ -102,7 +102,9 @@ def generate_text(prompt, status_context=None):
         models_cascade = [
             (config.GEMINI_MODEL, "gemini"),
             ("gemini-3-flash-preview", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini")
+            ("gemini-3.1-flash-lite", "gemini"),
+            (config.GROQ_MODEL, "groq"),
+            ("qwen/qwen3.6-27b", "groq")
         ]
 
     # Filter out models that are currently banned due to 503/504
