@@ -187,6 +187,9 @@ async def describe_image(file_paths, caption: str = None) -> str:
                         except Exception as e:
                             err_str = str(e).lower()
                             if "413" in err_str: return None
+                            if "503" in err_str or "504" in err_str or "unavailable" in err_str or "500" in err_str:
+                                logger.warning(f"Vision {provider} server overloaded ({err_str}). Skipping model {model_name}.")
+                                break
                             if "429" in err_str or "rate limit" in err_str or "quota" in err_str:
                                 logger.info(f"Vision key rate limited (429), cooling down 2.5s before next attempt...")
                                 await asyncio.sleep(2.5)

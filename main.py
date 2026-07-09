@@ -632,9 +632,10 @@ async def handle_new_message(event):
         msg_id = event.message.id
         sender_id = event.sender_id
         
-        # Игнорируем сообщения от самого бота во избежание самоциклирования
+        # Флаг, является ли отправителем сам бот
+        is_bot = False
         if sender_id == 7971556097 or (assistant.BOT_ID and sender_id == assistant.BOT_ID):
-            return
+            is_bot = True
             
         sender = None
         try:
@@ -738,6 +739,10 @@ async def handle_new_message(event):
                 ),
                 timeout=30,
             )
+
+            # Если сообщение от самого бота, мы его сохранили в базу, но больше ничего не делаем
+            if is_bot:
+                return
 
             # Check bookmark saving command
             cmd_clean = text.strip().lower()

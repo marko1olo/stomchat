@@ -66,9 +66,27 @@ def get_openai_client(api_key, base_url, timeout=30.0):
         timeout=timeout,
         max_retries=0
     )
-# Global state for temporarily banning models that return 503/504/deadline
-BANNED_MODELS = {}  # model_name -> ban_until_timestamp
+import json
 
+BANNED_MODELS_FILE = "banned_models.json"
+
+def get_banned_models():
+    if not os.path.exists(BANNED_MODELS_FILE):
+        return {}
+    try:
+        with open(BANNED_MODELS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def ban_model(model_name, duration_seconds):
+    models = get_banned_models()
+    models[model_name] = time.time() + duration_seconds
+    try:
+        with open(BANNED_MODELS_FILE, "w") as f:
+            json.dump(models, f)
+    except Exception as e:
+        logger.warning(f"Failed to save banned models: {e}")
 def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
     is_pm = status_context and status_context.get("kind") in ("pm_chat", "assistant_media_pm")
@@ -88,10 +106,11 @@ def generate_text(prompt, status_context=None):
         ]
 
     # Filter out models that are currently banned due to 503/504
-    now = time.monotonic()
+    now = time.time()
+    banned_models = get_banned_models()
     active_cascade = []
     for m_name, prov in models_cascade:
-        ban_until = BANNED_MODELS.get(m_name, 0)
+        ban_until = banned_models.get(m_name, 0)
         if ban_until > now:
             logger.info(f"Model {m_name} is temporarily banned due to 503/504 for another {int(ban_until - now)}s. Skipping.")
             continue
@@ -196,7 +215,7 @@ def generate_text(prompt, status_context=None):
                 
                 if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
                     ban_duration = 7200  # 2 часа в секундах
-                    BANNED_MODELS[model_name] = time.monotonic() + ban_duration
+                    ban_model(model_name, ban_duration)
                     logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 2 hours. Skipping in cascade.")
                     break
 
