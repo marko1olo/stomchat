@@ -423,26 +423,30 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         logger.info("No matching knowledge corpus found. Skipping assistant run.")
         return
 
-    # Определяем как обращаться к автору сообщения
+    # Определяем обращение ДО промпта — сами, не делегируем модели.
+    # Модель просто начнёт с готового префикса, выбор уже сделан.
     import random
     if is_dialogue:
-        address_line = ""  # В диалоге с ботом без обращения
+        address_prefix = ""  # В диалоге без обращения
     else:
-        # Считаем уникальных отправителей в контексте
         unique_senders = set()
         for cm in context_msgs:
             if ": " in cm:
                 unique_senders.add(cm.split(": ", 1)[0].strip())
-        
+
         if len(unique_senders) > 2:
-            # Несколько людей обсуждают — обращаемся "коллеги"
-            address_line = "Обратись к участникам 'Коллеги' в начале ответа."
-        elif sender_first_name and random.random() < 0.5:
-            # Один автор, с вероятностью 50% обращаемся по имени
-            address_line = f"Обратись к врачу по имени {sender_first_name} (например, '{sender_first_name}, ...'). Только в начале, не злоупотребляй."
+            # Несколько людей → 50% "Коллеги," / 50% без обращения
+            address_prefix = "Коллеги, " if random.random() < 0.5 else ""
+        elif sender_first_name:
+            # Один автор → 50% имя / 50% без обращения
+            address_prefix = f"{sender_first_name}, " if random.random() < 0.5 else ""
         else:
-            # Без обращения — сразу по делу
-            address_line = "Начни ответ сразу по делу, без обращения."
+            address_prefix = ""
+
+    if address_prefix:
+        address_line = f'Начни ответ строго с "{address_prefix}" — это первые слова. Не меняй, не перефразируй.'
+    else:
+        address_line = "Начни ответ сразу по делу, без обращения и без имён."
 
     # BUILD PROMPT
     if is_dialogue:
