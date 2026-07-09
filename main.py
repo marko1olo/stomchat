@@ -406,6 +406,27 @@ bot_client = TelegramClient(
     auto_reconnect=True,
 )
 
+# Wrapper to track bot's own outgoing message IDs for safety wipe commands
+original_send_message = bot_client.send_message
+async def patched_send_message(*args, **kwargs):
+    sent_msg = await original_send_message(*args, **kwargs)
+    if sent_msg and hasattr(sent_msg, 'id') and hasattr(sent_msg, 'peer_id'):
+        try:
+            peer = sent_msg.peer_id
+            chat_id = getattr(peer, 'channel_id', None) or getattr(peer, 'chat_id', None) or getattr(peer, 'user_id', None)
+            if chat_id:
+                if getattr(peer, 'channel_id', None):
+                    chat_id = -1000000000000 - chat_id
+                elif getattr(peer, 'chat_id', None):
+                    chat_id = -chat_id
+                import database
+                await database.save_bot_sent_message(sent_msg.id, chat_id)
+        except Exception as e:
+            logger.error(f"Error saving bot outgoing message ID: {e}")
+    return sent_msg
+
+bot_client.send_message = patched_send_message
+
 
 def start_media_analysis_workers():
     global _media_queue, _media_worker_tasks
@@ -753,6 +774,18 @@ async def handle_new_message(event):
                 cmd = text.strip()
                 cmd_lower = cmd.lower()
                 
+                # 0. Экстренное удаление сообщений (админское)
+                if cmd_lower in ("/wipe", "/delete", "/del", "удалить", "wipe") and reply_to_msg_id:
+                    try:
+                        permissions = await event.client.get_permissions(event.chat_id, event.sender_id)
+                        if permissions.is_admin:
+                            await bot_client.delete_messages(event.chat_id, [reply_to_msg_id, msg_id])
+                            import database
+                            await database.remove_bot_sent_message(reply_to_msg_id)
+                            return True
+                    except Exception as delete_exc:
+                        logger.error(f"Failed to execute inline admin delete: {delete_exc}")
+
                 # 1. Сводка/Саммари обсуждения
                 if cmd_lower.startswith(("/summary", "/итог", "/sum", "итог")):
                     await assistant.handle_group_summary(bot_client, event, reply_to_msg_id)

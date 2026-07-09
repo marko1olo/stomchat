@@ -88,6 +88,16 @@ async def init_db():
                 """
             )
 
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_sent_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id INTEGER UNIQUE,
+                    chat_id INTEGER
+                )
+                """
+            )
+
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
                 logger.info("database schema migrated: added media_remote_url")
@@ -423,4 +433,32 @@ async def clear_user_interactive_state(user_id):
                 "DELETE FROM user_interactive_states WHERE user_id = ?",
                 (user_id,),
             )
+    return await _run_db(operation)
+
+
+async def save_bot_sent_message(msg_id, chat_id):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO bot_sent_messages (msg_id, chat_id) VALUES (?, ?)",
+                (msg_id, chat_id)
+            )
+    return await _run_db(operation)
+
+
+async def get_last_bot_sent_messages(count=10):
+    def operation():
+        with _connection() as db:
+            cursor = db.execute(
+                "SELECT msg_id, chat_id FROM bot_sent_messages ORDER BY id DESC LIMIT ?",
+                (count,)
+            )
+            return cursor.fetchall()
+    return await _run_db(operation)
+
+
+async def remove_bot_sent_message(msg_id):
+    def operation():
+        with _connection() as db:
+            db.execute("DELETE FROM bot_sent_messages WHERE msg_id = ?", (msg_id,))
     return await _run_db(operation)

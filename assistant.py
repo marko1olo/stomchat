@@ -819,6 +819,59 @@ async def handle_private_message(bot_client, event):
             await handle_interactive_case_step(bot_client, chat_id, text, user_state)
             return
 
+        # Admin Wipe command to delete recent bot messages
+        if text.lower().startswith(("/wipe", "/del", "/delete")):
+            is_authorized = False
+            try:
+                import config
+                if str(chat_id) in [str(config.REPORT_CHAT_ID), str(config.SOURCE_CHAT_ID)]:
+                    is_authorized = True
+                else:
+                    if config.SOURCE_CHAT_ID:
+                        permissions = await bot_client.get_permissions(config.SOURCE_CHAT_ID, chat_id)
+                        if permissions.is_admin:
+                            is_authorized = True
+            except Exception as auth_err:
+                logger.error(f"Error checking PM admin auth: {auth_err}")
+                
+            if is_authorized:
+                parts = text.split()
+                count = 10
+                if len(parts) > 1:
+                    try:
+                        count = int(parts[1])
+                    except ValueError:
+                        pass
+                
+                last_msgs = await database.get_last_bot_sent_messages(count)
+                if not last_msgs:
+                    await bot_client.send_message(entity=chat_id, message="🤷‍♂️ <i>Не найдено отправленных сообщений бота для удаления.</i>", parse_mode='html')
+                    return
+                
+                deleted_count = 0
+                from collections import defaultdict
+                by_chat = defaultdict(list)
+                for msg_id, c_id in last_msgs:
+                    by_chat[c_id].append(msg_id)
+                    
+                for c_id, msg_ids in by_chat.items():
+                    try:
+                        await bot_client.delete_messages(c_id, msg_ids)
+                        deleted_count += len(msg_ids)
+                        for m_id in msg_ids:
+                            await database.remove_bot_sent_message(m_id)
+                    except Exception as del_err:
+                        logger.error(f"Error deleting messages in chat {c_id}: {del_err}")
+                        
+                await bot_client.send_message(
+                    entity=chat_id, 
+                    message=f"🧹 <b>Успешно удалено последних сообщений бота: {deleted_count} шт.</b>", 
+                    parse_mode='html'
+                )
+            else:
+                await bot_client.send_message(entity=chat_id, message="⛔ <i>У вас нет прав для выполнения этой команды.</i>", parse_mode='html')
+            return
+
         # 1. Обработка базовых команд
         if text.lower() == "/start":
             greeting = (
