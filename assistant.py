@@ -787,6 +787,9 @@ async def handle_private_message(bot_client, event):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось распознать аудио. Пожалуйста, повторите или напишите текстом.</i>", parse_mode='html')
                 return
 
+        if text and not text.startswith("/"):
+            await database.save_pm_message(chat_id, "User", text)
+
         # 0.5. Interactive Simulator State Routing & Abort Check
         user_state = await database.get_user_interactive_state(chat_id)
         
@@ -1151,14 +1154,10 @@ async def handle_private_message(bot_client, event):
                     except Exception: pass
 
         # 3. Восстановление динамического диалога (контекст до 25 сообщений)
-        history = await bot_client.get_messages(chat_id, limit=25)
-        history = history[::-1]
+        history = await database.get_last_pm_messages(chat_id, limit=25)
         context_msgs = []
         for msg in history:
-            # Определяем имя отправителя
-            is_bot = (msg.sender_id == BOT_ID) or (msg.out == True)
-            name = "Assistant" if is_bot else "User"
-            context_msgs.append(f"{name}: {msg.message or ''}")
+            context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
             
         # 4. RAG-поиск по стоматологической базе знаний
         # Поиск по ключевым словам из подписи и/или описания изображения
@@ -1272,6 +1271,7 @@ async def handle_private_message(bot_client, event):
                 message=reply_text,
                 parse_mode='html'
             )
+            await database.save_pm_message(chat_id, "Assistant", reply_text)
             logger.info(f"Successfully sent deep PM response to chat_id={chat_id}")
             
     except Exception as e:

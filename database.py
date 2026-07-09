@@ -98,6 +98,18 @@ async def init_db():
                 """
             )
 
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pm_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    sender_name TEXT,
+                    text TEXT,
+                    date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
                 logger.info("database schema migrated: added media_remote_url")
@@ -461,4 +473,26 @@ async def remove_bot_sent_message(msg_id):
     def operation():
         with _connection() as db:
             db.execute("DELETE FROM bot_sent_messages WHERE msg_id = ?", (msg_id,))
+    return await _run_db(operation)
+
+
+async def save_pm_message(user_id, sender_name, text):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                "INSERT INTO pm_messages (user_id, sender_name, text) VALUES (?, ?, ?)",
+                (user_id, sender_name, text)
+            )
+    return await _run_db(operation)
+
+
+async def get_last_pm_messages(user_id, limit=25):
+    def operation():
+        with _connection() as db:
+            cursor = db.execute(
+                "SELECT sender_name, text FROM pm_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                (user_id, limit)
+            )
+            rows = cursor.fetchall()
+            return [{"sender_name": row[0], "text": row[1]} for row in reversed(rows)]
     return await _run_db(operation)
