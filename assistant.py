@@ -30,6 +30,34 @@ def check_user_cooldown(chat_id, user_id, command, seconds=30):
             return int(seconds - elapsed)
     USER_COOLDOWNS[key] = now
     return 0
+
+async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
+    """Sends a long message in chunks of <= 4000 characters, splitting by paragraphs if possible."""
+    if len(text) <= 4000:
+        await bot_client.send_message(entity=chat_id, message=text, **kwargs)
+        return
+        
+    paragraphs = text.split("\n\n")
+    current_chunk = ""
+    for p in paragraphs:
+        if len(current_chunk) + len(p) + 2 > 4000:
+            if current_chunk:
+                await bot_client.send_message(entity=chat_id, message=current_chunk.strip(), **kwargs)
+                current_chunk = ""
+            if len(p) > 4000:
+                for i in range(0, len(p), 4000):
+                    await bot_client.send_message(entity=chat_id, message=p[i:i+4000], **kwargs)
+            else:
+                current_chunk = p
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + p
+            else:
+                current_chunk = p
+                
+    if current_chunk:
+        await bot_client.send_message(entity=chat_id, message=current_chunk.strip(), **kwargs)
+
 async def init_assistant(bot_client):
     global BOT_ID
     try:
@@ -1343,9 +1371,10 @@ async def handle_private_message(bot_client, event):
             reply_text = clean_html_formatting(reply_text)
             
             # Отправка развернутого ответа
-            await bot_client.send_message(
-                entity=chat_id,
-                message=reply_text,
+            await send_message_chunks_async(
+                bot_client,
+                chat_id,
+                reply_text,
                 parse_mode='html'
             )
             await database.save_pm_message(chat_id, "Assistant", reply_text)
