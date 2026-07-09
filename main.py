@@ -626,6 +626,11 @@ async def handle_new_message(event):
     try:
         msg_id = event.message.id
         sender_id = event.sender_id
+        
+        # Игнорируем сообщения от самого бота во избежание самоциклирования
+        if sender_id == 7971556097 or (assistant.BOT_ID and sender_id == assistant.BOT_ID):
+            return
+            
         sender = None
         try:
             sender = await asyncio.wait_for(
