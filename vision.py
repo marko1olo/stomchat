@@ -5,6 +5,8 @@ import asyncio
 import time
 import os
 import httpx
+import io
+from PIL import Image
 from openai import AsyncOpenAI
 
 import config

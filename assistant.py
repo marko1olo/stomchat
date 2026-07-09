@@ -5,6 +5,7 @@ import sqlite3
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timedelta
 from blocking_tools import generate_gemini_text_async
 import vision
@@ -377,7 +378,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             # Trigger on ANY question OR if there is an active dental topic
             if has_question or has_dental_topic:
                 triggered = True
-                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic}). Keywords: {search_keywords}"
+                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic})"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
                 context_msgs = [f"{r[0]}: {r[1]}" for r in last_msgs]
@@ -760,10 +761,6 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     # Send status "typing"
     status_msg = await bot_client.send_message(entity=chat_id, message="⚙️ <i>Анализирую ваши действия...</i>", parse_mode='html')
     
-    # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
-    keywords = extract_keywords(user_text + " " + history_str)
-    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
-
     # Formulate simulation prompt
     # If step < 3, continue the case. If step >= 3, finish and evaluate.
     is_last_step = (current_step >= 3)
@@ -772,7 +769,10 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     for msg in history_data:
         role_name = "Экзаменатор (Бот)" if msg["role"] == "assistant" else "Врач (Вы)"
         history_str += f"{role_name}: {msg['content']}\n\n"
-        
+    
+    # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
+    keywords = extract_keywords(user_text + " " + history_str)
+    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
     if not is_last_step:
         prompt = f"""
 Ты — старший стоматолог-экзаменатор. Ведешь интерактивный разбор клинического случая.

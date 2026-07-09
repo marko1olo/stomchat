@@ -79,7 +79,7 @@ async def call_groq_llama(prompt):
                     "https://api.groq.com/openai/v1/chat/completions",
                     headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
                     json={
-                        "model": "llama-3.3-70b-versatile",
+                        "model": config.GROQ_MODEL,
                         "messages": [
                             {
                                 "role": "system", 

@@ -90,12 +90,15 @@ def ban_model(model_name, duration_seconds):
 def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
     is_pm = status_context and status_context.get("kind") in ("pm_chat", "assistant_media_pm")
+    thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
+    
+    groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
     
     if is_pm:
         models_cascade = [
             ("gemini-3.1-flash-lite", "gemini"),
             ("gemini-3-flash-preview", "gemini"),
-            (config.GROQ_MODEL, "groq"),
+            (groq_fallback, "groq"),
             ("qwen/qwen3.6-27b", "groq")
         ]
     else:
@@ -103,7 +106,7 @@ def generate_text(prompt, status_context=None):
             (config.GEMINI_MODEL, "gemini"),
             ("gemini-3-flash-preview", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
-            (config.GROQ_MODEL, "groq"),
+            (groq_fallback, "groq"),
             ("qwen/qwen3.6-27b", "groq")
         ]
 

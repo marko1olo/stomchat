@@ -597,7 +597,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                         )
                     except Exception as e:
                         logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
-                asyncio.create_task(run_media_assistant_safe())
+                runtime_guard.create_task(run_media_assistant_safe(), name=f"media_{msg_id}")
             else:
                 logger.info("media analysis returned empty description msg_id=%s, marking as processed", msg_id)
                 for message in messages:
@@ -798,7 +798,7 @@ async def handle_new_message(event):
                                 combined_text = "\n".join([m.text for m in msgs if m.text]).strip()
                                 await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
                                 
-                        asyncio.create_task(_process_album_after_delay(event.grouped_id, bot_client))
+                        runtime_guard.create_task(_process_album_after_delay(event.grouped_id, bot_client), name=f"album_{event.grouped_id}")
                         
                     _pending_albums[event.grouped_id].append(event.message)
                 else:
@@ -862,7 +862,7 @@ async def handle_new_message(event):
 
                 # 5. Пассивный клинический рефери (проверка конфликтов)
                 # Запускается асинхронно, не мешает стандартному ассистенту
-                asyncio.create_task(assistant.check_and_trigger_referee(bot_client, event, text))
+                runtime_guard.create_task(assistant.check_and_trigger_referee(bot_client, event, text), name=f"referee_{msg_id}")
                 
             except Exception as e:
                 logger.exception(f"Error executing group feature: {e}")
@@ -884,7 +884,7 @@ async def handle_new_message(event):
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
                 
-        asyncio.create_task(run_assistant_safe())
+        runtime_guard.create_task(run_assistant_safe(), name=f"assistant_{msg_id}")
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -912,7 +912,7 @@ async def handle_private_message(event):
         except Exception as e:
             logger.exception(f"Unexpected error in PM message handler: {e}")
             
-    asyncio.create_task(run_pm_safe())
+    runtime_guard.create_task(run_pm_safe(), name=f"pm_{event.message.id}")
 
 @bot_client.on(events.CallbackQuery)
 async def handle_callback_query(event):
@@ -1032,21 +1032,6 @@ def extract_first_frame(video_path):
     if error:
         logger.error("frame extraction failed: %s", error)
     return path
-    """Извлекает первый кадр из видео и сохраняет как JPEG."""
-    vid_cap = None
-    try:
-        vid_cap = cv2.VideoCapture(video_path)
-        success, image = vid_cap.read()
-        if success:
-            frame_path = video_path + ".jpg"
-            if cv2.imwrite(frame_path, image):
-                return frame_path
-    except Exception as e:
-        logger.error(f"❌ Ошибка извлечения кадра: {e}")
-    finally:
-        if vid_cap is not None:
-            vid_cap.release()
-    return None
 async def sync_history():
     """Докачивает сообщения, пропущенные во время офлайна."""
     last_id = await asyncio.wait_for(database.get_last_msg_id(), timeout=30)

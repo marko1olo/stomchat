@@ -139,8 +139,12 @@ def stop_watchdog():
     _watchdog_stop.set()
 
 
+_ACTIVE_TASKS = set()
+
 def create_task(coro, name):
     task = asyncio.create_task(coro, name=name)
+    _ACTIVE_TASKS.add(task)
+    task.add_done_callback(_ACTIVE_TASKS.discard)
     task.add_done_callback(_log_task_result)
     return task
 
