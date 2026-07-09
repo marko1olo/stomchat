@@ -74,16 +74,14 @@ def generate_text(prompt, status_context=None):
         models_cascade = [
             ("gemini-3.1-flash-lite", "gemini"),
             ("gemini-3-flash-preview", "gemini"),
-            ("qwen/qwen3.6-27b", "groq"),
-            (config.GROQ_MODEL, "groq")
+            (config.GROQ_MODEL, "groq"),
+            ("qwen/qwen3.6-27b", "groq")
         ]
     else:
         models_cascade = [
             (config.GEMINI_MODEL, "gemini"),
             ("gemini-3-flash-preview", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            ("qwen/qwen3.6-27b", "groq"),
-            (config.GROQ_MODEL, "groq")
+            ("gemini-3.1-flash-lite", "gemini")
         ]
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
     
