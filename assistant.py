@@ -918,7 +918,8 @@ async def handle_private_message(bot_client, event):
                     ])
                 ],
                 resize=True,
-                persistent=True
+                single_use=True,
+                persistent=False
             )
             await bot_client.send_message(entity=chat_id, message=greeting, buttons=keyboard, parse_mode='html')
             return
