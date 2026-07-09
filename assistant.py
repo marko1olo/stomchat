@@ -1183,15 +1183,26 @@ async def handle_private_message(bot_client, event):
         for msg in history:
             context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
             
-        # 4. RAG-поиск по стоматологической базе знаний
-        # Поиск по ключевым словам из подписи и/или описания изображения
-        full_query = text
-        if media_description:
-            full_query += " " + media_description
-            
-        keywords = extract_keywords(full_query)
-        has_dental_topic = any(kw in full_query.lower() for kw in DENTAL_KEYWORDS)
+        # 4. RAG-поиск по стоматологической базе знаний с учетом контекста переписки
+        # Собираем текст текущего запроса и последних 3 сообщений истории для детекции клинической темы
+        history_context_text = " ".join([msg['text'] for msg in history[-3:]])
+        full_context_str = (text or "") + " " + (media_description or "") + " " + history_context_text
+        full_context_str_lower = full_context_str.lower()
         
+        # Проверяем наличие стоматологической темы во всем контексте
+        has_dental_topic = any(kw in full_context_str_lower for kw in DENTAL_KEYWORDS)
+        
+        # Экстрагируем ключевые слова из текущего сообщения и описания медиа
+        query_to_extract = (text or "") + " " + (media_description or "")
+        keywords = extract_keywords(query_to_extract)
+        
+        # Если ключевых слов в текущем запросе мало, дополняем ключевыми словами из истории
+        if len(keywords) < 6:
+            history_kws = extract_keywords(history_context_text)
+            for hk in history_kws:
+                if hk not in keywords:
+                    keywords.append(hk)
+                    
         wiki_corpus, archive_corpus = "", ""
         if has_dental_topic or has_media:
             # Ищем совпадения в стоматологической базе
@@ -1229,7 +1240,7 @@ async def handle_private_message(bot_client, event):
 """
         else:
             # Определяем тип запроса: это клинический вопрос или свободная тема
-            has_clinical_topic = any(kw in (text or "").lower() for kw in DENTAL_KEYWORDS) or bool(wiki_corpus)
+            has_clinical_topic = has_dental_topic or bool(wiki_corpus)
             if has_clinical_topic:
                 system_role = (
                     "Ты — старший клинический ассистент стоматологического сообщества \"StomChat\", специализирующийся на доказательной стоматологии. "
