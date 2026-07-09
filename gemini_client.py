@@ -117,9 +117,26 @@ def generate_text(prompt, status_context=None):
                 logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
                 if provider == "gemini":
+                    from google.genai import types
+                    thinking_config = None
+                    is_gemini_3 = any(v in model_name for v in ["gemini-3", "gemini-3.1", "gemini-3.5", "gemini-omni"])
+                    if is_gemini_3:
+                        lvl = os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL", "LOW").upper()
+                        if lvl in ["MINIMAL", "LOW", "MEDIUM", "HIGH"]:
+                            thinking_config = types.ThinkingConfig(thinking_level=lvl)
+                    else:
+                        bgt_str = os.getenv("STOMCHAT_GEMINI_THINKING_BUDGET", "1024")
+                        try:
+                            bgt = int(bgt_str)
+                            thinking_config = types.ThinkingConfig(thinking_budget=bgt)
+                        except ValueError:
+                            pass
+                    
+                    gen_config = types.GenerateContentConfig(thinking_config=thinking_config) if thinking_config else None
                     response = client.models.generate_content(
                         model=model_name,
                         contents=prompt,
+                        config=gen_config
                     )
                     text_result = response.text
                 else:
