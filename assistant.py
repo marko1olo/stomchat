@@ -433,7 +433,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
     
     # CALL GEMINI
-    status_ctx = {"kind": "assistant", "chat_id": event.chat_id}
+    status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if error:
@@ -589,7 +589,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     logger.info(f"Triggered media assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
     
     # CALL GEMINI
-    status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id}
+    status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if error:
@@ -711,7 +711,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 2. Разметка: только HTML. Без Markdown.
 """
     
-    status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if 'status_msg' in locals() and status_msg:
@@ -1024,7 +1024,7 @@ async def handle_private_message(bot_client, event):
 Будь лаконичен, профессионален.
 """
             async with bot_client.action(chat_id, 'typing'):
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
                 await bot_client.delete_messages(chat_id, status_msg.id)
                 if error:
@@ -1160,7 +1160,7 @@ async def handle_private_message(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
@@ -1326,7 +1326,7 @@ async def handle_private_message(bot_client, event):
         # 6. Отправка статуса "печатает"
         async with bot_client.action(chat_id, 'typing'):
             # Запрос к Gemini
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
             response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
             
             if error:
@@ -1399,7 +1399,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - Разметка: только HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
 - Будь краток: вся сводка должна занимать не более 800 символов.
 """
-        status_ctx = {"kind": "group_summary", "chat_id": chat_id}
+        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "MEDIUM"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
@@ -1448,7 +1448,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 3. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
 4. Только проверенные научные факты. Если в базе нет точных данных, напиши: "В базе данных нет точных сведений о Х, но на практике...", без выдумок.
 """
-        status_ctx = {"kind": "group_ask", "chat_id": chat_id}
+        status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "MEDIUM"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
@@ -1492,7 +1492,7 @@ async def handle_group_quiz(bot_client, event):
 }
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
-    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id}
+    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     await bot_client.delete_messages(chat_id, status_msg.id)
     
@@ -2042,7 +2042,7 @@ async def analyze_dispute_need(context_msgs):
 
 Правило: выведи строго одно слово 'YES' (если спор/конфликт есть) или 'NO' (если это обычное мирное обсуждение, шутка или обмен опытом без спора). Никаких других слов или комментариев не пиши.
 """
-    status_ctx = {"kind": "referee_analyser"}
+    status_ctx = {"kind": "referee_analyser", "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=45)
     if response and getattr(response, "text", None):
         res = response.text.strip().upper()
@@ -2165,7 +2165,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
 
-    status_ctx = {"kind": "group_referee", "chat_id": chat_id}
+    status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
     
     if error or not response or not getattr(response, "text", None):
@@ -2211,7 +2211,7 @@ async def handle_term_explainer(bot_client, event, term):
 2. Никаких приветствий, «Данный термин означает...» и прочей воды. Сразу определение.
 3. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
 """
-    status_ctx = {"kind": "group_explainer", "chat_id": chat_id}
+    status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
     
     if error or not response or not getattr(response, "text", None):
