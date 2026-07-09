@@ -743,6 +743,18 @@ async def handle_private_message(bot_client, event):
         chat_id = event.chat_id
         text = (event.message.message or "").strip()
 
+        # Map text menu button clicks to slash commands
+        btn_mapping = {
+            "📖 энциклопедия": "/wiki",
+            "🎮 клинический кейс": "/case",
+            "🎲 викторина": "/quiz",
+            "🧮 калькулятор": "/calc",
+            "⭐ закладки": "/bookmarks",
+            "📊 статистика чата": "/stats"
+        }
+        if text.lower() in btn_mapping:
+            text = btn_mapping[text.lower()]
+
         # 0. Voice Note / Audio processing
         is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
         is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
@@ -887,9 +899,15 @@ async def handle_private_message(bot_client, event):
                 "1. 📚 <b>Задавать клинические вопросы</b> — просто отправьте свой вопрос, и я подробно отвечу на него с использованием базы знаний.\n"
                 "2. 🖼️ <b>Анализировать снимки и фото</b> — пришлите рентген или фотографию клинического случая, и я сделаю подробный разбор.\n"
                 "3. 💬 <b>Вести непрерывный диалог</b> — я запоминаю контекст нашей переписки (до 25 сообщений), поэтому вы можете задавать уточняющие вопросы.\n\n"
-                "ℹ️ <i>Напишите /help для просмотра списка команд и возможностей!</i>"
+                "ℹ️ <i>Используйте кнопки меню внизу для быстрого доступа к функциям или напишите /help!</i>"
             )
-            await bot_client.send_message(entity=chat_id, message=greeting, parse_mode='html')
+            from telethon import Button
+            keyboard = [
+                [Button.text("📖 Энциклопедия", resize=True), Button.text("🎮 Клинический кейс", resize=True)],
+                [Button.text("🎲 Викторина", resize=True), Button.text("🧮 Калькулятор", resize=True)],
+                [Button.text("⭐ Закладки", resize=True), Button.text("📊 Статистика чата", resize=True)]
+            ]
+            await bot_client.send_message(entity=chat_id, message=greeting, buttons=keyboard, parse_mode='html')
             return
             
         if text.lower() == "/help":
