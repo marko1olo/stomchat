@@ -221,6 +221,8 @@ async def query_db_async(query_sql, params=()):
 def clean_html_formatting(text):
     if not text:
         return ""
+    # Strip database codes/fact indexes (e.g. [2.1.1], [1.3])
+    text = re.sub(r'\s*\[\d+(?:\.\d+)+\]', '', text)
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     # Temporarily hide valid HTML tags we want to support
@@ -917,9 +919,15 @@ async def handle_private_message(bot_client, event):
                 "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
                 "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
                 "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
-                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи."
+                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
+                "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
             )
-            await bot_client.send_message(entity=chat_id, message=protocols_text, parse_mode='html')
+            from telethon import Button
+            buttons = [
+                [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
+                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=protocols_text, buttons=buttons, parse_mode='html')
             return
 
         if text.lower() == "/calc":
@@ -1048,7 +1056,7 @@ async def handle_private_message(bot_client, event):
                                 content_hl = re.sub(f"(?i)({re.escape(kw)})", r"<u>\1</u>", content)
                             except Exception:
                                 content_hl = content
-                            fact = f"• [<b>{cat_code}</b>] {content_hl}"
+                            fact = f"• {content_hl}"
                             if fact not in wiki_facts:
                                 wiki_facts.append(fact)
                     conn.close()
@@ -1495,6 +1503,57 @@ async def handle_group_quiz(bot_client, event):
 async def handle_quiz_callback(bot_client, event):
     """Проверка ответа пользователя при клике на инлайн-кнопку."""
     data_str = event.data.decode('utf-8', errors='ignore')
+    
+    if data_str == "proto:back":
+        protocols_text = (
+            "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
+            "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
+            "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
+            "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
+            "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
+            "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
+            "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
+        )
+        from telethon import Button
+        buttons = [
+            [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
+            [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")]
+        ]
+        await bot_client.edit_message(event.chat_id, event.message_id, protocols_text, buttons=buttons, parse_mode='html')
+        await event.answer()
+        return
+
+    if data_str.startswith("proto:"):
+        proto_id = data_str.split(":")[1]
+        keywords_map = {
+            "irrigation": ["гипохлорит", "эдта", "ирригац", "активац"],
+            "bopt": ["bopt", "уступ", "преп"],
+            "etching": ["плавиков", "силан", "бонд", "травлен"],
+            "obturation": ["гуттаперч", "силер", "обтурац", "конденсац"]
+        }
+        kws = keywords_map.get(proto_id, ["дентин"])
+        wiki_corpus, _ = search_knowledge_corpus(kws)
+        wiki_corpus = clean_html_formatting(wiki_corpus)
+        if not wiki_corpus:
+            wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
+        else:
+            wiki_corpus = wiki_corpus[:1500] + "..."
+            
+        proto_names = {
+            "irrigation": "💧 Ирригация в эндодонтии",
+            "bopt": "🦷 BOPT (Препарирование)",
+            "etching": "🧪 Адгезивные протоколы (Травление)",
+            "obturation": "🩸 Обтурация корневых каналов"
+        }
+        title = proto_names.get(proto_id, "📚 Клинический протокол")
+        response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"
+        
+        from telethon import Button
+        back_btn = Button.inline("⬅️ Назад к списку", data="proto:back")
+        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html', link_preview=False)
+        await event.answer()
+        return
+
     if not data_str.startswith("qa:"):
         return
         
