@@ -3,6 +3,13 @@ import os
 import random
 import logging
 import time
+
+# Force lowercase proxy environment variables for httpx / requests compatibility on Windows
+for proxy_var in ["HTTP_PROXY", "HTTPS_PROXY", "PROXY_URL"]:
+    val = os.getenv(proxy_var)
+    if val:
+        os.environ[proxy_var.lower()] = val
+        os.environ[proxy_var.upper()] = val
 import runtime_guard
 from openai import OpenAI
 
