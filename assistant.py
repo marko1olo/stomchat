@@ -657,6 +657,10 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     # Send status "typing"
     status_msg = await bot_client.send_message(entity=chat_id, message="⚙️ <i>Анализирую ваши действия...</i>", parse_mode='html')
     
+    # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
+    keywords = extract_keywords(user_text + " " + history_str)
+    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+
     # Formulate simulation prompt
     # If step < 3, continue the case. If step >= 3, finish and evaluate.
     is_last_step = (current_step >= 3)
@@ -673,8 +677,11 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
 {history_str}
 
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus or "(справочная информация отсутствует)"}
+
 Задачи на этот шаг (Шаг {current_step + 1} из 4):
-1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично.
+1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично (опирайся на стандарты из Базы Знаний, если применимо).
 2. Предоставь новые клинические данные, соответствующие его действию (например, если врач назначил КТ — опиши, что видно на КТ; если сделал анестезию — опиши начало действия и следующий этап работы).
 3. Задай следующий конкретный вопрос о дальнейшей тактике.
 
@@ -690,8 +697,11 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
 {history_str}
 
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus or "(справочная информация отсутствует)"}
+
 Задачи на этот финальный шаг:
-1. Подведи итоги действий врача.
+1. Подведи итоги действий врача (опирайся на стандарты из Базы Знаний, если применимо).
 2. Укажи на допущенные ошибки (если были) или похвали за верную тактику.
 3. Выстави оценку по пятибалльной шкале (1/5 до 5/5) с краткой аргументацией.
 4. Заверши диалог, пожелав успехов в практике.
@@ -824,6 +834,13 @@ async def handle_private_message(bot_client, event):
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
         
+        # Автоматический выход из симулятора при вводе любой другой команды или нажатии кнопки меню
+        is_command = text.startswith("/")
+        if is_command and user_state and user_state.get("state_type") == "case" and text.lower() not in ("/abort", "/exit"):
+            await database.clear_user_interactive_state(chat_id)
+            user_state = None
+            await bot_client.send_message(entity=chat_id, message="⏹️ <i>Активный клинический симулятор прерван для выполнения новой команды.</i>", parse_mode='html')
+
         if text.lower() in ("/abort", "/exit", "выход", "отмена"):
             if user_state:
                 await database.clear_user_interactive_state(chat_id)
