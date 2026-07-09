@@ -1569,35 +1569,64 @@ async def handle_group_quiz(bot_client, event):
 
 
 async def query_wiki_subtopic(subtopic_id):
-    keywords_map = {
-        "ortho_bopt": ["bopt", "уступ", "преп"],
-        "ortho_vin": ["винил", "вкладк", "накладк"],
-        "ortho_crown": ["коронка", "коронок", "мост", "протез"],
-        "endo_irr": ["гипохлорит", "хлоргексидин", "эдта", "ирригац"],
-        "endo_obt": ["гуттаперч", "силер", "обтурац"],
-        "endo_files": ["файл", "реципрок", "протейпер", "мту"],
-        "perio_dis": ["гингивит", "пародонт", "пародонтоз"],
-        "perio_clean": ["кюрет", "скалер", "чистк", "налет", "камень"],
-        "perio_plast": ["десна", "десны", "сст", "трансплантат"],
-        "surg_impl": ["имплант", "абатм", "формировател", "заглушк"],
-        "surg_rem": ["удален", "экстракц", "лунк"],
-        "surg_bone": ["синус", "остеот", "мембран", "биоосс", "аугмент"],
-        "gnat_joint": ["окклюз", "сустав", "внчс"],
-        "gnat_splint": ["сплинт", "капп", "шина"]
+    codes_map = {
+        "ortho_bopt": ["2.2.1"],
+        "ortho_vin": ["2.1.1", "2.1.4"],
+        "ortho_crown": ["2.1.2", "2.1.3"],
+        "endo_irr": ["1.1.3"],
+        "endo_obt": ["1.1.4"],
+        "endo_files": ["1.1.2", "1.1.1"],
+        "perio_dis": ["1.3.2"],
+        "perio_clean": ["1.3.1"],
+        "perio_plast": ["3.3.1"],
+        "surg_impl": ["3.2.1", "3.2.2", "3.2.3"],
+        "surg_rem": ["3.1.1"],
+        "surg_bone": ["3.3.2"],
+        "gnat_joint": ["2.3.1", "2.3.2"],
+        "gnat_splint": ["2.3.2"]
     }
-    kws = keywords_map.get(subtopic_id, ["дентин"])
+    
     facts = []
     if os.path.exists("stomat_wiki.db"):
         try:
             import sqlite3
             conn = sqlite3.connect("stomat_wiki.db", timeout=10)
             c = conn.cursor()
-            for kw in kws:
-                c.execute("SELECT content FROM distilled_facts WHERE content LIKE ? LIMIT 10", (f"%{kw}%",))
+            
+            # 1. Try category code search
+            codes = codes_map.get(subtopic_id, [])
+            for code in codes:
+                c.execute("SELECT content FROM distilled_facts WHERE category_code LIKE ? LIMIT 15", (f"%{code}%",))
                 for row in c.fetchall():
                     fact = row[0].strip()
                     if fact not in facts:
                         facts.append(fact)
+                        
+            # 2. Fallback to keyword search if category code yields no results
+            if not facts:
+                keywords_map = {
+                    "ortho_bopt": ["bopt", "уступ", "преп"],
+                    "ortho_vin": ["винил", "вкладк", "накладк"],
+                    "ortho_crown": ["коронка", "коронок", "мост", "протез"],
+                    "endo_irr": ["гипохлорит", "хлоргексидин", "эдта", "ирригац"],
+                    "endo_obt": ["гуттаперч", "силер", "обтурац"],
+                    "endo_files": ["файл", "реципрок", "протейпер", "мту"],
+                    "perio_dis": ["гингивит", "пародонт", "пародонтоз"],
+                    "perio_clean": ["кюрет", "скалер", "чистк", "налет", "камень"],
+                    "perio_plast": ["десна", "десны", "сст", "трансплантат"],
+                    "surg_impl": ["имплант", "абатм", "формировател", "заглушк"],
+                    "surg_rem": ["удален", "экстракц", "лунк"],
+                    "surg_bone": ["синус", "остеот", "мембран", "биоосс", "аугмент"],
+                    "gnat_joint": ["окклюз", "сустав", "внчс"],
+                    "gnat_splint": ["сплинт", "капп", "шина"]
+                }
+                kws = keywords_map.get(subtopic_id, ["дентин"])
+                for kw in kws:
+                    c.execute("SELECT content FROM distilled_facts WHERE content LIKE ? LIMIT 10", (f"%{kw}%",))
+                    for row in c.fetchall():
+                        fact = row[0].strip()
+                        if fact not in facts:
+                            facts.append(fact)
             conn.close()
         except Exception as e:
             logger.error(f"Error querying wiki subtopic: {e}")
