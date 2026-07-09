@@ -119,7 +119,7 @@ def generate_text(prompt, status_context=None):
                     thinking_config = None
                     is_gemini_3 = any(v in model_name for v in ["gemini-3", "gemini-3.1", "gemini-3.5", "gemini-omni"])
                     if is_gemini_3:
-                        lvl = os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL", "LOW").upper()
+                        lvl = os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL", "HIGH").upper()
                         if lvl in ["MINIMAL", "LOW", "MEDIUM", "HIGH"]:
                             thinking_config = types.ThinkingConfig(thinking_level=lvl)
                     else:

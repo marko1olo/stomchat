@@ -358,9 +358,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 context_msgs = [f"{r[0]}: {r[1]}" for r in rows]                
     # 2. Check Passive Trigger (General Chat Flow)
     if not triggered:
-        # Get last 10 messages from DB
+        # Get last 20 messages from DB
         last_msgs = await query_db_async(
-            "SELECT sender_name, text, msg_id FROM messages ORDER BY date DESC LIMIT 10"
+            "SELECT sender_name, text, msg_id FROM messages ORDER BY date DESC LIMIT 20"
         )
         # Reorder chronologically
         last_msgs = last_msgs[::-1]
@@ -377,10 +377,26 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             # Trigger on ANY question OR if there is an active dental topic
             if has_question or has_dental_topic:
                 triggered = True
-                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic})"
+                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic}). Keywords: {search_keywords}"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
                 context_msgs = [f"{r[0]}: {r[1]}" for r in last_msgs]
+                
+                # If the triggering message is a reply, prepend the parent chain for full context
+                if reply_to_msg_id:
+                    try:
+                        thread_rows = await query_db_async(
+                            "SELECT sender_name, text FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
+                            (reply_to_msg_id, reply_to_msg_id)
+                        )
+                        if thread_rows:
+                            thread_msgs = [f"{r[0]}: {r[1]}" for r in thread_rows]
+                            # Merge: thread first, then recent context (deduplicated)
+                            seen = set(thread_msgs)
+                            extra = [m for m in context_msgs if m not in seen]
+                            context_msgs = thread_msgs + extra
+                    except Exception as thread_err:
+                        logger.warning(f"Failed to fetch reply thread for passive context: {thread_err}")
 
 
     if not triggered:
@@ -438,7 +454,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Тебе 15+ лет практики, ты говоришь коротко и по делу — как тот человек в чате, которого все слушают.
 
 Текущая переписка в чате:
-{chr(10).join(context_msgs[-8:])}
+{chr(10).join(context_msgs)}
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
