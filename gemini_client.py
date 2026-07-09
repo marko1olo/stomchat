@@ -66,6 +66,9 @@ def get_openai_client(api_key, base_url, timeout=30.0):
         timeout=timeout,
         max_retries=0
     )
+# Global state for temporarily banning models that return 503/504/deadline
+BANNED_MODELS = {}  # model_name -> ban_until_timestamp
+
 def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
     is_pm = status_context and status_context.get("kind") in ("pm_chat", "assistant_media_pm")
@@ -83,9 +86,24 @@ def generate_text(prompt, status_context=None):
             ("gemini-3-flash-preview", "gemini"),
             ("gemini-3.1-flash-lite", "gemini")
         ]
+
+    # Filter out models that are currently banned due to 503/504
+    now = time.monotonic()
+    active_cascade = []
+    for m_name, prov in models_cascade:
+        ban_until = BANNED_MODELS.get(m_name, 0)
+        if ban_until > now:
+            logger.info(f"Model {m_name} is temporarily banned due to 503/504 for another {int(ban_until - now)}s. Skipping.")
+            continue
+        active_cascade.append((m_name, prov))
+        
+    # If all models in the cascade are banned, fall back to the last one
+    if not active_cascade:
+        logger.warning("All models in cascade are banned. Forcing fallback to the last model.")
+        active_cascade = [models_cascade[-1]]
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
     
-    for model_name, provider in models_cascade:
+    for model_name, provider in active_cascade:
         if provider == "gemini":
             from google import genai
             from google.genai import types
@@ -177,7 +195,9 @@ def generate_text(prompt, status_context=None):
                 )
                 
                 if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
-                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Skipping this model in cascade.")
+                    ban_duration = 7200  # 2 часа в секундах
+                    BANNED_MODELS[model_name] = time.monotonic() + ban_duration
+                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 2 hours. Skipping in cascade.")
                     break
 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
