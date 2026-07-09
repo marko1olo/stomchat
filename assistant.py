@@ -1516,6 +1516,59 @@ async def handle_group_quiz(bot_client, event):
     )
 
 
+async def query_wiki_subtopic(subtopic_id):
+    keywords_map = {
+        "ortho_bopt": ["bopt", "уступ", "преп"],
+        "ortho_vin": ["винил", "вкладк", "накладк"],
+        "ortho_crown": ["коронка", "коронок", "мост", "протез"],
+        "endo_irr": ["гипохлорит", "хлоргексидин", "эдта", "ирригац"],
+        "endo_obt": ["гуттаперч", "силер", "обтурац"],
+        "endo_files": ["файл", "реципрок", "протейпер", "мту"],
+        "perio_dis": ["гингивит", "пародонт", "пародонтоз"],
+        "perio_clean": ["кюрет", "скалер", "чистк", "налет", "камень"],
+        "perio_plast": ["десна", "десны", "сст", "трансплантат"],
+        "surg_impl": ["имплант", "абатм", "формировател", "заглушк"],
+        "surg_rem": ["удален", "экстракц", "лунк"],
+        "surg_bone": ["синус", "остеот", "мембран", "биоосс", "аугмент"],
+        "gnat_joint": ["окклюз", "сустав", "внчс"],
+        "gnat_splint": ["сплинт", "капп", "шина"]
+    }
+    kws = keywords_map.get(subtopic_id, ["дентин"])
+    facts = []
+    if os.path.exists("stomat_wiki.db"):
+        try:
+            import sqlite3
+            conn = sqlite3.connect("stomat_wiki.db", timeout=10)
+            c = conn.cursor()
+            for kw in kws:
+                c.execute("SELECT content FROM distilled_facts WHERE content LIKE ? LIMIT 10", (f"%{kw}%",))
+                for row in c.fetchall():
+                    fact = row[0].strip()
+                    if fact not in facts:
+                        facts.append(fact)
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error querying wiki subtopic: {e}")
+    return facts
+
+
+async def query_random_wiki_fact():
+    fact = None
+    if os.path.exists("stomat_wiki.db"):
+        try:
+            import sqlite3
+            conn = sqlite3.connect("stomat_wiki.db", timeout=10)
+            c = conn.cursor()
+            c.execute("SELECT content FROM distilled_facts ORDER BY RANDOM() LIMIT 1")
+            row = c.fetchone()
+            if row:
+                fact = row[0].strip()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error querying random wiki fact: {e}")
+    return fact
+
+
 async def handle_quiz_callback(bot_client, event):
     """Проверка ответа пользователя при клике на инлайн-кнопку."""
     data_str = event.data.decode('utf-8', errors='ignore')
@@ -1570,63 +1623,188 @@ async def handle_quiz_callback(bot_client, event):
         await event.answer()
         return
 
+    # WIKI MAIN MENU BACK
     if data_str == "wiki_cat:back":
         wiki_text = (
             "📖 <b>Интерактивная Стоматологическая Энциклопедия</b>\n\n"
-            "Здесь вы можете изучать клинические стандарты, классификации и протоколы напрямую из нашей базы знаний.\n\n"
-            "👇 <i>Выберите раздел для детального просмотра:</i>"
+            "Добро пожаловать в базу клинических знаний и протоколов StomChat. Здесь собраны проверенные стандарты доказательной стоматологии.\n\n"
+            "👇 <i>Выберите интересующее действие:</i>"
         )
         from telethon import Button
         buttons = [
-            [Button.inline("🦷 Препарирование и Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия и Лечение", data="wiki_cat:endo")],
-            [Button.inline("🩹 Пародонтология и Десна", data="wiki_cat:perio"), Button.inline("🔩 Имплантация и Хирургия", data="wiki_cat:surg")],
-            [Button.inline("🔍 Инструкция по поиску", data="wiki_cat:help")]
+            [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics")],
+            [Button.inline("🎲 Случайный факт", data="wiki_cat:random"), Button.inline("🔍 Поиск по базе", data="wiki_cat:search_info")]
         ]
         await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
         await event.answer()
         return
 
+    # WIKI TOPICS SELECTOR
+    if data_str == "wiki_cat:topics":
+        wiki_text = "📚 <b>Рубрикатор Энциклопедии (основные разделы):</b>"
+        from telethon import Button
+        buttons = [
+            [Button.inline("🦷 Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия", data="wiki_cat:endo")],
+            [Button.inline("🩹 Пародонтология", data="wiki_cat:perio"), Button.inline("🔩 Хирургия", data="wiki_cat:surg")],
+            [Button.inline("📐 Гнатология", data="wiki_cat:gnat")],
+            [Button.inline("⬅️ Назад в меню", data="wiki_cat:back")]
+        ]
+        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await event.answer()
+        return
+
+    # SEARCH / RANDOM ROUTINGS
+    if data_str == "wiki_cat:search_info":
+        search_info = (
+            "🔍 <b>Поиск по Базе Знаний:</b>\n\n"
+            "Чтобы выполнить быстрый поиск, просто введите в ЛС команду <code>/search &lt;запрос&gt;</code>.\n\n"
+            "Например:\n"
+            "• <code>/search BOPT</code>\n"
+            "• <code>/search гипохлорит</code>\n"
+            "• <code>/search травление</code>\n\n"
+            "<i>Бот выведет наиболее релевантные статьи прямо в диалог!</i>"
+        )
+        from telethon import Button
+        back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
+        await bot_client.edit_message(event.chat_id, event.message_id, search_info, buttons=back_btn, parse_mode='html')
+        await event.answer()
+        return
+
+    if data_str == "wiki_cat:random":
+        fact = await query_random_wiki_fact()
+        if fact:
+            fact_cleaned = clean_html_formatting(fact)
+            response_text = f"🎲 <b>Случайный факт из Базы Знаний:</b>\n\n{fact_cleaned}"
+        else:
+            response_text = "<i>Не удалось получить случайный факт. База временно недоступна.</i>"
+        from telethon import Button
+        buttons = [
+            [Button.inline("🔄 Ещё факт", data="wiki_cat:random")],
+            [Button.inline("⬅️ Назад в меню", data="wiki_cat:back")]
+        ]
+        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=buttons, parse_mode='html', link_preview=False)
+        await event.answer()
+        return
+
+    # WIKI CATEGORY SUBTOPICS
     if data_str.startswith("wiki_cat:"):
         cat_id = data_str.split(":")[1]
-        if cat_id == "help":
-            help_text = (
-                "🔍 <b>Как пользоваться Энциклопедией:</b>\n\n"
-                "• Вы можете искать любую тему, используя команду <code>/search &lt;запрос&gt;</code> (например, <code>/search BOPT</code> или <code>/search гипохлорит</code>).\n"
-                "• Бот автоматически анализирует ваши обычные сообщения в ЛС на наличие стоматологических терминов и подтягивает информацию из этой базы для повышения точности ответов.\n"
-                "• Используйте меню ниже для быстрого перехода к разделам."
-            )
-            from telethon import Button
-            back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
-            await bot_client.edit_message(event.chat_id, event.message_id, help_text, buttons=back_btn, parse_mode='html')
-            await event.answer()
-            return
-            
-        keywords_map = {
-            "ortho": ["bopt", "коронка", "преп", "уступ", "винир", "ортопед"],
-            "endo": ["канал", "пульп", "апекс", "гипохлорит", "эдта", "гуттаперч", "силер", "эндо"],
-            "perio": ["десна", "пародонт", "гингивит", "карман", "рецесс"],
-            "surg": ["имплант", "удален", "хирург", "синус", "костн"]
-        }
-        kws = keywords_map.get(cat_id, ["дентин"])
-        wiki_corpus, _ = search_knowledge_corpus(kws)
-        wiki_corpus = clean_html_formatting(wiki_corpus)
-        if not wiki_corpus:
-            wiki_corpus = "<i>Раздел временно наполняется информацией.</i>"
-        else:
-            wiki_corpus = wiki_corpus[:1500] + "..."
-            
         cat_titles = {
             "ortho": "🦷 Препарирование и Ортопедия",
             "endo": "💧 Эндодонтия и Лечение",
             "perio": "🩹 Пародонтология и Десна",
-            "surg": "🔩 Имплантация и Хирургия"
+            "surg": "🔩 Имплантация и Хирургия",
+            "gnat": "📐 Гнатология и Окклюзия"
         }
-        title = cat_titles.get(cat_id, "📖 Раздел Энциклопедии")
-        response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"
+        title = cat_titles.get(cat_id, "📚 Раздел Энциклопедии")
         
         from telethon import Button
-        back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
-        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html', link_preview=False)
+        if cat_id == "ortho":
+            buttons = [
+                [Button.inline("🦷 BOPT / Преп без уступа", data="wiki_page:ortho_bopt:0")],
+                [Button.inline("💎 Виниры и накладки", data="wiki_page:ortho_vin:0")],
+                [Button.inline("👑 Коронки и мосты", data="wiki_page:ortho_crown:0")],
+                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
+            ]
+        elif cat_id == "endo":
+            buttons = [
+                [Button.inline("💧 Ирригация каналов", data="wiki_page:endo_irr:0")],
+                [Button.inline("🩸 Обтурация каналов", data="wiki_page:endo_obt:0")],
+                [Button.inline("🔬 Инструменты / Файлы", data="wiki_page:endo_files:0")],
+                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
+            ]
+        elif cat_id == "perio":
+            buttons = [
+                [Button.inline("🩹 Болезни пародонта", data="wiki_page:perio_dis:0")],
+                [Button.inline("🪥 Кюретаж и чистка", data="wiki_page:perio_clean:0")],
+                [Button.inline("🥩 Пластика десны / ССТ", data="wiki_page:perio_plast:0")],
+                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
+            ]
+        elif cat_id == "surg":
+            buttons = [
+                [Button.inline("🔩 Имплантация", data="wiki_page:surg_impl:0")],
+                [Button.inline("🩸 Удаление зубов", data="wiki_page:surg_rem:0")],
+                [Button.inline("🦴 Синус-лифтинг / Кость", data="wiki_page:surg_bone:0")],
+                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
+            ]
+        elif cat_id == "gnat":
+            buttons = [
+                [Button.inline("📐 Окклюзия и сустав", data="wiki_page:gnat_joint:0")],
+                [Button.inline("🦷 Сплинты и шины", data="wiki_page:gnat_splint:0")],
+                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
+            ]
+        else:
+            buttons = [[Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]]
+            
+        wiki_text = f"📚 <b>Раздел: {title}</b>\n\nвыберите интересующую клиническую подтему для просмотра статей:"
+        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await event.answer()
+        return
+
+    # WIKI FACT PAGE AND PAGINATION
+    if data_str.startswith("wiki_page:"):
+        parts = data_str.split(":")
+        subtopic_id = parts[1]
+        page_idx = int(parts[2])
+        
+        facts = await query_wiki_subtopic(subtopic_id)
+        
+        subtopic_names = {
+            "ortho_bopt": "🦷 BOPT / Преп без уступа",
+            "ortho_vin": "💎 Виниры и накладки",
+            "ortho_crown": "👑 Коронки и мосты",
+            "endo_irr": "💧 Ирригация каналов",
+            "endo_obt": "🩸 Обтурация каналов",
+            "endo_files": "🔬 Инструменты / Файлы",
+            "perio_dis": "🩹 Болезни пародонта",
+            "perio_clean": "🪥 Кюретаж и чистка",
+            "perio_plast": "🥩 Пластика десны / ССТ",
+            "surg_impl": "🔩 Имплантация",
+            "surg_rem": "🩸 Удаление зубов",
+            "surg_bone": "🦴 Синус-лифтинг / Кость",
+            "gnat_joint": "📐 Окклюзия и сустав",
+            "gnat_splint": "🦷 Сплинты и шины"
+        }
+        subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
+        
+        if not facts:
+            response_text = f"📚 <b>{subtopic_title}:</b>\n\n<i>В данной категории пока нет статей в базе знаний.</i>"
+            from telethon import Button
+            back_cat = subtopic_id.split("_")[0]
+            back_btn = Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
+            await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html')
+            await event.answer()
+            return
+            
+        total = len(facts)
+        if page_idx < 0:
+            page_idx = total - 1
+        elif page_idx >= total:
+            page_idx = 0
+            
+        fact_content = facts[page_idx]
+        fact_cleaned = clean_html_formatting(fact_content)
+        
+        response_text = (
+            f"📖 <b>{subtopic_title}</b>\n"
+            f"<i>Статья {page_idx + 1} из {total}</i>\n\n"
+            f"{fact_cleaned}"
+        )
+        
+        from telethon import Button
+        nav_row = []
+        if total > 1:
+            nav_row.append(Button.inline("◀️ Пред", data=f"wiki_page:{subtopic_id}:{page_idx - 1}"))
+            nav_row.append(Button.inline(f"{page_idx + 1}/{total}", data=f"wiki_page:{subtopic_id}:{page_idx}"))
+            nav_row.append(Button.inline("След ▶️", data=f"wiki_page:{subtopic_id}:{page_idx + 1}"))
+            
+        back_cat = subtopic_id.split("_")[0]
+        buttons = []
+        if nav_row:
+            buttons.append(nav_row)
+        buttons.append([Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")])
+        
+        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=buttons, parse_mode='html', link_preview=False)
         await event.answer()
         return
 
