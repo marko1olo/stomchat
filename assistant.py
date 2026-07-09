@@ -898,6 +898,7 @@ async def handle_private_message(bot_client, event):
                 "• /start — перезапустить приветствие бота.\n"
                 "• /help — показать эту памятку.\n"
                 "• /protocols — вывести список доступных клинических протоколов.\n"
+                "• /wiki — открыть интерактивную стоматологическую энциклопедию.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
                 "• /quiz — запустить клиническую викторину.\n"
                 "• /stats — показать самые обсуждаемые темы в чате сообщества.\n"
@@ -928,6 +929,21 @@ async def handle_private_message(bot_client, event):
                 [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")]
             ]
             await bot_client.send_message(entity=chat_id, message=protocols_text, buttons=buttons, parse_mode='html')
+            return
+
+        if text.lower() in ("/wiki", "/encyclopedia"):
+            wiki_text = (
+                "📖 <b>Интерактивная Стоматологическая Энциклопедия</b>\n\n"
+                "Здесь вы можете изучать клинические стандарты, классификации и протоколы напрямую из нашей базы знаний.\n\n"
+                "👇 <i>Выберите раздел для детального просмотра:</i>"
+            )
+            from telethon import Button
+            buttons = [
+                [Button.inline("🦷 Препарирование и Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия и Лечение", data="wiki_cat:endo")],
+                [Button.inline("🩹 Пародонтология и Десна", data="wiki_cat:perio"), Button.inline("🔩 Имплантация и Хирургия", data="wiki_cat:surg")],
+                [Button.inline("🔍 Инструкция по поиску", data="wiki_cat:help")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=wiki_text, buttons=buttons, parse_mode='html')
             return
 
         if text.lower() == "/calc":
@@ -1550,6 +1566,66 @@ async def handle_quiz_callback(bot_client, event):
         
         from telethon import Button
         back_btn = Button.inline("⬅️ Назад к списку", data="proto:back")
+        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html', link_preview=False)
+        await event.answer()
+        return
+
+    if data_str == "wiki_cat:back":
+        wiki_text = (
+            "📖 <b>Интерактивная Стоматологическая Энциклопедия</b>\n\n"
+            "Здесь вы можете изучать клинические стандарты, классификации и протоколы напрямую из нашей базы знаний.\n\n"
+            "👇 <i>Выберите раздел для детального просмотра:</i>"
+        )
+        from telethon import Button
+        buttons = [
+            [Button.inline("🦷 Препарирование и Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия и Лечение", data="wiki_cat:endo")],
+            [Button.inline("🩹 Пародонтология и Десна", data="wiki_cat:perio"), Button.inline("🔩 Имплантация и Хирургия", data="wiki_cat:surg")],
+            [Button.inline("🔍 Инструкция по поиску", data="wiki_cat:help")]
+        ]
+        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await event.answer()
+        return
+
+    if data_str.startswith("wiki_cat:"):
+        cat_id = data_str.split(":")[1]
+        if cat_id == "help":
+            help_text = (
+                "🔍 <b>Как пользоваться Энциклопедией:</b>\n\n"
+                "• Вы можете искать любую тему, используя команду <code>/search &lt;запрос&gt;</code> (например, <code>/search BOPT</code> или <code>/search гипохлорит</code>).\n"
+                "• Бот автоматически анализирует ваши обычные сообщения в ЛС на наличие стоматологических терминов и подтягивает информацию из этой базы для повышения точности ответов.\n"
+                "• Используйте меню ниже для быстрого перехода к разделам."
+            )
+            from telethon import Button
+            back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
+            await bot_client.edit_message(event.chat_id, event.message_id, help_text, buttons=back_btn, parse_mode='html')
+            await event.answer()
+            return
+            
+        keywords_map = {
+            "ortho": ["bopt", "коронка", "преп", "уступ", "винир", "ортопед"],
+            "endo": ["канал", "пульп", "апекс", "гипохлорит", "эдта", "гуттаперч", "силер", "эндо"],
+            "perio": ["десна", "пародонт", "гингивит", "карман", "рецесс"],
+            "surg": ["имплант", "удален", "хирург", "синус", "костн"]
+        }
+        kws = keywords_map.get(cat_id, ["дентин"])
+        wiki_corpus, _ = search_knowledge_corpus(kws)
+        wiki_corpus = clean_html_formatting(wiki_corpus)
+        if not wiki_corpus:
+            wiki_corpus = "<i>Раздел временно наполняется информацией.</i>"
+        else:
+            wiki_corpus = wiki_corpus[:1500] + "..."
+            
+        cat_titles = {
+            "ortho": "🦷 Препарирование и Ортопедия",
+            "endo": "💧 Эндодонтия и Лечение",
+            "perio": "🩹 Пародонтология и Десна",
+            "surg": "🔩 Имплантация и Хирургия"
+        }
+        title = cat_titles.get(cat_id, "📖 Раздел Энциклопедии")
+        response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"
+        
+        from telethon import Button
+        back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
         await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html', link_preview=False)
         await event.answer()
         return
