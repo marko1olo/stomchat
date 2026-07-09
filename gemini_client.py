@@ -92,7 +92,7 @@ def generate_text(prompt, status_context=None):
             from google import genai
             from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=30000))
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=10000))
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
@@ -178,6 +178,10 @@ def generate_text(prompt, status_context=None):
                     key=key_id, error=str(exc)[:500]
                 )
                 
+                if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
+                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Skipping this model in cascade.")
+                    break
+
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
                     logger.info(f"{provider.capitalize()} rate limited, waiting 2.5s cooldown before next attempt...")
                     time.sleep(2.5)
