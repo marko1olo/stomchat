@@ -16,7 +16,7 @@ LOG_PATH = "shadow_assistant.log"
 TEST_CHAT_ID = -1003735006121
 TEST_TOPIC_ID = 26
 
-SHADOW_TESTING = True
+SHADOW_TESTING = os.getenv("SHADOW_TESTING", "False").lower() in ("true", "1", "yes")
 BOT_ID = None
 LAST_REFEREE_RUN = datetime(2000, 1, 1)
 USER_COOLDOWNS = {}
