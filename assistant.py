@@ -1,0 +1,1640 @@
+import os
+import re
+import json
+import sqlite3
+import asyncio
+import logging
+import random
+from datetime import datetime, timedelta
+from blocking_tools import generate_gemini_text_async
+import vision
+import database
+logger = logging.getLogger("assistant")
+
+STATE_PATH = "assistant_state.json"
+LOG_PATH = "shadow_assistant.log"
+TEST_CHAT_ID = -1003735006121
+TEST_TOPIC_ID = 26
+
+SHADOW_TESTING = True
+BOT_ID = None
+LAST_REFEREE_RUN = datetime(2000, 1, 1)
+USER_COOLDOWNS = {}
+
+def check_user_cooldown(chat_id, user_id, command, seconds=30):
+    key = (chat_id, user_id, command)
+    now = datetime.now()
+    if key in USER_COOLDOWNS:
+        elapsed = (now - USER_COOLDOWNS[key]).total_seconds()
+        if elapsed < seconds:
+            return int(seconds - elapsed)
+    USER_COOLDOWNS[key] = now
+    return 0
+async def init_assistant(bot_client):
+    global BOT_ID
+    try:
+        me = await bot_client.get_me()
+        BOT_ID = me.id
+        logger.info(f"Assistant initialized with BOT_ID: {BOT_ID}")
+        
+        # Set inline bot command suggestions in Telegram UI
+        from telethon import functions, types
+        await bot_client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeDefault(),
+            lang_code='',
+            commands=[
+                types.BotCommand(command='start', description='Запустить приветствие и инициализировать бота'),
+                types.BotCommand(command='help', description='Показать памятку по работе с ассистентом'),
+                types.BotCommand(command='protocols', description='Показать доступные клинические протоколы в базе'),
+                types.BotCommand(command='calc', description='Открыть шпаргалку-калькулятор анестезии'),
+                types.BotCommand(command='quiz', description='Запустить клиническую викторину'),
+                types.BotCommand(command='stats', description='Показать популярные темы обсуждений в чате'),
+                types.BotCommand(command='bookmarks', description='Показать сохраненные вами клинические закладки'),
+                types.BotCommand(command='search', description='Прямой поиск по базе знаний стоматологии'),
+                types.BotCommand(command='case', description='Запустить интерактивный клинический симулятор'),
+                types.BotCommand(command='abort', description='Сбросить активный клинический симулятор'),
+            ]
+        ))
+        logger.info("Bot inline command suggestions successfully registered.")
+    except Exception as e:
+        logger.error(f"Failed to initialize assistant or set commands: {e}")
+
+STOP_WORDS = {
+    "это", "как", "для", "или", "что", "этот", "себя", "себе", "меня", "тебя", 
+    "было", "быть", "если", "хочу", "только", "когда", "тоже", "есть", "было", 
+    "будет", "просто", "здесь", "очень", "даже", "если", "тоже", "типа", "вообще",
+    "надо", "можно", "хотя", "коллеги", "привет", "здравствуйте", "какой", "такой",
+    "какие", "такие", "очень", "этого", "чтобы", "один", "одна", "одно", "будет",
+    "всем", "всех", "этом", "этой", "этих", "были", "была", "были", "того", "тому"
+}
+
+DENTAL_KEYWORDS = {
+    "зуб", "канал", "уступ", "бор", "файл", "цемент", "коронка", "коронок", "имплант", 
+    "активация", "винил", "преп", "эндо", "гнатол", "окклюз", "сустав", "внчс",
+    "сплинт", "капп", "слеп", "оттис", "трансфер", "абатм", "циркон", "пмма", "pmma",
+    "керам", "ультразвук", "эйтис", "петл", "спредер", "визуали", "микроскоп",
+    "пескоструй", "коффердам", "раббердам", "кламп", "плавиков", "силан", "бонд",
+    "травлен", "адгезив", "композит", "клинич", "диагно", "анестез", "артикаин",
+    "мепивакаин", "убистезин", "ультракаин", "лидокаин", "пульп", "апекс", "периодонт",
+    "периодонтит", "пульпит", "кариес", "гингивит", "пародонт", "пародонтоз", "рецесс",
+    "десна", "десны", "десневой", "костн", "альвеол", "синус", "остеот", "мембран",
+    "шовн", "викрил", "пролен", "монофил", "хирург", "удален", "экстракц", "лунк",
+    "кюрет", "остеоинтегр", "формировател", "заглушк", "крошк", "биоосс", "bio-oss",
+    "аллоплант", "ксенотрансп", "брекет", "элайнер", "ретейнер", "дистализ", "мезиализ",
+    "дуга", "дуги", "лигатур", "ортодонт", "ортопед", "терапевт", "кт", "клкт", "оптг",
+    "визиограф", "рентген", "снимок", "снимка", "бинокуляр", "лупы", "эндомотор",
+    "апекслокатор", "автоклав", "стерилиз", "дентин", "эмаль", "эмали", "челюст",
+    "прикус", "резец", "резц", "клык", "премоляр", "моляр", "реципрок", "протейпер",
+    "мту", "mtwo", "пасс-файл", "гипохлорит", "хлоргексидин", "эдта", "edta",
+    "гуттаперч", "силер", "обтурац", "латеральн", "вертикальн", "распломбиров",
+    "анкерн", "штифт", "платок", "ирригац", "мост", "протез", "вкладк", "накладк",
+    "оверлей", "рондоклип", "сканмаркер", "ложка", "артикулятор", "депрограмматор",
+    "коис", "миостимуляц", "шина", "емакс", "e.max", "e-max", "полевошпат", "каркас",
+    "полимеризац", "фотополимер", "клиновидн", "абфракц", "стираемост", "бруксизм",
+    "флюороз", "гипоплази", "фиссур", "герметизац", "карман", "грейси", "gracey",
+    "скалер", "чистк", "налет", "камень", "сст", "сдг", "трансплантат", "вестибулопласт",
+    "микроимплант", "тяга", "пломб", "девитал", "мышьяк", "резекц", "цистэкт",
+    "гранулем", "кист", "киста", "фистул", "свищ", "перфорац", "полость", "полости",
+    "кариозн", "поддеснев", "наддеснев", "шейка", "верхушка", "апикальн", "дентальный",
+    "стоматолог", "эндодонт", "пародонтолог", "кофердам", "остеопласт", "винир",
+    "синуслифт", "костнаяпласт", "аугмент", "регенер", "остеосинтез", "стекловолокн",
+    "свш", "металлокерам", "ортодонтич", "обтуратор", "термафил", "thermafil",
+    "airflow", "air-flow", "пазух", "гайморов", "мандибул", "ментальн", "подбородоч",
+    "альвеолярн", "остеотоми"
+}
+
+def load_state():
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading assistant state: {e}")
+    return {
+        "last_passive_run": "2000-01-01T00:00:00",
+        "last_passive_text_run": "2000-01-01T00:00:00",
+        "last_passive_media_run": "2000-01-01T00:00:00",
+        "processed_threads": []
+    }
+def save_state(state):
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving assistant state: {e}")
+def write_to_shadow_log(message):
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except Exception as e:
+        logger.error(f"Error writing to shadow log: {e}")
+
+def extract_keywords(text):
+    cleaned = re.sub(r"[^\w\s-]", " ", text.lower())
+    words = cleaned.split()
+    keywords = []
+    for w in words:
+        if len(w) >= 4 and w not in STOP_WORDS and not w.isdigit():
+            stem = w
+            for suffix in ["ами", "ями", "ыми", "ями", "ом", "ем", "ам", "ям", "ах", "ях", "ых", "их", "ов", "ев", "ие", "ия", "ию", "ии", "ей", "ой", "а", "у", "е", "ы", "и", "о"]:
+                if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+                    stem = w[:-len(suffix)]
+                    break
+            keywords.append(stem)
+            
+    # Deduplicate
+    keywords = list(set(keywords))
+    
+    # Prioritize dental-specific keywords at the front of the list
+    dental_matches = []
+    other_matches = []
+    for kw in keywords:
+        is_dental = any(dk in kw for dk in DENTAL_KEYWORDS)
+        if is_dental:
+            dental_matches.append(kw)
+        else:
+            other_matches.append(kw)
+            
+    return dental_matches + other_matches
+
+def search_knowledge_corpus(keywords):
+    if not keywords:
+        return "", ""
+        
+    wiki_facts = []
+    archive_msgs = []
+    
+    # 1. Search stomat_wiki.db
+    if os.path.exists("stomat_wiki.db"):
+        try:
+            conn = sqlite3.connect("stomat_wiki.db", timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            c = conn.cursor()
+            for kw in keywords:
+                c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 4", (f"%{kw}%",))
+                for row in c.fetchall():
+                    fact = f"[{row[0]}] {row[1]}"
+                    if fact not in wiki_facts:
+                        wiki_facts.append(fact)
+                if len(wiki_facts) >= 25:
+                    break
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error searching stomat_wiki.db: {e}")
+            
+    # 2. Search stomat_archive.db
+    if os.path.exists("stomat_archive.db"):
+        try:
+            conn = sqlite3.connect("stomat_archive.db", timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            c = conn.cursor()
+            for kw in keywords:
+                c.execute("SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT 4", (f"%{kw}%",))
+                for row in c.fetchall():
+                    msg = f"{row[0]}: {row[1]}"
+                    if msg not in archive_msgs:
+                        archive_msgs.append(msg)
+                if len(archive_msgs) >= 25:
+                    break
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error searching stomat_archive.db: {e}")
+            
+    wiki_corpus = "\n".join(wiki_facts[:20])
+    archive_corpus = "\n".join(archive_msgs[:20])
+    return wiki_corpus, archive_corpus
+
+async def query_db_async(query_sql, params=()):
+    # Helper to query the main bot database stomat_bot.db
+    loop = asyncio.get_running_loop()
+    def operation():
+        conn = sqlite3.connect("stomat_bot.db", timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        try:
+            c = conn.cursor()
+            c.execute(query_sql, params)
+            return c.fetchall()
+        finally:
+            conn.close()
+    return await loop.run_in_executor(None, operation)
+def clean_html_formatting(text):
+    if not text:
+        return ""
+    # Convert Markdown bold **text** to HTML bold <b>text</b>
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    # Temporarily hide valid HTML tags we want to support
+    text = text.replace("<b>", "__B_OPEN__").replace("</b>", "__B_CLOSE__")
+    text = text.replace("<i>", "__I_OPEN__").replace("</i>", "__I_CLOSE__")
+    text = text.replace("<code>", "__C_OPEN__").replace("</code>", "__C_CLOSE__")
+    # Escape raw HTML syntax characters to prevent Telegram parse errors
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Restore valid tags
+    text = text.replace("__B_OPEN__", "<b>").replace("__B_CLOSE__", "</b>")
+    text = text.replace("__I_OPEN__", "<i>").replace("__I_CLOSE__", "</i>")
+    text = text.replace("__C_OPEN__", "<code>").replace("__C_CLOSE__", "</code>")
+    return text
+
+
+async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id):
+    global BOT_ID
+    state = load_state()
+    triggered = False
+    trigger_reason = ""
+    context_msgs = []
+    is_dialogue = False
+    
+    # Try dynamic BOT_ID resolution if it is missing
+    if reply_to_msg_id and not BOT_ID:
+        try:
+            me = await bot_client.get_me()
+            BOT_ID = me.id
+            logger.info(f"Dynamically resolved BOT_ID: {BOT_ID}")
+        except Exception as e:
+            logger.error(f"Failed to dynamically resolve BOT_ID: {e}")
+
+    # 1. Check Dialogue Reaction (direct reply to the bot's own message)
+    if reply_to_msg_id and BOT_ID:
+        try:
+            parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+            if parent_msg and parent_msg.sender_id == BOT_ID:
+                is_dialogue = True
+                triggered = True
+                trigger_reason = f"Dialogue reply to bot message {reply_to_msg_id}"
+                
+                # Reconstruct reply chain
+                chain = []
+                curr = event.message
+                for _ in range(5):
+                    if not curr:
+                        break
+                    sender = await curr.get_sender()
+                    name = "User"
+                    if sender:
+                        if hasattr(sender, 'first_name') and sender.first_name:
+                            name = f"{sender.first_name} {getattr(sender, 'last_name', '') or ''}".strip()
+                        elif hasattr(sender, 'title') and sender.title:
+                            name = sender.title
+                    name = name or "User"
+                    
+                    # Truncate extremely long dialogue messages to 1000 characters
+                    msg_text = curr.message or ''
+                    if len(msg_text) > 1000:
+                        msg_text = msg_text[:1000] + "... [сообщение обрезано]"
+                        
+                    chain.append(f"{name}: {msg_text}")
+                    if curr.reply_to and curr.reply_to.reply_to_msg_id:
+                        curr = await event.client.get_messages(event.chat_id, ids=curr.reply_to.reply_to_msg_id)
+                    else:
+                        break
+                context_msgs = chain[::-1]
+        except Exception as e:
+            logger.error(f"Error checking dialogue parent: {e}")
+            
+    # Cooldown check for all passive text triggers (1.5 hours)
+    if not is_dialogue:
+        last_run = datetime.fromisoformat(state.get("last_passive_text_run", "2000-01-01T00:00:00"))
+        if datetime.now() - last_run < timedelta(minutes=90):
+            return  # Within 1.5-hour cooldown, skip all passive text triggers!
+
+    # 2. Check Reply Thread Reaction
+    if not triggered and reply_to_msg_id:
+        # Check if parent has media
+        parent_rows = await query_db_async("SELECT has_media, text FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
+        if parent_rows and (parent_rows[0][0] == 1 or parent_rows[0][0] == True):
+            # Count replies
+            reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
+            reply_count = reply_count_rows[0][0] if reply_count_rows else 0
+            
+            if reply_count >= 3 and reply_to_msg_id not in state.get("processed_threads", []):
+                # We have a discussion under a clinical post!
+                triggered = True
+                trigger_reason = f"Clinical post {reply_to_msg_id} discussion thread (reply_count={reply_count})"
+                # Mark thread as processed
+                state.setdefault("processed_threads", []).append(reply_to_msg_id)
+                # Keep thread in processed bounds
+                if len(state["processed_threads"]) > 100:
+                    state["processed_threads"].pop(0)
+                
+                # Update last passive run timestamp
+                state["last_passive_text_run"] = datetime.now().isoformat()
+                save_state(state)
+                
+                # Fetch parent + last replies for context
+                rows = await query_db_async(
+                    "SELECT sender_name, text FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
+                    (reply_to_msg_id, reply_to_msg_id)
+                )
+                context_msgs = [f"{r[0]}: {r[1]}" for r in rows]                
+    # 2. Check Passive Trigger (General Chat Flow)
+    if not triggered:
+        # Get last 10 messages from DB
+        last_msgs = await query_db_async(
+            "SELECT sender_name, text, msg_id FROM messages ORDER BY date DESC LIMIT 10"
+        )
+        # Reorder chronologically
+        last_msgs = last_msgs[::-1]
+        
+        if last_msgs:
+            # Check triggers: last message has '?' OR last messages contain dental trigger words
+            last_text = last_msgs[-1][1] or ""
+            has_question = "?" in last_text
+            
+            # Count dental keywords in context
+            full_context_text = " ".join([m[1] for m in last_msgs if m[1]]).lower()
+            has_dental_topic = any(kw in full_context_text for kw in DENTAL_KEYWORDS)
+            
+            # Trigger on ANY question OR if there is an active dental topic
+            if has_question or has_dental_topic:
+                triggered = True
+                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic})"
+                state["last_passive_text_run"] = datetime.now().isoformat()
+                save_state(state)
+                context_msgs = [f"{r[0]}: {r[1]}" for r in last_msgs]
+
+
+    if not triggered:
+        return
+
+    # EXTRACT KEYWORDS & SEARCH DB
+    full_context_str = " ".join(context_msgs)
+    keywords = extract_keywords(full_context_str)
+    
+    # Filter keywords to only those matching or relevant to dental keywords
+    dental_kw_matches = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
+    # We want up to 12 search keywords for a richer database search
+    search_keywords = dental_kw_matches if dental_kw_matches else keywords[:12]
+    if len(search_keywords) < 12:
+        other_kws = [kw for kw in keywords if kw not in search_keywords]
+        search_keywords = (search_keywords + other_kws)[:12]
+                
+
+    
+    wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+    
+    if not is_dialogue and not wiki_corpus and not archive_corpus:
+        # If corpus is empty, do not output anything (avoid generic AI fluff)
+        logger.info("No matching knowledge corpus found. Skipping assistant run.")
+        return
+
+    # BUILD PROMPT
+    if is_dialogue:
+        prompt = f"""
+Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и решил ответить на заданный вопрос.
+Тебе 15+ лет клинической практики, ты видел всякое, говоришь прямо и не любишь воду.
+Не строишь из себя учебник — ты коллега, который знает ответ и выдаёт его точно и ёмко.
+
+История диалога (последние сообщения):
+{chr(10).join(context_msgs)}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+Похожие обсуждения из Архива чата:
+{archive_corpus}
+
+ИНСТРУКЦИИ:
+1. Длина по ситуации — если тема сложная, можно 2-3 коротких абзаца. Если всё ясно в одной фразе — достаточно одной.
+2. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
+3. Тон: прямой, чуть ироничный, peer-to-peer. Можешь быть слегка саркастичным там, где это уместно.
+4. Термины используй строго по теме разговора. Если обсуждают деньги, документы, переезд — никакого вертипрепа.
+5. Только доказанные факты. Домыслы, выдуманные протоколы и дозировки — строго запрещены. Если данных нет — так и скажи прямо.
+6. Не повторяй то, что уже написали в чате. Принеси что-то новое — факт, уточнение, протокол, нюанс.
+7. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
+"""
+    else:
+        prompt = f"""
+Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и вставляешь точную, полезную реплику.
+Тебе 15+ лет практики, ты говоришь коротко и по делу — как тот человек в чате, которого все слушают.
+
+Текущая переписка в чате:
+{chr(10).join(context_msgs[-8:])}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+Похожие обсуждения из Архива чата:
+{archive_corpus}
+
+ИНСТРУКЦИИ:
+1. Длина по ситуации — если тема требует развёрнутости, можно 2-3 коротких абзаца. Если ответ умещается в одну фразу — не тяни.
+2. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
+3. Тон: прямой, уверенный, слегка ироничный там где уместно. Не зануда, не учебник — коллега.
+4. Термины — строго по контексту разговора. Если тема не клиническая (деньги, налоги, переезд) — никаких зубных терминов.
+5. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...»
+6. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
+7. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
+
+ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE
+"""
+
+    logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
+    
+    # CALL GEMINI
+    status_ctx = {"kind": "assistant", "chat_id": event.chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    
+    if error:
+        logger.error(f"Assistant Gemini generation error: {error}")
+        return
+        
+    reply_text = getattr(response, "text", None)
+    if not reply_text:
+        logger.warning("Assistant Gemini returned empty text.")
+        return
+        
+    reply_text = reply_text.strip()
+    reply_text = clean_html_formatting(reply_text)
+
+    if not is_dialogue:
+        if reply_text.upper() == "IGNORE" or "ignore" in reply_text.lower():
+            logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
+            return
+            
+    # SENDING
+    if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
+        # Shadow testing: deliver to test chat & topic
+        shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
+        write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nContext:\n{chr(10).join(context_msgs[-4:])}\nResponse:\n{reply_text}\n---")
+        try:
+            await bot_client.send_message(
+                entity=TEST_CHAT_ID,
+                message=shadow_message,
+                reply_to=TEST_TOPIC_ID,
+                parse_mode='html'
+            )
+            logger.info("Sent shadow assistant message to Telegram test topic.")
+        except Exception as e:
+            logger.error(f"Failed to send shadow assistant message to Telegram: {e}")
+    else:
+        # Live mode OR direct reply in test chat: reply directly to user message!
+        reply_message = reply_text
+
+        try:
+            await bot_client.send_message(
+                entity=event.chat_id,
+                message=reply_message,
+                reply_to=msg_id,
+                parse_mode='html'
+            )
+            logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
+        except Exception as e:
+            logger.error(f"Failed to send direct assistant reply: {e}")
+async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description):
+    # Enforce 1.5-hour cooldown for passive media trigger
+    state = load_state()
+    last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
+    if datetime.now() - last_run < timedelta(minutes=90):
+        return  # Within 1.5-hour cooldown, skip!
+
+    # Construct a simple event-like object for direct compatibility
+    class MediaEvent:
+        def __init__(self, msg):
+            self.message = msg
+            self.client = msg.client
+            self.chat_id = msg.chat_id
+            
+    event = MediaEvent(message)
+    
+    # 1. Parse keywords
+    caption_text = text or ""
+    full_context_str = caption_text + " " + media_description
+    keywords = extract_keywords(full_context_str)
+    
+    # Check if there is dental content
+    has_dental_topic = any(kw in full_context_str.lower() for kw in DENTAL_KEYWORDS)
+    has_question = "?" in caption_text
+    
+    triggered = False
+    trigger_reason = ""
+    wiki_corpus = ""
+    archive_corpus = ""
+    is_dental = False
+    
+    # Limit keywords to 12
+    dental_kw_matches = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
+    search_keywords = dental_kw_matches if dental_kw_matches else keywords[:12]
+    if len(search_keywords) < 12:
+        other_kws = [kw for kw in keywords if kw not in search_keywords]
+        search_keywords = (search_keywords + other_kws)[:12]
+        
+    if has_dental_topic or has_question:
+        # Dental Case: Always query RAG!
+        triggered = True
+        trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic}, has_question={has_question})"
+        is_dental = True
+        wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+    else:
+        # Non-dental Meme/Coffee: Balancer probability check (35% chance to reply)
+        # Bypassed only if the user explicitly asks a question (already handled above)
+        roll = random.random()
+        if roll < 0.35:
+            triggered = True
+            trigger_reason = f"Non-dental media chitchat balancer (roll={roll:.2f} < 0.35)"
+            is_dental = False
+            
+    if not triggered:
+        return
+        
+    state["last_passive_media_run"] = datetime.now().isoformat()
+    save_state(state)
+
+    # BUILD PROMPT
+    if is_dental:
+        prompt = f"""
+Ты — опытный стоматолог-практик, читаешь чат коллег "StomChat". Тебе прислали изображение по стоматологической теме.
+Дай короткий, точный клинический комментарий — как ответил бы врач с 15 годами практики: уверенно, без воды, по делу.
+
+Описание изображения (распознано моделью):
+{media_description}
+
+Подпись пользователя к изображению (если есть):
+{caption_text}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+Похожие обсуждения из Архива чата:
+{archive_corpus}
+
+ИНСТРУКЦИИ:
+1. Длина по ситуации — если снимок требует клинического разбора, можно 2-3 абзаца. Если всё понятно с ходу — одна фраза.
+2. Тон — уверенный, peer-to-peer, чуть ироничный там где уместно.
+3. Разметка: только HTML — <b>жирный</b>. Никакого Markdown.
+4. Только доказанные факты. Если данных нет — скажи честно.
+5. Добавляй ценность, не пересказывай подпись.
+
+ЕСЛИ изображение явно не стоматологическое (мем, еда, бытовая сцена) — верни одно слово: IGNORE
+"""
+    else:
+        prompt = f"""
+Ты — участник стоматологического чата "StomChat" с чёрным юмором. Коллега кинул мем или бытовую картинку.
+Одна острая реплика в духе «врач в конце рабочего дня».
+
+Описание изображения:
+{media_description}
+
+Подпись (если есть):
+{caption_text}
+
+ИНСТРУКЦИИ:
+1. Коротко — 1-2 предложения max. Это реплика, не монолог.
+2. Сразу с места в карьер — никакого «Смотрю на это и думаю».
+3. Юмор: цинизм, ирония, усталость стоматолога, кассовый аппарат, пациент-должник, сломанный файл, бормашина.
+4. Разметка: <b>жирный</b> только если реально нужно.
+"""
+
+    logger.info(f"Triggered media assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
+    
+    # CALL GEMINI
+    status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    
+    if error:
+        logger.error(f"Media Assistant Gemini generation error: {error}")
+        return
+        
+    reply_text = getattr(response, "text", None)
+    if not reply_text:
+        logger.warning("Media Assistant Gemini returned empty text.")
+        return
+        
+    reply_text = reply_text.strip()
+    reply_text = clean_html_formatting(reply_text)
+    
+    # Check IGNORE filter only for dental checks (non-dental balancer is already validated)
+    if is_dental:
+        if reply_text.upper() == "IGNORE" or "ignore" in reply_text.lower():
+            logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
+            return
+
+    # SENDING
+    if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
+        shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
+        write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nImage description: {media_description}\nResponse:\n{reply_text}\n---")
+        try:
+            await bot_client.send_message(
+                entity=TEST_CHAT_ID,
+                message=shadow_message,
+                reply_to=TEST_TOPIC_ID,
+                parse_mode='html'
+            )
+            logger.info("Sent shadow media assistant message to Telegram test topic.")
+        except Exception as e:
+            logger.error(f"Failed to send shadow media assistant message: {e}")
+    else:
+        reply_message = reply_text
+        try:
+            await bot_client.send_message(
+                entity=event.chat_id,
+                message=reply_message,
+                reply_to=msg_id,
+                parse_mode='html'
+            )
+            logger.info(f"Sent direct media assistant reply to chat {event.chat_id}, message {msg_id}.")
+        except Exception as e:
+            logger.error(f"Failed to send direct media assistant reply: {e}")
+
+
+async def handle_interactive_case_step(bot_client, chat_id, user_text, user_state):
+    # Parse history
+    try:
+        history_raw = json.loads(user_state.get("history") or "[]")
+        if isinstance(history_raw, dict):
+            history_data = history_raw.get("messages", [])
+        else:
+            history_data = history_raw
+    except Exception:
+        history_data = []
+        
+    current_step = user_state.get("current_step", 1)
+    
+    # Add user message to history
+    history_data.append({"role": "user", "content": user_text})
+    
+    # Send status "typing"
+    status_msg = await bot_client.send_message(entity=chat_id, message="⚙️ <i>Анализирую ваши действия...</i>", parse_mode='html')
+    
+    # Formulate simulation prompt
+    # If step < 3, continue the case. If step >= 3, finish and evaluate.
+    is_last_step = (current_step >= 3)
+    
+    history_str = ""
+    for msg in history_data:
+        role_name = "Экзаменатор (Бот)" if msg["role"] == "assistant" else "Врач (Вы)"
+        history_str += f"{role_name}: {msg['content']}\n\n"
+        
+    if not is_last_step:
+        prompt = f"""
+Ты — старший стоматолог-экзаменатор. Ведешь интерактивный разбор клинического случая.
+Вот история переписки на данный момент:
+
+{history_str}
+
+Задачи на этот шаг (Шаг {current_step + 1} из 4):
+1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично.
+2. Предоставь новые клинические данные, соответствующие его действию (например, если врач назначил КТ — опиши, что видно на КТ; если сделал анестезию — опиши начало действия и следующий этап работы).
+3. Задай следующий конкретный вопрос о дальнейшей тактике.
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Тон: экспертный, конструктивный.
+2. Не давай готовых решений и не завершай случай раньше времени!
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+    else:
+        prompt = f"""
+Ты — старший стоматолог-экзаменатор. Нам нужно завершить интерактивный разбор клинического случая.
+Вот вся история разбора:
+
+{history_str}
+
+Задачи на этот финальный шаг:
+1. Подведи итоги действий врача.
+2. Укажи на допущенные ошибки (если были) или похвали за верную тактику.
+3. Выстави оценку по пятибалльной шкале (1/5 до 5/5) с краткой аргументацией.
+4. Заверши диалог, пожелав успехов в практике.
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Дай развернутый экспертный фидбек.
+2. Разметка: только HTML. Без Markdown.
+"""
+    
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    
+    if 'status_msg' in locals() and status_msg:
+        try: await bot_client.delete_messages(chat_id, status_msg.id)
+        except Exception: pass
+    
+    if error or not response or not getattr(response, "text", None):
+        await bot_client.send_message(entity=chat_id, message="❌ <i>Ошибка симулятора при генерации ответа. Пожалуйста, отправьте ваш ответ еще раз.</i>", parse_mode='html')
+        return
+        
+    reply_text = response.text.strip()
+    reply_text = clean_html_formatting(reply_text)
+    
+    if is_last_step:
+        # Clear state
+        await database.clear_user_interactive_state(chat_id)
+        final_message = f"🏁 <b>Разбор случая завершен!</b>\n\n{reply_text}"
+        await bot_client.send_message(entity=chat_id, message=final_message, parse_mode='html')
+    else:
+        # Update history and save state
+        history_data.append({"role": "assistant", "content": reply_text})
+        history_payload = {
+            "messages": history_data,
+            "last_updated": time.time()
+        }
+        await database.set_user_interactive_state(
+            user_id=chat_id,
+            state_type="case",
+            current_step=current_step + 1,
+            case_id="dynamic",
+            history=json.dumps(history_payload, ensure_ascii=False)
+        )
+        await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
+
+
+async def handle_private_message(bot_client, event):
+    """Глубокий обработчик входящих личных сообщений (ЛС) бота с RAG, зрением и памятью."""
+    try:
+        chat_id = event.chat_id
+        text = (event.message.message or "").strip()
+
+        # 0. Voice Note / Audio processing
+        is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
+        is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
+        is_audio = is_voice or is_audio_file
+        transcribed_text = None
+        if is_audio:
+            os.makedirs("temp_media", exist_ok=True)
+            status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
+            temp_path = None
+            try:
+                temp_path = await event.message.download_media(file="temp_media/")
+                if temp_path and os.path.exists(temp_path):
+                    import blocking_tools
+                    transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
+                    if error:
+                        logger.error(f"Audio transcription error: {error}")
+                    elif transcribed:
+                        transcribed_text = transcribed.strip()
+            except Exception as audio_err:
+                logger.error(f"Error handling voice note: {audio_err}")
+            finally:
+                if 'status_msg' in locals() and status_msg:
+                    try: await bot_client.delete_messages(chat_id, status_msg.id)
+                    except Exception: pass
+                if temp_path and os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except Exception: pass
+            
+            if transcribed_text:
+                text = transcribed_text
+                # Filter common Whisper silence hallucinations
+                silence_hallucinations = {
+                    "you", "thank you", "bye", "подпишитесь", 
+                    "продолжение следует", "редактор субтитров", "субтитры", 
+                    "youtube", "собачья чушь", "спасибо"
+                }
+                clean_transcribed = text.strip().lower().rstrip(".").rstrip(",")
+                if clean_transcribed in silence_hallucinations:
+                    logger.info(f"Filtered suspected Whisper silence hallucination: '{text}'")
+                    await bot_client.send_message(entity=chat_id, message="🎤 <i>(Тишина или фоновый шум) Пожалуйста, говорите громче или пишите текстом.</i>", parse_mode='html')
+                    return
+                await bot_client.send_message(entity=chat_id, message=f"🎤 <b>Распознано:</b> «{text}»", parse_mode='html')
+            else:
+                await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось распознать аудио. Пожалуйста, повторите или напишите текстом.</i>", parse_mode='html')
+                return
+
+        # 0.5. Interactive Simulator State Routing & Abort Check
+        user_state = await database.get_user_interactive_state(chat_id)
+        
+        # Check for case expiration (1 hour inactivity)
+        if user_state and user_state.get("state_type") == "case":
+            try:
+                history_raw = json.loads(user_state.get("history") or "[]")
+                if isinstance(history_raw, dict) and "last_updated" in history_raw:
+                    last_updated = history_raw["last_updated"]
+                    if time.time() - last_updated > 3600:
+                        await database.clear_user_interactive_state(chat_id)
+                        user_state = None
+                        await bot_client.send_message(
+                            entity=chat_id, 
+                            message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>", 
+                            parse_mode='html'
+                        )
+            except Exception as exp_err:
+                logger.error(f"Error checking case expiration: {exp_err}")
+        
+        if text.lower() in ("/abort", "/exit", "выход", "отмена"):
+            if user_state:
+                await database.clear_user_interactive_state(chat_id)
+                await bot_client.send_message(entity=chat_id, message="⏹️ <i>Интерактивная сессия симулятора успешно сброшена.</i>", parse_mode='html')
+            else:
+                await bot_client.send_message(entity=chat_id, message="ℹ️ <i>У вас нет активной сессии симулятора.</i>", parse_mode='html')
+            return
+
+        if user_state and user_state.get("state_type") == "case":
+            await handle_interactive_case_step(bot_client, chat_id, text, user_state)
+            return
+
+        # 1. Обработка базовых команд
+        if text.lower() == "/start":
+            greeting = (
+                "👋 <b>Приветствую! Я умный ассистент стоматологического сообщества StomChat.</b>\n\n"
+                "Вы общаетесь со мной в режиме личных сообщений (ЛС). Здесь вы можете:\n"
+                "1. 📚 <b>Задавать клинические вопросы</b> — просто отправьте свой вопрос, и я подробно отвечу на него с использованием базы знаний.\n"
+                "2. 🖼️ <b>Анализировать снимки и фото</b> — пришлите рентген или фотографию клинического случая, и я сделаю подробный разбор.\n"
+                "3. 💬 <b>Вести непрерывный диалог</b> — я запоминаю контекст нашей переписки (до 25 сообщений), поэтому вы можете задавать уточняющие вопросы.\n\n"
+                "ℹ️ <i>Напишите /help для просмотра списка команд и возможностей!</i>"
+            )
+            await bot_client.send_message(entity=chat_id, message=greeting, parse_mode='html')
+            return
+            
+        if text.lower() == "/help":
+            help_text = (
+                "💡 <b>Доступные команды в ЛС:</b>\n\n"
+                "• /start — перезапустить приветствие бота.\n"
+                "• /help — показать эту памятку.\n"
+                "• /protocols — вывести список доступных клинических протоколов.\n"
+                "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
+                "• /quiz — запустить клиническую викторину.\n"
+                "• /stats — показать самые обсуждаемые темы в чате сообщества.\n"
+                "• /bookmarks — просмотреть сохраненные вами клинические закладки.\n"
+                "• /search &lt;запрос&gt; — быстрый прямой поиск по базе знаний стоматологии.\n"
+                "• /case — запустить интерактивный клинический симулятор.\n"
+                "• /abort — сбросить текущий клинический симулятор.\n\n"
+                "• <b>Текстовый/Голосовой вопрос:</b> Просто напишите его или отправьте голосовое сообщение. Я отвечу с использованием базы знаний.\n"
+                "• <b>Анализ снимка:</b> Прикрепите фото или рентген. Я опишу, что на нем изображено, и предложу клиническую тактику.\n"
+                "• <b>Контекстная память:</b> Я анализирую последние <b>25 сообщений</b> нашего диалога."
+            )
+            await bot_client.send_message(entity=chat_id, message=help_text, parse_mode='html')
+            return
+
+        if text.lower() == "/protocols":
+            protocols_text = (
+                "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
+                "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
+                "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
+                "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
+                "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
+                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи."
+            )
+            await bot_client.send_message(entity=chat_id, message=protocols_text, parse_mode='html')
+            return
+
+        if text.lower() == "/calc":
+            calc_text = (
+                "🧮 <b>Справочник-калькулятор анестезии:</b>\n\n"
+                "Вы можете отправить мне запрос напрямую (например, <i>«рассчитай артикаин 4% для ребенка 20 кг»</i>), и я рассчитаю безопасную дозу:\n\n"
+                "• <b>Артикаин 4% (1:100 000 / 1:200 000):</b> Максимальная доза для взрослых — 7 мг/кг. Для детей — 5 мг/кг.\n"
+                "• <b>Мепивакаин 3% (без адреналина):</b> Максимальная доза — 4.4 мг/кг.\n"
+                "• <b>Лидокаин 2% (с адреналином):</b> Максимальная доза — 7 мг/кг (взрослые) / 4.4 мг/кг (дети).\n\n"
+                "<i>Просто пришлите вес и название анестетика, и я помогу с математикой!</i>"
+            )
+            await bot_client.send_message(entity=chat_id, message=calc_text, parse_mode='html')
+            return
+
+        if text.lower() == "/quiz":
+            status_msg = await bot_client.send_message(entity=chat_id, message="🎲 <i>Генерирую клиническую викторину для вас... Подождите.</i>", parse_mode='html')
+            prompt = """
+Ты — умный клинический ассистент-преподаватель в чате врачей-стоматологов "StomChat". 
+Придумай и напиши интересную клиническую задачу-викторину для практикующего стоматолога. 
+Задача должна быть сложной, реалистичной, из терапевтической, ортопедической или хирургической стоматологии.
+
+Формат вывода:
+1. Описание клинической ситуации (жалобы, осмотр, данные рентгенографии).
+2. Четыре варианта ответа (A, B, C, D) с различными тактиками лечения или диагнозами.
+3. Инструкция: напиши пользователю, что он может прислать свой ответ (например, "Мой ответ А"), чтобы ты проверил его и выдал подробное объяснение.
+
+Не пиши правильный ответ сразу в сообщении викторины!
+Будь лаконичен, профессионален.
+"""
+            async with bot_client.action(chat_id, 'typing'):
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+                await bot_client.delete_messages(chat_id, status_msg.id)
+                if error:
+                    await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось сгенерировать викторину. Попробуйте позже.</i>", parse_mode='html')
+                    return
+                reply_text = getattr(response, "text", "Ошибка генерации").strip()
+                reply_text = clean_html_formatting(reply_text)
+                await bot_client.send_message(entity=chat_id, message=f"🎲 <b>Клиническая Викторина:</b>\n\n{reply_text}", parse_mode='html')
+            return
+
+        if text.lower() == "/stats":
+            stats_text = (
+                "📊 <b>Популярные клинические темы в чате StomChat</b>\n"
+                "<i>(на основе анализа 117,000+ сообщений архива):</i>\n\n"
+                "1. 👑 <b>Ортопедия и коронки</b> (~5,400+ упоминаний) — выбор материалов (диоксид циркония, PMMA, E.max) и методы фиксации.\n"
+                "2. 🔪 <b>Вертипреп (Vertiprep) vs Уступы</b> (~4,300+ упоминаний) — дискуссии о границе препарирования и ведении мягких тканей.\n"
+                "3. 🩸 <b>Состояние десны и биологическая ширина</b> (~3,800+ упоминаний) — реакция периодонта, ретракционные нити, временное протезирование.\n"
+                "4. 🧪 <b>Адгезивные протоколы и композиты</b> (~1,800+ упоминаний) — бондинг к разным типам керамики, пескоструй, фиксация виниров.\n"
+                "5. 🦷 <b>Эндодонтия (Лечение каналов)</b> (~1,300+ упоминаний) — инструментация, гипохлорит натрия, ультразвуковая активация.\n"
+                "6. 🔩 <b>Имплантация и протезирование</b> (~1,000+ упоминаний) — позиционирование имплантатов, выбор абатментов."
+            )
+            await bot_client.send_message(entity=chat_id, message=stats_text, parse_mode='html')
+            return
+
+        if text.lower().startswith("/bookmarks"):
+            arg = text[10:].strip()
+            page = 1
+            query_filter = None
+            if arg:
+                if arg.isdigit():
+                    page = int(arg)
+                else:
+                    query_filter = arg
+            
+            if query_filter:
+                rows = await database.get_clinical_bookmarks(chat_id, query=query_filter)
+                title = f"📌 <b>Результаты поиска в закладках по запросу «{query_filter}»:</b>\n\n"
+            else:
+                rows = await database.get_clinical_bookmarks(chat_id)
+                title = f"📌 <b>Ваши сохраненные клинические закладки (Страница {page}):</b>\n\n"
+
+            if not rows:
+                if query_filter:
+                    await bot_client.send_message(entity=chat_id, message=f"🔍 В ваших закладках не найдено совпадений по запросу «{query_filter}».", parse_mode='html')
+                else:
+                    await bot_client.send_message(entity=chat_id, message="📌 <b>У вас пока нет сохраненных закладок</b> (или страница пуста).\nОтправьте <code>/save</code> в ответ на любое сообщение в общем чате, чтобы сохранить его.", parse_mode='html')
+                return
+
+            per_page = 10
+            total_items = len(rows)
+            total_pages = (total_items + per_page - 1) // per_page
+            
+            if not query_filter and page > total_pages:
+                await bot_client.send_message(entity=chat_id, message=f"⚠️ Страница {page} не существует. Всего страниц: {total_pages}.", parse_mode='html')
+                return
+                
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            page_rows = rows[start_idx:end_idx]
+            
+            text_out = title
+            for i, row in enumerate(page_rows, start_idx + 1):
+                msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
+                msg_text_snippet = (msg_text[:80] + "...") if len(msg_text) > 80 else msg_text
+                text_out += f"{i}. <b>{sender_name}</b> ({date}):\n"
+                text_out += f"«{msg_text_snippet}»\n"
+                if media_desc:
+                    text_out += f"🖼️ <i>Описание снимка:</i> {media_desc[:80]}...\n"
+                clean_chat_id = str(chat_id_val).replace("-100", "")
+                text_out += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+                
+            if not query_filter and total_pages > 1:
+                text_out += f"<i>Показано {len(page_rows)} из {total_items} закладок. Страница {page} из {total_pages}.\nИспользуйте <code>/bookmarks [номер_страницы]</code> для перехода.</i>"
+                
+            await bot_client.send_message(entity=chat_id, message=text_out, parse_mode='html', link_preview=False)
+            return
+
+        if text.lower().startswith("/search"):
+            query_param = text[7:].strip()
+            if not query_param:
+                await bot_client.send_message(entity=chat_id, message="🔍 <b>Пожалуйста, укажите поисковый запрос.</b>\nПример: <code>/search BOPT</code>", parse_mode='html')
+                return
+            keywords = extract_keywords(query_param)
+            wiki_facts = []
+            if os.path.exists("stomat_wiki.db"):
+                try:
+                    conn = sqlite3.connect("stomat_wiki.db", timeout=10)
+                    c = conn.cursor()
+                    for kw in keywords:
+                        c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 5", (f"%{kw}%",))
+                        for row in c.fetchall():
+                            cat_code, content = row
+                            import re
+                            try:
+                                content_hl = re.sub(f"(?i)({re.escape(kw)})", r"<u>\1</u>", content)
+                            except Exception:
+                                content_hl = content
+                            fact = f"• [<b>{cat_code}</b>] {content_hl}"
+                            if fact not in wiki_facts:
+                                wiki_facts.append(fact)
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error direct searching wiki: {e}")
+            if not wiki_facts:
+                await bot_client.send_message(entity=chat_id, message=f"🔍 По запросу «{query_param}» ничего не найдено в базе знаний.", parse_mode='html')
+                return
+            search_out = f"🔍 <b>Результаты поиска по запросу «{query_param}»:</b>\n\n" + "\n\n".join(wiki_facts[:8])
+            search_out = clean_html_formatting(search_out)
+            await bot_client.send_message(entity=chat_id, message=search_out, parse_mode='html')
+            return
+
+        if text.lower() == "/case":
+            status_msg = await bot_client.send_message(entity=chat_id, message="🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>", parse_mode='html')
+            
+            departments = [
+                "эндодонтия/кариесология (терапевтическая стоматология)",
+                "протезирование/виниры/коронки (ортопедическая стоматология)",
+                "имплантация/удаление зуба (хирургическая стоматология)",
+                "заболевания пародонта (пародонтология)",
+                "окклюзия/ВНЧС (гнатология)"
+            ]
+            selected_dept = random.choice(departments)
+            
+            case_prompt = f"""
+Ты — старший стоматолог-экзаменатор. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
+Напиши:
+1. Жалобы пациента и анамнез.
+2. Данные визуального осмотра.
+3. Задай ровно один конкретный вопрос о первом действии врача (например, какие дополнительные исследования назначить, или какой инструмент выбрать).
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Будь лаконичен, профессионален.
+2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
+            await bot_client.delete_messages(chat_id, status_msg.id)
+            if error or not response or not getattr(response, "text", None):
+                await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
+                return
+            starting_text = response.text.strip()
+            starting_text = clean_html_formatting(starting_text)
+            
+            history_payload = {
+                "messages": [{"role": "assistant", "content": starting_text}],
+                "last_updated": time.time()
+            }
+            await database.set_user_interactive_state(
+                user_id=chat_id,
+                state_type="case",
+                current_step=1,
+                case_id="dynamic",
+                history=json.dumps(history_payload, ensure_ascii=False)
+            )
+            case_welcome = (
+                "🎮 <b>Интерактивный клинический симулятор запущен!</b>\n"
+                "Вы можете отвечать текстом или отправлять голосовые сообщения. Бот будет анализировать ваши действия и вести кейс дальше.\n"
+                "Для отмены отправьте /abort.\n\n"
+                f"{starting_text}"
+            )
+            await bot_client.send_message(entity=chat_id, message=case_welcome, parse_mode='html')
+            return
+
+        # 2. Обработка медиафайлов (фото/видео) в ЛС
+        media_description = None
+        temp_path = None
+        has_media = event.message.photo is not None or event.message.video is not None
+        
+        if has_media:
+            os.makedirs("temp_media", exist_ok=True)
+            try:
+                # Отправляем статус ожидания
+                status_msg = await bot_client.send_message(entity=chat_id, message="📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>", parse_mode='html')
+                
+                temp_path = await event.message.download_media(file="temp_media/")
+                file_to_analyze = temp_path
+                
+                # Если видео, извлекаем первый кадр
+                if event.message.video:
+                    logger.info("Извлечение первого кадр из видео в ЛС...")
+                    from media_tools import extract_first_frame_async
+                    file_to_analyze = await extract_first_frame_async(temp_path, timeout=60)
+                    
+                if file_to_analyze:
+                    media_description = await vision.describe_image(file_to_analyze, caption=text)
+                    
+                # Удаляем статусное сообщение
+                await bot_client.delete_messages(chat_id, status_msg.id)
+            except Exception as e:
+                logger.error(f"Error analyzing media in PM: {e}")
+                if 'status_msg' in locals():
+                    await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>", parse_mode='html')
+            finally:
+                # Очистка временных файлов
+                if temp_path and os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except Exception: pass
+                if 'file_to_analyze' in locals() and file_to_analyze != temp_path and os.path.exists(file_to_analyze):
+                    try: os.remove(file_to_analyze)
+                    except Exception: pass
+
+        # 3. Восстановление динамического диалога (контекст до 25 сообщений)
+        history = await bot_client.get_messages(chat_id, limit=25)
+        history = history[::-1]
+        context_msgs = []
+        for msg in history:
+            # Определяем имя отправителя
+            is_bot = (msg.sender_id == BOT_ID) or (msg.out == True)
+            name = "Assistant" if is_bot else "User"
+            context_msgs.append(f"{name}: {msg.message or ''}")
+            
+        # 4. RAG-поиск по стоматологической базе знаний
+        # Поиск по ключевым словам из подписи и/или описания изображения
+        full_query = text
+        if media_description:
+            full_query += " " + media_description
+            
+        keywords = extract_keywords(full_query)
+        has_dental_topic = any(kw in full_query.lower() for kw in DENTAL_KEYWORDS)
+        
+        wiki_corpus, archive_corpus = "", ""
+        if has_dental_topic or has_media:
+            # Ищем совпадения в стоматологической базе
+            search_keywords = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
+            search_keywords = search_keywords if search_keywords else keywords[:12]
+            if len(search_keywords) < 12:
+                other_kws = [kw for kw in keywords if kw not in search_keywords]
+                search_keywords = (search_keywords + other_kws)[:12]
+            wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+
+        # 5. Сборка индивидуального глубокого промпта
+        if media_description:
+            prompt = f"""
+Ты — старший клинический ассистент стоматологического сообщества "StomChat", специализирующийся на диагностике по изображениям.
+Пользователь прислал тебе изображение в личные сообщения для получения экспертного клинического мнения.
+
+Описание изображения (распознано Vision-моделью):
+{media_description}
+
+Вопрос или подпись пользователя:
+{text or "(без подписи)"}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+Похожие обсуждения из Архива чата:
+{archive_corpus}
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. ГЛУБИНА: Дай развёрнутый, структурированный клинический разбор. В ЛС нет лимита на длину ответа — давай настолько подробно, насколько нужно. Покрой: предварительный диагноз → дифференциальный ряд → рекомендуемый протокол действий → на что обратить особое внимание.
+2. ФОРМАТ: Никаких приветствий и вводных. Начинай сразу с клинического вывода ("На снимке — ..."). Используй короткие абзацы или нумерованные пункты.
+3. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown (**текст**, ## заголовки и т.д.).
+4. НАУЧНАЯ ТОЧНОСТЬ: Только доказательная медицина. Не выдумывай протоколы и дозировки. Если данных в базе недостаточно — честно укажи это и предложи дальнейший путь диагностики.
+5. ДИСКЛЕЙМЕР: Если описание изображения нечёткое или не позволяет однозначно установить диагноз, честно это укажи и попроси прислать более качественное изображение.
+"""
+        else:
+            # Определяем тип запроса: это клинический вопрос или свободная тема
+            has_clinical_topic = any(kw in (text or "").lower() for kw in DENTAL_KEYWORDS) or bool(wiki_corpus)
+            if has_clinical_topic:
+                system_role = (
+                    "Ты — старший клинический ассистент стоматологического сообщества \"StomChat\", специализирующийся на доказательной стоматологии. "
+                    "Твоя задача — давать максимально точные, подробные и структурированные ответы на клинические вопросы, опираясь исключительно на доказательную медицину и базу знаний сообщества."
+                )
+                instructions = """КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. ГЛУБИНА: Дай развёрнутый, подробный и клинически точный ответ. В ЛС нет лимита на длину. Структурируй ответ: суть → протокол/алгоритм → нюансы и подводные камни → при необходимости — рекомендации по источникам.
+2. ФОРМАТ: Никаких приветствий, вводных слов ("Отличный вопрос!", "Разберём вместе") и концовок ("Успехов!"). Начинай сразу с ответа.
+3. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>, <i>курсив</i>. Никакого Markdown.
+4. НАУЧНАЯ ТОЧНОСТЬ: Только доказанные факты. Не выдумывай протоколы и дозировки. Если данных в базе нет — честно укажи пробел и предложи направление для дальнейшего изучения.
+5. КОНТЕКСТ: Учитывай всю историю диалога. Если вопрос является уточнением к предыдущему — дай ответ именно в этом контексте, без повторения уже сказанного."""
+            else:
+                system_role = (
+                    "Ты — умный, живой и остроумный ассистент стоматологического чата \"StomChat\". "
+                    "Ты ведёшь диалог в личных сообщениях и можешь свободно общаться на любые темы, помогать, объяснять, шутить. "
+                    "Ты — знающий коллега, а не занудный чат-бот."
+                )
+                instructions = """КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Отвечай живо, по-человечески, без академического занудства.
+2. Никаких вводных и концовок. Начинай сразу с сути.
+3. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown.
+4. Если тема всё-таки касается профессии (стоматология, медицина, клиника) — можешь ненавязчиво использовать профессиональный контекст."""
+
+            prompt = f"""
+{system_role}
+
+История вашего диалога (последние сообщения):
+{chr(10).join(context_msgs)}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus or "(не найдено — свободная беседа)"}
+
+Похожие обсуждения из Архива чата:
+{archive_corpus or ""}
+
+{instructions}
+"""
+
+        logger.info(f"Processing deep PM query from chat_id={chat_id}. Has media={has_media}.")
+        
+        # 6. Отправка статуса "печатает"
+        async with bot_client.action(chat_id, 'typing'):
+            # Запрос к Gemini
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id}
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+            
+            if error:
+                logger.error(f"PM Gemini generation error: {error}")
+                await bot_client.send_message(entity=chat_id, message="❌ <i>Ошибка генерации ответа нейросетью. Пожалуйста, повторите запрос позже.</i>", parse_mode='html')
+                return
+                
+            reply_text = getattr(response, "text", None)
+            if not reply_text:
+                logger.warning("PM Gemini returned empty text.")
+                return
+                
+            reply_text = reply_text.strip()
+            reply_text = clean_html_formatting(reply_text)
+            
+            # Отправка развернутого ответа
+            await bot_client.send_message(
+                entity=chat_id,
+                message=reply_text,
+                parse_mode='html'
+            )
+            logger.info(f"Successfully sent deep PM response to chat_id={chat_id}")
+            
+    except Exception as e:
+        logger.exception(f"Unexpected error in handle_private_message: {e}")
+
+
+async def handle_group_summary(bot_client, event, reply_to_msg_id):
+    """Сборка саммари обсуждения в группе по запросу."""
+    chat_id = event.chat_id
+    msg_id = event.message.id
+    
+    cooldown = check_user_cooldown(chat_id, event.sender_id, "summary", seconds=30)
+    if cooldown > 0:
+        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
+        return
+        
+    status_msg = await bot_client.send_message(entity=chat_id, message="📝 <i>Собираю и анализирую историю обсуждения... Подождите.</i>", reply_to=msg_id, parse_mode='html')
+    
+    try:
+        # Получаем последние 30 сообщений из базы данных
+        rows = await database.get_last_n_messages(limit=30)
+        chat_rows = [r for r in rows if r[3] and r[3].strip()]
+        
+        if not chat_rows:
+            await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось найти сообщения для саммари.</i>", parse_mode='html')
+            return
+            
+        history_msgs = []
+        for r in chat_rows:
+            history_msgs.append(f"{r[1] or 'Врач'}: {r[3]}")
+            
+        history_str = "\n".join(history_msgs)
+        
+        prompt = f"""
+Ты — старший научный редактор и эксперт-клиницист стоматологического сообщества "StomChat".
+Проанализируй следующую дискуссию врачей-стоматологов и сделай краткую, профессиональную выжимку.
+
+История переписки:
+{history_str}
+
+Задачи:
+1. Суть спора или обсуждаемого клинического вопроса (1-2 предложения).
+2. Выдели основные точки зрения/аргументы участников (кратко, тезисно).
+3. Клиническая рекомендация на основе доказательной стоматологии (каков золотой стандарт решения этого вопроса).
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+- Никакой воды, приветствий и концовок. Начинай сразу со структуры.
+- Разметка: только HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
+- Будь краток: вся сводка должна занимать не более 800 символов.
+"""
+        status_ctx = {"kind": "group_summary", "chat_id": chat_id}
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+        
+        if error or not response or not getattr(response, "text", None):
+            await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Ошибка генерации саммари. Пожалуйста, попробуйте позже.</i>", parse_mode='html')
+            return
+            
+        summary_text = response.text.strip()
+        summary_text = clean_html_formatting(summary_text)
+        
+        final_text = f"📋 <b>Результаты клинического анализа дискуссии:</b>\n\n{summary_text}"
+        await bot_client.edit_message(chat_id, status_msg.id, final_text, parse_mode='html')
+        logger.info(f"Successfully posted group summary for chat_id={chat_id}")
+    except Exception as e:
+        logger.error(f"Error generating group summary: {e}")
+        try: await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Произошла неожиданная ошибка при составлении сводки.</i>", parse_mode='html')
+        except Exception: pass
+
+
+async def handle_group_direct_ask(bot_client, event, question):
+    """Ответ на прямой клинический вопрос пользователя в группе."""
+    chat_id = event.chat_id
+    msg_id = event.message.id
+    
+    cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
+    if cooldown > 0:
+        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
+        return
+        
+    async with bot_client.action(chat_id, 'typing'):
+        keywords = extract_keywords(question)
+        wiki_corpus, archive_corpus = search_knowledge_corpus(keywords[:12])
+        
+        prompt = f"""
+Ты — опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
+Ответь кратко, экспертно и строго по существу.
+
+Вопрос коллеги:
+{question}
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Максимально 600 символов. Никаких приветствий, обращений и пожеланий. Сразу ответ.
+2. Тон — уверенный, коллегиальный, peer-to-peer.
+3. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
+4. Только проверенные научные факты. Если в базе нет точных данных, напиши: "В базе данных нет точных сведений о Х, но на практике...", без выдумок.
+"""
+        status_ctx = {"kind": "group_ask", "chat_id": chat_id}
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+        
+        if error or not response or not getattr(response, "text", None):
+            return
+            
+        reply_text = response.text.strip()
+        reply_text = clean_html_formatting(reply_text)
+        
+        try:
+            await bot_client.send_message(
+                entity=chat_id,
+                message=reply_text,
+                reply_to=msg_id,
+                parse_mode='html'
+            )
+            logger.info(f"Sent group direct ask reply to msg_id={msg_id}")
+        except Exception as e:
+            logger.error(f"Failed to send group direct ask reply: {e}")
+
+
+async def handle_group_quiz(bot_client, event):
+    """Генерация и отправка клинической викторины с инлайн-кнопками в группу."""
+    chat_id = event.chat_id
+    msg_id = event.message.id
+    
+    cooldown = check_user_cooldown(chat_id, event.sender_id, "quiz", seconds=60)
+    if cooldown > 0:
+        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией новой викторины.", reply_to=msg_id)
+        return
+        
+    status_msg = await bot_client.send_message(entity=chat_id, message="🎲 <i>Конструирую клиническую задачу... Подождите.</i>", reply_to=msg_id, parse_mode='html')
+    
+    prompt = """
+Ты — старший стоматолог-экзаменатор. Твоя задача — сгенерировать сложную клиническую задачу-викторину для группы врачей.
+Выдай строго в формате JSON:
+{
+  "question": "Описание клинического случая и вопрос (до 300 символов)...",
+  "options": ["Вариант A", "Вариант B", "Вариант C", "Вариант D"],
+  "correct": 0,
+  "explanation": "Объяснение правильного ответа (до 150 символов)..."
+}
+Ответ должен быть валидным JSON, без markdown разметки и без ```json.
+"""
+    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    await bot_client.delete_messages(chat_id, status_msg.id)
+    
+    if error or not response or not getattr(response, "text", None):
+        await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось сгенерировать кейс. Попробуйте позже.</i>", parse_mode='html')
+        return
+        
+    try:
+        raw_text = response.text.strip()
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw_text = "\n".join(lines).strip()
+            
+        data = json.loads(raw_text)
+        question = data["question"]
+        options = data["options"]
+        correct = int(data["correct"])
+        explanation = data["explanation"]
+    except Exception as parse_err:
+        logger.error(f"Failed to parse quiz JSON: {parse_err}. Raw: {response.text}")
+        question = "Пациент жалуется на боли при накусывании в зубе 3.6 (лечен эндодонтически 2 года назад). На снимке: недопломбировка язычного канала на 2 мм, очаг разрежения костной ткани в области апекса 3 мм. Какова первоочередная тактика?"
+        options = [
+            "Апикальная хирургия (резекция)",
+            "Ортопедическое перелечивание",
+            "Повторное эндодонтическое лечение",
+            "Удаление зуба и имплантация"
+        ]
+        correct = 2
+        explanation = "Перелечивание — метод первого выбора при наличии проходимых каналов и апикального периодонтита."
+
+    quiz_id = str(random.randint(100000, 999999))
+    init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
+    await database.set_user_interactive_state(
+        user_id=int(quiz_id),
+        state_type="quiz_config",
+        current_step=correct,
+        case_id=explanation[:200],
+        history=json.dumps(init_votes)
+    )
+    
+    from telethon import Button
+    
+    buttons = [
+        [
+            Button.inline(f"A: {options[0][:30]}", data=f"qa:{correct}:0:{quiz_id}"),
+            Button.inline(f"B: {options[1][:30]}", data=f"qa:{correct}:1:{quiz_id}")
+        ],
+        [
+            Button.inline(f"C: {options[2][:30]}", data=f"qa:{correct}:2:{quiz_id}"),
+            Button.inline(f"D: {options[3][:30]}", data=f"qa:{correct}:3:{quiz_id}")
+        ]
+    ]
+    
+    message_text = (
+        "🎲 <b>КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА</b>\n\n"
+        f"{question}\n\n"
+        f"<b>A:</b> {options[0]}\n"
+        f"<b>B:</b> {options[1]}\n"
+        f"<b>C:</b> {options[2]}\n"
+        f"<b>D:</b> {options[3]}\n\n"
+        "<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>"
+    )
+    message_text = clean_html_formatting(message_text)
+    
+    await bot_client.send_message(
+        entity=chat_id,
+        message=message_text,
+        buttons=buttons,
+        parse_mode='html'
+    )
+
+
+async def handle_quiz_callback(bot_client, event):
+    """Проверка ответа пользователя при клике на инлайн-кнопку."""
+    data_str = event.data.decode('utf-8', errors='ignore')
+    if not data_str.startswith("qa:"):
+        return
+        
+    parts = data_str.split(":")
+    correct_idx = int(parts[1])
+    clicked_idx = int(parts[2])
+    quiz_id = int(parts[3])
+    voter_id = str(event.sender_id)
+    
+    state_row = await database.get_user_interactive_state(quiz_id)
+    if not state_row:
+        await event.answer("⚠️ Ошибка: Викторина не найдена.", alert=True)
+        return
+        
+    explanation = state_row.get("case_id") or "Правильный выбор!"
+    history_str = state_row.get("history") or "{}"
+    
+    try:
+        history_data = json.loads(history_str)
+        if not isinstance(history_data, dict) or "votes" not in history_data:
+            history_data = {"votes": [0, 0, 0, 0], "voters": {}}
+    except Exception:
+        history_data = {"votes": [0, 0, 0, 0], "voters": {}}
+        
+    votes = history_data["votes"]
+    voters = history_data["voters"]
+    
+    if voter_id in voters:
+        await event.answer("⚠️ Вы уже проголосовали в этой викторине!", alert=True)
+        return
+        
+    # Record vote
+    voters[voter_id] = clicked_idx
+    votes[clicked_idx] += 1
+    
+    # Update DB
+    await database.set_user_interactive_state(
+        user_id=quiz_id,
+        state_type="quiz_config",
+        current_step=correct_idx,
+        case_id=explanation,
+        history=json.dumps(history_data)
+    )
+    
+    is_correct = (correct_idx == clicked_idx)
+    prefix = "✅ Верно! " if is_correct else "❌ Неверно! "
+    alert_text = f"{prefix}\n\n{explanation}"
+    await event.answer(alert_text, alert=True)
+    
+    # Update message text with stats
+    try:
+        original_msg = await event.get_message()
+        if original_msg and original_msg.message:
+            lines = original_msg.message.split("\n")
+            total_votes = sum(votes)
+            pct = [int((v / total_votes) * 100) if total_votes > 0 else 0 for v in votes]
+            
+            new_lines = []
+            for line in lines:
+                if line.startswith("<b>A:</b>"):
+                    clean_choice = line[9:].split("(")[0].strip()
+                    new_lines.append(f"<b>A:</b> {clean_choice} ({votes[0]} гол. | {pct[0]}%)")
+                elif line.startswith("<b>B:</b>"):
+                    clean_choice = line[9:].split("(")[0].strip()
+                    new_lines.append(f"<b>B:</b> {clean_choice} ({votes[1]} гол. | {pct[1]}%)")
+                elif line.startswith("<b>C:</b>"):
+                    clean_choice = line[9:].split("(")[0].strip()
+                    new_lines.append(f"<b>C:</b> {clean_choice} ({votes[2]} гол. | {pct[2]}%)")
+                elif line.startswith("<b>D:</b>"):
+                    clean_choice = line[9:].split("(")[0].strip()
+                    new_lines.append(f"<b>D:</b> {clean_choice} ({votes[3]} гол. | {pct[3]}%)")
+                elif "Нажмите на кнопку" in line or "Всего проголосовало:" in line:
+                    continue
+                else:
+                    new_lines.append(line)
+            
+            while new_lines and not new_lines[-1].strip():
+                new_lines.pop()
+                
+            new_lines.append(f"\n📊 <b>Всего проголосовало: {total_votes}</b>\n\n<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>")
+            
+            new_text = "\n".join(new_lines)
+            await event.edit(text=new_text, parse_mode='html')
+    except Exception as edit_err:
+        logger.error(f"Failed to edit quiz message text with live stats: {edit_err}")
+
+
+async def check_and_trigger_referee(bot_client, event, text):
+    """Пассивный клинический рефери для предотвращения конфликтов."""
+    global LAST_REFEREE_RUN
+    chat_id = event.chat_id
+    msg_id = event.message.id
+    
+    text_lower = text.lower()
+    has_conflict_kw = any(kw in text_lower for kw in [
+        "бред", "чушь", "дичь", "херня", "говно", "полная лажа", 
+        "безрукий", "руки оторвать", "какой дурак", "херню", "глупость",
+        "рукожоп", "рукожопие", "помойку", "мусорку", "выброси", 
+        "косяк", "ужасно", "кривые руки", "уродство", "жесть", "отстой",
+        "хлам", "ахинея", "ппц", "пиздец", "бредятина",
+        "чушь собачья", "какой дебил", "убейся", "дебилизм",
+        "идиот", "идиотизм", "тупой", "тупость", "придурок", "даун",
+        "рукожопый", "криворукий", "жопорукий", "косорукий", "из жопы",
+        "ересь", "чепуха", "психушка", "дурка", "лечись", "высер",
+        "выкинь", "дерьмо", "говнище", "днище", "лажовый", "шиза",
+        "дебил", "кретин", "олень", "баран", "тормоз", "позорище",
+        "позор", "стыдоба", "срач", "клоун", "цирк", "клоунада",
+        "курам на смех", "хрень", "галиматья", "шарага", "колхозный",
+        "безрукие", "руки отсохнут", "убожество", "убого"
+    ])
+    
+    if not has_conflict_kw:
+        return
+        
+    if datetime.now() - LAST_REFEREE_RUN < timedelta(hours=1):
+        return
+        
+    LAST_REFEREE_RUN = datetime.now()
+    logger.info(f"Conflict suspected in group msg_id={msg_id}. Triggering Clinical Referee...")
+    
+    prompt = f"""
+Ты — юмористический клинический рефери в чате врачей-стоматологов "StomChat". 
+В чате назревает конфликт: один из врачей высказался агрессивно/недоверчиво: "{text}".
+
+Напиши короткую, ироничную и миролюбивую реплику, используя профессиональный юмор стоматологов, чтобы мягко разрядить обстановку.
+Примеры тем для шуток: сравнение спора с перегретым бором, воспаленным пульпитом, удалением без анестезии или плохим сцеплением гибридного слоя.
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Длина — максимум 180 символов! Реплика должна быть короткой и меткой.
+2. Никаких приветствий и концовок. Сразу суть.
+3. Тон: дружелюбный, ироничный, призывающий коллег к спокойной дискуссии.
+4. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
+"""
+    status_ctx = {"kind": "group_referee", "chat_id": chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+    
+    if error or not response or not getattr(response, "text", None):
+        return
+        
+    reply_text = response.text.strip()
+    reply_text = clean_html_formatting(reply_text)
+    
+    try:
+        await bot_client.send_message(
+            entity=chat_id,
+            message=f"⚖️ {reply_text}",
+            reply_to=msg_id,
+            parse_mode='html'
+        )
+        logger.info(f"Referee intervention successfully sent to chat_id={chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send referee intervention: {e}")
+
+
+async def handle_term_explainer(bot_client, event, term):
+    """Быстрое объяснение стоматологического термина из базы знаний."""
+    chat_id = event.chat_id
+    msg_id = event.message.id
+    
+    cooldown = check_user_cooldown(chat_id, event.sender_id, "what", seconds=30)
+    if cooldown > 0:
+        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед повторным запросом термина.", reply_to=msg_id)
+        return
+        
+    keywords = extract_keywords(term)
+    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+    
+    prompt = f"""
+Ты — толковый словарь стоматологического сообщества "StomChat".
+Объясни стоматологический термин или аббревиатуру: "{term}".
+
+Справка из Базы Знаний (stomat_wiki):
+{wiki_corpus}
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Объясни термин ровно в 1-2 предложениях. Предельно кратко и научно-популярно для коллег.
+2. Никаких приветствий, «Данный термин означает...» и прочей воды. Сразу определение.
+3. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
+"""
+    status_ctx = {"kind": "group_explainer", "chat_id": chat_id}
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+    
+    if error or not response or not getattr(response, "text", None):
+        return
+        
+    reply_text = response.text.strip()
+    reply_text = clean_html_formatting(reply_text)
+    
+    try:
+        await bot_client.send_message(
+            entity=chat_id,
+            message=f"📖 <b>{term.upper()}:</b> {reply_text}",
+            reply_to=msg_id,
+            parse_mode='html'
+        )
+        logger.info(f"Term explanation sent for term={term}")
+    except Exception as e:
+        logger.error(f"Failed to send term explanation: {e}")

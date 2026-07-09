@@ -90,7 +90,7 @@ async def _run_json_tool(action, payload, timeout=None):
         action,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=None,
     )
     request_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="replace")
     try:
@@ -105,7 +105,7 @@ async def _run_json_tool(action, payload, timeout=None):
         raise
 
     stdout_text = stdout.decode("utf-8", errors="replace")
-    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
     json_line = None
     for line in reversed(stdout_text.splitlines()):
         stripped = line.strip()
@@ -169,6 +169,22 @@ async def web_search_async(query, max_results, timeout):
     return payload.get("results") or [], None
 
 
+async def transcribe_audio_async(file_path, timeout):
+    payload, error = await _run_json_tool(
+        "whisper-transcribe",
+        {"file_path": file_path},
+        timeout=timeout,
+    )
+    if error:
+        return None, error
+    return payload.get("text"), None
+
+
+def _transcribe_audio_sync(file_path):
+    import gemini_client
+    return gemini_client.transcribe_audio_bytes_or_file(file_path)
+
+
 def _main():
     if len(sys.argv) != 2:
         _json_exit({"ok": False, "error": "usage: blocking_tools.py <action>"}, 2)
@@ -190,6 +206,10 @@ def _main():
                 int(payload.get("max_results") or 2),
             )
             _json_exit({"ok": True, "results": results})
+
+        if action == "whisper-transcribe":
+            text = _transcribe_audio_sync(payload.get("file_path") or "")
+            _json_exit({"ok": bool(text), "text": text})
 
         _json_exit({"ok": False, "error": f"unknown action: {action}"}, 2)
     except Exception as exc:

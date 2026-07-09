@@ -10,13 +10,11 @@ import config
 logger = logging.getLogger(__name__)
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stomchat-db")
 
-
 def _connect():
     db = sqlite3.connect(config.DB_PATH, timeout=30)
     db.execute("PRAGMA busy_timeout = 30000")
+    db.execute("PRAGMA journal_mode = WAL")
     return db
-
-
 @contextmanager
 def _connection():
     db = _connect()
@@ -60,6 +58,35 @@ async def init_db():
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_date ON messages(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sender ON messages(sender_id)")
+
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clinical_bookmarks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    saved_by_user_id INTEGER,
+                    msg_id INTEGER,
+                    chat_id INTEGER,
+                    sender_name TEXT,
+                    text TEXT,
+                    has_media BOOLEAN,
+                    media_description TEXT,
+                    date TEXT
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_user ON clinical_bookmarks(saved_by_user_id)")
+
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_interactive_states (
+                    user_id INTEGER PRIMARY KEY,
+                    state_type TEXT,
+                    current_step INTEGER,
+                    case_id TEXT,
+                    history TEXT
+                )
+                """
+            )
 
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
@@ -306,4 +333,94 @@ async def get_messages_for_period(hours):
                 (f"-{hours} hours",),
             ).fetchall()
 
+    return await _run_db(operation)
+
+
+async def get_media_description(msg_id):
+    def operation():
+        with _connection() as db:
+            row = db.execute("SELECT media_description FROM messages WHERE msg_id = ?", (msg_id,)).fetchone()
+            return row[0] if row else None
+    return await _run_db(operation)
+
+
+async def save_clinical_bookmark(saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO clinical_bookmarks
+                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, _date_text(date) if hasattr(date, 'strftime') else str(date)),
+            )
+    return await _run_db(operation)
+
+
+async def get_clinical_bookmarks(saved_by_user_id, query=None):
+    def operation():
+        with _connection() as db:
+            if query:
+                return db.execute(
+                    """
+                    SELECT msg_id, chat_id, sender_name, text, media_description, date
+                    FROM clinical_bookmarks
+                    WHERE saved_by_user_id = ? AND (text LIKE ? OR media_description LIKE ?)
+                    ORDER BY date DESC
+                    """,
+                    (saved_by_user_id, f"%{query}%", f"%{query}%"),
+                ).fetchall()
+            else:
+                return db.execute(
+                    """
+                    SELECT msg_id, chat_id, sender_name, text, media_description, date
+                    FROM clinical_bookmarks
+                    WHERE saved_by_user_id = ?
+                    ORDER BY date DESC
+                    """,
+                    (saved_by_user_id,),
+                ).fetchall()
+    return await _run_db(operation)
+
+
+async def set_user_interactive_state(user_id, state_type, current_step, case_id, history):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO user_interactive_states
+                (user_id, state_type, current_step, case_id, history)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, state_type, current_step, case_id, history),
+            )
+    return await _run_db(operation)
+
+
+async def get_user_interactive_state(user_id):
+    def operation():
+        with _connection() as db:
+            row = db.execute(
+                "SELECT state_type, current_step, case_id, history FROM user_interactive_states WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row:
+                return {
+                    "state_type": row[0],
+                    "current_step": row[1],
+                    "case_id": row[2],
+                    "history": row[3]
+                }
+            return None
+    return await _run_db(operation)
+
+
+async def clear_user_interactive_state(user_id):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                "DELETE FROM user_interactive_states WHERE user_id = ?",
+                (user_id,),
+            )
     return await _run_db(operation)

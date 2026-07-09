@@ -11,6 +11,7 @@ import os
 import asyncio
 import json
 import database
+import assistant
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -557,20 +558,48 @@ async def process_media_message(message, msg_id, text, media_type_hint=None):
                 )
                 logger.info(f"📝 Описание готово: {media_description}")
                 logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
+                
+                # Запуск медиа-ассистента
+                async def run_media_assistant_safe():
+                    try:
+                        await assistant.check_and_trigger_assistant_media(
+                            bot_client, message, msg_id, text, media_description
+                        )
+                    except Exception as e:
+                        logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
+                asyncio.create_task(run_media_assistant_safe())
             else:
-                logger.info("media analysis returned empty description msg_id=%s", msg_id)
+                logger.info("media analysis returned empty description msg_id=%s, marking as processed", msg_id)
+                await asyncio.wait_for(
+                    database.update_media_description(msg_id, "-"),
+                    timeout=30,
+                )
 
     except asyncio.TimeoutError:
-        logger.warning("media processing timeout msg_id=%s", msg_id)
+        logger.warning("media processing timeout msg_id=%s, marking as processed to avoid loop", msg_id)
+        try:
+            await asyncio.wait_for(
+                database.update_media_description(msg_id, "-"),
+                timeout=10,
+            )
+        except Exception:
+            pass
     except Exception:
-        logger.exception("Ошибка обработки медиа %s", msg_id)
+        logger.exception("Ошибка обработки медиа %s, marking as processed to avoid loop", msg_id)
+        try:
+            await asyncio.wait_for(
+                database.update_media_description(msg_id, "-"),
+                timeout=10,
+            )
+        except Exception:
+            pass
     finally:
         _remove_temp_file(temp_path)
         if is_video and file_to_analyze != temp_path:
             _remove_temp_file(file_to_analyze)
 
 
-@client.on(events.NewMessage(chats=config.SOURCE_CHAT_ID))
+@client.on(events.NewMessage(chats=[config.SOURCE_CHAT_ID, -1003735006121]))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
     try:
@@ -605,6 +634,42 @@ async def handle_new_message(event):
 
         text = event.message.message or ""
         date = event.message.date
+
+        # Group Voice Note / Audio processing
+        is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
+        is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
+        is_audio = is_voice or is_audio_file
+        
+        if is_audio:
+            os.makedirs("temp_media", exist_ok=True)
+            temp_path = None
+            try:
+                temp_path = await event.message.download_media(file="temp_media/")
+                if temp_path and os.path.exists(temp_path):
+                    import blocking_tools
+                    transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
+                    if not error and transcribed:
+                        transcribed_text = transcribed.strip()
+                        silence_hallucinations = {
+                            "you", "thank you", "bye", "подпишитесь", 
+                            "продолжение следует", "редактор субтитров", "субтитры", 
+                            "youtube", "собачья чушь", "спасибо"
+                        }
+                        clean_trans = transcribed_text.lower().rstrip(".").rstrip(",")
+                        if clean_trans not in silence_hallucinations:
+                            text = transcribed_text
+                            await bot_client.send_message(
+                                entity=event.chat_id,
+                                message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
+                                reply_to=msg_id,
+                                parse_mode='html'
+                            )
+            except Exception as audio_err:
+                logger.error(f"Error handling group voice message: {audio_err}")
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except Exception: pass
         
         # Получаем ID сообщения, на которое ответили (если есть)
         reply_to_msg_id = None
@@ -621,26 +686,125 @@ async def handle_new_message(event):
             media_type = None
         media_description = None
 
-        # Сохраняем расширенный набор данных (базовая запись)
-        await asyncio.wait_for(
-            database.save_message(
-                msg_id=msg_id,
-                reply_to_msg_id=reply_to_msg_id,
-                sender_id=sender_id,
-                sender_name=sender_name,
-                sender_username=sender_username,
-                text=text,
-                date=date,
-                has_media=has_media,
-                media_type=media_type
-            ),
-            timeout=30,
-        )
+        # Сохраняем и анализируем только для целевого (основного) чата
+        if event.chat_id == config.SOURCE_CHAT_ID:
+            await asyncio.wait_for(
+                database.save_message(
+                    msg_id=msg_id,
+                    reply_to_msg_id=reply_to_msg_id,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    sender_username=sender_username,
+                    text=text,
+                    date=date,
+                    has_media=has_media,
+                    media_type=media_type
+                ),
+                timeout=30,
+            )
 
-        # Анализ медиа (фото, видео), игнорируя стикеры/гифки
-        if event.photo or event.video:
-            await enqueue_media_analysis(event.message, msg_id, text)
+            # Check bookmark saving command
+            cmd_clean = text.strip().lower()
+            if cmd_clean in ("/save", "/сохранить", "сохранить") and reply_to_msg_id:
+                try:
+                    parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+                    if parent_msg:
+                        db_desc = await database.get_media_description(reply_to_msg_id)
+                        p_text = parent_msg.message or ""
+                        p_has_media = parent_msg.photo is not None or parent_msg.video is not None
+                        p_sender = await parent_msg.get_sender()
+                        
+                        if p_sender is None:
+                            p_sender_name = "Unknown"
+                        elif hasattr(p_sender, 'first_name'):
+                            p_sender_name = f"{getattr(p_sender, 'first_name', '') or ''} {getattr(p_sender, 'last_name', '') or ''}".strip() or "Участник"
+                        elif hasattr(p_sender, 'title'):
+                            p_sender_name = p_sender.title or "Администрация"
+                        else:
+                            p_sender_name = "Админ"
 
+                        await database.save_clinical_bookmark(
+                            saved_by_user_id=sender_id,
+                            msg_id=reply_to_msg_id,
+                            chat_id=event.chat_id,
+                            sender_name=p_sender_name,
+                            text=p_text,
+                            has_media=p_has_media,
+                            media_description=db_desc or "",
+                            date=parent_msg.date
+                        )
+                        
+                        confirm_text = "📌 <b>Клинический пост сохранен в ваши закладки!</b>\nВы можете просмотреть и найти его в ЛС бота по команде /bookmarks."
+                        await bot_client.send_message(
+                            entity=event.chat_id,
+                            message=confirm_text,
+                            reply_to=msg_id,
+                            parse_mode='html'
+                        )
+                except Exception as bookmark_exc:
+                    logger.error(f"Failed to save clinical bookmark: {bookmark_exc}")
+
+            # Анализ медиа (фото, видео), игнорируя стикеры/гифки
+            if event.photo or event.video:
+                await enqueue_media_analysis(event.message, msg_id, text)
+        # Групповые команды и модерация
+        async def run_group_features():
+            try:
+                cmd = text.strip()
+                cmd_lower = cmd.lower()
+                
+                # 1. Сводка/Саммари обсуждения
+                if cmd_lower.startswith(("/summary", "/итог", "/sum", "итог")):
+                    await assistant.handle_group_summary(bot_client, event, reply_to_msg_id)
+                    return True
+                
+                # 2. Прямой запрос к боту
+                if cmd_lower.startswith("/ask ") or (BOT_ID and f"@{BOT_ID}" in cmd) or "@stomchat_bot" in cmd_lower:
+                    question = cmd
+                    if cmd_lower.startswith("/ask "):
+                        question = cmd[5:].strip()
+                    elif BOT_ID and f"@{BOT_ID}" in cmd:
+                        question = cmd.replace(f"@{BOT_ID}", "").strip()
+                    elif "@stomchat_bot" in cmd_lower:
+                        import re
+                        question = re.sub(r'(?i)@stomchat_bot', '', cmd).strip()
+                    
+                    if question:
+                        await assistant.handle_group_direct_ask(bot_client, event, question)
+                    return True
+                
+                # 3. Викторина/Опрос в группе
+                if cmd_lower in ("/poll", "/кейс", "викторина", "опрос"):
+                    await assistant.handle_group_quiz(bot_client, event)
+                    return True
+                
+                # 4. Толковый словарь (объяснение терминов)
+                if cmd_lower.startswith(("/what ", "/что ")):
+                    term = cmd[6:].strip() if cmd_lower.startswith("/what ") else cmd[5:].strip()
+                    if term:
+                        await assistant.handle_term_explainer(bot_client, event, term)
+                    return True
+
+                # 5. Пассивный клинический рефери (проверка конфликтов)
+                # Запускается асинхронно, не мешает стандартному ассистенту
+                asyncio.create_task(assistant.check_and_trigger_referee(bot_client, event, text))
+                
+            except Exception as e:
+                logger.exception(f"Error executing group feature: {e}")
+            return False
+
+        # Умный авто-ассистент (поддерживает как основной чат, так и диалог в тестовом топике)
+        async def run_assistant_safe():
+            try:
+                if await run_group_features():
+                    return
+                await assistant.check_and_trigger_assistant(
+                    bot_client, event, msg_id, text, reply_to_msg_id
+                )
+            except Exception as e:
+                logger.exception(f"Unexpected error in run_assistant_safe: {e}")
+                
+        asyncio.create_task(run_assistant_safe())
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -656,9 +820,28 @@ async def handle_new_message(event):
         if media_description:
             logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
         # --- КОНЕЦ НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
-
     except Exception:
         logger.exception("message handler failed")
+
+@bot_client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
+async def handle_private_message(event):
+    """Обработчик входящих личных сообщений (ЛС) бота."""
+    async def run_pm_safe():
+        try:
+            await assistant.handle_private_message(bot_client, event)
+        except Exception as e:
+            logger.exception(f"Unexpected error in PM message handler: {e}")
+            
+    asyncio.create_task(run_pm_safe())
+
+@bot_client.on(events.CallbackQuery)
+async def handle_callback_query(event):
+    """Обработчик нажатий на инлайн-кнопки (викторины)."""
+    try:
+        await assistant.handle_quiz_callback(bot_client, event)
+    except Exception as e:
+        logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
+
 @client.on(events.NewMessage(pattern=r'\.dump', outgoing=True))
 async def dump_handler(event):
     await event.edit("📦 <b>Начинаю тестовую выкачку истории...</b>", parse_mode='HTML')
@@ -916,6 +1099,8 @@ async def start_bot():
         await client.disconnect()
         raise
     await asyncio.wait_for(get_my_id(), timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS)
+    logger.info("🤖 Инициализация авто-ассистента...")
+    await assistant.init_assistant(bot_client)
     # СИНХРОНИЗАЦИЯ ПЕРЕД ЗАПУСКОМ СЛУШАТЕЛЯ
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()

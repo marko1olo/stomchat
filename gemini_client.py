@@ -52,32 +52,40 @@ def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
         )
         time.sleep(min(15, remaining))
 
-def get_openai_client(api_key, base_url, timeout=60.0):
+def get_openai_client(api_key, base_url, timeout=30.0):
     return OpenAI(
         api_key=api_key if api_key else "dummy_key",
         base_url=base_url,
         timeout=timeout,
         max_retries=0
     )
-
 def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
-    models_cascade = [
-        (config.GEMINI_MODEL, "gemini"),
-        ("gemini-3-flash-preview", "gemini"),
-        ("gemini-3.1-flash-lite", "gemini"),
-        ("qwen/qwen3.6-27b", "groq"),
-        (config.GROQ_MODEL, "groq")
-    ]
+    is_pm = status_context and status_context.get("kind") in ("pm_chat", "assistant_media_pm")
     
-    max_attempts = max(15, _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 15))
+    if is_pm:
+        models_cascade = [
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("gemini-3-flash-preview", "gemini"),
+            ("qwen/qwen3.6-27b", "groq"),
+            (config.GROQ_MODEL, "groq")
+        ]
+    else:
+        models_cascade = [
+            (config.GEMINI_MODEL, "gemini"),
+            ("gemini-3-flash-preview", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("qwen/qwen3.6-27b", "groq"),
+            (config.GROQ_MODEL, "groq")
+        ]
+    max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
     
     for model_name, provider in models_cascade:
         if provider == "gemini":
             from google import genai
             from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=60000))
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=30000))
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
@@ -147,7 +155,8 @@ def generate_text(prompt, status_context=None):
                 )
                 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
-                    logger.info(f"{provider.capitalize()} rate limited, switching key without sleeping.")
+                    logger.info(f"{provider.capitalize()} rate limited, waiting 2.5s cooldown before next attempt...")
+                    time.sleep(2.5)
                     continue
                     
                 if "403" in err_msg or "permission" in err_msg:
@@ -160,4 +169,69 @@ def generate_text(prompt, status_context=None):
 
     logger.error("All AI attempts exhausted. Summary was not generated.")
     _write_generation_status(status_context, stage="all_exhausted", max_attempts=max_attempts)
+    return None
+
+
+def convert_to_wav(file_path):
+    """Convert any audio file to standard 16kHz mono WAV using ffmpeg."""
+    import subprocess
+    base, ext = os.path.splitext(file_path)
+    wav_path = base + "_converted.wav"
+    try:
+        cmd = ["ffmpeg", "-y", "-i", file_path, "-ar", "16000", "-ac", "1", wav_path]
+        logger.info(f"Converting audio using ffmpeg: {' '.join(cmd)}")
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if os.path.exists(wav_path):
+            return wav_path
+    except Exception as e:
+        logger.warning(f"Audio conversion failed via ffmpeg: {e}")
+        if os.path.exists(wav_path):
+            try: os.remove(wav_path)
+            except Exception: pass
+    return file_path
+
+
+def transcribe_audio_bytes_or_file(file_path):
+    """Transcribe audio using Groq Whisper API (whisper-large-v3) with key rotation."""
+    keys = list(config.GROQ_KEYS)
+    if not keys:
+        logger.error("No Groq keys found for transcription.")
+        return None
+
+    actual_file_path = convert_to_wav(file_path)
+    
+    random.shuffle(keys)
+    max_attempts = len(keys)
+
+    for attempt in range(max_attempts):
+        api_key = keys[attempt]
+        key_id = f"groq_whisper...{api_key[-5:]}" if api_key else "groq_none"
+        try:
+            logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
+            client = get_openai_client(api_key, "https://api.groq.com/openai/v1")
+            with open(actual_file_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=audio_file,
+                    response_format="text"
+                )
+            if transcription:
+                result_text = transcription.strip()
+                logger.info(f"Transcription success chars={len(result_text)}")
+                
+                if actual_file_path != file_path and os.path.exists(actual_file_path):
+                    try: os.remove(actual_file_path)
+                    except Exception: pass
+                    
+                return result_text
+        except Exception as e:
+            logger.warning(f"Whisper transcription failed key={key_id}: {e}")
+            if "429" in str(e).lower() or "rate limit" in str(e).lower():
+                time.sleep(2)
+            continue
+            
+    if actual_file_path != file_path and os.path.exists(actual_file_path):
+        try: os.remove(actual_file_path)
+        except Exception: pass
+        
     return None

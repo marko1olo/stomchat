@@ -174,7 +174,10 @@ async def describe_image(file_path: str, caption: str = None) -> str:
                         except Exception as e:
                             err_str = str(e).lower()
                             if "413" in err_str: return None
-                            if "429" in err_str or "rate limit" in err_str or "quota" in err_str: continue
+                            if "429" in err_str or "rate limit" in err_str or "quota" in err_str:
+                                logger.info(f"Vision key rate limited (429), cooling down 2.5s before next attempt...")
+                                await asyncio.sleep(2.5)
+                                continue
                             logger.warning(f"Vision {provider} key failed ({model_name}): {e}")
 
             GROQ_COOLDOWN_UNTIL = time.time() + 60
