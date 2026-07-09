@@ -1210,16 +1210,8 @@ async def handle_private_message(bot_client, event):
         # Проверяем наличие стоматологической темы во всем контексте
         has_dental_topic = any(kw in full_context_str_lower for kw in DENTAL_KEYWORDS)
         
-        # Экстрагируем ключевые слова из текущего сообщения и описания медиа
-        query_to_extract = (text or "") + " " + (media_description or "")
-        keywords = extract_keywords(query_to_extract)
-        
-        # Если ключевых слов в текущем запросе мало, дополняем ключевыми словами из истории
-        if len(keywords) < 6:
-            history_kws = extract_keywords(history_context_text)
-            for hk in history_kws:
-                if hk not in keywords:
-                    keywords.append(hk)
+        # Извлекаем ключевые слова из всего контекста (текущий запрос + медиа + история), чтобы искать статьи
+        keywords = extract_keywords(full_context_str)
                     
         wiki_corpus, archive_corpus = "", ""
         if has_dental_topic or has_media:
