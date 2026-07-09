@@ -266,7 +266,7 @@ def clean_html_formatting(text):
     return text
 
 
-async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id):
+async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
     global BOT_ID
     state = load_state()
     triggered = False
@@ -423,6 +423,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         logger.info("No matching knowledge corpus found. Skipping assistant run.")
         return
 
+    # Определяем как обращаться к автору сообщения
+    if is_dialogue:
+        address_line = ""  # В диалоге с ботом без обращения
+    elif sender_first_name:
+        address_line = f"Обратись к врачу по имени {sender_first_name} (например, '{sender_first_name}, ...'). Используй имя только в начале ответа, не злоупотребляй."
+    else:
+        address_line = "Обратись к врачу 'Коллега' в начале ответа, если уместно."
+
     # BUILD PROMPT
     if is_dialogue:
         prompt = f"""
@@ -440,13 +448,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 {archive_corpus}
 
 ИНСТРУКЦИИ:
-1. Длина по ситуации — если тема сложная, можно 2-3 коротких абзаца. Если всё ясно в одной фразе — достаточно одной.
-2. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
-3. Тон: прямой, чуть ироничный, peer-to-peer. Можешь быть слегка саркастичным там, где это уместно.
-4. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-5. Только доказанные факты. Домыслы, выдуманные протоколы и дозировки — строго запрещены. Если данных нет — так и скажи прямо.
-6. Не повторяй то, что уже написали в чате. Принеси что-то новое — факт, уточнение, протокол, нюанс.
-7. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
+1. {address_line}
+2. Длина по ситуации — если тема сложная, можно 2-3 коротких абзаца. Если всё ясно в одной фразе — достаточно одной.
+3. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
+4. Тон: прямой, чуть ироничный, peer-to-peer. Можешь быть слегка саркастичным там, где это уместно.
+5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
+6. Только доказанные факты. Домыслы, выдуманные протоколы и дозировки — строго запрещены. Если данных нет — так и скажи прямо.
+7. Не повторяй то, что уже написали в чате. Принеси что-то новое — факт, уточнение, протокол, нюанс.
+8. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
 """
     else:
         prompt = f"""
@@ -463,13 +472,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 {archive_corpus}
 
 ИНСТРУКЦИИ:
-1. Длина по ситуации — если тема требует развёрнутости, можно 2-3 коротких абзаца. Если ответ умещается в одну фразу — не тяни.
-2. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
-3. Тон: прямой, уверенный, слегка ироничный там где уместно. Не зануда, не учебник — коллега.
-4. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-5. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...»
-6. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
-7. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
+1. {address_line}
+2. Длина по ситуации — если тема требует развёрнутости, можно 2-3 коротких абзаца. Если ответ умещается в одну фразу — не тяни.
+3. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
+4. Тон: прямой, уверенный, слегка ироничный там где уместно. Не зануда, не учебник — коллега.
+5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
+6. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...»
+7. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
+8. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
 
 ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE
 """
@@ -1400,7 +1410,108 @@ async def handle_private_message(bot_client, event):
         logger.exception(f"Unexpected error in handle_private_message: {e}")
 
 
+async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_first_name=None):
+    """
+    Срабатывает когда кто-то пишет 'бот' в чате.
+    Этап 1: отправляет контекст в LLM с вопросом — стоит ли отвечать?
+    Этап 2: если YES — генерирует живой ответ и отправляет (shadow mode пока не промотировано).
+    """
+    BOT_MENTION_SHADOW_MODE = True  # Сменить на False чтобы выкатить в боевой
+
+    text_lower = (text or "").lower()
+    # Триггер: упомянули "бот" / "бота" / "боту" / "ботом" / "боте"
+    bot_words = ["бот", "бота", "боту", "ботом", "боте"]
+    if not any(w in text_lower.split() or text_lower == w for w in bot_words):
+        # Ищем substring тоже — "бот," "бот!" "бот?"
+        import re
+        if not re.search(r'\bбот[аоуеём]?\b', text_lower):
+            return
+
+    chat_id = event.chat_id
+
+    try:
+        # Берём текущее сообщение + 5 до + 5 после из БД
+        context_rows = await query_db_async(
+            "SELECT sender_name, text FROM messages WHERE msg_id <= ? ORDER BY msg_id DESC LIMIT 6",
+            (msg_id,)
+        )
+        context_rows = context_rows[::-1]  # хронологический порядок
+        context_str = "\n".join(f"{r[0]}: {r[1]}" for r in context_rows if r[1])
+
+        # ЭТАП 1: Спросить LLM — стоит ли отвечать?
+        triage_prompt = f"""Ты — ИИ-ассистент в стоматологическом Telegram-чате StomChat.
+Кто-то написал слово "бот" в переписке. Вот контекст:
+
+{context_str}
+
+Реши: стоит ли боту вступить в разговор с живым ответом?
+
+Отвечай строго одним словом:
+YES — если человек обращается к боту, задаёт вопрос, хочет чем-то помочь, или ждёт реакции.
+NO — если это случайное упоминание, обсуждение другого бота, ругательство, или контекст никак не требует реакции бота.
+"""
+        triage_ctx = {"kind": "bot_mention_triage", "chat_id": chat_id, "thinking_level": "LOW"}
+        triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=20)
+
+        if triage_err or not triage_resp:
+            logger.warning(f"Bot mention triage failed: {triage_err}")
+            return
+
+        decision = (getattr(triage_resp, "text", "") or "").strip().upper()
+        logger.info(f"Bot mention triage decision: {decision!r} for msg_id={msg_id}")
+
+        if "YES" not in decision:
+            return
+
+        # ЭТАП 2: Сгенерировать живой ответ
+        address = f"{sender_first_name}, " if sender_first_name else ""
+        reply_prompt = f"""Ты — опытный стоматолог-практик и ИИ-ассистент чата StomChat. 
+Тебя только что позвали или упомянули в чате. Вот контекст переписки:
+
+{context_str}
+
+Ответь живо, коротко и по делу — как будто ты сидел рядом и тебя окликнули.
+Начни с "{address}" если уместно, или без обращения если человек просто упомянул что ты есть.
+Тон: тёплый, свой, не официальный. Без шаблонов и вводных фраз. Разметка: только HTML <b>жирный</b>.
+Если непонятно чего хотят — можно коротко переспросить.
+"""
+        reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+        reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=60)
+
+        if reply_err or not reply_resp:
+            logger.warning(f"Bot mention reply generation failed: {reply_err}")
+            return
+
+        reply_text = (getattr(reply_resp, "text", "") or "").strip()
+        reply_text = clean_html_formatting(reply_text)
+        if not reply_text:
+            return
+
+        if BOT_MENTION_SHADOW_MODE:
+            write_to_shadow_log(
+                f"[BOT_MENTION] msg_id={msg_id} sender={sender_first_name}\n"
+                f"Context:\n{context_str}\n"
+                f"Triage: {decision}\nReply:\n{reply_text}\n---"
+            )
+            logger.info(f"[SHADOW] Bot mention reply logged (not sent): {reply_text[:80]}")
+        else:
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=reply_text,
+                    reply_to=msg_id,
+                    parse_mode='html'
+                )
+                logger.info(f"Bot mention reply sent to chat {chat_id}, msg_id={msg_id}")
+            except Exception as send_err:
+                logger.error(f"Failed to send bot mention reply: {send_err}")
+
+    except Exception as e:
+        logger.exception(f"Unexpected error in check_bot_mention_trigger: {e}")
+
+
 async def handle_group_summary(bot_client, event, reply_to_msg_id):
+
     """Сборка саммари обсуждения в группе по запросу."""
     chat_id = event.chat_id
     msg_id = event.message.id

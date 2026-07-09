@@ -644,19 +644,23 @@ async def handle_new_message(event):
         if sender is None:
             sender_name = "Unknown"
             sender_username = None
+            sender_first_name = None
         elif hasattr(sender, 'first_name'):
             # Это обычный пользователь
             first_name = sender.first_name or ''
             last_name = sender.last_name or ''
+            sender_first_name = first_name or None
             sender_name = f"{first_name} {last_name}".strip() or "Участник"
             sender_username = getattr(sender, 'username', None)
         elif hasattr(sender, 'title'):
             # Это сообщение от имени группы/канала
             sender_name = sender.title or "Администрация"
             sender_username = getattr(sender, 'username', None)
+            sender_first_name = sender_name
         else:
             sender_name = "Админ"
             sender_username = getattr(sender, 'username', None)
+            sender_first_name = None
 
         text = event.message.message or ""
         date = event.message.date
@@ -845,7 +849,12 @@ async def handle_new_message(event):
                 if await run_group_features():
                     return
                 await assistant.check_and_trigger_assistant(
-                    bot_client, event, msg_id, text, reply_to_msg_id
+                    bot_client, event, msg_id, text, reply_to_msg_id,
+                    sender_first_name=sender_first_name
+                )
+                # Bot-mention trigger (always shadow mode until promoted)
+                await assistant.check_bot_mention_trigger(
+                    bot_client, event, msg_id, text, sender_first_name=sender_first_name
                 )
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
