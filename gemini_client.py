@@ -26,7 +26,7 @@ def _env_int(name, default):
         return default
 
 def _retry_sleep_seconds(attempt):
-    base = _env_int("STOMCHAT_GEMINI_RETRY_BASE_SECONDS", 10)
+    base = _env_int("STOMCHAT_GEMINI_RETRY_BASE_SECONDS", 2)
     cap = _env_int("STOMCHAT_GEMINI_RETRY_MAX_SECONDS", 60)
     jitter = random.uniform(0, min(5, base))
     return min(cap, base * (2 ** min(attempt, 4)) + jitter)

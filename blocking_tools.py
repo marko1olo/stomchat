@@ -144,18 +144,25 @@ class TextResponse:
 
 
 async def generate_gemini_text_async(prompt, context, timeout=None):
-    payload, error = await _run_json_tool(
-        "gemini-text",
-        {"prompt": prompt, "context": context},
-        timeout=timeout,
-    )
-    if error:
-        return None, error
+    try:
+        payload, error = await _run_json_tool(
+            "gemini-text",
+            {"prompt": prompt, "context": context},
+            timeout=timeout,
+        )
+        if error:
+            return None, error
 
-    text = payload.get("text")
-    if not text:
-        return None, None
-    return TextResponse(text), None
+        text = payload.get("text")
+        if not text:
+            return None, None
+        return TextResponse(text), None
+    finally:
+        try:
+            import runtime_guard
+            runtime_guard.write_summary_status({"active": False})
+        except Exception:
+            pass
 
 
 async def web_search_async(query, max_results, timeout):
