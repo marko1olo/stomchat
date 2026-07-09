@@ -48,6 +48,7 @@ MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
 MEDIA_RECOVERY_LIMIT = max(0, _env_int("STOMCHAT_MEDIA_RECOVERY_LIMIT", 5))
 _media_queue = None
 _media_worker_tasks = []
+_pending_albums = {}
 
 async def get_my_id():
     global MY_ID
@@ -452,12 +453,12 @@ async def stop_media_analysis_workers():
     _media_worker_tasks = []
 
 
-async def enqueue_media_analysis(message, msg_id, text, media_type_hint=None):
+async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None):
     if _media_queue is None:
         start_media_analysis_workers()
 
     try:
-        _media_queue.put_nowait((message, msg_id, text, media_type_hint))
+        _media_queue.put_nowait((messages, msg_id, text, media_type_hint))
         logger.info("media analysis queued msg_id=%s queue_size=%s", msg_id, _media_queue.qsize())
     except asyncio.QueueFull:
         logger.error(
@@ -509,7 +510,7 @@ async def recover_pending_media_analysis():
             logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
             continue
         await enqueue_media_analysis(
-            message,
+            [message],
             msg_id,
             id_to_text.get(msg_id) or message.message or "",
             media_type_hint=media_type_hint,
@@ -521,9 +522,9 @@ async def recover_pending_media_analysis():
 
 async def media_analysis_worker(worker_id):
     while True:
-        message, msg_id, text, media_type_hint = await _media_queue.get()
+        messages, msg_id, text, media_type_hint = await _media_queue.get()
         try:
-            await process_media_message(message, msg_id, text, media_type_hint=media_type_hint)
+            await process_media_message(messages, msg_id, text, media_type_hint=media_type_hint)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -543,40 +544,48 @@ def _remove_temp_file(path):
         logger.warning("temporary media cleanup failed path=%s: %s", path, exc)
 
 
-async def process_media_message(message, msg_id, text, media_type_hint=None):
-    file_to_analyze = None
-    is_video = False
+async def process_media_message(messages, msg_id, text, media_type_hint=None):
+    files_to_analyze = []
     media_description = None
-    temp_path = None
+    temp_paths = []
 
     try:
         os.makedirs(MEDIA_TEMP_DIR, exist_ok=True)
-        temp_path = await asyncio.wait_for(
-            message.download_media(file=os.path.join(MEDIA_TEMP_DIR, "")),
-            timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
-        )
+        for message in messages:
+            try:
+                temp_path = await asyncio.wait_for(
+                    message.download_media(file=os.path.join(MEDIA_TEMP_DIR, "")),
+                    timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                )
+                if temp_path:
+                    temp_paths.append(temp_path)
+                    
+                    if message.photo or media_type_hint == "photo":
+                        files_to_analyze.append(temp_path)
+                    elif message.video or media_type_hint == "video":
+                        logger.info(f"🎞️ Извлечение первого кадра из видео {message.id}...")
+                        frame_path = await extract_first_frame_async(
+                            temp_path,
+                            timeout=MEDIA_FRAME_TIMEOUT_SECONDS,
+                        )
+                        if frame_path:
+                            files_to_analyze.append(frame_path)
+                            temp_paths.append(frame_path)
+            except Exception as e:
+                logger.warning(f"Failed to process a media item in album {msg_id}: {e}")
 
-        if message.photo or media_type_hint == "photo":
-            file_to_analyze = temp_path
-        elif message.video or media_type_hint == "video":
-            is_video = True
-            logger.info(f"🎞️ Извлечение первого кадра из видео {msg_id}...")
-            file_to_analyze = await extract_first_frame_async(
-                temp_path,
-                timeout=MEDIA_FRAME_TIMEOUT_SECONDS,
-            )
-
-        if file_to_analyze:
-            logger.info(f"📸 Анализ медиа в сообщении {msg_id}...")
+        if files_to_analyze:
+            logger.info(f"📸 Анализ медиа (файлов: {len(files_to_analyze)}) в сообщении {msg_id}...")
             media_description = await asyncio.wait_for(
-                vision.describe_image(file_to_analyze, caption=text),
+                vision.describe_image(files_to_analyze, caption=text),
                 timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
             )
             if media_description:
-                await asyncio.wait_for(
-                    database.update_media_description(msg_id, media_description),
-                    timeout=30,
-                )
+                for message in messages:
+                    await asyncio.wait_for(
+                        database.update_media_description(message.id, media_description),
+                        timeout=30,
+                    )
                 logger.info(f"📝 Описание готово: {media_description}")
                 logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
                 
@@ -584,40 +593,36 @@ async def process_media_message(message, msg_id, text, media_type_hint=None):
                 async def run_media_assistant_safe():
                     try:
                         await assistant.check_and_trigger_assistant_media(
-                            bot_client, message, msg_id, text, media_description
+                            bot_client, messages[0], msg_id, text, media_description
                         )
                     except Exception as e:
                         logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
                 asyncio.create_task(run_media_assistant_safe())
             else:
                 logger.info("media analysis returned empty description msg_id=%s, marking as processed", msg_id)
-                await asyncio.wait_for(
-                    database.update_media_description(msg_id, "-"),
-                    timeout=30,
-                )
+                for message in messages:
+                    await asyncio.wait_for(
+                        database.update_media_description(message.id, "-"),
+                        timeout=30,
+                    )
 
     except asyncio.TimeoutError:
         logger.warning("media processing timeout msg_id=%s, marking as processed to avoid loop", msg_id)
         try:
-            await asyncio.wait_for(
-                database.update_media_description(msg_id, "-"),
-                timeout=10,
-            )
+            for message in messages:
+                await asyncio.wait_for(database.update_media_description(message.id, "-"), timeout=10)
         except Exception:
             pass
     except Exception:
         logger.exception("Ошибка обработки медиа %s, marking as processed to avoid loop", msg_id)
         try:
-            await asyncio.wait_for(
-                database.update_media_description(msg_id, "-"),
-                timeout=10,
-            )
+            for message in messages:
+                await asyncio.wait_for(database.update_media_description(message.id, "-"), timeout=10)
         except Exception:
             pass
     finally:
-        _remove_temp_file(temp_path)
-        if is_video and file_to_analyze != temp_path:
-            _remove_temp_file(file_to_analyze)
+        for p in temp_paths:
+            _remove_temp_file(p)
 
 
 @client.on(events.NewMessage(chats=[config.SOURCE_CHAT_ID, -1003735006121]))
@@ -777,7 +782,22 @@ async def handle_new_message(event):
 
             # Анализ медиа (фото, видео), игнорируя стикеры/гифки
             if event.photo or event.video:
-                await enqueue_media_analysis(event.message, msg_id, text)
+                if getattr(event, "grouped_id", None):
+                    if event.grouped_id not in _pending_albums:
+                        _pending_albums[event.grouped_id] = []
+                        
+                        async def _process_album_after_delay(g_id, b_client):
+                            await asyncio.sleep(2.0)
+                            msgs = _pending_albums.pop(g_id, [])
+                            if msgs:
+                                combined_text = "\n".join([m.text for m in msgs if m.text]).strip()
+                                await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
+                                
+                        asyncio.create_task(_process_album_after_delay(event.grouped_id, bot_client))
+                        
+                    _pending_albums[event.grouped_id].append(event.message)
+                else:
+                    await enqueue_media_analysis([event.message], msg_id, text)
         # Групповые команды и модерация
         async def run_group_features():
             try:

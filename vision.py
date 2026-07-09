@@ -77,27 +77,33 @@ def prepare_image_for_groq(file_path):
                 pass
 
 
-async def describe_image(file_path: str, caption: str = None) -> str:
-    """Анализирует изображение через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
+_LAST_VISION_CALL_TIME = 0.0
+
+async def describe_image(file_paths, caption: str = None) -> str:
+    """Анализирует изображение(я) через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
     global GROQ_COOLDOWN_UNTIL
+    global _LAST_VISION_CALL_TIME
 
     if time.time() < GROQ_COOLDOWN_UNTIL:
         return None
 
+    if isinstance(file_paths, str):
+        file_paths = [file_paths]
+
     async with _get_vision_semaphore():
-        resized_bytes = None
-        image_url = None
         try:
-            resized_bytes, error = await prepare_image_for_analysis(
-                file_path,
-                timeout=VISION_IMAGE_PREP_TIMEOUT_SECONDS,
-            )
+            image_urls = []
+            for fp in file_paths:
+                resized_bytes, error = await prepare_image_for_analysis(
+                    fp,
+                    timeout=VISION_IMAGE_PREP_TIMEOUT_SECONDS,
+                )
+                if not error and resized_bytes:
+                    image_urls.append(f"data:image/jpeg;base64,{base64.b64encode(resized_bytes).decode('utf-8')}")
 
-            if error:
-                logger.error(f"Ошибка подготовки фото: {error}")
+            if not image_urls:
+                logger.error("Ошибка подготовки фото: ни одно фото не удалось обработать.")
                 return None
-
-            image_url = f"data:image/jpeg;base64,{base64.b64encode(resized_bytes).decode('utf-8')}"
 
             context = f" Context from the author: '{caption}'." if caption else ""
             system_prompt = (
@@ -143,16 +149,23 @@ async def describe_image(file_path: str, caption: str = None) -> str:
                                 max_retries=0,
                                 timeout=GROQ_HTTP_TIMEOUT_SECONDS,
                             )
+                            
+                            # Enforce global cooldown of 3 seconds between requests
+                            time_since_last_call = time.time() - _LAST_VISION_CALL_TIME
+                            if time_since_last_call < 3.0:
+                                await asyncio.sleep(3.0 - time_since_last_call)
+                            _LAST_VISION_CALL_TIME = time.time()
 
+                            content_arr = [{"type": "text", "text": system_prompt}]
+                            for iu in image_urls:
+                                content_arr.append({"type": "image_url", "image_url": {"url": iu}})
+                            
                             resp = await client.chat.completions.create(
                                 model=model_name,
                                 messages=[
                                     {
                                         "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": system_prompt},
-                                            {"type": "image_url", "image_url": {"url": image_url}}
-                                        ]
+                                        "content": content_arr
                                     }
                                 ],
                                 max_tokens=1024

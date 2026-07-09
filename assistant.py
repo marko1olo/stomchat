@@ -570,11 +570,27 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         except Exception as e:
             logger.error(f"Failed to send direct assistant reply: {e}")
 async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description):
-    # Enforce 1.5-hour cooldown for passive media trigger
-    state = load_state()
-    last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
-    if datetime.now() - last_run < timedelta(minutes=90):
-        return  # Within 1.5-hour cooldown, skip!
+    import config
+    
+    is_direct_reply = False
+    if getattr(message, 'reply_to_msg_id', None):
+        try:
+            parent = await bot_client.get_messages(message.chat_id, ids=message.reply_to_msg_id)
+            if parent and parent.sender_id == (await bot_client.get_me()).id:
+                is_direct_reply = True
+        except Exception:
+            pass
+
+    is_mentioned = False
+    if text and config.BOT_USERNAME.lower() in text.lower():
+        is_mentioned = True
+
+    # Enforce 1.5-hour cooldown for passive media trigger, unless it's a direct reply or mention
+    if not (is_direct_reply or is_mentioned):
+        state = load_state()
+        last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
+        if datetime.now() - last_run < timedelta(minutes=90):
+            return  # Within 1.5-hour cooldown, skip!
 
     # Construct a simple event-like object for direct compatibility
     class MediaEvent:

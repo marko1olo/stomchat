@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 
 
 def _json_exit(payload, code=0):
@@ -143,7 +144,15 @@ class TextResponse:
         self.text = text
 
 
+_LAST_GEMINI_CALL_TIME = 0.0
+
 async def generate_gemini_text_async(prompt, context, timeout=None):
+    global _LAST_GEMINI_CALL_TIME
+    time_since_last_call = time.time() - _LAST_GEMINI_CALL_TIME
+    if time_since_last_call < 3.0:
+        await asyncio.sleep(3.0 - time_since_last_call)
+    _LAST_GEMINI_CALL_TIME = time.time()
+    
     try:
         payload, error = await _run_json_tool(
             "gemini-text",
