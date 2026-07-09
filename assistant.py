@@ -901,12 +901,25 @@ async def handle_private_message(bot_client, event):
                 "3. 💬 <b>Вести непрерывный диалог</b> — я запоминаю контекст нашей переписки (до 25 сообщений), поэтому вы можете задавать уточняющие вопросы.\n\n"
                 "ℹ️ <i>Используйте кнопки меню внизу для быстрого доступа к функциям или напишите /help!</i>"
             )
-            from telethon import Button
-            keyboard = [
-                [Button.text("📖 Энциклопедия", resize=True), Button.text("🎮 Клинический кейс", resize=True)],
-                [Button.text("🎲 Викторина", resize=True), Button.text("🧮 Калькулятор", resize=True)],
-                [Button.text("⭐ Закладки", resize=True), Button.text("📊 Статистика чата", resize=True)]
-            ]
+            from telethon import types
+            keyboard = types.ReplyKeyboardMarkup(
+                rows=[
+                    types.KeyboardButtonRow(buttons=[
+                        types.KeyboardButton(text="📖 Энциклопедия"),
+                        types.KeyboardButton(text="🎮 Клинический кейс")
+                    ]),
+                    types.KeyboardButtonRow(buttons=[
+                        types.KeyboardButton(text="🎲 Викторина"),
+                        types.KeyboardButton(text="🧮 Калькулятор")
+                    ]),
+                    types.KeyboardButtonRow(buttons=[
+                        types.KeyboardButton(text="⭐ Закладки"),
+                        types.KeyboardButton(text="📊 Статистика чата")
+                    ])
+                ],
+                resize=True,
+                persistent=True
+            )
             await bot_client.send_message(entity=chat_id, message=greeting, buttons=keyboard, parse_mode='html')
             return
             
