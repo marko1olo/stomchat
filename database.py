@@ -282,6 +282,8 @@ async def get_texts_by_ids(msg_ids):
             ).fetchall()
             return {row[0]: (row[1], row[2]) for row in rows}
 
+    return await _run_db(operation)
+
 async def get_reply_chain_texts(msg_id, max_depth=5):
     def operation():
         with _connection() as db:
