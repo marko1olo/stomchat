@@ -800,12 +800,12 @@ async def handle_new_message(event):
                     return True
                 
                 # 2. Прямой запрос к боту
-                if cmd_lower.startswith("/ask ") or (BOT_ID and f"@{BOT_ID}" in cmd) or "@stomchat_bot" in cmd_lower:
+                if cmd_lower.startswith("/ask ") or (assistant.BOT_ID and f"@{assistant.BOT_ID}" in cmd) or "@stomchat_bot" in cmd_lower:
                     question = cmd
                     if cmd_lower.startswith("/ask "):
                         question = cmd[5:].strip()
-                    elif BOT_ID and f"@{BOT_ID}" in cmd:
-                        question = cmd.replace(f"@{BOT_ID}", "").strip()
+                    elif assistant.BOT_ID and f"@{assistant.BOT_ID}" in cmd:
+                        question = cmd.replace(f"@{assistant.BOT_ID}", "").strip()
                     elif "@stomchat_bot" in cmd_lower:
                         import re
                         question = re.sub(r'(?i)@stomchat_bot', '', cmd).strip()
