@@ -438,8 +438,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             # Несколько людей → 50% "Коллеги," / 50% без обращения
             address_prefix = "Коллеги, " if random.random() < 0.5 else ""
         elif sender_first_name:
-            # Один автор → 50% имя / 50% без обращения
-            address_prefix = f"{sender_first_name}, " if random.random() < 0.5 else ""
+            # Один автор → 33% имя / 33% "Коллега," / 33% без обращения
+            roll = random.random()
+            if roll < 0.33:
+                address_prefix = f"{sender_first_name}, "
+            elif roll < 0.66:
+                address_prefix = "Коллега, "
+            else:
+                address_prefix = ""
         else:
             address_prefix = ""
 
