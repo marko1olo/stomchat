@@ -73,9 +73,7 @@ def generate_text(prompt, status_context=None):
     if is_pm:
         models_cascade = [
             ("gemini-3.1-flash-lite", "gemini"),
-            ("gemini-3-flash-preview", "gemini"),
-            (config.GROQ_MODEL, "groq"),
-            ("qwen/qwen3.6-27b", "groq")
+            ("gemini-3-flash-preview", "gemini")
         ]
     else:
         models_cascade = [
