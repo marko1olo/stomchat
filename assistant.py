@@ -614,8 +614,13 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             pass
 
     is_mentioned = False
-    if text and config.BOT_USERNAME.lower() in text.lower():
-        is_mentioned = True
+    if text:
+        try:
+            bot_info = await bot_client.get_me()
+            if bot_info and bot_info.username and bot_info.username.lower() in text.lower():
+                is_mentioned = True
+        except Exception:
+            pass
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     if not (is_direct_reply or is_mentioned):
