@@ -330,7 +330,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     if len(msg_text) > 1000:
                         msg_text = msg_text[:1000] + "... [сообщение обрезано]"
                         
-                    chain.append(f"{name}: {msg_text}")
+                    rep_str = f" (в ответ на #{curr.reply_to.reply_to_msg_id})" if curr.reply_to and curr.reply_to.reply_to_msg_id else ""
+                    chain.append(f"[Сообщение #{curr.id}{rep_str}] {name}: {msg_text}")
                     if curr.reply_to and curr.reply_to.reply_to_msg_id:
                         curr = await event.client.get_messages(event.chat_id, ids=curr.reply_to.reply_to_msg_id)
                     else:
@@ -370,15 +371,18 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 
                 # Fetch parent + last replies for context
                 rows = await query_db_async(
-                    "SELECT sender_name, text FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
+                    "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
                     (reply_to_msg_id, reply_to_msg_id)
                 )
-                context_msgs = [f"{r[0]}: {r[1]}" for r in rows]                
+                context_msgs = []
+                for r in rows:
+                    rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
+                    context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
     # 2. Check Passive Trigger (General Chat Flow)
     if not triggered:
         # Get last 20 messages from DB
         last_msgs = await query_db_async(
-            "SELECT sender_name, text, msg_id FROM messages ORDER BY date DESC LIMIT 20"
+            "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages ORDER BY date DESC LIMIT 20"
         )
         # Reorder chronologically
         last_msgs = last_msgs[::-1]
@@ -398,17 +402,24 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic})"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
-                context_msgs = [f"{r[0]}: {r[1]}" for r in last_msgs]
+                
+                context_msgs = []
+                for r in last_msgs:
+                    rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
+                    context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
                 
                 # If the triggering message is a reply, prepend the parent chain for full context
                 if reply_to_msg_id:
                     try:
                         thread_rows = await query_db_async(
-                            "SELECT sender_name, text FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
+                            "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
                             (reply_to_msg_id, reply_to_msg_id)
                         )
                         if thread_rows:
-                            thread_msgs = [f"{r[0]}: {r[1]}" for r in thread_rows]
+                            thread_msgs = []
+                            for r in thread_rows:
+                                rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
+                                thread_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
                             # Merge: thread first, then recent context (deduplicated)
                             seen = set(thread_msgs)
                             extra = [m for m in context_msgs if m not in seen]
@@ -490,8 +501,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Тебе 15+ лет клинической практики, ты видел всякое, говоришь прямо и не любишь воду.
 Не строишь из себя учебник — ты коллега, который знает ответ и выдаёт его точно и ёмко.
 
-История диалога (последние сообщения):
+История диалога (последние сообщения со структурой ответов):
 {chr(10).join(context_msgs)}
+
+ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос!
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
@@ -505,7 +518,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 3. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
 4. Тон: прямой, уверенный, peer-to-peer, как живой опытный врач-стоматолог в чате с коллегами. Используй привычный профессиональный сленг (снимок вместо рентгенограмма, каналы вместо корневые каналы, коронка, ортопед, терапевт, хирург и т.д.). Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением".
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-6. Только доказанные факты. Домыслы, выдуманные протоколы и дозировки — строго запрещены. Если данных нет — так и скажи прямо. Строго соблюдай точность при упоминании цифр, микрон (например, 40 и 8 микрон), номеров зубов и порядка клинических этапов. Не путай их местами, не придумывай несуществующие сочетания и не искажай последовательность.
+6. Только доказанные факты. Домыслы, выдуманные протоколы и дозировки — строго запрещены. Если данных нет — так и скажи прямо. Не путай последовательность этапов лечения.
 7. Не повторяй то, что уже написали в чате. Принеси что-то новое — факт, уточнение, протокол, нюанс.
 8. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ (например, в конце предложения). Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, только один 😎 или один 😤).
 9. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
@@ -517,8 +530,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и вставляешь точную, полезную реплику.
 Тебе 15+ лет практики, ты говоришь коротко и по делу — как тот человек в чате, которого все слушают.
 
-Текущая переписка в чате:
+Текущая переписка в чате (последние сообщения со структурой ответов):
 {chr(10).join(context_msgs)}
+
+ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения!
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
@@ -532,7 +547,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 3. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
 4. Тон: прямой, уверенный, peer-to-peer, как живой опытный врач-стоматолог в чате с коллегами. Используй привычный профессиональный сленг (снимок вместо рентгенограмма, каналы вместо корневые каналы, коронка, ортопед, терапевт, хирург и т.д.). Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением".
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-6. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...». Строго соблюдай точность при упоминании цифр, микрон (например, 40 и 8 микрон), номеров зубов и порядка клинических этапов. Не путай их местами, не придумывай несуществующие сочетания и не искажай последовательность.
+6. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...». Не путай последовательность этапов лечения.
 7. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
 8. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ (например, в конце предложения). Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, только один 😎 или один 😤).
 9. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**).
