@@ -1,4 +1,5 @@
 import asyncio  # Добавлено
+import os
 import config
 import database
 import logging
@@ -142,7 +143,7 @@ async def _generate_text_singleflight(prompt, kind, chat_id, topic_id, message_c
         "topic_id": topic_id,
         "message_count": message_count,
         "prompt_chars": prompt_chars,
-        "thinking_level": "LOW",
+        "thinking_level": os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL_SUMMARIZER", os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL", "MEDIUM")),
     }
     _write_summary_stage("waiting_for_generation_slot", **context)
     async with _summary_generation_lock:
