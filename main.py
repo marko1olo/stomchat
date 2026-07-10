@@ -882,14 +882,16 @@ async def handle_new_message(event):
             try:
                 if await run_group_features():
                     return
-                await assistant.check_and_trigger_assistant(
+                # Запускаем авто-ассистента. Если он сработал и ответил (вернул True), то mention_trigger пропускаем, чтобы не было двойных ответов
+                replied = await assistant.check_and_trigger_assistant(
                     bot_client, event, msg_id, text, reply_to_msg_id,
                     sender_first_name=sender_first_name
                 )
-                # Bot-mention trigger (always shadow mode until promoted)
-                await assistant.check_bot_mention_trigger(
-                    bot_client, event, msg_id, text, sender_first_name=sender_first_name
-                )
+                if not replied:
+                    # Bot-mention trigger (always shadow mode until promoted)
+                    await assistant.check_bot_mention_trigger(
+                        bot_client, event, msg_id, text, sender_first_name=sender_first_name
+                    )
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
                 

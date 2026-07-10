@@ -12,8 +12,9 @@ import vision
 import database
 logger = logging.getLogger("assistant")
 
-STATE_PATH = "assistant_state.json"
-LOG_PATH = "shadow_assistant.log"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_PATH = os.path.join(SCRIPT_DIR, "assistant_state.json")
+LOG_PATH = os.path.join(SCRIPT_DIR, "shadow_assistant.log")
 TEST_CHAT_ID = -1003735006121
 TEST_TOPIC_ID = 26
 
@@ -271,7 +272,7 @@ def clean_html_formatting(text):
 
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
     if text and text.strip().startswith("/"):
-        return
+        return False
     global BOT_ID
     state = load_state()
     triggered = False
@@ -327,11 +328,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         except Exception as e:
             logger.error(f"Error checking dialogue parent: {e}")
             
-    # Cooldown check for all passive text triggers (1.5 hours)
+    # Cooldown check for all passive text triggers (2 hours)
     if not is_dialogue:
         last_run = datetime.fromisoformat(state.get("last_passive_text_run", "2000-01-01T00:00:00"))
-        if datetime.now() - last_run < timedelta(minutes=90):
-            return  # Within 1.5-hour cooldown, skip all passive text triggers!
+        if datetime.now() - last_run < timedelta(minutes=120):
+            return False  # Within 2-hour cooldown, skip all passive text triggers!
 
     # 2. Check Reply Thread Reaction
     if not triggered and reply_to_msg_id:
@@ -416,7 +417,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 
     if not triggered:
-        return
+        return False
 
     # EXTRACT KEYWORDS & SEARCH DB
     # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
@@ -448,7 +449,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if not is_dialogue and not wiki_corpus and not archive_corpus:
         # If corpus is empty, do not output anything (avoid generic AI fluff)
         logger.info("No matching knowledge corpus found. Skipping assistant run.")
-        return
+        return False
 
     # Определяем обращение ДО промпта — сами, не делегируем модели.
     # Модель просто начнёт с готового префикса, выбор уже сделан.
@@ -552,12 +553,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     
     if error:
         logger.error(f"Assistant Gemini generation error: {error}")
-        return
+        return False
         
     reply_text = getattr(response, "text", None)
     if not reply_text:
         logger.warning("Assistant Gemini returned empty text.")
-        return
+        return False
         
     reply_text = reply_text.strip()
     reply_text = clean_html_formatting(reply_text)
@@ -565,7 +566,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if not is_dialogue:
         if reply_text.upper() == "IGNORE" or "ignore" in reply_text.lower():
             logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
-            return
+            return False
             
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
@@ -580,8 +581,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info("Sent shadow assistant message to Telegram test topic.")
+            return True
         except Exception as e:
             logger.error(f"Failed to send shadow assistant message to Telegram: {e}")
+            return False
     else:
         # Live mode OR direct reply in test chat: reply directly to user message!
         reply_message = reply_text
@@ -594,8 +597,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
+            return True
         except Exception as e:
             logger.error(f"Failed to send direct assistant reply: {e}")
+            return False
 async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description):
     import config
     
@@ -612,12 +617,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     if text and config.BOT_USERNAME.lower() in text.lower():
         is_mentioned = True
 
-    # Enforce 1.5-hour cooldown for passive media trigger, unless it's a direct reply or mention
+    # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     if not (is_direct_reply or is_mentioned):
         state = load_state()
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
-        if datetime.now() - last_run < timedelta(minutes=90):
-            return  # Within 1.5-hour cooldown, skip!
+        if datetime.now() - last_run < timedelta(minutes=120):
+            return  # Within 2-hour cooldown, skip!
 
     # Construct a simple event-like object for direct compatibility
     class MediaEvent:
