@@ -142,6 +142,7 @@ async def _generate_text_singleflight(prompt, kind, chat_id, topic_id, message_c
         "topic_id": topic_id,
         "message_count": message_count,
         "prompt_chars": prompt_chars,
+        "thinking_level": "LOW",
     }
     _write_summary_stage("waiting_for_generation_slot", **context)
     async with _summary_generation_lock:
@@ -300,6 +301,66 @@ def create_telegraph_page(title, html_content):
         logger.error(f"Ошибка Telegraph: {e}")
         return None
 
+def filter_useful_messages(messages):
+    """Фильтрует список сообщений, удаляя короткий флуд, смайлики и неинформативные реплики."""
+    if not messages:
+        return []
+        
+    useful = []
+    # Набор стоматологических и медицинских корней, а также ключевых слов для сохранения реплик
+    dental_keywords = {
+        # Клиника и анатомия
+        "зуб", "канал", "корон", "пломб", "эндо", "имплант", "уступ", "оттиск", 
+        "слепок", "бор", "винир", "пульп", "кариес", "десн", "брекет", "элайнер",
+        "корн", "корень", "анест", "удал", "резек", "синус", "кость", "шов",
+        # Диагностика
+        "сним", "кт", "рентг", "панорам", "кллт", "оптг", "визиограф",
+        # Протоколы и материалы
+        "gbt", "srp", "bopt", "ids", "адгези", "цемент", "композит", "керамик", 
+        "коффер", "кламп", "матриц", "вертипреп", "преп",
+        # Оборудование
+        "микроскоп", "бинокуляры", "оптик", "сканер", "экзокад", "exocad", 
+        "печь", "печать", "3d", "принтер", "автоклав", "мотор",
+        # Бизнес и общение
+        "рубл", "тысяч", "руб", "клиник", "пациент", "стоимост", "цена", "прайс", 
+        "зарплат", "процент", "аренд"
+    }
+    
+    for msg in messages:
+        # Распаковка полей
+        # m_id, name, username, text, m_desc, date, reply_id, m_url = msg
+        m_desc = msg[4] if len(msg) > 4 else None
+        m_url = msg[7] if len(msg) > 7 else None
+        text = msg[3] if len(msg) > 3 else None
+        
+        # Оставляем, если есть описание медиа (описание мема/снимка) или прямая ссылка
+        if m_desc or m_url:
+            useful.append(msg)
+            continue
+            
+        if not text:
+            continue
+            
+        text_strip = text.strip()
+        text_lower = text_strip.lower()
+        
+        # Оставляем, если длина сообщения >= 25 символов
+        if len(text_strip) >= 25:
+            useful.append(msg)
+            continue
+            
+        # Оставляем, если есть знак вопроса
+        if "?" in text_strip:
+            useful.append(msg)
+            continue
+            
+        # Оставляем, если есть важные ключевые корни
+        if any(kw in text_lower for kw in dental_keywords):
+            useful.append(msg)
+            continue
+            
+    return useful
+
 async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_count=0, cached_message=None, delivery_hook=None):
     if not messages:
         return None
@@ -332,18 +393,23 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         return cached_message
     
     # --- 2. ОБЫЧНЫЙ ПУТЬ (ГЕНЕРАЦИЯ) ---
+    filtered_messages = filter_useful_messages(messages)
+    if not filtered_messages:
+        logger.warning(f"No useful messages left for summary in chat={chat_id}")
+        return None
+
     # Сборка лога переписки для нейросети
     full_text_parts = ["ЛОГ ПЕРЕПИСКИ СТОМАТОЛОГОВ:\n\n"]
     media_map = {} # Карта для вставки фото
 
-    logger.info(f"summary build start chat={chat_id} messages={len(messages)}")
-    reply_ids = [msg[6] for msg in messages if msg[6]]
+    logger.info(f"summary build start chat={chat_id} messages={len(filtered_messages)}")
+    reply_ids = [msg[6] for msg in filtered_messages if msg[6]]
     reply_lookup = await asyncio.wait_for(
         database.get_texts_by_ids(reply_ids),
         timeout=30,
     )
 
-    for msg in messages:
+    for msg in filtered_messages:
         # Распаковка всех полей из БД
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg
         
@@ -765,12 +831,18 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # Объявляем переменную msg_count, которой не хватало
     msg_count = len(messages)
 
+    # Фильтруем сообщения от мусора
+    filtered_messages = filter_useful_messages(messages)
+    if not filtered_messages:
+        logger.warning(f"No useful messages left for weekly summary in chat={chat_id}")
+        return None
+
     # 1. СБОРКА ПОЛНОГО ЛОГА
     # Собираем абсолютно всё, чтобы у нейронки была вся фактура
     full_text_parts = ["ПОЛНЫЙ ЛОГ НЕДЕЛИ (Raw Data):\n\n"]
     media_map = {} 
     
-    for msg in messages:
+    for msg in filtered_messages:
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg
         dt_str = date.strftime('%d.%m') if isinstance(date, datetime) else str(date)[:10]
         
