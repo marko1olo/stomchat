@@ -132,7 +132,7 @@ def generate_text(prompt, status_context=None):
             from google import genai
             from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=120000))
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=240000))
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
@@ -226,9 +226,9 @@ def generate_text(prompt, status_context=None):
                 )
                 
                 if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
-                    ban_duration = 3600  # 1 час в секундах
+                    ban_duration = 1200  # 20 минут в секундах
                     ban_model(model_name, ban_duration)
-                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 1 hour. Skipping in cascade.")
+                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 20 minutes. Skipping in cascade.")
                     break
 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
