@@ -315,9 +315,15 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     try:
         recent_texts = []
         # We will get last messages from DB to count words
-        db_history = await database.get_last_messages(event.chat_id, limit=6)
+        db_history = await database.get_last_n_messages(limit=6)
         if db_history:
-            recent_texts = [m.get("text", "") if isinstance(m, dict) else getattr(m, "text", "") or "" for m in db_history]
+            for m in db_history:
+                if isinstance(m, (list, tuple)) and len(m) > 3:
+                    recent_texts.append(m[3] or "")
+                elif isinstance(m, dict):
+                    recent_texts.append(m.get("text", "") or "")
+                else:
+                    recent_texts.append(getattr(m, "text", "") or "")
         length_guideline = calculate_context_length_guidelines(recent_texts)
     except Exception as calc_err:
         logger.error(f"Error calculating length guideline: {calc_err}")
@@ -662,9 +668,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     # Calculate context length guidelines
     try:
         recent_texts = []
-        db_history = await database.get_last_messages(message.chat_id, limit=6)
+        db_history = await database.get_last_n_messages(limit=6)
         if db_history:
-            recent_texts = [m.get("text", "") if isinstance(m, dict) else getattr(m, "text", "") or "" for m in db_history]
+            for m in db_history:
+                if isinstance(m, (list, tuple)) and len(m) > 3:
+                    recent_texts.append(m[3] or "")
+                elif isinstance(m, dict):
+                    recent_texts.append(m.get("text", "") or "")
+                else:
+                    recent_texts.append(getattr(m, "text", "") or "")
         length_guideline = calculate_context_length_guidelines(recent_texts)
     except Exception as calc_err:
         logger.error(f"Error calculating length guideline for media: {calc_err}")
@@ -2439,7 +2451,7 @@ async def check_and_trigger_referee(bot_client, event, text):
         "бред", "чушь", "дичь", "херня", "говно", "полная лажа", 
         "безрукий", "руки оторвать", "какой дурак", "херню", "глупость",
         "рукожоп", "рукожопие", "помойку", "мусорку", "выброси", 
-        "косяк", "ужасно", "кривые руки", "уродство", "жесть", "отстой",
+        "косяк", "ужасно", "кривые руки", "уродство", "отстой",
         "хлам", "ахинея", "ппц", "пиздец", "бредятина",
         "чушь собачья", "какой дебил", "убейся", "дебилизм",
         "идиот", "идиотизм", "тупой", "тупость", "придурок", "даун",
