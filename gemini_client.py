@@ -132,7 +132,7 @@ def generate_text(prompt, status_context=None):
             from google import genai
             from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=10000))
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=120000))
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
@@ -176,12 +176,16 @@ def generate_text(prompt, status_context=None):
                             pass
                     
                     gen_config = types.GenerateContentConfig(thinking_config=thinking_config) if thinking_config else None
-                    response = client.models.generate_content(
+                    response = client.models.generate_content_stream(
                         model=model_name,
                         contents=prompt,
                         config=gen_config
                     )
-                    text_result = response.text
+                    text_result_parts = []
+                    for chunk in response:
+                        if chunk.text:
+                            text_result_parts.append(chunk.text)
+                    text_result = "".join(text_result_parts)
                 else:
                     response = client.chat.completions.create(
                         model=model_name,
