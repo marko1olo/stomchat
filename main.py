@@ -22,6 +22,8 @@ try:
 except Exception:
     psutil = None
 
+PROCESSED_MSG_IDS = []
+
 
 def _env_int(name, default):
     try:
@@ -630,6 +632,14 @@ async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
     try:
         msg_id = event.message.id
+        
+        global PROCESSED_MSG_IDS
+        if msg_id in PROCESSED_MSG_IDS:
+            logger.info(f"Deduplicator: Skipping already processed msg_id={msg_id}")
+            return
+        PROCESSED_MSG_IDS.append(msg_id)
+        if len(PROCESSED_MSG_IDS) > 500:
+            PROCESSED_MSG_IDS.pop(0)
         sender_id = event.sender_id
         
         # Флаг, является ли отправителем сам бот
