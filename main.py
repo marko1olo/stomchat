@@ -900,6 +900,9 @@ async def handle_new_message(event):
             try:
                 if await run_group_features():
                     return
+                # Если сообщение содержит медиа (фото/видео), пропускаем текстовый триггер, так как его обработает медиа-ассистент
+                if event.photo or event.video:
+                    return
                 # Запускаем авто-ассистента. Если он сработал и ответил (вернул True), то mention_trigger пропускаем, чтобы не было двойных ответов
                 replied = await assistant.check_and_trigger_assistant(
                     bot_client, event, msg_id, text, reply_to_msg_id,
