@@ -890,10 +890,7 @@ async def handle_new_message(event):
                         await assistant.handle_term_explainer(bot_client, event, term)
                     return True
 
-                # 5. Пассивный клинический рефери (проверка конфликтов)
-                # Запускается асинхронно, не мешает стандартному ассистенту
-                runtime_guard.create_task(assistant.check_and_trigger_referee(bot_client, event, text), name=f"referee_{msg_id}")
-                
+                pass
             except Exception as e:
                 logger.exception(f"Error executing group feature: {e}")
             return False
@@ -910,9 +907,12 @@ async def handle_new_message(event):
                 )
                 if not replied:
                     # Bot-mention trigger (always shadow mode until promoted)
-                    await assistant.check_bot_mention_trigger(
+                    replied_mention = await assistant.check_bot_mention_trigger(
                         bot_client, event, msg_id, text, sender_first_name=sender_first_name
                     )
+                    # Если бот не ответил ни как пассивный, ни по упоминанию, проверяем рефери!
+                    if not replied_mention:
+                        await assistant.check_and_trigger_referee(bot_client, event, text)
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
                 
