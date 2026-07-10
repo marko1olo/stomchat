@@ -821,7 +821,16 @@ async def handle_new_message(event):
                                 is_super_admin = True
                                 
                         if is_super_admin:
-                            await bot_client.delete_messages(event.chat_id, [reply_to_msg_id, msg_id])
+                            # Split deletion to avoid complete failure if bot cannot delete user's command message
+                            try:
+                                await bot_client.delete_messages(event.chat_id, [reply_to_msg_id])
+                            except Exception as e1:
+                                logger.warning(f"Failed to delete replied message {reply_to_msg_id}: {e1}")
+                            try:
+                                await bot_client.delete_messages(event.chat_id, [msg_id])
+                            except Exception as e2:
+                                logger.warning(f"Failed to delete command message {msg_id}: {e2}")
+                                
                             import database
                             await database.remove_bot_sent_message(reply_to_msg_id)
                             return True
