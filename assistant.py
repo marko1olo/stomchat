@@ -86,21 +86,6 @@ async def init_assistant(bot_client):
         ))
         logger.info("Bot inline command suggestions successfully registered.")
         
-        # Reset passive run cooldowns on startup
-        state = load_state()
-        state["last_passive_run"] = "2000-01-01T00:00:00"
-        state["last_passive_text_run"] = "2000-01-01T00:00:00"
-        state["last_passive_media_run"] = "2000-01-01T00:00:00"
-        save_state(state)
-        logger.info("Assistant state cooldowns reset on startup.")
-        
-        # Reset model bans
-        if os.path.exists("banned_models.json"):
-            try:
-                os.remove("banned_models.json")
-                logger.info("Model ban database cleared on startup.")
-            except Exception as ban_exc:
-                logger.warning(f"Failed to clear model bans: {ban_exc}")
                 
     except Exception as e:
         logger.error(f"Failed to initialize assistant or set commands: {e}")
