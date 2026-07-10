@@ -1032,6 +1032,17 @@ def extract_first_frame(video_path):
     if error:
         logger.error("frame extraction failed: %s", error)
     return path
+class TelethonEventAdapter:
+    def __init__(self, message):
+        self.message = message
+        self.client = message.client
+        
+    def __getattr__(self, name):
+        return getattr(self.message, name)
+        
+    async def get_sender(self):
+        return await self.message.get_sender()
+
 async def sync_history():
     """Докачивает сообщения, пропущенные во время офлайна."""
     last_id = await asyncio.wait_for(database.get_last_msg_id(), timeout=30)
@@ -1041,6 +1052,7 @@ async def sync_history():
 
     logger.info(f"🔄 Проверка пропущенных сообщений с ID {last_id}...")
     count = 0
+    last_synced_message = None
     
     # Запрашиваем сообщения, которые ID которых больше последнего в базе
     async for message in client.iter_messages(config.SOURCE_CHAT_ID, min_id=last_id, reverse=True):
@@ -1083,6 +1095,7 @@ async def sync_history():
                 ),
                 timeout=30,
             )
+            last_synced_message = message
             count += 1
             if count % 25 == 0:
                 runtime_guard.write_heartbeat("sync_history")
@@ -1091,6 +1104,10 @@ async def sync_history():
     
     if count > 0:
         logger.info(f"✅ Синхронизация завершена. Докачано {count} сообщений.")
+        if last_synced_message:
+            logger.info(f"🚀 Обрабатываем последнее пропущенное сообщение msg_id={last_synced_message.id}...")
+            adapter_event = TelethonEventAdapter(last_synced_message)
+            runtime_guard.create_task(handle_new_message(adapter_event), name=f"sync_process_{last_synced_message.id}")
     else:
         logger.info("✅ Пропущенных сообщений не обнаружено.")
 

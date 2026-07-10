@@ -219,9 +219,9 @@ def generate_text(prompt, status_context=None):
                 )
                 
                 if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
-                    ban_duration = 7200  # 2 часа в секундах
+                    ban_duration = 3600  # 1 час в секундах
                     ban_model(model_name, ban_duration)
-                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 2 hours. Skipping in cascade.")
+                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 1 hour. Skipping in cascade.")
                     break
 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:

@@ -85,6 +85,23 @@ async def init_assistant(bot_client):
             ]
         ))
         logger.info("Bot inline command suggestions successfully registered.")
+        
+        # Reset passive run cooldowns on startup
+        state = load_state()
+        state["last_passive_run"] = "2000-01-01T00:00:00"
+        state["last_passive_text_run"] = "2000-01-01T00:00:00"
+        state["last_passive_media_run"] = "2000-01-01T00:00:00"
+        save_state(state)
+        logger.info("Assistant state cooldowns reset on startup.")
+        
+        # Reset model bans
+        if os.path.exists("banned_models.json"):
+            try:
+                os.remove("banned_models.json")
+                logger.info("Model ban database cleared on startup.")
+            except Exception as ban_exc:
+                logger.warning(f"Failed to clear model bans: {ban_exc}")
+                
     except Exception as e:
         logger.error(f"Failed to initialize assistant or set commands: {e}")
 
@@ -1484,7 +1501,7 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     Этап 1: отправляет контекст в LLM с вопросом — стоит ли отвечать?
     Этап 2: если YES — генерирует живой ответ и отправляет (shadow mode пока не промотировано).
     """
-    BOT_MENTION_SHADOW_MODE = True  # Сменить на False чтобы выкатить в боевой
+    BOT_MENTION_SHADOW_MODE = False  # Выкачено в боевой
 
     text_lower = (text or "").lower()
     # Триггер: упомянули "бот" во всех возможных падежах и числах (бот, бота, боту, ботом, боте, боты, ботов, ботам, ботами, ботах)
@@ -1544,7 +1561,7 @@ NO — если это случайное упоминание, обсужден
 Используй эмоциональные смайлики (😎, 😂, 😤, 🤯 и т.д.) строго в ОДНОМ месте за весь ответ. Подряд можно ставить только 2-3 ржущих смайла (😂😂😂). Все остальные — строго по одному! Не раскидывай их по всему тексту.
 Разметка: только HTML <b>жирный</b>.
 Если непонятно чего хотят или не хватает данных — смело переспрашивай по-простому. Будь проактивен: если видишь, где можно уберечь от ошибки или подсказать лучший вариант — предлагай решение сам.
-ЕСЛИ ТЕБЯ СПРАШИВАЮТ "что ты умеешь", "какие команды" и т.п., коротко и дружелюбно перечисли функционал: разбор клинических вопросов, анализ снимков (Vision), энциклопедию /wiki, кейсы /case, калькулятор /calc, статистику /stats. Не придумывай лишнего!
+ЕСЛИ ТЕБЯ СПРАШИВАЮТ "что ты умеешь", "какие команды" и т.п., коротко и дружелюбно перечисли функционал (анализ снимков, энциклопедию, кейсы). Просто скажи "пиши мне в ЛС". Команды обертывай в моноширинный шрифт (теги <code>) чтобы их не кликали случайно, например <code>/wiki</code>. Не придумывай лишнего!
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "MEDIUM"}
         reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=60)
