@@ -384,6 +384,17 @@ async def scheduler_task(bot_client):
         except Exception as e:
             logger.error(f"Ошибка планировщика: {e}")
             await asyncio.sleep(60)
+
+async def pm_ping_scheduler_task(bot_client):
+    """Задача периодической проверки неактивности пользователей в ЛС и отправки им пинга."""
+    logger.info("📅 Планировщик пингов в ЛС активен.")
+    while True:
+        try:
+            await assistant.check_and_send_pm_pings(bot_client)
+        except Exception as e:
+            logger.error(f"Error in pm_ping_scheduler_task: {e}")
+        await asyncio.sleep(3600)  # Проверка каждый час
+
 # 1. Клиент Юзербота (Твой аккаунт) - только слушает
 client = TelegramClient(
     config.SESSION_NAME,
@@ -1210,6 +1221,7 @@ async def start_bot():
     
     runtime_guard.create_task(heartbeat_task(), "heartbeat")
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
+    runtime_guard.create_task(pm_ping_scheduler_task(bot_client), "pm_ping_scheduler")
     runtime_guard.create_task(runtime_telemetry_task(), "runtime_telemetry")
     runtime_guard.create_task(summary_watchdog_task(), "summary_watchdog")
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")

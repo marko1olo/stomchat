@@ -497,6 +497,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Похожие обсуждения из Архива чата:
 {archive_corpus}
@@ -526,6 +527,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Похожие обсуждения из Архива чата:
 {archive_corpus}
@@ -606,6 +608,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     if msg_id in REPLIED_MSG_IDS:
         return False
     import config
+    state = load_state()
     
     is_direct_reply = False
     if getattr(message, 'reply_to_msg_id', None):
@@ -626,8 +629,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             pass
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
-    if not (is_direct_reply or is_mentioned):
-        state = load_state()
+    is_passive = not (is_direct_reply or is_mentioned)
+    if is_passive:
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
         if datetime.now() - last_run < timedelta(minutes=120):
             return  # Within 2-hour cooldown, skip!
@@ -681,8 +684,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     if not triggered:
         return
         
-    state["last_passive_media_run"] = datetime.now().isoformat()
-    save_state(state)
+    if is_passive:
+        state["last_passive_media_run"] = datetime.now().isoformat()
+        save_state(state)
 
     # BUILD PROMPT
     if is_dental:
@@ -698,6 +702,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Похожие обсуждения из Архива чата:
 {archive_corpus}
@@ -822,6 +827,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(справочная информация отсутствует)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Задачи на этот шаг (Шаг {current_step + 1} из 4):
 1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично (опирайся на стандарты из Базы Знаний, если применимо).
@@ -842,6 +848,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(справочная информация отсутствует)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Задачи на этот финальный шаг:
 1. Подведи итоги действий врача (опирайся на стандарты из Базы Знаний, если применимо).
@@ -895,6 +902,18 @@ async def handle_private_message(bot_client, event):
     try:
         chat_id = event.chat_id
         text = (event.message.message or "").strip()
+        
+        # Record user activity for DM proactive pings
+        try:
+            state = load_state()
+            pings = state.setdefault("pm_pings", {})
+            pings[str(chat_id)] = {
+                "last_activity": datetime.now().isoformat(),
+                "ping_sent": False
+            }
+            save_state(state)
+        except Exception as ping_err:
+            logger.error(f"Failed to record ping activity for {chat_id}: {ping_err}")
 
         # Map text menu button clicks to slash commands
         btn_mapping = {
@@ -1412,6 +1431,7 @@ async def handle_private_message(bot_client, event):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Похожие обсуждения из Архива чата:
 {archive_corpus}
@@ -1477,6 +1497,7 @@ async def handle_private_message(bot_client, event):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(не найдено — свободная беседа)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Похожие обсуждения из Архива чата:
 {archive_corpus or ""}
@@ -1709,6 +1730,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Максимально 600 символов. Никаких приветствий, обращений и пожеланий. Сразу ответ.
@@ -2406,6 +2428,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(справочная информация отсутствует)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Напиши научно обоснованную, спокойную и примиряющую реплику на основе Справки из Базы Знаний. Разъясни доказательный клинический стандарт по теме спора, чтобы миролюбиво разрешить спор.
 
@@ -2427,6 +2450,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(нет точных справочных данных по теме)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 Напиши естественную, живую реплику от лица коллеги. Вырази своё мнение, основываясь на Базе Знаний, но пиши простым человеческим языком практикующего врача (без занудства и канцелярита). Не читай нотации. Пиши так, будто общаешься с равными коллегами в ординаторской.
 
@@ -2476,6 +2500,7 @@ async def handle_term_explainer(bot_client, event, term):
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Объясни термин ровно в 1-2 предложениях. Предельно кратко и научно-популярно для коллег.
@@ -2501,3 +2526,65 @@ async def handle_term_explainer(bot_client, event, term):
         logger.info(f"Term explanation sent for term={term}")
     except Exception as e:
         logger.error(f"Failed to send term explanation: {e}")
+
+
+async def check_and_send_pm_pings(bot_client):
+    """Проверяет неактивных пользователей в ЛС и отправляет им пинг."""
+    try:
+        state = load_state()
+        pings = state.get("pm_pings", {})
+        if not pings:
+            return
+            
+        now = datetime.now()
+        updated = False
+        
+        for chat_id_str, info in list(pings.items()):
+            try:
+                last_activity = datetime.fromisoformat(info.get("last_activity"))
+                ping_sent = info.get("ping_sent", False)
+                
+                # Если прошло больше 48 часов и пинг еще не отправлен
+                if now - last_activity > timedelta(hours=48) and not ping_sent:
+                    chat_id = int(chat_id_str)
+                    logger.info(f"Generating proactive DM ping for chat_id={chat_id}...")
+                    
+                    # Загружаем последние сообщения, чтобы сформировать контекстный пинг
+                    history = await database.get_last_pm_messages(chat_id, limit=6)
+                    context_str = "\n".join([f"{m['sender_name']}: {m['text']}" for m in history])
+                    
+                    prompt = f"""
+Ты — опытный, живой стоматолог-практик из чата "StomChat". 
+Один из твоих коллег общался с тобой в личных сообщениях, но пропал и не писал уже 2 дня.
+Вот история вашей последней переписки:
+{context_str}
+
+Задачи:
+1. Напиши ОДНО короткое, дружелюбное предложение, чтобы возобновить диалог.
+2. Спроси, как продвигается его клинический случай или тема, которую вы обсуждали в конце (например, BOPT, имплантат, синус-лифтинг, КТ, или просто спроси как дела/работа, если тема была свободной).
+3. Тон: теплый, неформальный, коллегиальный, без банальностей и шаблонов. Говори как человек, а не как автоответчик.
+4. Длина: строго 1 предложение! Без приветствий и официоза.
+5. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+                    status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
+                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+                    
+                    if not error and response and getattr(response, "text", None):
+                        reply_text = response.text.strip()
+                        reply_text = clean_html_formatting(reply_text)
+                        
+                        await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
+                        await database.save_pm_message(chat_id, "Assistant", reply_text)
+                        
+                        info["ping_sent"] = True
+                        updated = True
+                        logger.info(f"Proactive DM ping sent to chat_id={chat_id}: '{reply_text}'")
+                    else:
+                        logger.error(f"Failed to generate DM ping for chat_id={chat_id}: {error}")
+            except Exception as e:
+                logger.error(f"Error processing DM ping for user {chat_id_str}: {e}")
+                
+        if updated:
+            save_state(state)
+    except Exception as g_err:
+        logger.error(f"Global error in check_and_send_pm_pings: {g_err}")
