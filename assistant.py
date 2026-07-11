@@ -2638,6 +2638,63 @@ async def analyze_dispute_need(context_msgs):
     return False
 
 
+async def check_referee_triage(context_msgs):
+    """
+    Отправляет контекст спора в Llama для подтверждения:
+    действительно ли между пользователями происходит токсичный/личный конфликт,
+    требующий вмешательства координатора чата.
+    """
+    try:
+        context_str = "\n".join(context_msgs)
+        triage_prompt = f"""Ты - ИИ-координатор стоматологического Telegram-чата StomChat.
+Твоя задача - оценить контекст переписки и решить, действительно ли между участниками чата разгорается токсичный спор, личный конфликт или агрессивная перепалка, требующая вежливого вмешательства координатора чата.
+
+Критерии для вмешательства (should_intervene: true):
+1. Участники переходят на личности, оскорбляют друг друга, ругаются, проявляют явную агрессию.
+2. Идет острая, неконструктивная перепалка с использованием токсичных выражений.
+
+Критерии для игнорирования (should_intervene: false):
+1. Коллеги ведут обычный, пусть даже эмоциональный профессиональный спор о клинических методах или материалах без личных оскорблений.
+2. В сообщениях проскочило эмоциональное слово (например, "косяк", "бред", "чушь"), но оно относится к материалу, методике или клиническому случаю, а не к личности собеседника.
+3. Сообщение содержит вопрос или бытовое обсуждение, а не конфликт.
+
+Контекст переписки:
+{context_str}
+
+Отвечай СТРОГО в формате JSON без какого-либо дополнительного текста (без разметки markdown вроде ```json):
+{{
+  "should_intervene": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "короткое объяснение на русском"
+}}
+"""
+        triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=25)
+        
+        if error or not response:
+            logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
+            return False
+            
+        text = response.text.strip() if hasattr(response, "text") else str(response).strip()
+        if "```" in text:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1:
+                text = text[start:end+1]
+        
+        import json
+        data = json.loads(text)
+        should_intervene = data.get("should_intervene", False)
+        reason = data.get("reason", "No reason provided")
+        confidence = data.get("confidence", 1.0)
+        
+        logger.info(f"Llama Referee Triage decision: should_intervene={should_intervene} (confidence={confidence}). Reason: {reason}")
+        return should_intervene
+    except Exception as e:
+        logger.error(f"Error in Llama referee triage: {e}. Defaulting to False.")
+        return False
+
+
 async def check_and_trigger_referee(bot_client, event, text):
     """Пассивный клинический рефери для предотвращения конфликтов."""
     global LAST_REFEREE_RUN
@@ -2700,6 +2757,35 @@ async def check_and_trigger_referee(bot_client, event, text):
             logger.error(f"Error checking reply chain dispute: {chain_err}")
             
     if not should_intervene:
+        return
+        
+    # 4. Собираем контекст для триажа рефери
+    context_msgs = []
+    if event.message.reply_to:
+        try:
+            context_msgs = await database.get_reply_chain_texts(msg_id, max_depth=5)
+        except Exception:
+            pass
+            
+    if not context_msgs:
+        try:
+            db_history = await database.get_last_n_messages(limit=5)
+            db_history = db_history[::-1]
+            for m in db_history:
+                name = m[4] if (isinstance(m, (list, tuple)) and len(m) > 4) else "Участник"
+                msg_txt = m[6] if (isinstance(m, (list, tuple)) and len(m) > 6) else ""
+                if msg_txt:
+                    context_msgs.append(f"{name}: {msg_txt}")
+        except Exception as e:
+            logger.error(f"Failed to fetch db history for referee triage: {e}")
+            
+    if not context_msgs:
+        context_msgs = [text]
+
+    # 5. Запускаем Llama-триаж для подтверждения конфликта
+    should_reply = await check_referee_triage(context_msgs)
+    if not should_reply:
+        logger.info("Llama referee triage decided NOT to intervene. Cancelling referee trigger.")
         return
         
     # Разрешаем интервенции не чаще одного раза в 5 минут
