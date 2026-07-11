@@ -305,11 +305,34 @@ def clean_html_formatting(text):
     return text
 
 
+def is_negative_feedback(text):
+    if not text:
+        return False
+    text_lower = text.strip().lower()
+    stop_words = [
+        "назойлив", "надоел", "удали", "отвали", "замолчи", "хватит", "затычка",
+        "выруби", "выключи", "заткнись", "бесишь", "достала", "достали", 
+        "удалить бота", "выкинуть", "кикнуть", "помолчи", "не зуди"
+    ]
+    return any(sw in text_lower for sw in stop_words)
+
+
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
     if text and text.strip().startswith("/"):
         return False
     global BOT_ID
     state = load_state()
+    
+    # Check if the bot is temporarily silenced
+    silenced_until_str = state.get("silenced_until")
+    if silenced_until_str:
+        try:
+            silenced_until = datetime.fromisoformat(silenced_until_str)
+            if datetime.now() < silenced_until:
+                logger.info(f"Bot is currently silenced until {silenced_until_str}. Skipping trigger check.")
+                return False
+        except Exception as e:
+            logger.error(f"Error parsing silenced_until: {e}")
     
     # Calculate context length guidelines
     try:
@@ -349,15 +372,28 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
             if parent_msg and parent_msg.sender_id == BOT_ID:
                 is_dialogue = True
-                triggered = True
-                trigger_reason = f"Dialogue reply to bot message {reply_to_msg_id}"
+                
+                # Check for criticism / negative feedback from user
+                if is_negative_feedback(text):
+                    logger.warning(f"Negative feedback detected in dialogue reply: '{text}'. Silencing bot.")
+                    # Set 4-hour silence
+                    state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                    save_state(state)
+                    # Apologize politely and shut up
+                    apology = "Понял, умолкаю. Если понадоблюсь — позовите."
+                    await event.reply(apology)
+                    return True
                 
                 # Reconstruct reply chain
                 chain = []
                 curr = event.message
-                for _ in range(5):
+                bot_msg_count = 0
+                for _ in range(6):
                     if not curr:
                         break
+                    if curr.sender_id == BOT_ID:
+                        bot_msg_count += 1
+                        
                     sender = await curr.get_sender()
                     name = "User"
                     if sender:
@@ -378,6 +414,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         curr = await event.client.get_messages(event.chat_id, ids=curr.reply_to.reply_to_msg_id)
                     else:
                         break
+                
+                # Dialogue length check: maximum 2 bot replies in the chain
+                if bot_msg_count >= 2:
+                    logger.info(f"Dialogue chain already has {bot_msg_count} bot replies. Stopping to avoid flooding.")
+                    return False
+                
+                triggered = True
+                trigger_reason = f"Dialogue reply to bot message {reply_to_msg_id}"
                 context_msgs = chain[::-1]
         except Exception as e:
             logger.error(f"Error checking dialogue parent: {e}")
@@ -430,18 +474,24 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         last_msgs = last_msgs[::-1]
         
         if last_msgs:
-            # Check triggers: last message has '?' OR last messages contain dental trigger words
+            # Check triggers: the triggering message (last message) itself must contain dental keywords
             last_text = last_msgs[-1][1] or ""
-            has_question = "?" in last_text
+            last_text_lower = last_text.lower()
             
-            # Count dental keywords in context
-            full_context_text = " ".join([m[1] for m in last_msgs if m[1]]).lower()
-            has_dental_topic = any(kw in full_context_text for kw in DENTAL_KEYWORDS)
+            # Message contains dental keyword
+            msg_has_dental_kw = any(kw in last_text_lower for kw in DENTAL_KEYWORDS)
+            # Message contains a question mark
+            msg_has_question = "?" in last_text
             
-            # Trigger on ANY question OR if there is an active dental topic
-            if has_question or has_dental_topic:
+            # Passive trigger fires only in two cases:
+            # 1. Message contains a dental keyword AND is a question (e.g. "какой имплант лучше?")
+            # 2. Message contains a dental keyword AND is a descriptive clinical sentence (len >= 40)
+            is_dental_question = msg_has_dental_kw and msg_has_question
+            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 40
+            
+            if is_dental_question or is_long_dental_statement:
                 triggered = True
-                trigger_reason = f"Passive trigger (has_question={has_question}, has_dental_topic={has_dental_topic})"
+                trigger_reason = f"Passive trigger (is_dental_question={is_dental_question}, is_long_dental_statement={is_long_dental_statement})"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
                 
@@ -681,6 +731,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     import config
     state = load_state()
     
+    # Check if the bot is temporarily silenced
+    silenced_until_str = state.get("silenced_until")
+    if silenced_until_str:
+        try:
+            silenced_until = datetime.fromisoformat(silenced_until_str)
+            if datetime.now() < silenced_until:
+                logger.info(f"Bot is currently silenced until {silenced_until_str}. Skipping media trigger check.")
+                return False
+        except Exception as e:
+            logger.error(f"Error parsing silenced_until: {e}")
+    
     # Calculate context length guidelines
     try:
         recent_texts = []
@@ -762,12 +823,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         is_dental = True
         wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
     else:
-        # Non-dental Meme/Coffee: Balancer probability check (35% chance to reply)
-        # Bypassed only if the user explicitly asks a question (already handled above)
-        roll = random.random()
-        if roll < 0.35:
+        # Non-dental Meme/Coffee: Trigger chitchat only if NOT passive (direct reply/mention)
+        if not is_passive:
             triggered = True
-            trigger_reason = f"Non-dental media chitchat balancer (roll={roll:.2f} < 0.35)"
+            trigger_reason = "Non-dental direct reply/mention on media"
             is_dental = False
             
     if not triggered:
