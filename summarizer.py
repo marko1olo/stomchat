@@ -351,8 +351,8 @@ def filter_useful_messages(messages):
         
 
             
-        # Оставляем, если есть знак вопроса
-        if "?" in text_strip:
+        # Оставляем, если есть знак вопроса и длина сообщения больше 7 символов
+        if "?" in text_strip and len(text_strip) > 7:
             useful.append(msg)
             continue
             

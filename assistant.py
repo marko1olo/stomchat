@@ -2668,11 +2668,11 @@ async def analyze_dispute_need(context_msgs):
 
 Правило: выведи строго одно слово 'YES' (если спор/конфликт есть) или 'NO' (если это обычное мирное обсуждение, шутка или обмен опытом без спора). Никаких других слов или комментариев не пиши.
 """
-    status_ctx = {"kind": "referee_analyser", "thinking_level": "HIGH"}
+    status_ctx = {"kind": "referee_analyser", "thinking_level": "LOW"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=45)
     if response and getattr(response, "text", None):
         res = response.text.strip().upper()
-        if "YES" in res:
+        if res.startswith("YES"):
             return True
     return False
 
