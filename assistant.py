@@ -312,9 +312,51 @@ def is_negative_feedback(text):
     stop_words = [
         "назойлив", "надоел", "удали", "отвали", "замолчи", "хватит", "затычка",
         "выруби", "выключи", "заткнись", "бесишь", "достала", "достали", 
-        "удалить бота", "выкинуть", "кикнуть", "помолчи", "не зуди"
+        "удалить бота", "выкинуть", "кикнуть", "помолчи", "не зуди",
+        "закрой рот", "завали", "заткни", "закройся", "не пиши", "хватит спамить",
+        "выключите", "забаньте", "подбанить"
     ]
     return any(sw in text_lower for sw in stop_words)
+
+
+async def check_and_apply_silence(event, text, reply_to_msg_id):
+    """
+    Проверяет, содержит ли сообщение критику/требование выключить бота.
+    Если да - отправляет извинение, вешает 4-часовую тишину и возвращает True.
+    """
+    if not text:
+        return False
+        
+    text_lower = text.lower()
+    is_about_bot = False
+    
+    # Check if reply to bot
+    global BOT_ID
+    if reply_to_msg_id and BOT_ID:
+        try:
+            parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+            if parent_msg and parent_msg.sender_id == BOT_ID:
+                is_about_bot = True
+        except Exception:
+            pass
+            
+    bot_keywords = ["бот", "робот", "координатор", "@docendobot", "@stomchat_bot", "душный"]
+    if any(bkw in text_lower for bkw in bot_keywords):
+        is_about_bot = True
+        
+    if is_about_bot and is_negative_feedback(text):
+        logger.warning(f"Global negative feedback detected: '{text}'. Silencing bot.")
+        state = load_state()
+        state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+        save_state(state)
+        apology = "Понял, умолкаю. Если понадоблюсь - позовите."
+        try:
+            await event.reply(apology)
+        except Exception as reply_err:
+            logger.error(f"Failed to reply with apology: {reply_err}")
+        return True
+        
+    return False
 
 
 async def check_llm_triage(context_msgs):
@@ -377,6 +419,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if text and text.strip().startswith("/"):
         return False
     global BOT_ID
+    
+    # 1. Проверяем глобальную критику / требование выключить бота
+    if await check_and_apply_silence(event, text, reply_to_msg_id):
+        return True
+
     state = load_state()
     
     # Check if the bot is temporarily silenced
@@ -1775,6 +1822,10 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     Этап 1: отправляет контекст в LLM с вопросом — стоит ли отвечать?
     Этап 2: если YES — генерирует живой ответ и отправляет (shadow mode пока не промотировано).
     """
+    # 1. Проверяем глобальную критику / требование выключить бота
+    if await check_and_apply_silence(event, text, getattr(event.message, 'reply_to_msg_id', None)):
+        return True
+
     BOT_MENTION_SHADOW_MODE = False  # Выкачено в боевой
 
     text_lower = (text or "").lower()
@@ -2593,8 +2644,29 @@ async def check_and_trigger_referee(bot_client, event, text):
     chat_id = event.chat_id
     msg_id = event.message.id
     
+    # 1. Проверяем тишину
+    state = load_state()
+    silenced_until_str = state.get("silenced_until")
+    if silenced_until_str:
+        try:
+            silenced_until = datetime.fromisoformat(silenced_until_str)
+            if datetime.now() < silenced_until:
+                logger.info(f"Bot is currently silenced. Skipping referee trigger.")
+                return
+        except Exception as e:
+            logger.error(f"Error parsing silenced_until in referee: {e}")
+
     text_lower = text.lower()
-    has_conflict_kw = any(kw in text_lower for kw in [
+    
+    # 2. Исключаем обсуждение самого бота (чтобы не было автозацикливания при критике)
+    bot_words = ["бот", "боту", "ботом", "боте", "боты", "ботов", "ботам", "ботами", "ботах", "@docendobot", "@stomchat_bot"]
+    if any(bw in text_lower for bw in bot_words):
+        logger.info("Message mentions bot, skipping referee to avoid feedback loops.")
+        return
+
+    # 3. Регулярка с границами слов для точного совпадения токсичных ключевиков
+    import re
+    escaped_kws = [re.escape(kw) for kw in [
         "бред", "чушь", "дичь", "херня", "говно", "полная лажа", 
         "безрукий", "руки оторвать", "какой дурак", "херню", "глупость",
         "рукожоп", "рукожопие", "помойку", "мусорку", "выброси", 
@@ -2609,7 +2681,9 @@ async def check_and_trigger_referee(bot_client, event, text):
         "позор", "стыдоба", "срач", "клоун", "цирк", "клоунада",
         "курам на смех", "хрень", "галиматья", "шарага", "колхозный",
         "безрукие", "руки отсохнут", "убожество", "убого"
-    ])
+    ]]
+    pattern = rf"\b({'|'.join(escaped_kws)})(е|я|ом|а|ы|и|у|ой|ем|ах|ами|ями|ов|ев)?\b"
+    has_conflict_kw = bool(re.search(pattern, text_lower))
     
     should_intervene = has_conflict_kw
     chain_msgs = []
@@ -2648,15 +2722,16 @@ async def check_and_trigger_referee(bot_client, event, text):
     
     if style == "joke":
         prompt = f"""
-Ты — юмористический клинический рефери стоматологического сообщества "StomChat". 
-В чате начался агрессивный спор (градус эмоций зашкаливает). Вот последнее сообщение: "{text}".
+Ты - тактичный и мудрый клинический координатор стоматологического сообщества "StomChat". 
+В чате начался агрессивный спор (градус эмоций высок). Последнее сообщение: "{text}".
 
-Напиши короткую, исключительно ироничную и миролюбивую шутку, используя профессиональный стоматологический юмор (например, про перегретые боры, адгезивный протокол, грязный коффердам или усадку), чтобы разрядить агрессию.
+Напиши очень короткую, спокойную, дружелюбную реплику, чтобы мягко разрядить обстановку. Можно использовать легкую, уместную стоматологическую метафору или легкий профессиональный юмор, но без заезженных клише (никакого фанатизма про "перегретые боры" или "коффердам дзен", если это не ложится идеально). 
+Реплика должна призывать коллег к конструктивному общению и снижению градуса эмоций.
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Длина — максимум 220 символов! Коротко и метко.
-2. Никаких приветствий и концовок. Сразу суть.
-3. Тон: дружелюбный, ироничный, призывающий успокоиться.
+1. Длина - строго максимум 180 символов! Будь краток.
+2. Никаких приветствий, обращений и концовок. Сразу суть.
+3. Тон: нейтральный, вежливый, миролюбивый.
 4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
     elif style == "scientific":
