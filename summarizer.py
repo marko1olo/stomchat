@@ -349,10 +349,7 @@ def filter_useful_messages(messages):
         text_strip = text.strip()
         text_lower = text_strip.lower()
         
-        # Оставляем, если длина сообщения >= 70 символов
-        if len(text_strip) >= 70:
-            useful.append(msg)
-            continue
+
             
         # Оставляем, если есть знак вопроса
         if "?" in text_strip:
