@@ -761,8 +761,13 @@ async def handle_new_message(event):
                 timeout=30,
             )
 
-            # Если сообщение от самого бота, мы его сохранили в базу, но больше ничего не делаем
-            if is_bot:
+            # Если сообщение от самого бота или от другого бота, мы его сохранили в базу, но больше ничего не делаем
+            is_other_bot = False
+            if sender and getattr(sender, 'bot', False) and not is_bot:
+                is_other_bot = True
+                logger.info(f"Deduplicator: Message is from another bot (sender_id={sender_id}, username={sender_username}). Skipping triggers.")
+                
+            if is_bot or is_other_bot:
                 return
 
             # Check bookmark saving command

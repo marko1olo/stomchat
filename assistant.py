@@ -416,6 +416,9 @@ async def check_llm_triage(context_msgs):
 
 
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
+    if text and len(text) > 1500:
+        text = text[:1500] + "..."
+
     if text and text.strip().startswith("/"):
         return False
     global BOT_ID
@@ -1817,6 +1820,9 @@ async def handle_private_message(bot_client, event):
 
 
 async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_first_name=None):
+    if text and len(text) > 1500:
+        text = text[:1500] + "..."
+
     """
     Срабатывает когда кто-то пишет 'бот' в чате.
     Этап 1: отправляет контекст в LLM с вопросом — стоит ли отвечать?
@@ -2696,6 +2702,9 @@ async def check_referee_triage(context_msgs):
 
 
 async def check_and_trigger_referee(bot_client, event, text):
+    if text and len(text) > 1500:
+        text = text[:1500] + "..."
+
     """Пассивный клинический рефери для предотвращения конфликтов."""
     global LAST_REFEREE_RUN
     chat_id = event.chat_id
