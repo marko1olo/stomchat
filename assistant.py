@@ -317,6 +317,62 @@ def is_negative_feedback(text):
     return any(sw in text_lower for sw in stop_words)
 
 
+async def check_llm_triage(context_msgs):
+    """
+    Отправляет последние сообщения в Llama-3 для принятия решения:
+    стоит ли вступать в разговор. Возвращает True/False.
+    """
+    try:
+        context_str = "\n".join(context_msgs)
+        triage_prompt = f"""Ты — ИИ-координатор стоматологического Telegram-чата StomChat.
+Твоя задача — оценить контекст переписки и решить, уместно ли боту ответить на последнее сообщение.
+
+Критерии для ответа (should_reply: true):
+1. Последнее сообщение содержит реальный клинический вопрос или описание стоматологической проблемы (боль, имплантация, ортодонтия, препарирование, снимки КТ и т.д.), требующие экспертного мнения.
+2. Человек обращается напрямую к боту или отвечает на сообщение бота, продолжая содержательный стоматологический спор/диалог.
+
+Критерии для игнорирования (should_reply: false):
+1. Последнее сообщение — это флуд, шутка, приветствие, прощание, оффтоп, личная переписка («напиши в лс», «как дела», «встретимся»).
+2. Человек критикует бота, грубит или требует замолчать.
+3. В сообщении упоминаются стоматологические термины, но контекст не подразумевает вопроса или темы для экспертного обсуждения.
+
+Последние сообщения в чате:
+{context_str}
+
+Отвечай СТРОГО в формате JSON без какого-либо дополнительного текста (без разметки markdown вроде ```json):
+{{
+  "should_reply": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "короткое объяснение причины на русском"
+}}
+"""
+        triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=25)
+        
+        if error or not response:
+            logger.warning(f"Llama triage generation failed: {error}. Defaulting to True to avoid blocking.")
+            return True
+            
+        text = response.text.strip() if hasattr(response, "text") else str(response).strip()
+        if "```" in text:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1:
+                text = text[start:end+1]
+        
+        import json
+        data = json.loads(text)
+        should_reply = data.get("should_reply", True)
+        reason = data.get("reason", "No reason provided")
+        confidence = data.get("confidence", 1.0)
+        
+        logger.info(f"Llama Triage decision: should_reply={should_reply} (confidence={confidence}). Reason: {reason}")
+        return should_reply
+    except Exception as e:
+        logger.error(f"Error in Llama triage check: {e}. Defaulting to True.")
+        return True
+
+
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
     if text and text.strip().startswith("/"):
         return False
@@ -519,6 +575,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     except Exception as thread_err:
                         logger.warning(f"Failed to fetch reply thread for passive context: {thread_err}")
 
+
+    # Run Llama Triage on passive triggers (to avoid false positives)
+    if triggered and not is_dialogue and not (reply_to_msg_id and "discussion thread" in trigger_reason):
+        should_reply = await check_llm_triage(context_msgs)
+        if not should_reply:
+            logger.info("Llama triage decided NOT to reply. Cancelling trigger.")
+            return False
 
     if not triggered:
         return False

@@ -89,12 +89,20 @@ def ban_model(model_name, duration_seconds):
         logger.warning(f"Failed to save banned models: {e}")
 def generate_text(prompt, status_context=None):
     """Generate summary text through Gemini with Groq fallback."""
-    is_pm = status_context and status_context.get("kind") in ("pm_chat", "assistant_media_pm")
+    kind = status_context.get("kind") if status_context else None
+    is_pm = kind in ("pm_chat", "assistant_media_pm")
+    is_triage = kind == "llama_triage"
     thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
     
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
     
-    if is_pm:
+    if is_triage:
+        models_cascade = [
+            ("llama-3.3-70b-versatile", "groq"),
+            ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini")
+        ]
+    elif is_pm:
         models_cascade = [
             ("gemini-3.1-flash-lite", "gemini"),
             ("gemini-3-flash-preview", "gemini"),
