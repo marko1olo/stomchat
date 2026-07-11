@@ -95,6 +95,7 @@ async def describe_image(file_paths, caption: str = None) -> str:
     async with _get_vision_semaphore():
         try:
             image_urls = []
+            images_data = []
             for fp in file_paths:
                 resized_bytes, error = await prepare_image_for_analysis(
                     fp,
@@ -102,6 +103,7 @@ async def describe_image(file_paths, caption: str = None) -> str:
                 )
                 if not error and resized_bytes:
                     image_urls.append(f"data:image/jpeg;base64,{base64.b64encode(resized_bytes).decode('utf-8')}")
+                    images_data.append(resized_bytes)
 
             if not image_urls:
                 logger.error("Ошибка подготовки фото: ни одно фото не удалось обработать.")
@@ -116,6 +118,7 @@ async def describe_image(file_paths, caption: str = None) -> str:
             )
             
             models_cascade = [
+                ("gemini-2.5-flash", "gemini"),
                 ("qwen/qwen3.6-27b", "groq"),
                 ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
             ]
@@ -144,36 +147,52 @@ async def describe_image(file_paths, caption: str = None) -> str:
                     
                     for api_key in keys:
                         try:
-                            client = AsyncOpenAI(
-                                api_key=api_key,
-                                base_url=base_url,
-                                http_client=http_client,
-                                max_retries=0,
-                                timeout=GROQ_HTTP_TIMEOUT_SECONDS,
-                            )
-                            
                             # Enforce global cooldown of 3 seconds between requests
                             time_since_last_call = time.time() - _LAST_VISION_CALL_TIME
                             if time_since_last_call < 3.0:
                                 await asyncio.sleep(3.0 - time_since_last_call)
                             _LAST_VISION_CALL_TIME = time.time()
 
-                            content_arr = [{"type": "text", "text": system_prompt}]
-                            for iu in image_urls:
-                                content_arr.append({"type": "image_url", "image_url": {"url": iu}})
-                            
-                            resp = await client.chat.completions.create(
-                                model=model_name,
-                                messages=[
-                                    {
-                                        "role": "user",
-                                        "content": content_arr
-                                    }
-                                ],
-                                max_tokens=1024
-                            )
-
-                            content = resp.choices[0].message.content
+                            if provider == "gemini":
+                                from google import genai
+                                from google.genai import types
+                                client = genai.Client(api_key=api_key)
+                                
+                                contents = [system_prompt]
+                                for img_bytes in images_data:
+                                    contents.append(types.Part.from_bytes(
+                                        data=img_bytes,
+                                        mime_type="image/jpeg"
+                                    ))
+                                
+                                response = await client.aio.models.generate_content(
+                                    model=model_name,
+                                    contents=contents
+                                )
+                                content = response.text
+                            else:
+                                client = AsyncOpenAI(
+                                    api_key=api_key,
+                                    base_url=base_url,
+                                    http_client=http_client,
+                                    max_retries=0,
+                                    timeout=GROQ_HTTP_TIMEOUT_SECONDS,
+                                )
+                                content_arr = [{"type": "text", "text": system_prompt}]
+                                for iu in image_urls:
+                                    content_arr.append({"type": "image_url", "image_url": {"url": iu}})
+                                
+                                resp = await client.chat.completions.create(
+                                    model=model_name,
+                                    messages=[
+                                        {
+                                            "role": "user",
+                                            "content": content_arr
+                                        }
+                                    ],
+                                    max_tokens=1024
+                                )
+                                content = resp.choices[0].message.content
                             if content:
                                 import re
                                 if "<think>" in content:
