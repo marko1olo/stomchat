@@ -392,8 +392,8 @@ async def check_llm_triage(context_msgs):
         response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=25)
         
         if error or not response:
-            logger.warning(f"Llama triage generation failed: {error}. Defaulting to True to avoid blocking.")
-            return True
+            logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
+            return False
             
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
         if "```" in text:
@@ -411,8 +411,8 @@ async def check_llm_triage(context_msgs):
         logger.info(f"Llama Triage decision: should_reply={should_reply} (confidence={confidence}). Reason: {reason}")
         return should_reply
     except Exception as e:
-        logger.error(f"Error in Llama triage check: {e}. Defaulting to True.")
-        return True
+        logger.error(f"Error in Llama triage check: {e}. Defaulting to False.")
+        return False
 
 
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
