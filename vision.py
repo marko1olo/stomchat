@@ -118,6 +118,9 @@ async def describe_image(file_paths, caption: str = None) -> str:
             )
             
             models_cascade = [
+                ("gemini-3.5-flash", "gemini"),
+                ("gemini-3.1-flash-lite", "gemini"),
+                ("gemini-3-flash-preview", "gemini"),
                 ("gemini-2.5-flash", "gemini"),
                 ("qwen/qwen3.6-27b", "groq"),
                 ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
