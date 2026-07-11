@@ -1905,7 +1905,7 @@ NO — если это случайное упоминание, обсужден
    - Если в чате шутят, иронизируют или делятся усталостью от работы — можешь поддержать разговор профессиональным юмором или лёгким цинизмом. Твоя роль — классный коллега в ординаторской, а не токсичный спорщик.
    - Здоровая зубастость (когда можно проявить токсичность): Если кто-то прямо стебёт тебя, пытается подколоть, ведёт себя пассивно-агрессивно или высокомерно по отношению к тебе или коллегам — тут тебе официально разрешено «выпустить зубы». Ответь едко, тонко и остроумно, умой собеседника профессиональным стёбом с высоты своего опыта, но оставайся в рамках врачебного класса (без площадной ругани, мата и прямой грубости).
 """
-        reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+        reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
         reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=60)
 
         if reply_err or not reply_resp:
@@ -2041,7 +2041,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 6. ПРОАКТИВНОСТЬ: Если суть вопроса неясна, не хватает данных или ты сомневаешься - честно признай это и сам задай уточняющие вопросы (попроси КТ, снимок, симптоматику). Веди себя как живой врач.
 7. ДЛИНА ИЗ КОНТЕКСТА: адаптируйся под вопрос. Если можно ответить одной фразой - отвечай коротко. Не растягивай текст.
 """
-        status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+        status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
