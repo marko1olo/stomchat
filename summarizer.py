@@ -172,7 +172,7 @@ def get_russian_date(date_input):
     
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
     
-def _safe_truncate_html(html_str, max_len=9200):
+def _safe_truncate_html(html_str, max_len=55000):
     if len(html_str) <= max_len:
         return html_str
         

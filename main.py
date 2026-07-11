@@ -1101,6 +1101,9 @@ async def sync_history():
     count = 0
     last_synced_message = None
     
+    synced_albums = {}
+    synced_singles = []
+    
     # Запрашиваем сообщения, которые ID которых больше последнего в базе
     async for message in client.iter_messages(config.SOURCE_CHAT_ID, min_id=last_id, reverse=True):
         try:
@@ -1128,6 +1131,9 @@ async def sync_history():
             
             reply_to_id = message.reply_to.reply_to_msg_id if message.reply_to else None
             
+            has_media = message.photo is not None or message.video is not None
+            media_type = "photo" if message.photo else ("video" if message.video else None)
+            
             await asyncio.wait_for(
                 database.save_message(
                     msg_id=message.id,
@@ -1137,11 +1143,21 @@ async def sync_history():
                     sender_username=sender_username,
                     text=message.message or "",
                     date=message.date,
-                    has_media=message.photo is not None,
-                    media_type="photo" if message.photo else None
+                    has_media=has_media,
+                    media_type=media_type
                 ),
                 timeout=30,
             )
+            
+            if has_media:
+                if getattr(message, 'grouped_id', None):
+                    g_id = message.grouped_id
+                    if g_id not in synced_albums:
+                        synced_albums[g_id] = []
+                    synced_albums[g_id].append(message)
+                else:
+                    synced_singles.append(message)
+
             last_synced_message = message
             count += 1
             if count % 25 == 0:
@@ -1149,6 +1165,22 @@ async def sync_history():
         except Exception as e:
             logger.error(f"Ошибка синхронизации сообщения {message.id}: {e}")
     
+    # Enqueue media analysis for all synced media items in the background
+    for g_id, msgs in synced_albums.items():
+        try:
+            combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
+            await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
+            logger.info(f"🔄 Enqueued synced album {g_id} for media analysis ({len(msgs)} items).")
+        except Exception as e:
+            logger.error(f"Failed to enqueue synced album {g_id}: {e}")
+        
+    for msg in synced_singles:
+        try:
+            await enqueue_media_analysis([msg], msg.id, msg.message or "")
+            logger.info(f"🔄 Enqueued synced single message {msg.id} for media analysis.")
+        except Exception as e:
+            logger.error(f"Failed to enqueue synced single message {msg.id}: {e}")
+
     if count > 0:
         logger.info(f"✅ Синхронизация завершена. Докачано {count} сообщений.")
         if last_synced_message:
