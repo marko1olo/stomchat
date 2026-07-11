@@ -404,7 +404,7 @@ async def check_llm_triage(context_msgs):
         
         import json
         data = json.loads(text)
-        should_reply = data.get("should_reply", True)
+        should_reply = data.get("should_reply", False)
         reason = data.get("reason", "No reason provided")
         confidence = data.get("confidence", 1.0)
         
@@ -803,7 +803,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     reply_text = clean_html_formatting(reply_text)
 
     if not is_dialogue:
-        if reply_text.upper() == "IGNORE" or "ignore" in reply_text.lower():
+        if reply_text.strip().upper() == "IGNORE":
             logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
             return False
             
@@ -1023,7 +1023,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # Check IGNORE filter only for dental checks (non-dental balancer is already validated)
     if is_dental:
-        if reply_text.upper() == "IGNORE" or "ignore" in reply_text.lower():
+        if reply_text.strip().upper() == "IGNORE":
             logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
             return
 
@@ -1173,6 +1173,14 @@ async def handle_private_message(bot_client, event):
         chat_id = event.chat_id
         text = (event.message.message or "").strip()
         
+        # Rate limit: PM requests allowed once per 5 seconds per user (allow commands through)
+        is_command = text.lower().startswith("/")
+        if not is_command:
+            cooldown_secs = check_user_cooldown(chat_id, chat_id, "pm_chat", seconds=5)
+            if cooldown_secs > 0:
+                logger.info(f"PM rate limit for chat_id={chat_id}, cooldown={cooldown_secs}s")
+                return  # Silent drop - too fast, wait a bit
+        
         # Record user activity for DM proactive pings
         try:
             state = load_state()
@@ -1288,6 +1296,7 @@ async def handle_private_message(bot_client, event):
 
         # Admin Wipe command to delete recent bot messages
         if text.lower().startswith(("/wipe", "/del", "/delete")):
+            is_authorized = False
             if chat_id in (7716348189, 1890028643):
                 is_authorized = True
             else:
@@ -1699,6 +1708,9 @@ async def handle_private_message(bot_client, event):
 Ты — опытный стоматолог-практик и старший эксперт сообщества "StomChat". Твоя задача — помочь коллеге разобраться со снимком/фото, которое он прислал в личные сообщения.
 Общайся как живой, очень опытный врач с коллегой: свободно, неформально, но умно и информативно. Без бюрократии и излишнего официоза.
 
+История вашего диалога (контекст):
+{chr(10).join(context_msgs[-8:]) if context_msgs else "(история пуста)"}
+
 Описание изображения (распознано Vision-моделью):
 {media_description}
 
@@ -1732,7 +1744,7 @@ async def handle_private_message(bot_client, event):
                     "Ты общаешься с коллегой в личных сообщениях. Отвечай как живой, очень опытный врач, а не как робот. "
                     "Опирайся исключительно на доказательную медицину и базу знаний сообщества."
                 )
-                instructions = """КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+                instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. ГЛУБИНА: Если пользователь задает клинический вопрос, дай развернутый и точный ответ (в чем суть, как лучше поступить, какие есть нюансы). Если это просто реплика (приветствие, благодарность и т.п.) — ответь коротко и по-свойски.
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. ФОРМАТ И ТОН: Никаких приветствий, вводных слов ("Отличный вопрос!") и концовок ("Успехов!", "С уважением"). Полностью избегай канцелярщины и фраз типа "Как ИИ...". Используй профессиональный сленг (снимок, каналы, коронка, ортопед и т.д.). Тон прямой, peer-to-peer.
@@ -1749,7 +1761,7 @@ async def handle_private_message(bot_client, event):
                     "Ты ведёшь диалог с коллегой в личных сообщениях и можешь свободно общаться на любые темы, шутить и помогать. "
                     "Ты — знающий и свойский коллега, а не занудный чат-бот."
                 )
-                instructions = """КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+                instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Отвечай живо, по-человечески, без академического занудства. Отвечай строго к месту, без цитирования лишней теории и без зацикливания. Используй стоматологический сленг (если это уместно).
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. Никаких вводных, фраз "Как ИИ...", "С уважением" and концовок. Начинай сразу с сути.
@@ -1883,12 +1895,16 @@ NO — если это случайное упоминание, обсужден
         decision = (getattr(triage_resp, "text", "") or "").strip().upper()
         logger.info(f"Bot mention triage decision: {decision!r} for msg_id={msg_id}")
 
-        if "YES" not in decision:
+        if not decision.startswith("YES"):
             return False
 
         # Calculate context-based length guidelines
         recent_texts = [r[1] for r in context_rows if r[1]]
         length_guideline = calculate_context_length_guidelines(recent_texts)
+
+        # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
+        mention_keywords = extract_keywords(text or "")
+        mention_wiki, mention_archive = search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
 
         # ЭТАП 2: Сгенерировать живой ответ
         address = f"{sender_first_name}, " if sender_first_name else ""
@@ -1896,6 +1912,10 @@ NO — если это случайное упоминание, обсужден
 Тебя только что позвали или упомянули в чате. Вот контекст переписки:
 
 {context_str}
+
+Справка из Базы Знаний (stomat_wiki):
+{mention_wiki or "(нет данных)"}
+[КРИТИЧЕСКОЕ ПРАВИЛО: Игнорируй факты из справки, не относящиеся к вопросу. Фильтруй через EBM!]
 
 Задачи:
 1. Ответь максимально живо, коротко и по делу — как будто ты сидел рядом и тебя окликнули.
@@ -1905,6 +1925,7 @@ NO — если это случайное упоминание, обсужден
 5. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
 6. ПРОАКТИВНОСТЬ: Если непонятно чего хотят, не хватает данных или ты сомневаешься — честно признай это и переспрашивай.
 7. ЕСЛИ ТЕБЯ СПРАШИВАЮТ "что ты умеешь", коротко перечисли функционал (анализ снимков, энциклопедия, кейсы) и позови в ЛС.
+8. [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка содержит живые чаты, где могут быть ошибки. Фильтруй через EBM и здравый смысл!]
 8. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ:
    Твой настрой должен быть гибким и органично меняться вслед за беседой:
    - Если коллеги общаются тепло, поддерживают друг друга или делятся хорошим настроением — будь на позитиве, отвечай дружелюбно и одобряюще, без лишней сухости и высокомерия.
@@ -1994,8 +2015,9 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - Никакой воды, приветствий и концовок. Начинай сразу со структуры.
 - Разметка: только HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
 - Будь краток: вся сводка должна занимать не более 800 символов.
+- КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
-        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
@@ -2039,6 +2061,9 @@ async def handle_group_direct_ask(bot_client, event, question):
 {wiki_corpus}
 [КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
+
+Похожие обсуждения из Архива чата:
+{archive_corpus}
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Максимально 600 символов. Никаких приветствий, обращений и пожеланий. Сразу ответ.
@@ -2806,10 +2831,18 @@ async def check_and_trigger_referee(bot_client, event, text):
         return
         
     # Разрешаем интервенции не чаще одного раза в 5 минут
-    if datetime.now() - LAST_REFEREE_RUN < timedelta(minutes=5):
-        return
+    last_referee_run_str = state.get("last_referee_run")
+    if last_referee_run_str:
+        try:
+            last_referee_run = datetime.fromisoformat(last_referee_run_str)
+            if datetime.now() - last_referee_run < timedelta(minutes=5):
+                logger.info("Referee cooldown: within 5 minutes. Skipping.")
+                return
+        except Exception as cooldown_err:
+            logger.error(f"Error parsing last_referee_run: {cooldown_err}")
         
-    LAST_REFEREE_RUN = datetime.now()
+    state["last_referee_run"] = datetime.now().isoformat()
+    save_state(state)
     logger.info(f"Clinical Referee triggered for msg_id={msg_id}. Deciding style (toxic={has_conflict_kw})...")
     
     # 50/50 ИЛИ ШУТИТ ИЛИ НАУЧНО
@@ -2927,9 +2960,11 @@ async def handle_term_explainer(bot_client, event, term):
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Объясни термин ровно в 1-2 предложениях. Предельно кратко и научно-популярно для коллег.
+1. Объясни термин ровно в 1-2 предложениях (не более 350 символов). Предельно кратко и научно-популярно для коллег.
 2. Никаких приветствий, «Данный термин означает...» и прочей воды. Сразу определение.
 3. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
+4. ЕСЛИ термин неоднозначен (несколько значений) — коротко укажи оба варианта через «; или».
+5. ЕСЛИ справка пуста и термин тебе незнаком — честно напиши: «Точных данных по этому термину нет в нашей базе. Уточни у коллег!» — и ничего не выдумывай.
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
@@ -2943,7 +2978,7 @@ async def handle_term_explainer(bot_client, event, term):
     try:
         await bot_client.send_message(
             entity=chat_id,
-            message=f"📖 <b>{term.upper()}:</b> {reply_text}",
+            message=f"📖 <b>{__import__('html').escape(term).upper()}:</b> {reply_text}",
             reply_to=msg_id,
             parse_mode='html'
         )
