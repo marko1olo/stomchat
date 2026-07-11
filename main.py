@@ -589,8 +589,15 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
 
         if files_to_analyze:
             logger.info(f"📸 Анализ медиа (файлов: {len(files_to_analyze)}) в сообщении {msg_id}...")
+            # Determine if the media message is a passive background upload or an active bot call
+            is_passive_image = True
+            if text:
+                t_low = text.lower()
+                if "бот" in t_low or "@" in t_low:
+                    is_passive_image = False
+
             media_description = await asyncio.wait_for(
-                vision.describe_image(files_to_analyze, caption=text),
+                vision.describe_image(files_to_analyze, caption=text, is_passive=is_passive_image),
                 timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
             )
             if media_description:

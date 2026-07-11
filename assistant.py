@@ -1637,7 +1637,7 @@ async def handle_private_message(bot_client, event):
                     file_to_analyze = await extract_first_frame_async(temp_path, timeout=60)
                     
                 if file_to_analyze:
-                    media_description = await vision.describe_image(file_to_analyze, caption=text)
+                    media_description = await vision.describe_image(file_to_analyze, caption=text, is_passive=False)
                     
                 # Удаляем статусное сообщение
                 await bot_client.delete_messages(chat_id, status_msg.id)

@@ -81,7 +81,7 @@ def prepare_image_for_groq(file_path):
 
 _LAST_VISION_CALL_TIME = 0.0
 
-async def describe_image(file_paths, caption: str = None) -> str:
+async def describe_image(file_paths, caption: str = None, is_passive: bool = False) -> str:
     """Анализирует изображение(я) через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
     global GROQ_COOLDOWN_UNTIL
     global _LAST_VISION_CALL_TIME
@@ -117,14 +117,23 @@ async def describe_image(file_paths, caption: str = None) -> str:
                 f"Respond directly. Do not use reasoning/thinking blocks. Do not output <think> tags."
             )
             
-            models_cascade = [
-                ("gemini-3.5-flash", "gemini"),
-                ("gemini-3.1-flash-lite", "gemini"),
-                ("gemini-3-flash-preview", "gemini"),
-                ("gemini-2.5-flash", "gemini"),
-                ("qwen/qwen3.6-27b", "groq"),
-                ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
-            ]
+            if is_passive:
+                # Cheaper/lighter models for passive background image description
+                models_cascade = [
+                    ("gemini-3.1-flash-lite", "gemini"),
+                    ("qwen/qwen3.6-27b", "groq"),
+                    ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
+                ]
+            else:
+                # Best quality models for active bot mentions/calls/PMs
+                models_cascade = [
+                    ("gemini-3.5-flash", "gemini"),
+                    ("gemini-3.1-flash-lite", "gemini"),
+                    ("gemini-3-flash-preview", "gemini"),
+                    ("gemini-2.5-flash", "gemini"),
+                    ("qwen/qwen3.6-27b", "groq"),
+                    ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
+                ]
 
             timeout = httpx.Timeout(
                 GROQ_HTTP_TIMEOUT_SECONDS,
