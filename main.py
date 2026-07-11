@@ -819,7 +819,13 @@ async def handle_new_message(event):
                     logger.error(f"Failed to save clinical bookmark: {bookmark_exc}")
 
             # Анализ медиа (фото, видео), игнорируя стикеры/гифки
-            if event.photo or event.video:
+            # Не запускаем авто-анализ медиа, если подпись является интерактивной командой (чтобы избежать двойного ответа)
+            is_media_command = False
+            if text:
+                cmd_test = text.strip().lower()
+                is_media_command = cmd_test.startswith(("/", "итог", "викторина", "опрос", "удалить", "wipe"))
+
+            if (event.photo or event.video) and not is_media_command:
                 if getattr(event, "grouped_id", None):
                     if event.grouped_id not in _pending_albums:
                         _pending_albums[event.grouped_id] = []
