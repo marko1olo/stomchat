@@ -87,7 +87,7 @@ def ban_model(model_name, duration_seconds):
             json.dump(models, f)
     except Exception as e:
         logger.warning(f"Failed to save banned models: {e}")
-def generate_text(prompt, status_context=None):
+def generate_text(prompt, status_context=None, timeout=None):
     """Generate summary text through Gemini with Groq fallback."""
     kind = status_context.get("kind") if status_context else None
     is_pm = kind in ("pm_chat", "assistant_media_pm")
@@ -95,6 +95,11 @@ def generate_text(prompt, status_context=None):
     thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
     
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
+    
+    # Calculate per-request timeout dynamically
+    req_timeout = 30.0
+    if timeout:
+        req_timeout = max(7.0, float(timeout) / 3.0)
     
     if is_triage:
         models_cascade = [
@@ -140,10 +145,11 @@ def generate_text(prompt, status_context=None):
             from google import genai
             from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=240000))
+            ms_timeout = int(req_timeout * 1000)
+            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=ms_timeout))
         else:
             keys = list(config.GROQ_KEYS)
-            client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1")
+            client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1", timeout=req_timeout)
             
         if not keys:
             logger.warning(f"No API keys for {provider}. Skipping {model_name}.")

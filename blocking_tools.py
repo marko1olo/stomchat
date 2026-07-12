@@ -36,10 +36,10 @@ def _create_telegraph_page_sync(title, html_content):
     return page["url"]
 
 
-def _generate_gemini_text_sync(prompt, context):
+def _generate_gemini_text_sync(prompt, context, timeout=None):
     import gemini_client
 
-    response = gemini_client.generate_text(prompt, context)
+    response = gemini_client.generate_text(prompt, context, timeout=timeout)
     if not response:
         return None
     return getattr(response, "text", None)
@@ -156,7 +156,7 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
     try:
         payload, error = await _run_json_tool(
             "gemini-text",
-            {"prompt": prompt, "context": context},
+            {"prompt": prompt, "context": context, "timeout": timeout},
             timeout=timeout,
         )
         if error:
@@ -234,7 +234,11 @@ def _main():
             _json_exit({"ok": bool(url), "url": url})
 
         if action == "gemini-text":
-            text = _generate_gemini_text_sync(payload.get("prompt") or "", payload.get("context") or {})
+            text = _generate_gemini_text_sync(
+                payload.get("prompt") or "",
+                payload.get("context") or {},
+                payload.get("timeout")
+            )
             _json_exit({"ok": bool(text), "text": text})
 
         if action == "web-search":
