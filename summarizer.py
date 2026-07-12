@@ -172,7 +172,7 @@ def get_russian_date(date_input):
     
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
     
-def _safe_truncate_html(html_str, max_len=55000):
+def _safe_truncate_html(html_str, max_len=9500):
     if len(html_str) <= max_len:
         return html_str
         
@@ -202,7 +202,8 @@ def _safe_truncate_html(html_str, max_len=55000):
     for tag in reversed(open_tags):
         truncated += f"</{tag}>"
         
-    return truncated + "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
+    suffix = "<br><br><b>[Отчет сокращен из-за лимитов Telegram]</b>" if max_len <= 4000 else "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
+    return truncated + suffix
 
 def clean_markdown_to_html(text):
     if not text: return ""
@@ -591,7 +592,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     ТЕКСТ ПЕРЕПИСКИ:
     {full_text}
 
-    Инструкция для самопроверки: Напиши максимально подробный, профессиональный, глубокий и развернутый дайджест в пределах 15000–25000 символов. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, не сокращай детали ради экономии места.
+    Инструкция для самопроверки: Напиши максимально подробный, профессиональный, глубокий и развернутый дайджест в пределах 7000–9000 символов. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, концентрируй пользу без лишней воды.
     """
 
     try:
@@ -788,7 +789,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                     f"{sel_cta}"
                 )
             else:
-                msg_to_send = final_html[:4000]
+                msg_to_send = _safe_truncate_html(final_html, max_len=3900)
 
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
             _write_summary_stage(
@@ -862,7 +863,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # 2. ПРОМПТ "MEDICAL JOURNALIST" (MAXIMUM DETAILS)
     prompt = f"""
     Ты — главный редактор крупного медицинского портала.
-    Твоя задача — написать **ОГРОМНЫЙ, ДЕТАЛЬНЫЙ ОБЗОР** (лонгрид) по материалам чата стоматологов за неделю.
+    Твоя задача — написать **ДЕТАЛЬНЫЙ ОБЗОР** по материалам чата стоматологов за неделю в пределах 8000–10000 символов.
     === ПРАВИЛА ВНИМАНИЯ ===
     1. Проанализируй ВЕСЬ предоставленный лог. Не фокусируйся только на последних сообщениях. 
     2. Если в начале или середине лога была важная дискуссия, она ОБЯЗАТЕЛЬНО должна попасть в отчет.
@@ -935,11 +936,11 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     === ТРЕБОВАНИЯ К ОФОРМЛЕНИЮ ===
     1. Пиши ЖИВЫМ, ПРОФЕССИОНАЛЬНЫМ языком.
     2. Используй HTML теги (<b>, <i>, <br>).
-    3. Объём статьи: стремись к максимальной полноте (20 000–35 000 символов). Статья публикуется на Telegraph, где нет ограничений по длине.
+    3. Объём статьи: стремись к максимальной полноте (8000–10000 символов). Статья публикуется на Telegraph, где нет ограничений по длине.
     
     ЛОГ НЕДЕЛИ:
     {full_text}
-    Инструкция для самопроверки: Напиши максимально подробную, профессиональную, глубокую и развернутую статью в пределах 20 000–35 000 символов. Это лонгрид-летопись, а не краткое саммари. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, не сокращай детали ради экономии места.
+    Инструкция для самопроверки: Напиши максимально подробную, профессиональную, глубокую и развернутую статью в пределах 8000–10000 символов. Это летопись, а не краткое саммари. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, концентрируй пользу без воды.
     """
 
     try:
@@ -1000,7 +1001,26 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             logger.error("Telegraph subprocess failed: %s", telegraph_error)
         
         if not page_url:
-            logger.error("❌ Не удалось создать Telegraph страницу (Weekly). Проверь валидность HTML.")
+            logger.error("❌ Не удалось создать Telegraph страницу (Weekly). Проверь валидность HTML. Пробуем отправить напрямую...")
+            # Попробуем отправить напрямую в телеграм, обрезав до 3900 символов
+            msg_to_send = _safe_truncate_html(final_html, max_len=3900)
+            send_params = {'parse_mode': 'HTML', 'link_preview': False}
+            if topic_id: send_params['reply_to'] = topic_id
+            sent_msg = await _send_message_once(
+                client,
+                chat_id,
+                topic_id,
+                msg_to_send,
+                send_params,
+                "weekly_fallback",
+            )
+            if sent_msg:
+                await _notify_delivery(delivery_hook, sent_msg)
+                await _pin_message_safely(client, chat_id, sent_msg.id)
+                logger.info(f"✅ Временный Weekly Digest отправлен напрямую в {chat_id}")
+                runtime_guard.clear_summary_status("weekly_summary_done")
+                return msg_to_send
+            
             runtime_guard.clear_summary_status("weekly_telegraph_failed")
             return None
 
