@@ -597,14 +597,28 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     else:
                         break
                 
-                # Dialogue length check: maximum 2 bot replies in the chain
-                if bot_msg_count >= 2:
-                    # Вместо жесткого лимита проводим умный анализ продолжения диалога через Llama
-                    should_continue = await check_dialogue_continuation_triage(chain[::-1])
-                    if not should_continue:
-                        logger.info(f"Dialogue chain already has {bot_msg_count} bot replies and triage rejected continuation. Stopping.")
-                        return False
-                    logger.info(f"Dialogue chain has {bot_msg_count} bot replies, but Llama approved continuing the discussion.")
+                # 1. Проверяем "свежесть" диалога. Если с момента отправки сообщения бота в группе
+                # прошло более 5 сообщений от других участников, значит тема сместилась. Игнорируем.
+                try:
+                    msgs_since = await query_db_async(
+                        "SELECT COUNT(*) FROM messages WHERE msg_id > ?",
+                        (reply_to_msg_id,)
+                    )
+                    count_since = msgs_since[0][0] if msgs_since else 0
+                except Exception as db_err:
+                    logger.error(f"Error checking message distance: {db_err}")
+                    count_since = 0
+
+                if count_since > 5:
+                    logger.info(f"Dialogue reply is stale. {count_since} messages have passed since bot message {reply_to_msg_id}. Skipping to avoid thread hijacking.")
+                    return False
+
+                # 2. Проводим умный анализ продолжения диалога через Llama для ЛЮБОГО сообщения в цепочке
+                should_continue = await check_dialogue_continuation_triage(chain[::-1])
+                if not should_continue:
+                    logger.info(f"Dialogue triage rejected continuation for chain with {bot_msg_count} bot replies. Stopping.")
+                    return False
+                logger.info(f"Llama triage approved dialogue continuation (bot_msg_count={bot_msg_count}).")
                 
                 triggered = True
                 trigger_reason = f"Dialogue reply to bot message {reply_to_msg_id}"
