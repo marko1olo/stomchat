@@ -24,6 +24,82 @@ LAST_REFEREE_RUN = datetime(2000, 1, 1)
 USER_COOLDOWNS = {}
 REPLIED_MSG_IDS = set()
 
+STYLE_PROMPTS = {
+    "colleague_friendly": "Твой стиль общения — дружелюбный коллега-эксперт. Общайся свободно, на равных, на профессиональном стоматологическом сленге, но вежливо. Разрешено шутить, но без перегибов.",
+    "clinical_dry": "Твой стиль общения — сухие клинические факты. Отвечай максимально строго, академично, лаконично и по делу. Категорически ЗАПРЕЩЕНЫ любые шутки, каламбуры, смайлы, метафоры или лирические отступления. Только голая наука, стандарты EBM, дозировки и анатомические обоснования. Никаких смайлов вообще.",
+    "humor_cynic": "Твой стиль общения — ироничный стоматолог-циник с черным юмором. Ты слегка устал от пациентов, любишь профессиональный медицинский цинизм, иронию и шутки про деньги, сломанные файлы или пульпу, но остаешься в рамках приличия и врачебного этикета."
+}
+
+AD_HINTS = [
+    "\\n\\n<i>💡 Кстати, вы можете прислать мне рентген-снимок или задать клинический вопрос в ЛС — там я помню историю сообщений и общаюсь тет-а-тет.</i>",
+    "\\n\\n<i>💡 Напоминаю, что в личных сообщениях я умею разбирать рентген-снимки, проводить викторины (/quiz) и интерактивные кейсы (/case).</i>",
+    "\\n\\n<i>💡 Если вы хотите обсудить сложный случай приватно, пишите мне в ЛС. Там я храню глубокую память диалога и не отвлекаю коллег в общей группе.</i>",
+    "\\n\\n<i>💡 В ЛС я работаю как персональный ассистент: принимаю голосовые сообщения, ищу протоколы по базе из 118 000+ постов и храню ваши закладки (/bookmarks).</i>"
+]
+
+async def generate_user_portrait(user_id):
+    try:
+        # Загружаем последние сообщения пользователя из группы
+        msgs = await database.get_user_recent_group_messages(user_id, limit=50)
+        if not msgs or len(msgs) < 3:
+            return "Недостаточно сообщений в общей группе для анализа клинического профиля."
+            
+        context_str = "\n".join([f"- {m}" for m in msgs])
+        prompt = f"""Ты — ИИ-аналитик профессионального сообщества врачей-стоматологов StomChat.
+Проанализируй список сообщений врача-стоматолога в общем чате и составь его краткий профессиональный портрет в 1-2 предложениях (не более 300 символов).
+
+Задачи:
+1. Определи специализацию врача (например: терапевт, хирург-имплантолог, ортопед, детский стоматолог, ортодонт, гнатолог).
+2. Выдели темы и материалы, о которых он чаще всего пишет или спрашивает (например: вертипреп, эндодонтия, адгезивы, коффердам, КЛКТ).
+3. Пиши лаконично, профессионально, только факты.
+
+Сообщения врача:
+{context_str}
+
+Вывод (строго 1-2 предложения):
+"""
+        status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=20)
+        if error or not response or not getattr(response, "text", None):
+            return "Недостаточно сообщений в общей группе для анализа клинического профиля."
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Error generating user portrait for {user_id}: {e}")
+        return "Ошибка при составлении клинического профиля."
+
+async def check_dialogue_continuation_triage(context_msgs):
+    try:
+        context_str = "\n".join(context_msgs)
+        triage_prompt = f"""Ты — ИИ-координатор профессионального чата стоматологов.
+В чате идет дискуссия с участием нашего ИИ-ассистента (Бота). Бот уже ответил 2 или более раз в этой ветке.
+Определи, уместно ли Боту продолжить диалог и дать еще один ответ, или это перерастает во флуд/спор/раздражение участников, и Боту лучше промолчать?
+
+Критерии продолжения диалога (выведи YES):
+1. Участник задает конкретные клинические или технические уточняющие вопросы Боту по делу (например, спрашивает параметры, дозировку, материалы, статьи).
+2. Обсуждение конструктивное, вежливое и требует дополнительного авторитетного разъяснения от Бота.
+
+Критерии завершения (выведи NO):
+1. Собеседник просто спорит с Ботом, иронизирует, троллит, выражает скепсис или недовольство Ботом (например, пишет "да ладно", "чушь", "все понятно").
+2. Тема исчерпана, идет флуд или личные мнения без конкретных вопросов к базе знаний Бота.
+3. Бот начнет дублировать информацию или ходить по кругу.
+
+Контекст переписки:
+{context_str}
+
+Выведи строго одно слово:
+YES — если Боту стоит продолжить диалог и ответить.
+NO — если Боту лучше замолчать и не писать в эту ветку.
+"""
+        triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=20)
+        if error or not response or not getattr(response, "text", None):
+            return False
+        res = response.text.strip().upper()
+        return res.startswith("YES")
+    except Exception as e:
+        logger.error(f"Error in dialogue continuation triage: {e}")
+        return False
+
 def check_user_cooldown(chat_id, user_id, command, seconds=30):
     key = (chat_id, user_id, command)
     now = datetime.now()
@@ -523,8 +599,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 
                 # Dialogue length check: maximum 2 bot replies in the chain
                 if bot_msg_count >= 2:
-                    logger.info(f"Dialogue chain already has {bot_msg_count} bot replies. Stopping to avoid flooding.")
-                    return False
+                    # Вместо жесткого лимита проводим умный анализ продолжения диалога через Llama
+                    should_continue = await check_dialogue_continuation_triage(chain[::-1])
+                    if not should_continue:
+                        logger.info(f"Dialogue chain already has {bot_msg_count} bot replies and triage rejected continuation. Stopping.")
+                        return False
+                    logger.info(f"Dialogue chain has {bot_msg_count} bot replies, but Llama approved continuing the discussion.")
                 
                 triggered = True
                 trigger_reason = f"Dialogue reply to bot message {reply_to_msg_id}"
@@ -827,6 +907,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     else:
         # Live mode OR direct reply in test chat: reply directly to user message!
         reply_message = reply_text
+
+        # Добавляем ненавязчивую рекламу ЛС в группе с вероятностью 15%
+        import random
+        if random.random() < 0.15:
+            reply_message += random.choice(AD_HINTS)
 
         try:
             await bot_client.send_message(
@@ -1200,7 +1285,8 @@ async def handle_private_message(bot_client, event):
             "🎲 викторина": "/quiz",
             "🧮 калькулятор": "/calc",
             "⭐ закладки": "/bookmarks",
-            "📊 статистика чата": "/stats"
+            "📊 статистика чата": "/stats",
+            "⚙️ стиль общения": "/style"
         }
         if text.lower() in btn_mapping:
             text = btn_mapping[text.lower()]
@@ -1374,6 +1460,9 @@ async def handle_private_message(bot_client, event):
                     types.KeyboardButtonRow(buttons=[
                         types.KeyboardButton(text="⭐ Закладки"),
                         types.KeyboardButton(text="📊 Статистика чата")
+                    ]),
+                    types.KeyboardButtonRow(buttons=[
+                        types.KeyboardButton(text="⚙️ Стиль общения")
                     ])
                 ],
                 resize=True,
@@ -1383,11 +1472,38 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=greeting, buttons=keyboard, parse_mode='html')
             return
             
+        if text.lower() == "/style":
+            profile = await database.get_user_profile(chat_id)
+            current_style = profile.get("selected_style", "colleague_friendly")
+            
+            style_names = {
+                "colleague_friendly": "Коллега-эксперт 🤝",
+                "clinical_dry": "Сухие факты 📝",
+                "humor_cynic": "Ироничный циник 💀"
+            }
+            curr_style_name = style_names.get(current_style, "Неизвестный")
+            
+            style_welcome = (
+                "⚙️ <b>Настройка стиля общения</b>\n\n"
+                f"Текущий стиль общения: <b>{curr_style_name}</b>\n\n"
+                "Выберите стиль, в котором я буду отвечать вам в личных сообщениях:"
+            )
+            
+            from telethon import types
+            style_buttons = [
+                [types.KeyboardButtonCallback(text="Коллега-эксперт 🤝 (по умолчанию)", data=b"style:colleague_friendly")],
+                [types.KeyboardButtonCallback(text="Сухие факты 📝 (строго, без шуток)", data=b"style:clinical_dry")],
+                [types.KeyboardButtonCallback(text="Ироничный циник 💀 (черный юмор)", data=b"style:humor_cynic")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=style_welcome, buttons=style_buttons, parse_mode='html')
+            return
+            
         if text.lower() == "/help":
             help_text = (
                 "💡 <b>Доступные команды в ЛС:</b>\n\n"
                 "• /start — перезапустить приветствие бота.\n"
                 "• /help — показать эту памятку.\n"
+                "• /style — настроить стиль общения (коллега, сухие факты, циник).\n"
                 "• /protocols — вывести список доступных клинических протоколов.\n"
                 "• /wiki — открыть интерактивную стоматологическую энциклопедию.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
@@ -1399,7 +1515,7 @@ async def handle_private_message(bot_client, event):
                 "• /abort — сбросить текущий клинический симулятор.\n\n"
                 "• <b>Текстовый/Голосовой вопрос:</b> Просто напишите его или отправьте голосовое сообщение. Я отвечу с использованием базы знаний.\n"
                 "• <b>Анализ снимка:</b> Прикрепите фото или рентген. Я опишу, что на нем изображено, и предложу клиническую тактику.\n"
-                "• <b>Контекстная память:</b> Я анализирую последние <b>25 сообщений</b> нашего диалога."
+                "• <b>Контекстная память:</b> Я анализирую последние <b>30 сообщений</b> нашего диалога."
             )
             await bot_client.send_message(entity=chat_id, message=help_text, parse_mode='html')
             return
@@ -1668,8 +1784,8 @@ async def handle_private_message(bot_client, event):
                     try: os.remove(file_to_analyze)
                     except Exception: pass
 
-        # 3. Восстановление динамического диалога (контекст до 25 сообщений)
-        history = await database.get_last_pm_messages(chat_id, limit=25)
+        # 3. Восстановление динамического диалога (контекст до 35 сообщений)
+        history = await database.get_last_pm_messages(chat_id, limit=35)
         context_msgs = []
         try:
             recent_pm_texts = [m["text"] for m in history[-6:] if m["text"]]
@@ -1679,6 +1795,31 @@ async def handle_private_message(bot_client, event):
 
         for msg in history:
             context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
+
+        # Получаем стиль и портрет пользователя из БД
+        user_profile = await database.get_user_profile(chat_id)
+        selected_style = user_profile.get("selected_style", "colleague_friendly")
+        style_prompt_text = STYLE_PROMPTS.get(selected_style, STYLE_PROMPTS["colleague_friendly"])
+        portrait = user_profile.get("profile_portrait")
+        
+        # Если портрета еще нет, запускаем его генерацию в фоне
+        if not portrait:
+            async def _bg_portrait():
+                try:
+                    p_text = await generate_user_portrait(chat_id)
+                    last_msg_id = await database.get_last_msg_id()
+                    await database.set_user_portrait(chat_id, p_text, last_msg_id)
+                    logger.info(f"Generated and saved portrait for user {chat_id}: {p_text}")
+                except Exception as p_err:
+                    logger.error(f"Error in bg portrait gen: {p_err}")
+            
+            import runtime_guard
+            runtime_guard.create_task(_bg_portrait(), name=f"portrait_gen_{chat_id}")
+            portrait = "Клинический профиль доктора формируется."
+
+        # Получаем недавние сообщения пользователя из группы
+        user_group_messages = await database.get_user_recent_group_messages(chat_id, limit=15)
+        group_msgs_str = "\n".join([f"- {m}" for m in user_group_messages]) if user_group_messages else "(нет сообщений в группе)"
             
         # 4. RAG-поиск по стоматологической базе знаний с учетом контекста переписки
         # Собираем текст текущего запроса и последних 3 сообщений истории для детекции клинической темы
@@ -1705,8 +1846,14 @@ async def handle_private_message(bot_client, event):
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
             prompt = f"""
-Ты — опытный стоматолог-практик и старший эксперт сообщества "StomChat". Твоя задача — помочь коллеге разобраться со снимком/фото, которое он прислал в личные сообщения.
-Общайся как живой, очень опытный врач с коллегой: свободно, неформально, но умно и информативно. Без бюрократии и излишнего официоза.
+Ты — опытный стоматолог-практик и эксперт сообщества "StomChat". Твоя задача — помочь коллеге со снимком/фото в личных сообщениях.
+{style_prompt_text}
+
+Клинический портрет собеседника:
+{portrait}
+
+Недавние сообщения собеседника в общем чате (поможет понять его клинический фокус):
+{group_msgs_str}
 
 История вашего диалога (контекст):
 {chr(10).join(context_msgs[-8:]) if context_msgs else "(история пуста)"}
@@ -1739,11 +1886,15 @@ async def handle_private_message(bot_client, event):
             # Определяем тип запроса: это клинический вопрос или свободная тема
             has_clinical_topic = has_dental_topic or bool(wiki_corpus)
             if has_clinical_topic:
-                system_role = (
-                    "Ты — опытный стоматолог-практик и старший эксперт сообщества \"StomChat\". "
-                    "Ты общаешься с коллегой в личных сообщениях. Отвечай как живой, очень опытный врач, а не как робот. "
-                    "Опирайся исключительно на доказательную медицину и базу знаний сообщества."
-                )
+                system_role = f"""Ты — опытный стоматолог-практик и эксперт сообщества "StomChat", общаешься с коллегой в личных сообщениях.
+{style_prompt_text}
+
+Клинический портрет собеседника:
+{portrait}
+
+Недавние сообщения собеседника в общем чате:
+{group_msgs_str}
+"""
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. ГЛУБИНА: Если пользователь задает клинический вопрос, дай развернутый и точный ответ (в чем суть, как лучше поступить, какие есть нюансы). Если это просто реплика (приветствие, благодарность и т.п.) — ответь коротко и по-свойски.
 2. ДЛИНА ОТВЕТА: {length_guideline}
@@ -1756,11 +1907,15 @@ async def handle_private_message(bot_client, event):
 9. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
 10. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ: Твой настрой должен быть гибким: отвечай тепло и дружелюбно на добрые слова, строго профессионально на клинические вопросы, и используй остроумный отпор (без мата и грубости), если собеседник пытается подколоть или стебать тебя."""
             else:
-                system_role = (
-                    "Ты — умный, живой и остроумный врач-стоматолог из чата \"StomChat\". "
-                    "Ты ведёшь диалог с коллегой в личных сообщениях и можешь свободно общаться на любые темы, шутить и помогать. "
-                    "Ты — знающий и свойский коллега, а не занудный чат-бот."
-                )
+                system_role = f"""Ты — врач-стоматолог из чата "StomChat", ведёшь диалог с коллегой в личных сообщениях.
+{style_prompt_text}
+
+Клинический портрет собеседника:
+{portrait}
+
+Недавние сообщения собеседника в общем чате:
+{group_msgs_str}
+"""
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Отвечай живо, по-человечески, без академического занудства. Отвечай строго к месту, без цитирования лишней теории и без зацикливания. Используй стоматологический сленг (если это уместно).
 2. ДЛИНА ОТВЕТА: {length_guideline}
@@ -2083,6 +2238,11 @@ async def handle_group_direct_ask(bot_client, event, question):
         reply_text = response.text.strip()
         reply_text = clean_html_formatting(reply_text)
         
+        # Добавляем ненавязчивую рекламу ЛС в группе с вероятностью 15%
+        import random
+        if random.random() < 0.15:
+            reply_text += random.choice(AD_HINTS)
+
         try:
             await bot_client.send_message(
                 entity=chat_id,
@@ -2281,6 +2441,27 @@ async def handle_quiz_callback(bot_client, event):
     """Проверка ответа пользователя при клике на инлайн-кнопку."""
     data_str = event.data.decode('utf-8', errors='ignore')
     
+    if data_str.startswith("style:"):
+        style = data_str.split(":")[1]
+        style_names = {
+            "colleague_friendly": "Коллега-эксперт 🤝",
+            "clinical_dry": "Сухие факты 📝",
+            "humor_cynic": "Ироничный циник 💀"
+        }
+        style_name = style_names.get(style, "Неизвестный")
+        
+        # Сохраняем в БД
+        await database.set_user_style(event.sender_id, style)
+        
+        confirm_text = (
+            "✅ <b>Стиль общения успешно изменен!</b>\n\n"
+            f"Новый стиль: <b>{style_name}</b>\n\n"
+            "Все последующие ответы в ЛС будут генерироваться в соответствии с выбранной тональностью. Вы можете изменить его в любой момент с помощью команды /style."
+        )
+        await bot_client.edit_message(event.chat_id, event.message_id, confirm_text, parse_mode='html')
+        await event.answer()
+        return
+
     if data_str == "proto:back":
         protocols_text = (
             "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
@@ -3047,3 +3228,133 @@ async def check_and_send_pm_pings(bot_client):
             save_state(state)
     except Exception as g_err:
         logger.error(f"Global error in check_and_send_pm_pings: {g_err}")
+
+
+async def check_and_send_group_activity_pings(bot_client):
+    """Проверяет общую группу на наличие горячих обсуждений и приглашает пользователей из ЛС присоединиться."""
+    import config
+    if not config.SOURCE_CHAT_ID:
+        return
+
+    try:
+        # 1. Загружаем последние 30 сообщений из базы данных
+        rows = await database.get_last_n_messages(limit=30)
+        if not rows or len(rows) < 5:
+            return
+            
+        # Формируем текст переписки для Llama
+        context_msgs = []
+        for r in rows:
+            sender_name = r[1] or "Участник"
+            msg_text = r[3] or ""
+            if msg_text:
+                context_msgs.append(f"{sender_name}: {msg_text}")
+                
+        context_str = "\n".join(context_msgs)
+        last_msg_id = rows[-1][0]
+        
+        # 2. Опрашиваем Llama на предмет горячего клинического обсуждения
+        prompt = f"""Ты — ИИ-аналитик стоматологического чата "StomChat".
+Проанализируй последние сообщения коллег в чате. Твоя задача — определить, идет ли сейчас активное клиническое обсуждение или спор на какую-то конкретную тему (например: фиксация коронок, обтурация каналов, выбор имплантата, анестезия).
+
+Переписка:
+{context_str}
+
+Ответь строго в формате JSON:
+{{
+  "is_hot": true/false,
+  "topic": "Тема спора в 2-4 словах",
+  "teaser": "Короткий завлекающий тизер в 1 предложение на русском, побуждающий зайти в чат и принять участие. Например: 'Слушай, там в чате сейчас как раз горячо спорят о границах уступа и протоколе BOPT, заходи!'"
+}}
+"""
+        status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=20)
+        if error or not response or not getattr(response, "text", None):
+            return
+            
+        # Парсим JSON
+        try:
+            import json
+            text_res = response.text.strip()
+            if "```" in text_res:
+                start = text_res.find("{")
+                end = text_res.rfind("}")
+                if start != -1 and end != -1:
+                    text_res = text_res[start:end+1]
+            data = json.loads(text_res)
+        except Exception:
+            return
+            
+        if not data.get("is_hot"):
+            logger.info("Group activity check: no hot discussions found.")
+            return
+            
+        topic = data.get("topic", "Клинический спор")
+        teaser = data.get("teaser", "В чате сейчас идет активное клиническое обсуждение!")
+        
+        logger.info(f"Group activity check: detected hot discussion on '{topic}'. Teaser: {teaser}")
+        
+        # 3. Находим активных пользователей ЛС
+        user_ids = await database.get_active_pm_users(days_limit=30)
+        if not user_ids:
+            return
+            
+        state = load_state()
+        pings = state.setdefault("pm_pings", {})
+        now = datetime.now()
+        
+        # Формируем ссылку на чат
+        chat_id_clean = str(config.SOURCE_CHAT_ID)
+        if chat_id_clean.startswith("-100"):
+            chat_id_clean = chat_id_clean[4:]
+        chat_link = f"https://t.me/c/{chat_id_clean}/{last_msg_id}"
+        
+        # 4. Отбираем пользователей с учетом 48-часового кулдауна
+        candidates = []
+        for uid in user_ids:
+            uid_str = str(uid)
+            user_info = pings.setdefault(uid_str, {"last_activity": "2000-01-01T00:00:00", "ping_sent": False})
+            
+            # Проверяем время последней активности или пинга
+            last_activity_str = user_info.get("last_activity", "2000-01-01T00:00:00")
+            last_ping_str = user_info.get("last_group_ping", "2000-01-01T00:00:00")
+            
+            try:
+                last_act = datetime.fromisoformat(last_activity_str)
+                last_ping = datetime.fromisoformat(last_ping_str)
+            except Exception:
+                last_act = datetime(2000, 1, 1)
+                last_ping = datetime(2000, 1, 1)
+                
+            # Должно пройти не менее 48 часов с момента последнего пинга группы или ЛС-пинга
+            if now - last_ping > timedelta(hours=48) and now - last_act > timedelta(hours=24):
+                candidates.append(uid)
+                
+        if not candidates:
+            logger.info("No users available for group activity ping (all on cooldown).")
+            return
+            
+        # Отправляем случайным 20% кандидатов (минимум 1 пользователю)
+        import math
+        sample_size = max(1, int(math.ceil(len(candidates) * 0.20)))
+        targets = random.sample(candidates, min(sample_size, len(candidates)))
+        
+        logger.info(f"Sending proactive group activity pings to {len(targets)} users (out of {len(candidates)} candidates).")
+        
+        for uid in targets:
+            try:
+                msg = f"🔥 <b>{teaser}</b>\n\n💬 Тема: {topic}\n\n👉 <a href=\"{chat_link}\">Перейти к обсуждению в чате</a>"
+                await bot_client.send_message(entity=uid, message=msg, parse_mode='html', link_preview=True)
+                
+                # Сохраняем в историю переписки ЛС
+                await database.save_pm_message(uid, "Assistant", f"[Проактивный пинг чата]: {teaser}")
+                
+                # Обновляем таймштамп пинга в состоянии
+                pings[str(uid)]["last_group_ping"] = now.isoformat()
+            except Exception as send_err:
+                logger.error(f"Failed to send group activity ping to {uid}: {send_err}")
+                
+        save_state(state)
+        
+    except Exception as g_err:
+        logger.error(f"Global error in check_and_send_group_activity_pings: {g_err}")

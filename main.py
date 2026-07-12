@@ -392,7 +392,13 @@ async def pm_ping_scheduler_task(bot_client):
         try:
             await assistant.check_and_send_pm_pings(bot_client)
         except Exception as e:
-            logger.error(f"Error in pm_ping_scheduler_task: {e}")
+            logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
+
+        try:
+            await assistant.check_and_send_group_activity_pings(bot_client)
+        except Exception as e:
+            logger.error(f"Error in pm_ping_scheduler_task (Group pings): {e}")
+
         await asyncio.sleep(3600)  # Проверка каждый час
 
 # 1. Клиент Юзербота (Твой аккаунт) - только слушает

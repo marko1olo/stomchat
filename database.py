@@ -110,6 +110,17 @@ async def init_db():
                 """
             )
 
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    selected_style TEXT DEFAULT 'colleague_friendly',
+                    profile_portrait TEXT,
+                    last_analyzed_msg_id INTEGER DEFAULT 0
+                )
+                """
+            )
+
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
                 logger.info("database schema migrated: added media_remote_url")
@@ -519,3 +530,85 @@ async def get_last_pm_messages(user_id, limit=25):
             rows = cursor.fetchall()
             return [{"sender_name": row[0], "text": row[1]} for row in reversed(rows)]
     return await _run_db(operation)
+
+
+async def get_user_profile(user_id):
+    def operation():
+        with _connection() as db:
+            row = db.execute(
+                "SELECT selected_style, profile_portrait, last_analyzed_msg_id FROM user_profiles WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+            if row:
+                return {
+                    "selected_style": row[0],
+                    "profile_portrait": row[1],
+                    "last_analyzed_msg_id": row[2]
+                }
+            return {
+                "selected_style": "colleague_friendly",
+                "profile_portrait": None,
+                "last_analyzed_msg_id": 0
+            }
+    return await _run_db(operation)
+
+
+async def set_user_style(user_id, style):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                INSERT INTO user_profiles (user_id, selected_style)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET selected_style = excluded.selected_style
+                """,
+                (user_id, style)
+            )
+    return await _run_db(operation)
+
+
+async def set_user_portrait(user_id, portrait, last_msg_id):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                INSERT INTO user_profiles (user_id, profile_portrait, last_analyzed_msg_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    profile_portrait = excluded.profile_portrait,
+                    last_analyzed_msg_id = excluded.last_analyzed_msg_id
+                """,
+                (user_id, portrait, last_msg_id)
+            )
+    return await _run_db(operation)
+
+
+async def get_user_recent_group_messages(user_id, limit=20):
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                """
+                SELECT text FROM messages 
+                WHERE sender_id = ? AND text IS NOT NULL AND text != ''
+                ORDER BY date DESC LIMIT ?
+                """,
+                (user_id, limit)
+            ).fetchall()
+            return [r[0] for r in rows[::-1]]
+    return await _run_db(operation)
+
+
+async def get_active_pm_users(days_limit=30):
+    def operation():
+        with _connection() as db:
+            # Выбираем уникальных пользователей, которые писали боту в ЛС за последние N дней
+            rows = db.execute(
+                """
+                SELECT DISTINCT user_id FROM pm_messages 
+                WHERE date >= datetime('now', ?)
+                """,
+                (f"-{days_limit} days",)
+            ).fetchall()
+            return [r[0] for r in rows]
+    return await _run_db(operation)
+
