@@ -27,7 +27,12 @@ def _create_telegraph_page_sync(title, html_content):
     if not config.TELEGRAPH_TOKEN:
         poster.create_api_token("StomatBot_Reporter")
 
-    formatted_body = html_content.replace("\n", "<br>")
+    paragraphs = html_content.split('\n\n')
+    formatted_body = ''
+    for p in paragraphs:
+        p = p.strip()
+        if p:
+            formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
     page = poster.post(
         title=title,
         author="StomatBot AI",

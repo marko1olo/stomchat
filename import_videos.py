@@ -44,7 +44,12 @@ async def get_category(text):
         response = client.models.generate_content(
             model=model_id,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.0)
+            config=types.GenerateContentConfig(temperature=0.0, safety_settings=[
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+        ])
         )
         
         if response.text:

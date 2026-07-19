@@ -189,17 +189,22 @@ def generate_text(prompt, status_context=None, timeout=None):
                         except ValueError:
                             pass
                     
-                    gen_config = types.GenerateContentConfig(thinking_config=thinking_config) if thinking_config else None
-                    response = client.models.generate_content_stream(
+                    safety_settings = [
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                    ]
+                    gen_config = types.GenerateContentConfig(
+                        thinking_config=thinking_config if thinking_config else None,
+                        safety_settings=safety_settings
+                    )
+                    response = client.models.generate_content(
                         model=model_name,
                         contents=prompt,
                         config=gen_config
                     )
-                    text_result_parts = []
-                    for chunk in response:
-                        if chunk.text:
-                            text_result_parts.append(chunk.text)
-                    text_result = "".join(text_result_parts)
+                    text_result = response.text if response and response.text else ""
                 else:
                     response = client.chat.completions.create(
                         model=model_name,

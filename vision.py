@@ -177,9 +177,16 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         mime_type="image/jpeg"
                                     ))
                                 
+                                safety_settings = [
+                                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                                ]
                                 response = await client.aio.models.generate_content(
                                     model=model_name,
-                                    contents=contents
+                                    contents=contents,
+                                    config=types.GenerateContentConfig(safety_settings=safety_settings)
                                 )
                                 content = response.text
                             else:

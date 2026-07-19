@@ -111,7 +111,12 @@ async def classify_fact(client, content, f_id):
             client.models.generate_content,
             model=MODEL_ID,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.0)
+            config=types.GenerateContentConfig(temperature=0.0, safety_settings=[
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+        ])
         )
         if response and response.text:
             data = json.loads(clean_json_raw(response.text))

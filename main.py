@@ -837,7 +837,14 @@ async def handle_new_message(event):
                         _pending_albums[event.grouped_id] = []
                         
                         async def _process_album_after_delay(g_id, b_client):
-                            await asyncio.sleep(2.0)
+                            last_len = 0
+                            while True:
+                                await asyncio.sleep(3.0)
+                                current_len = len(_pending_albums.get(g_id, []))
+                                if current_len == 0 or current_len == last_len:
+                                    break
+                                last_len = current_len
+                                
                             msgs = _pending_albums.pop(g_id, [])
                             if msgs:
                                 combined_text = "\n".join([m.text for m in msgs if m.text]).strip()

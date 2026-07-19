@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from blocking_tools import generate_gemini_text_async
 import vision
 import database
+import config
 logger = logging.getLogger("assistant")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,10 +20,11 @@ TEST_CHAT_ID = -1003735006121
 TEST_TOPIC_ID = 26
 
 SHADOW_TESTING = os.getenv("SHADOW_TESTING", "False").lower() in ("true", "1", "yes")
+from cachetools import TTLCache
 BOT_ID = None
 LAST_REFEREE_RUN = datetime(2000, 1, 1)
-USER_COOLDOWNS = {}
-REPLIED_MSG_IDS = set()
+USER_COOLDOWNS = TTLCache(maxsize=10000, ttl=86400) # 24 часа
+REPLIED_MSG_IDS = TTLCache(maxsize=50000, ttl=604800) # 7 дней
 
 STYLE_PROMPTS = {
     "colleague_friendly": "Твой стиль общения — дружелюбный коллега-эксперт. Общайся свободно, на равных, на профессиональном стоматологическом сленге, но вежливо. Разрешено шутить, но без перегибов.",
@@ -176,40 +178,7 @@ STOP_WORDS = {
     "всем", "всех", "этом", "этой", "этих", "были", "была", "были", "того", "тому"
 }
 
-DENTAL_KEYWORDS = {
-    "зуб", "канал", "уступ", "бор", "файл", "цемент", "коронка", "коронок", "имплант", 
-    "активация", "винил", "преп", "эндо", "гнатол", "окклюз", "сустав", "внчс",
-    "сплинт", "капп", "слеп", "оттис", "трансфер", "абатм", "циркон", "пмма", "pmma",
-    "керам", "ультразвук", "эйтис", "петл", "спредер", "визуали", "микроскоп",
-    "пескоструй", "коффердам", "раббердам", "кламп", "плавиков", "силан", "бонд",
-    "травлен", "адгезив", "композит", "клинич", "диагно", "анестез", "артикаин",
-    "мепивакаин", "убистезин", "ультракаин", "лидокаин", "пульп", "апекс", "периодонт",
-    "периодонтит", "пульпит", "кариес", "гингивит", "пародонт", "пародонтоз", "рецесс",
-    "десна", "десны", "десневой", "костн", "альвеол", "синус", "остеот", "мембран",
-    "шовн", "викрил", "пролен", "монофил", "хирург", "удален", "экстракц", "лунк",
-    "кюрет", "остеоинтегр", "формировател", "заглушк", "крошк", "биоосс", "bio-oss",
-    "аллоплант", "ксенотрансп", "брекет", "элайнер", "ретейнер", "дистализ", "мезиализ",
-    "дуга", "дуги", "лигатур", "ортодонт", "ортопед", "терапевт", "кт", "клкт", "оптг",
-    "визиограф", "рентген", "снимок", "снимка", "бинокуляр", "лупы", "эндомотор",
-    "апекслокатор", "автоклав", "стерилиз", "дентин", "эмаль", "эмали", "челюст",
-    "прикус", "резец", "резц", "клык", "премоляр", "моляр", "реципрок", "протейпер",
-    "мту", "mtwo", "пасс-файл", "гипохлорит", "хлоргексидин", "эдта", "edta",
-    "гуттаперч", "силер", "обтурац", "латеральн", "вертикальн", "распломбиров",
-    "анкерн", "штифт", "платок", "ирригац", "мост", "протез", "вкладк", "накладк",
-    "оверлей", "рондоклип", "сканмаркер", "ложка", "артикулятор", "депрограмматор",
-    "коис", "миостимуляц", "шина", "емакс", "e.max", "e-max", "полевошпат", "каркас",
-    "полимеризац", "фотополимер", "клиновидн", "абфракц", "стираемост", "бруксизм",
-    "флюороз", "гипоплази", "фиссур", "герметизац", "карман", "грейси", "gracey",
-    "скалер", "чистк", "налет", "камень", "сст", "сдг", "трансплантат", "вестибулопласт",
-    "микроимплант", "тяга", "пломб", "девитал", "мышьяк", "резекц", "цистэкт",
-    "гранулем", "кист", "киста", "фистул", "свищ", "перфорац", "полость", "полости",
-    "кариозн", "поддеснев", "наддеснев", "шейка", "верхушка", "апикальн", "дентальный",
-    "стоматолог", "эндодонт", "пародонтолог", "кофердам", "остеопласт", "винир",
-    "синуслифт", "костнаяпласт", "аугмент", "регенер", "остеосинтез", "стекловолокн",
-    "свш", "металлокерам", "ортодонтич", "обтуратор", "термафил", "thermafil",
-    "airflow", "air-flow", "пазух", "гайморов", "мандибул", "ментальн", "подбородоч",
-    "альвеолярн", "остеотоми"
-}
+DENTAL_KEYWORDS = config.DENTAL_KEYWORDS
 
 def load_state():
     if os.path.exists(STATE_PATH):
@@ -299,52 +268,56 @@ def extract_keywords(text):
             
     return dental_matches + other_matches
 
-def search_knowledge_corpus(keywords):
+async def search_knowledge_corpus(keywords):
     if not keywords:
         return "", ""
         
-    wiki_facts = []
-    archive_msgs = []
-    
-    # 1. Search stomat_wiki.db
-    if os.path.exists("stomat_wiki.db"):
-        try:
-            conn = sqlite3.connect("stomat_wiki.db", timeout=30)
-            conn.execute("PRAGMA busy_timeout = 30000")
-            c = conn.cursor()
-            for kw in keywords:
-                c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 4", (f"%{kw}%",))
-                for row in c.fetchall():
-                    fact = f"[{row[0]}] {row[1]}"
-                    if fact not in wiki_facts:
-                        wiki_facts.append(fact)
-                if len(wiki_facts) >= 25:
-                    break
-            conn.close()
-        except Exception as e:
-            logger.error(f"Error searching stomat_wiki.db: {e}")
-            
-    # 2. Search stomat_archive.db
-    if os.path.exists("stomat_archive.db"):
-        try:
-            conn = sqlite3.connect("stomat_archive.db", timeout=30)
-            conn.execute("PRAGMA busy_timeout = 30000")
-            c = conn.cursor()
-            for kw in keywords:
-                c.execute("SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT 4", (f"%{kw}%",))
-                for row in c.fetchall():
-                    msg = f"{row[0]}: {row[1]}"
-                    if msg not in archive_msgs:
-                        archive_msgs.append(msg)
-                if len(archive_msgs) >= 25:
-                    break
-            conn.close()
-        except Exception as e:
-            logger.error(f"Error searching stomat_archive.db: {e}")
-            
-    wiki_corpus = "\n".join(wiki_facts[:20])
-    archive_corpus = "\n".join(archive_msgs[:20])
-    return wiki_corpus, archive_corpus
+    def sync_search():
+        wiki_facts = []
+        archive_msgs = []
+        
+        # 1. Search stomat_wiki.db
+        if os.path.exists("stomat_wiki.db"):
+            try:
+                conn = sqlite3.connect("stomat_wiki.db", timeout=30)
+                conn.execute("PRAGMA busy_timeout = 30000")
+                c = conn.cursor()
+                for kw in keywords:
+                    c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 4", (f"%{kw}%",))
+                    for row in c.fetchall():
+                        fact = f"[{row[0]}] {row[1]}"
+                        if fact not in wiki_facts:
+                            wiki_facts.append(fact)
+                    if len(wiki_facts) >= 25:
+                        break
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error searching stomat_wiki.db: {e}")
+                
+        # 2. Search stomat_archive.db
+        if os.path.exists("stomat_archive.db"):
+            try:
+                conn = sqlite3.connect("stomat_archive.db", timeout=30)
+                conn.execute("PRAGMA busy_timeout = 30000")
+                c = conn.cursor()
+                for kw in keywords:
+                    c.execute("SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT 4", (f"%{kw}%",))
+                    for row in c.fetchall():
+                        msg = f"{row[0]}: {row[1]}"
+                        if msg not in archive_msgs:
+                            archive_msgs.append(msg)
+                    if len(archive_msgs) >= 25:
+                        break
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error searching stomat_archive.db: {e}")
+                
+        wiki_corpus = "\n".join(wiki_facts[:20])
+        archive_corpus = "\n".join(archive_msgs[:20])
+        return wiki_corpus, archive_corpus
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, sync_search)
 
 async def query_db_async(query_sql, params=()):
     # Helper to query the main bot database stomat_bot.db
@@ -365,6 +338,12 @@ def clean_html_formatting(text):
         return ""
     # Strip database codes/fact indexes (e.g. [2.1.1], [1.3])
     text = re.sub(r'\s*\[\d+(?:\.\d+)+\]', '', text)
+    
+    if len(text) > 4000:
+        text = re.sub(r'<[^>]+>', '', text)
+        text = text[:3900] + "\n\n[Текст обрезан из-за превышения длины сообщения]"
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     # Temporarily hide valid HTML tags we want to support
@@ -769,7 +748,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 
 
     
-    wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+    wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
     
     if not is_dialogue and not wiki_corpus and not archive_corpus:
         # If corpus is empty, do not output anything (avoid generic AI fluff)
@@ -1066,7 +1045,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         triggered = True
         trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic}, has_question={has_question})"
         is_dental = True
-        wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+        wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
     else:
         # Non-dental Meme/Coffee: Trigger chitchat only if NOT passive (direct reply/mention)
         if not is_passive:
@@ -1215,7 +1194,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     
     # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
     keywords = extract_keywords(user_text + " " + history_str)
-    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
     if not is_last_step:
         prompt = f"""
 Ты — старший стоматолог-экзаменатор. Ведешь интерактивный разбор клинического случая.
@@ -1346,7 +1325,7 @@ async def handle_private_message(bot_client, event):
             status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
             temp_path = None
             try:
-                temp_path = await event.message.download_media(file="temp_media/")
+                temp_path = await event.message.download_media(file=f"temp_media/{event.message.id}_")
                 if temp_path and os.path.exists(temp_path):
                     import blocking_tools
                     transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
@@ -1791,7 +1770,21 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=case_welcome, parse_mode='html')
             return
 
-        # 2. Обработка медиафайлов (фото/видео) в ЛС
+        # 2. Восстановление динамического диалога (контекст до 35 сообщений)
+        history = await database.get_last_pm_messages(chat_id, limit=35)
+        context_msgs = []
+        try:
+            recent_pm_texts = [m["text"] for m in history[-6:] if m["text"]]
+            length_guideline = calculate_context_length_guidelines(recent_pm_texts)
+        except Exception:
+            length_guideline = "Отвечай кратко, до 3-4 предложений."
+
+        for msg in history:
+            context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
+            
+        history_context_text = " ".join([msg['text'] for msg in history[-3:]]) if history else ""
+
+        # 3. Обработка медиафайлов (фото/видео) в ЛС
         media_description = None
         temp_path = None
         has_media = event.message.photo is not None or event.message.video is not None
@@ -1802,7 +1795,7 @@ async def handle_private_message(bot_client, event):
                 # Отправляем статус ожидания
                 status_msg = await bot_client.send_message(entity=chat_id, message="📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>", parse_mode='html')
                 
-                temp_path = await event.message.download_media(file="temp_media/")
+                temp_path = await event.message.download_media(file=f"temp_media/{event.message.id}_")
                 file_to_analyze = temp_path
                 
                 # Если видео, извлекаем первый кадр
@@ -1812,7 +1805,9 @@ async def handle_private_message(bot_client, event):
                     file_to_analyze = await extract_first_frame_async(temp_path, timeout=60)
                     
                 if file_to_analyze:
-                    media_description = await vision.describe_image(file_to_analyze, caption=text, is_passive=False)
+                    # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
+                    vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
+                    media_description = await vision.describe_image(file_to_analyze, caption=vision_caption, is_passive=False)
                     
                 # Удаляем статусное сообщение
                 await bot_client.delete_messages(chat_id, status_msg.id)
@@ -1828,18 +1823,6 @@ async def handle_private_message(bot_client, event):
                 if 'file_to_analyze' in locals() and file_to_analyze != temp_path and os.path.exists(file_to_analyze):
                     try: os.remove(file_to_analyze)
                     except Exception: pass
-
-        # 3. Восстановление динамического диалога (контекст до 35 сообщений)
-        history = await database.get_last_pm_messages(chat_id, limit=35)
-        context_msgs = []
-        try:
-            recent_pm_texts = [m["text"] for m in history[-6:] if m["text"]]
-            length_guideline = calculate_context_length_guidelines(recent_pm_texts)
-        except Exception:
-            length_guideline = "Отвечай кратко, до 3-4 предложений."
-
-        for msg in history:
-            context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
 
         # Получаем стиль и портрет пользователя из БД
         user_profile = await database.get_user_profile(chat_id)
@@ -1868,7 +1851,7 @@ async def handle_private_message(bot_client, event):
             
         # 4. RAG-поиск по стоматологической базе знаний с учетом контекста переписки
         # Собираем текст текущего запроса и последних 3 сообщений истории для детекции клинической темы
-        history_context_text = " ".join([msg['text'] for msg in history[-3:]])
+        # history_context_text уже определен выше
         full_context_str = (text or "") + " " + (media_description or "") + " " + history_context_text
         full_context_str_lower = full_context_str.lower()
         
@@ -1886,7 +1869,7 @@ async def handle_private_message(bot_client, event):
             if len(search_keywords) < 12:
                 other_kws = [kw for kw in keywords if kw not in search_keywords]
                 search_keywords = (search_keywords + other_kws)[:12]
-            wiki_corpus, archive_corpus = search_knowledge_corpus(search_keywords)
+            wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
 
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
@@ -2104,7 +2087,7 @@ NO — если это случайное упоминание, обсужден
 
         # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
         mention_keywords = extract_keywords(text or "")
-        mention_wiki, mention_archive = search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
+        mention_wiki, mention_archive = await search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
 
         # ЭТАП 2: Сгенерировать живой ответ
         address = f"{sender_first_name}, " if sender_first_name else ""
@@ -2261,7 +2244,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 
     async with bot_client.action(chat_id, 'typing'):
         keywords = extract_keywords(question)
-        wiki_corpus, archive_corpus = search_knowledge_corpus(keywords[:12])
+        wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords[:12])
         
         prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
@@ -2550,7 +2533,7 @@ async def handle_quiz_callback(bot_client, event):
             "obturation": ["гуттаперч", "силер", "обтурац", "конденсац"]
         }
         kws = keywords_map.get(proto_id, ["дентин"])
-        wiki_corpus, _ = search_knowledge_corpus(kws)
+        wiki_corpus, _ = await search_knowledge_corpus(kws)
         wiki_corpus = clean_html_formatting(wiki_corpus)
         if not wiki_corpus:
             wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
@@ -3114,7 +3097,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     elif style == "scientific":
         # Поиск по базе RAG
         keywords = extract_keywords(text + " " + " ".join(chain_msgs))
-        wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+        wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
         
         prompt = f"""
 Ты — клинический эксперт сообщества "StomChat". В чате идет профессиональный спор.
@@ -3136,7 +3119,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     else: # style == "colleague"
         # Поиск по базе RAG для содержательного ответа от лица коллеги
         keywords = extract_keywords(text + " " + " ".join(chain_msgs))
-        wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+        wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
         
         prompt = f"""
 Ты - живой практикующий врач-стоматолог, активный и уважаемый участник чата "StomChat". 
@@ -3189,7 +3172,7 @@ async def handle_term_explainer(bot_client, event, term):
         return
         
     keywords = extract_keywords(term)
-    wiki_corpus, _ = search_knowledge_corpus(keywords[:12])
+    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
     
     prompt = f"""
 Ты — толковый словарь стоматологического сообщества "StomChat".
@@ -3273,10 +3256,18 @@ async def check_and_send_pm_pings(bot_client):
                         reply_text = response.text.strip()
                         reply_text = clean_html_formatting(reply_text)
                         
-                        await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
-                        await database.save_pm_message(chat_id, "Assistant", reply_text)
-                        
-                        info["ping_sent"] = True
+                        try:
+                            await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
+                            await database.save_pm_message(chat_id, "Assistant", reply_text)
+                            info["ping_sent"] = True
+                        except ValueError as ve:
+                            if "Could not find the input entity" in str(ve):
+                                import logging
+                                logging.getLogger(__name__).warning(f"User {chat_id} entity not found. Removing from PM pings.")
+                                pings.pop(chat_id_str, None)
+                                continue
+                            else:
+                                raise ve
                         updated = True
                         logger.info(f"Proactive DM ping sent to chat_id={chat_id}: '{reply_text}'")
                     else:
@@ -3404,13 +3395,20 @@ async def check_and_send_group_activity_pings(bot_client):
         for uid in targets:
             try:
                 msg = f"🔥 <b>{teaser}</b>\n\n💬 Тема: {topic}\n\n👉 <a href=\"{chat_link}\">Перейти к обсуждению в чате</a>"
-                await bot_client.send_message(entity=uid, message=msg, parse_mode='html', link_preview=True)
-                
-                # Сохраняем в историю переписки ЛС
-                await database.save_pm_message(uid, "Assistant", f"[Проактивный пинг чата]: {teaser}")
-                
-                # Обновляем таймштамп пинга в состоянии
-                pings[str(uid)]["last_group_ping"] = now.isoformat()
+                try:
+                    await bot_client.send_message(entity=uid, message=msg, parse_mode='html', link_preview=True)
+                    # Сохраняем в историю переписки ЛС
+                    await database.save_pm_message(uid, "Assistant", f"[Проактивный пинг чата]: {teaser}")
+                    # Обновляем таймштамп пинга в состоянии
+                    if str(uid) in pings:
+                        pings[str(uid)]["last_group_ping"] = now.isoformat()
+                except ValueError as ve:
+                    if "Could not find the input entity" in str(ve):
+                        import logging
+                        logging.getLogger(__name__).warning(f"User {uid} entity not found. Cannot send group ping.")
+                        pings.pop(str(uid), None)
+                    else:
+                        raise ve
             except Exception as send_err:
                 logger.error(f"Failed to send group activity ping to {uid}: {send_err}")
                 

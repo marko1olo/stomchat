@@ -64,9 +64,16 @@ def write_heartbeat(reason):
         "stale_after_seconds": WATCHDOG_STALE_SECONDS,
     }
     tmp_path = HEARTBEAT_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as heartbeat_file:
-        json.dump(payload, heartbeat_file, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, HEARTBEAT_PATH)
+    for attempt in range(5):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as heartbeat_file:
+                json.dump(payload, heartbeat_file, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, HEARTBEAT_PATH)
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
 
 
 def write_summary_status(status):
@@ -74,9 +81,16 @@ def write_summary_status(status):
     payload["utc"] = utc_now_text()
     payload["pid"] = os.getpid()
     tmp_path = SUMMARY_STATUS_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as status_file:
-        json.dump(payload, status_file, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, SUMMARY_STATUS_PATH)
+    for attempt in range(5):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as status_file:
+                json.dump(payload, status_file, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, SUMMARY_STATUS_PATH)
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
 
 
 def clear_summary_status(reason="idle"):

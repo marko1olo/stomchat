@@ -1,6 +1,22 @@
 {
-  "last_passive_run": "2026-07-09T10:03:16.170035",
-  "processed_threads": [],
-  "last_passive_text_run": "2026-07-09T22:41:05.871274",
-  "last_passive_media_run": "2026-07-09T23:19:31.624124"
+  "last_passive_run": "2000-01-01T00:00:00",
+  "last_passive_text_run": "2026-07-19T22:08:37.888352",
+  "last_passive_media_run": "2026-07-19T20:58:31.362800",
+  "processed_threads": [
+    168179,
+    169279
+  ],
+  "last_referee_run": "2026-07-12T11:47:43.565435",
+  "pm_pings": {
+    "7716348189": {
+      "last_activity": "2000-01-01T00:00:00",
+      "ping_sent": true,
+      "last_group_ping": "2026-07-18T18:51:38.016914"
+    },
+    "691680153": {
+      "last_activity": "2000-01-01T00:00:00",
+      "ping_sent": true,
+      "last_group_ping": "2026-07-18T20:47:04.990693"
+    }
+  }
 }
