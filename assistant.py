@@ -413,6 +413,57 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     return False
 
 
+async def check_response_quality(context_msgs: list, draft_reply: str) -> tuple[bool, str]:
+    """
+    Post-generation validator: проверяет черновик ответа бота на галлюцинации,
+    клинический бред и несоответствие контексту.
+    Возвращает (ok: bool, reason: str).
+    ok=True — ответ можно отправлять.
+    ok=False — ответ нужно выбросить (бред/галлюцинация/не по теме).
+    """
+    try:
+        context_str = "\n".join(context_msgs[-10:])
+        prompt = f"""Ты — строгий клинический рецензент стоматологического Telegram-чата.
+Тебе дан контекст переписки и черновик ответа ИИ-ассистента.
+Твоя задача: оценить, является ли черновик корректным, клинически обоснованным ответом.
+
+Контекст переписки:
+{context_str}
+
+Черновик ответа ИИ-ассистента:
+{draft_reply}
+
+Отклони черновик (ok: false), если:
+1. В нём содержится клиническая галлюцинация: связываются патологии, между которыми нет доказанной причинно-следственной связи.
+2. Ответ не относится к теме переписки — уводит в сторону, приплетает нерелевантные протоколы или факты.
+3. Ответ содержит выдуманные дозировки, протоколы, торговые названия или несуществующие методики.
+4. Ответ уверенно утверждает то, в чём нет консенсуса в EBM (доказательной медицине).
+5. Тон ответа неуместно агрессивен, высокомерен или явно обидит коллег в чате.
+
+Одобри черновик (ok: true), если:
+— Ответ клинически корректен, по теме, обоснован и уместен в контексте.
+
+Отвечай СТРОГО в формате JSON без дополнительного текста:
+{{"ok": true/false, "reason": "одна фраза на русском"}}
+"""
+        ctx = {"kind": "response_validator", "thinking_level": "LOW"}
+        response, error = await generate_gemini_text_async(prompt, ctx, timeout=15)
+        if error or not response:
+            logger.warning(f"Response quality check failed: {error}. Allowing response by default.")
+            return True, "validator_unavailable"
+        
+        text = getattr(response, "text", str(response)).strip()
+        if "```" in text:
+            text = text[text.find("{"):text.rfind("}")+1]
+        data = json.loads(text)
+        ok = bool(data.get("ok", True))
+        reason = data.get("reason", "")
+        return ok, reason
+    except Exception as e:
+        logger.warning(f"Response quality validator exception: {e}. Allowing response by default.")
+        return True, f"validator_error: {e}"
+
+
 async def check_llm_triage(context_msgs):
     """
     Отправляет последние сообщения в Llama-3 для принятия решения:
@@ -924,7 +975,15 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         if reply_clean == "IGNORE":
             logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
             return False
-            
+    
+    # POST-GENERATION QUALITY CHECK: validate draft before sending
+    if not is_dialogue:
+        quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text)
+        if not quality_ok:
+            logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+            return False
+        logger.info(f"Response quality validator approved draft: {quality_reason}")
+        
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
         # Shadow testing: deliver to test chat & topic
@@ -1200,6 +1259,14 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if reply_clean == "IGNORE":
             logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
             return
+    
+    # POST-GENERATION QUALITY CHECK: validate draft before sending
+    if is_passive:
+        quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text)
+        if not quality_ok:
+            logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+            return
+        logger.info(f"Media response quality validator approved draft: {quality_reason}")
 
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
