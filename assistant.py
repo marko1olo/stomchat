@@ -423,19 +423,19 @@ async def check_llm_triage(context_msgs):
         triage_prompt = f"""Ты — экспертный ИИ-координатор стоматологического Telegram-чата "StomChat".
 Твоя задача — проанализировать последние сообщения в чате и принять решение: должен ли ИИ-ассистент (Бот-стоматолог) ответить или вмешаться в обсуждение?
 
-ПРАВИЛО ОЦЕНКИ СОБСТВЕННОЙ ЭКСПЕРТНОСТИ И УВЕРЕННОСТИ:
-К боту редко обращаются напрямую, поэтому ты должен сам оценить: может ли Бот дать действительно ЦЕННЫЙ, точный и доказательный клинический ответ.
-
-Когда СТОИТ ответить / вмешаться (should_reply: true):
-1. В чате задан клинический или практический вопрос по понятной стоматологической теме (протоколы адгезии, эндодонтия, препарирование, выбор материалов, КЛКТ, ортопедия), ДАЖЕ ЕСЛИ вопрос адресован просто в чат (а не лично боту). Если тема известная и Бот уверено знает точный ответ — дай добро!
-2. В чате идет активное обсуждение клинического случая или методики, и Бот может внести полезную научную ясность или указать на важный клинический нюанс.
-3. Пользователь явно обращается к боту или тегает его.
+ГЛАВНЫЕ ПРАВИЛА (ЗАЩИТА ОТ НАЗОЙЛИВОСТИ И НАВЯЗЧИВОСТИ):
+Пользователи НЕ любят, когда бот спонтанно лезет в их личный разговор или перебивает размышления вслух.
 
 Когда СТРОГО ИГНОРИРОВАТЬ и молчать (should_reply: false):
-1. СОМНИТЕЛЬНЫЕ ИЛИ РЕДКИЕ ТЕРМИНЫ: Если в сообщении используются странные, неясные, малоизвестные или сомнительные понятия/сокращения (где есть риск сморозить глупость или галлюцинировать) — КАТЕГОРИЧЕСКИ НЕ ЛЕЗТЬ!
-2. ФЛУД И БЫТ: Переписка о ценах, расписании, выгорании, политике, шутках, оборудовании или жизни.
-3. Обычные короткие реплики и мнения ("я делаю так", "красиво"), где нет вопроса и не требуется экспертное вмешательство.
-4. Коллеги уже сами идеально и полно ответили на вопрос, добавлять нечего.
+1. МЫСЛИ ВСЛУХ И РИТОРИЧЕСКИЕ ВОПРОСЫ: Если пользователь пишет короткую реплику, мысли вслух (например "Интересно, как поведет себя десна...", "А что там за проблема..."), общается с конкретным собеседником или пишет неполное предложение — КАТЕГОРИЧЕСКИ НЕ ЛЕЗТЬ (`should_reply: false`)!
+2. СОМНИТЕЛЬНЫЕ ИЛИ РЕДКИЕ ТЕРМИНЫ: Если в сообщении используются странные, неясные, малоизвестные или сомнительные понятия/сокращения — НЕ ЛЕЗТЬ!
+3. ФЛУД И БЫТ: Переписка о ценах, расписании, выгорании, политике, шутках, оборудовании или жизни.
+4. Обычные короткие реплики и мнения ("я делаю так", "красиво"), где нет прямого обращения к боту.
+5. Коллеги уже сами идеально и полно ответили на вопрос, добавлять нечего.
+
+Когда СТОИТ ответить / вмешаться (should_reply: true):
+1. Пользователь явно обращается к боту или тегает его.
+2. Задан ЧЁТКИЙ, ЗАВЕРШЁННЫЙ клинический/технический вопрос к сообществу (например: "Коллеги, кто знает, в чем разница между методикой Мелкера в biological shaping и коронкой по Мелкеру?"), на который врачу действительно нужен профессиональный ответ, и темы нет в обсуждении выше.
 
 Последние сообщения в чате:
 {context_str}
@@ -674,11 +674,24 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             
             # Message contains dental keyword
             msg_has_dental_kw = any(kw in last_text_lower for kw in DENTAL_KEYWORDS)
-            # Passive trigger fires on any question in chat (len >= 8) OR messages with dental keywords/statements
-            is_question = "?" in last_text and len(last_text.strip()) >= 8
-            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 30
+            # Question markers (explicit question mark OR explicit request phrases)
+            request_phrases = ["кто знает", "подскажите", "как сделать", "какой протокол", "посоветуйте", "кто пробовал"]
+            msg_has_request_phrase = any(rp in last_text_lower for rp in request_phrases)
+            is_question = ("?" in last_text or msg_has_request_phrase) and len(last_text.strip()) >= 12
+            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 40
             
-            if is_question or is_long_dental_statement:
+            # Enforce 60-minute cooldown for unrequested passive triggers in main group
+            last_passive_str = state.get("last_passive_text_run")
+            passive_cooldown_active = False
+            if last_passive_str:
+                try:
+                    last_passive_dt = datetime.fromisoformat(last_passive_str)
+                    if datetime.now() - last_passive_dt < timedelta(minutes=60):
+                        passive_cooldown_active = True
+                except Exception:
+                    pass
+            
+            if not passive_cooldown_active and (is_question or is_long_dental_statement):
                 triggered = True
                 trigger_reason = f"Passive trigger (is_question={is_question}, is_long_dental_statement={is_long_dental_statement})"
                 state["last_passive_text_run"] = datetime.now().isoformat()
@@ -1041,6 +1054,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         other_kws = [kw for kw in keywords if kw not in search_keywords]
         search_keywords = (search_keywords + other_kws)[:12]
         
+    if is_passive:
+        last_passive_media_str = state.get("last_passive_media_run")
+        if last_passive_media_str:
+            try:
+                last_passive_media_dt = datetime.fromisoformat(last_passive_media_str)
+                if datetime.now() - last_passive_media_dt < timedelta(minutes=60):
+                    logger.info("Media Assistant: passive media cooldown active (60 min). Skipping unrequested media analysis.")
+                    return
+            except Exception:
+                pass
+
     if has_dental_topic or has_question:
         # Dental Case: Always query RAG!
         triggered = True
