@@ -68,6 +68,7 @@ def get_openai_client(api_key, base_url, timeout=30.0):
     )
 import json
 
+_key_cooldowns = {}
 BANNED_MODELS_FILE = "banned_models.json"
 
 def get_banned_models():
@@ -101,26 +102,29 @@ def generate_text(prompt, status_context=None, timeout=None):
     if timeout:
         req_timeout = max(7.0, float(timeout) / 3.0)
     
+    # ROUTING BY TASKS:
+    is_chatbot = kind in ("assistant", "assistant_media", "assistant_media_pm", "pm_chat", "llama_triage", "term_explainer", "quiz", "direct_ask")
+    
     if is_triage:
         models_cascade = [
             ("llama-3.3-70b-versatile", "groq"),
-            ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini")
         ]
-    elif is_pm:
+    elif is_chatbot:
         models_cascade = [
+            ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("gemini-3-flash-preview", "gemini"),
-            (groq_fallback, "groq"),
-            ("qwen/qwen3.6-27b", "groq")
+            ("qwen/qwen3.6-27b", "groq"),
+            (groq_fallback, "groq")
         ]
     else:
+        # Complex tasks (Summaries, analytics, etc)
         models_cascade = [
-            (config.GEMINI_MODEL, "gemini"),
-            ("gemini-3-flash-preview", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            (groq_fallback, "groq"),
-            ("qwen/qwen3.6-27b", "groq")
+            (config.GEMINI_MODEL, "gemini"), # gemini-3.6-flash
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            (groq_fallback, "groq")
         ]
 
     # Filter out models that are currently banned due to 503/504
@@ -142,11 +146,8 @@ def generate_text(prompt, status_context=None, timeout=None):
     
     for model_name, provider in active_cascade:
         if provider == "gemini":
-            from google import genai
-            from google.genai import types
             keys = list(config.GOOGLE_KEYS)
-            ms_timeout = int(req_timeout * 1000)
-            client_maker = lambda k: genai.Client(api_key=k, http_options=types.HttpOptions(timeout=ms_timeout))
+            client_maker = lambda k: get_openai_client(k, "https://generativelanguage.googleapis.com/v1beta/openai/", timeout=req_timeout)
         else:
             keys = list(config.GROQ_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1", timeout=req_timeout)
@@ -161,6 +162,11 @@ def generate_text(prompt, status_context=None, timeout=None):
             api_key = keys[attempt % len(keys)]
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
             
+            # Smart cooldown check
+            if _key_cooldowns.get((provider, api_key), 0) > time.time():
+                logger.info(f"Skipping key {key_id} (on cooldown for {int(_key_cooldowns[(provider, api_key)] - time.time())}s)")
+                continue
+            
             try:
                 client = client_maker(api_key)
                 _write_generation_status(
@@ -170,48 +176,13 @@ def generate_text(prompt, status_context=None, timeout=None):
                 )
                 logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
-                if provider == "gemini":
-                    from google.genai import types
-                    thinking_config = None
-                    is_gemini_3 = any(v in model_name for v in ["gemini-3", "gemini-3.1", "gemini-3.5", "gemini-omni"])
-                    if is_gemini_3:
-                        lvl = status_context.get("thinking_level") if status_context else None
-                        if not lvl:
-                            lvl = os.getenv("STOMCHAT_GEMINI_THINKING_LEVEL", "HIGH")
-                        lvl = lvl.upper()
-                        if lvl in ["MINIMAL", "LOW", "MEDIUM", "HIGH"]:
-                            thinking_config = types.ThinkingConfig(thinking_level=lvl)
-                    else:
-                        bgt_str = os.getenv("STOMCHAT_GEMINI_THINKING_BUDGET", "1024")
-                        try:
-                            bgt = int(bgt_str)
-                            thinking_config = types.ThinkingConfig(thinking_budget=bgt)
-                        except ValueError:
-                            pass
-                    
-                    safety_settings = [
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                    ]
-                    gen_config = types.GenerateContentConfig(
-                        thinking_config=thinking_config if thinking_config else None,
-                        safety_settings=safety_settings
-                    )
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=gen_config
-                    )
-                    text_result = response.text if response and response.text else ""
-                else:
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.95
-                    )
-                    text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
+                # Using OpenAI SDK for BOTH Groq and Gemini now
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.95
+                )
+                text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
 
                 if text_result:
                     import re
@@ -251,8 +222,9 @@ def generate_text(prompt, status_context=None, timeout=None):
                     break
 
                 if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
-                    logger.info(f"{provider.capitalize()} rate limited, waiting 2.5s cooldown before next attempt...")
-                    time.sleep(2.5)
+                    logger.info(f"{provider.capitalize()} rate limited (429/quota). Placing key {key_id} on 5-minute cooldown.")
+                    _key_cooldowns[(provider, api_key)] = time.time() + 300
+                    # Do not sleep, immediately skip to the next key or model
                     continue
                     
                 if "403" in err_msg or "permission" in err_msg:

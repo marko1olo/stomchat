@@ -10,7 +10,30 @@ from PIL import Image
 from openai import AsyncOpenAI
 
 import config
-from media_tools import prepare_image_for_analysis
+
+
+async def prepare_image_for_analysis(file_path: str, timeout: int = 45):
+    """
+    Inline implementation — media_tools не существует.
+    Читает файл, ресайзит до 1024px по длинной стороне, возвращает JPEG bytes.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        def _load_and_resize():
+            with Image.open(file_path) as img:
+                img = img.convert("RGB")
+                max_side = 1024
+                w, h = img.size
+                if max(w, h) > max_side:
+                    scale = max_side / max(w, h)
+                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                return buf.getvalue()
+        data = await loop.run_in_executor(None, _load_and_resize)
+        return data, None
+    except Exception as e:
+        return None, str(e)
 
 logger = logging.getLogger(__name__)
 GROQ_COOLDOWN_UNTIL = 0
@@ -117,23 +140,14 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"Respond directly. Do not use reasoning/thinking blocks. Do not output <think> tags."
             )
             
-            if is_passive:
-                # Cheaper/lighter models for passive background image description
-                models_cascade = [
-                    ("gemini-3.1-flash-lite", "gemini"),
-                    ("qwen/qwen3.6-27b", "groq"),
-                    ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
-                ]
-            else:
-                # Best quality models for active bot mentions/calls/PMs
-                models_cascade = [
-                    ("gemini-3.5-flash", "gemini"),
-                    ("gemini-3.1-flash-lite", "gemini"),
-                    ("gemini-3-flash-preview", "gemini"),
-                    ("gemini-2.5-flash", "gemini"),
-                    ("qwen/qwen3.6-27b", "groq"),
-                    ("meta-llama/llama-4-scout-17b-16e-instruct", "groq")
-                ]
+            # 33% / 33% / 33% load balancing pool between Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.6 27B
+            models_pool = [
+                ("gemini-3.5-flash-lite", "gemini"),
+                ("gemini-3.1-flash-lite", "gemini"),
+                ("qwen/qwen3.6-27b", "groq")
+            ]
+            start_idx = random.randint(0, 2)
+            models_cascade = models_pool[start_idx:] + models_pool[:start_idx]
 
             timeout = httpx.Timeout(
                 GROQ_HTTP_TIMEOUT_SECONDS,
@@ -143,14 +157,19 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 pool=5.0,
             )
 
-            async with httpx.AsyncClient(verify=False, timeout=timeout) as http_client:
+            async with httpx.AsyncClient(verify=False, trust_env=False, timeout=timeout) as http_client:
                 for model_name, provider in models_cascade:
                     if provider == "gemini":
-                        keys = list(config.GOOGLE_KEYS)
+                        raw_keys = os.getenv("GOOGLE_API_KEYS", "") or os.getenv("GOOGLE_KEYS", "") or getattr(config, "GOOGLE_KEYS", [])
                         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
                     else:
-                        keys = list(config.GROQ_KEYS)
+                        raw_keys = os.getenv("GROQ_API_KEYS", "") or os.getenv("GROQ_KEYS", "") or getattr(config, "GROQ_KEYS", [])
                         base_url = "https://api.groq.com/openai/v1"
+
+                    if isinstance(raw_keys, list):
+                        keys = [k for k in raw_keys if k]
+                    else:
+                        keys = [k.strip() for k in str(raw_keys).split(",") if k.strip()]
                         
                     if not keys:
                         continue
@@ -159,67 +178,46 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                     
                     for api_key in keys:
                         try:
-                            # Enforce global cooldown of 3 seconds between requests
+                            # Enforce global cooldown of 3 seconds between requests per provider
                             time_since_last_call = time.time() - _LAST_VISION_CALL_TIME
                             if time_since_last_call < 3.0:
                                 await asyncio.sleep(3.0 - time_since_last_call)
                             _LAST_VISION_CALL_TIME = time.time()
 
-                            if provider == "gemini":
-                                from google import genai
-                                from google.genai import types
-                                client = genai.Client(api_key=api_key)
-                                
-                                contents = [system_prompt]
-                                for img_bytes in images_data:
-                                    contents.append(types.Part.from_bytes(
-                                        data=img_bytes,
-                                        mime_type="image/jpeg"
-                                    ))
-                                
-                                safety_settings = [
-                                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                                ]
-                                response = await client.aio.models.generate_content(
-                                    model=model_name,
-                                    contents=contents,
-                                    config=types.GenerateContentConfig(safety_settings=safety_settings)
-                                )
-                                content = response.text
-                            else:
-                                client = AsyncOpenAI(
-                                    api_key=api_key,
-                                    base_url=base_url,
-                                    http_client=http_client,
-                                    max_retries=0,
-                                    timeout=GROQ_HTTP_TIMEOUT_SECONDS,
-                                )
-                                content_arr = [{"type": "text", "text": system_prompt}]
-                                for iu in image_urls:
-                                    content_arr.append({"type": "image_url", "image_url": {"url": iu}})
-                                
-                                resp = await client.chat.completions.create(
-                                    model=model_name,
-                                    messages=[
-                                        {
-                                            "role": "user",
-                                            "content": content_arr
-                                        }
-                                    ],
-                                    max_tokens=1024
-                                )
-                                content = resp.choices[0].message.content
+                            client = AsyncOpenAI(
+                                api_key=api_key,
+                                base_url=base_url,
+                                http_client=http_client,
+                                max_retries=0,
+                                timeout=GROQ_HTTP_TIMEOUT_SECONDS,
+                            )
+                            content_arr = [{"type": "text", "text": system_prompt}]
+                            for iu in image_urls:
+                                content_arr.append({"type": "image_url", "image_url": {"url": iu}})
+                            
+                            resp = await client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": content_arr
+                                    }
+                                ],
+                                max_tokens=600
+                            )
+                            content = resp.choices[0].message.content
                             if content:
                                 import re
                                 if "<think>" in content:
                                     if "</think>" in content:
                                         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
                                     else:
-                                        parts = content.split("<think>", 1)
-                                        content = parts[0].strip()
+                                        parts = content.split("</think>", 1)
+                                        if len(parts) > 1 and parts[1].strip():
+                                            content = parts[1].strip()
+                                        else:
+                                            parts2 = content.split("<think>", 1)
+                                            content = parts2[0].strip() or parts2[1].strip()
                                 if content.strip():
                                     logger.info(f"Vision success via {provider} ({model_name})")
                                     return content.strip()
@@ -236,7 +234,6 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 continue
                             logger.warning(f"Vision {provider} key failed ({model_name}): {e}")
 
-            GROQ_COOLDOWN_UNTIL = time.time() + 60
             return None
 
         except Exception as e:

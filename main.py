@@ -548,6 +548,11 @@ async def media_analysis_worker(worker_id):
             raise
         except Exception:
             logger.exception("media analysis worker failed worker=%s msg_id=%s", worker_id, msg_id)
+            # Mark as permanently failed so recover_pending_media_analysis stops retrying on every restart
+            try:
+                await database.update_media_description(msg_id, "[медиа — ошибка анализа]")
+            except Exception as mark_err:
+                logger.warning("Could not mark failed media msg_id=%s: %s", msg_id, mark_err)
         finally:
             _media_queue.task_done()
 
@@ -591,7 +596,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                             files_to_analyze.append(frame_path)
                             temp_paths.append(frame_path)
             except Exception as e:
-                logger.warning(f"Failed to process a media item in album {msg_id}: {e}")
+                logger.warning(f"Failed to process a media item in album {msg_id}: {type(e).__name__}: {e}")
 
         if files_to_analyze:
             logger.info(f"📸 Анализ медиа (файлов: {len(files_to_analyze)}) в сообщении {msg_id}...")
