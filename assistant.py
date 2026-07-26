@@ -672,28 +672,28 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             last_text = last_msgs[-1][1] or ""
             last_text_lower = last_text.lower()
             
-            # Message contains dental keyword
-            msg_has_dental_kw = any(kw in last_text_lower for kw in DENTAL_KEYWORDS)
-            # Question markers (explicit question mark OR explicit request phrases)
-            request_phrases = ["кто знает", "подскажите", "как сделать", "какой протокол", "посоветуйте", "кто пробовал"]
+            # Passive trigger requires BOTH dental keyword AND clear question/request marker
+            request_phrases = ["кто знает", "подскажите", "как сделать", "какой протокол", "посоветуйте", "кто пробовал", "какой материал", "что думаете"]
             msg_has_request_phrase = any(rp in last_text_lower for rp in request_phrases)
-            is_question = ("?" in last_text or msg_has_request_phrase) and len(last_text.strip()) >= 12
-            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 40
+            is_question = ("?" in last_text or msg_has_request_phrase) and len(last_text.strip()) >= 15
             
-            # Enforce 60-minute cooldown for unrequested passive triggers in main group
+            # REQUIRE dental keyword AND question marker to prevent triggering on general thoughts
+            is_valid_passive_question = msg_has_dental_kw and is_question
+            
+            # Enforce 120-minute (2 hours) cooldown for unrequested passive triggers in main group
             last_passive_str = state.get("last_passive_text_run")
             passive_cooldown_active = False
             if last_passive_str:
                 try:
                     last_passive_dt = datetime.fromisoformat(last_passive_str)
-                    if datetime.now() - last_passive_dt < timedelta(minutes=60):
+                    if datetime.now() - last_passive_dt < timedelta(minutes=120):
                         passive_cooldown_active = True
                 except Exception:
                     pass
             
-            if not passive_cooldown_active and (is_question or is_long_dental_statement):
+            if not passive_cooldown_active and is_valid_passive_question:
                 triggered = True
-                trigger_reason = f"Passive trigger (is_question={is_question}, is_long_dental_statement={is_long_dental_statement})"
+                trigger_reason = f"Passive trigger (is_valid_passive_question=True)"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
                 
@@ -1059,8 +1059,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if last_passive_media_str:
             try:
                 last_passive_media_dt = datetime.fromisoformat(last_passive_media_str)
-                if datetime.now() - last_passive_media_dt < timedelta(minutes=60):
-                    logger.info("Media Assistant: passive media cooldown active (60 min). Skipping unrequested media analysis.")
+                if datetime.now() - last_passive_media_dt < timedelta(minutes=120):
+                    logger.info("Media Assistant: passive media cooldown active (120 min). Skipping unrequested media analysis.")
                     return
             except Exception:
                 pass
