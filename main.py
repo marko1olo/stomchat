@@ -991,7 +991,10 @@ async def handle_callback_query(event):
     try:
         await assistant.handle_quiz_callback(bot_client, event)
     except Exception as e:
-        logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
+        if "MessageNotModifiedError" in type(e).__name__ or "Content of the message was not modified" in str(e):
+            pass
+        else:
+            logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
 
 @client.on(events.NewMessage(pattern=r'\.dump', outgoing=True))
 async def dump_handler(event):

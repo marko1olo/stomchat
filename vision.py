@@ -132,12 +132,12 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 logger.error("Ошибка подготовки фото: ни одно фото не удалось обработать.")
                 return None
 
-            context = f" Context from the author: '{caption}'." if caption else ""
+            context = f" Контекст от автора: '{caption}'." if caption else ""
             system_prompt = (
-                f"This is a dental image from a professional chat.{context} "
-                f"Describe what you see in Russian (pathology, clinical step, or materials). If there is any text, analyze it (make conclusion). If picture is not medical, describe it briefly. "
-                f"Be professional. (Write up to 4-6 sentences). "
-                f"Respond directly. Do not use reasoning/thinking blocks. Do not output <think> tags."
+                f"Это стоматологическое изображение из профессионального врачебного чата.{context} "
+                f"Опиши клиническую картину на русском языке (патология, этап лечения, материалы или инструмент). Если на картинке есть текст — разбери его смысл. Если картинка не медицинская (мем, котик, бытовая), опиши её кратко. "
+                f"Будь профессионалом. (Напиши 3-5 предложений). "
+                f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать на английском языке, выводить черновики, шаги размышления (Reasoning/Thinking) или теги <think>."
             )
             
             # 33% / 33% / 33% load balancing pool between Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.6 27B

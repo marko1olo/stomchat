@@ -420,21 +420,22 @@ async def check_llm_triage(context_msgs):
     """
     try:
         context_str = "\n".join(context_msgs)
-        triage_prompt = f"""Ты — высококлассный ИИ-координатор стоматологического Telegram-чата "StomChat".
-Твоя задача — проанализировать последние сообщения в чате и принять взвешенное решение: должен ли ИИ-ассистент (Бот) ответить на последнее сообщение?
+        triage_prompt = f"""Ты — экспертный ИИ-координатор стоматологического Telegram-чата "StomChat".
+Твоя задача — проанализировать последние сообщения в чате и принять решение: должен ли ИИ-ассистент (Бот-стоматолог) ответить или вмешаться в обсуждение?
 
-Главная цель — Бот НЕ ДОЛЖЕН СПАМИТЬ и лезть со своими лекциями или банальными советами, если его об этом не просят, и не должен перебивать живой разговор участников чата.
+ПРАВИЛО ОЦЕНКИ СОБСТВЕННОЙ ЭКСПЕРТНОСТИ И УВЕРЕННОСТИ:
+К боту редко обращаются напрямую, поэтому ты должен сам оценить: может ли Бот дать действительно ЦЕННЫЙ, точный и доказательный клинический ответ.
 
-Критерии для ответа (should_reply: true):
-1. Последнее сообщение содержит прямой клинический/технический вопрос по стоматологии (например, расчет дозировок, протокол адгезии, выбор имплантационного протокола, расшифровка КЛКТ), на который действительно нужен авторитетный научный ответ.
-2. Пользователь явно обращается к боту или тегает его.
-3. Пользователь просит бота выполнить конкретную команду (/wiki, /calc, /quiz, /case).
+Когда СТОИТ ответить / вмешаться (should_reply: true):
+1. В чате задан клинический или практический вопрос по понятной стоматологической теме (протоколы адгезии, эндодонтия, препарирование, выбор материалов, КЛКТ, ортопедия), ДАЖЕ ЕСЛИ вопрос адресован просто в чат (а не лично боту). Если тема известная и Бот уверено знает точный ответ — дай добро!
+2. В чате идет активное обсуждение клинического случая или методики, и Бот может внести полезную научную ясность или указать на важный клинический нюанс.
+3. Пользователь явно обращается к боту или тегает его.
 
-Критерии для жесткого игнорирования (should_reply: false):
-1. Последнее сообщение — это просто утверждение, констатация факта или личное клиническое мнение (например: "я делаю вертипреп на 12 зубах и все отлично", "вчера ставил коффердам полчаса"). Бот не должен встревать с комментариями на такие сообщения!
-2. В чате идет обычный разговор, обсуждение цен, графиков, выгорания, административных вопросов, софта, оборудования, шуток или флуда. Бот не должен лезть в этот разговор со своими лекциями.
-3. Последнее сообщение содержит стоматологические термины, но в нем НЕТ конкретного вопроса к боту.
-4. Собеседник просто шутит, иронизирует, троллит или выражает скепсис.
+Когда СТРОГО ИГНОРИРОВАТЬ и молчать (should_reply: false):
+1. СОМНИТЕЛЬНЫЕ ИЛИ РЕДКИЕ ТЕРМИНЫ: Если в сообщении используются странные, неясные, малоизвестные или сомнительные понятия/сокращения (где есть риск сморозить глупость или галлюцинировать) — КАТЕГОРИЧЕСКИ НЕ ЛЕЗТЬ!
+2. ФЛУД И БЫТ: Переписка о ценах, расписании, выгорании, политике, шутках, оборудовании или жизни.
+3. Обычные короткие реплики и мнения ("я делаю так", "красиво"), где нет вопроса и не требуется экспертное вмешательство.
+4. Коллеги уже сами идеально и полно ответили на вопрос, добавлять нечего.
 
 Последние сообщения в чате:
 {context_str}
@@ -673,18 +674,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             
             # Message contains dental keyword
             msg_has_dental_kw = any(kw in last_text_lower for kw in DENTAL_KEYWORDS)
-            # Message contains a question mark
-            msg_has_question = "?" in last_text
+            # Passive trigger fires on any question in chat (len >= 8) OR messages with dental keywords/statements
+            is_question = "?" in last_text and len(last_text.strip()) >= 8
+            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 30
             
-            # Passive trigger fires only in two cases:
-            # 1. Message contains a dental keyword AND is a question (e.g. "какой имплант лучше?")
-            # 2. Message contains a dental keyword AND is a descriptive clinical sentence (len >= 40)
-            is_dental_question = msg_has_dental_kw and msg_has_question
-            is_long_dental_statement = msg_has_dental_kw and len(last_text.strip()) >= 40
-            
-            if is_dental_question or is_long_dental_statement:
+            if is_question or is_long_dental_statement:
                 triggered = True
-                trigger_reason = f"Passive trigger (is_dental_question={is_dental_question}, is_long_dental_statement={is_long_dental_statement})"
+                trigger_reason = f"Passive trigger (is_question={is_question}, is_long_dental_statement={is_long_dental_statement})"
                 state["last_passive_text_run"] = datetime.now().isoformat()
                 save_state(state)
                 
@@ -911,7 +907,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     reply_text = clean_html_formatting(reply_text)
 
     if not is_dialogue:
-        if reply_text.strip().upper() == "IGNORE":
+        reply_clean = re.sub(r'[^A-Z]', '', reply_text.strip().upper())
+        if reply_clean == "IGNORE":
             logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
             return False
             
@@ -1064,6 +1061,39 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         state["last_passive_media_run"] = datetime.now().isoformat()
         save_state(state)
 
+    # Fetch recent messages and reply chain for context
+    context_msgs = []
+    try:
+        last_msgs = await query_db_async(
+            "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages ORDER BY date DESC LIMIT 15"
+        )
+        if last_msgs:
+            last_msgs = last_msgs[::-1]
+            for r in last_msgs:
+                rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
+                context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
+    except Exception as ctx_err:
+        logger.warning(f"Failed to fetch context for media: {ctx_err}")
+
+    reply_to_msg_id = getattr(message, 'reply_to_msg_id', None)
+    if reply_to_msg_id:
+        try:
+            chain = await database.get_reply_chain_texts(reply_to_msg_id, max_depth=7)
+            if chain:
+                chain_msgs = [f"[Контекст ответа #{r[0]}] {r[1]}: {r[2]}" for r in chain]
+                seen = set(chain_msgs)
+                extra = [m for m in context_msgs if m not in seen]
+                context_msgs = chain_msgs + extra
+        except Exception as chain_err:
+            logger.warning(f"Failed to fetch reply chain for media: {chain_err}")
+
+    context_str = "\n".join(context_msgs) if context_msgs else "Нет предыдущего контекста."
+
+    is_dialogue = is_direct_reply or is_mentioned
+    ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
+    if is_dialogue:
+        ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
+
     # BUILD PROMPT
     if is_dental:
         prompt = f"""
@@ -1142,7 +1172,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # Check IGNORE filter only for dental checks (non-dental balancer is already validated)
     if is_dental:
-        if reply_text.strip().upper() == "IGNORE":
+        reply_clean = re.sub(r'[^A-Z]', '', reply_text.strip().upper())
+        if reply_clean == "IGNORE":
             logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
             return
 
