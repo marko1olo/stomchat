@@ -668,19 +668,18 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         last_msgs = last_msgs[::-1]
         
         if last_msgs:
-            # Check triggers: the triggering message (last message) itself must contain dental keywords
             last_text = last_msgs[-1][1] or ""
             last_text_lower = last_text.lower()
             
-            # Passive trigger requires BOTH dental keyword AND clear question/request marker
-            request_phrases = ["кто знает", "подскажите", "как сделать", "какой протокол", "посоветуйте", "кто пробовал", "какой материал", "что думаете"]
-            msg_has_request_phrase = any(rp in last_text_lower for rp in request_phrases)
-            is_question = ("?" in last_text or msg_has_request_phrase) and len(last_text.strip()) >= 15
+            # Pre-filter: block only OBVIOUS garbage before paying for LLM triage call
+            # Commands, pure emoji, very short messages — don't even bother triaging
+            is_obviously_junk = (
+                last_text.startswith("/") or                     # bot command
+                len(last_text.strip()) < 8 or                   # too short to mean anything
+                not any(c.isalpha() for c in last_text)         # pure emoji / numbers / symbols
+            )
             
-            # REQUIRE dental keyword AND question marker to prevent triggering on general thoughts
-            is_valid_passive_question = msg_has_dental_kw and is_question
-            
-            # Enforce 120-minute (2 hours) cooldown for unrequested passive triggers in main group
+            # Enforce 120-minute (2 hours) cooldown for unrequested passive triggers
             last_passive_str = state.get("last_passive_text_run")
             passive_cooldown_active = False
             if last_passive_str:
@@ -691,11 +690,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 except Exception:
                     pass
             
-            if not passive_cooldown_active and is_valid_passive_question:
+            if not is_obviously_junk and not passive_cooldown_active:
                 triggered = True
-                trigger_reason = f"Passive trigger (is_valid_passive_question=True)"
-                state["last_passive_text_run"] = datetime.now().isoformat()
-                save_state(state)
+                trigger_reason = "Passive trigger (pending LLM triage)"
                 
                 context_msgs = []
                 for r in last_msgs:
@@ -714,7 +711,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                             for r in thread_rows:
                                 rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
                                 thread_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
-                            # Merge: thread first, then recent context (deduplicated)
                             seen = set(thread_msgs)
                             extra = [m for m in context_msgs if m not in seen]
                             context_msgs = thread_msgs + extra
@@ -722,12 +718,16 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         logger.warning(f"Failed to fetch reply thread for passive context: {thread_err}")
 
 
-    # Run Llama Triage on passive triggers (to avoid false positives)
+    # Run LLM Triage on passive triggers — the AI decides whether to reply, not regexes
     if triggered and not is_dialogue and not (reply_to_msg_id and "discussion thread" in trigger_reason):
         should_reply = await check_llm_triage(context_msgs)
         if not should_reply:
-            logger.info("Llama triage decided NOT to reply. Cancelling trigger.")
+            logger.info("LLM triage decided NOT to reply. Cancelling trigger.")
             return False
+        # LLM said yes — NOW record the cooldown timestamp
+        if not is_dialogue:
+            state["last_passive_text_run"] = datetime.now().isoformat()
+            save_state(state)
 
     if not triggered:
         return False
