@@ -1,7 +1,7 @@
 {
   "last_passive_run": "2000-01-01T00:00:00",
   "last_passive_text_run": "2026-07-26T19:20:14.672262",
-  "last_passive_media_run": "2026-07-26T17:19:03.183784",
+  "last_passive_media_run": "2026-07-26T20:05:47.143681",
   "processed_threads": [
     168179,
     169279,
@@ -13,7 +13,7 @@
     "7716348189": {
       "last_activity": "2000-01-01T00:00:00",
       "ping_sent": true,
-      "last_group_ping": "2026-07-24T19:36:21.783277"
+      "last_group_ping": "2026-07-26T20:33:54.830892"
     },
     "691680153": {
       "last_activity": "2000-01-01T00:00:00",
