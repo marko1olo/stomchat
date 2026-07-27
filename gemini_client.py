@@ -1,6 +1,9 @@
 import config
+import hashlib
+import json
 import os
 import random
+import re
 import logging
 import time
 
@@ -31,13 +34,24 @@ def _retry_sleep_seconds(attempt):
     jitter = random.uniform(0, min(5, base))
     return min(cap, base * (2 ** min(attempt, 4)) + jitter)
 
+# Коды статусов ищем по границе слова. Подстрочный поиск "500" находил его в
+# "1500 tokens" и "500000 tokens" — совершенно посторонний отказ трактовался как
+# перегрузка сервера и банил модель на 20 минут для всех ключей сразу.
+_STATUS_CODE_RE = re.compile(r"\b(429|500|502|503|504)\b")
+_SERVER_ERROR_RE = re.compile(r"\b(500|502|503|504)\b")
+_RATE_LIMIT_RE = re.compile(r"\b429\b|rate ?limit|quota|resource[_ ]exhausted")
+
+
 def _is_retryable_gemini_error(error_text):
+    # "rate" отдельным маркером был ловушкой: он есть в слове "generate", то
+    # есть почти в любом сообщении об ошибке генерации.
     retry_markers = (
-        "429", "500", "502", "503", "504",
         "deadline", "timeout", "timed out", "temporarily",
-        "unavailable", "rate", "quota", "failed_precondition",
+        "unavailable", "failed_precondition",
         "connection", "transport"
     )
+    if _STATUS_CODE_RE.search(error_text) or _RATE_LIMIT_RE.search(error_text):
+        return True
     return any(marker in error_text for marker in retry_markers)
 
 def _write_generation_status(context, **updates):
@@ -66,28 +80,89 @@ def get_openai_client(api_key, base_url, timeout=30.0):
         timeout=timeout,
         max_retries=0
     )
-import json
-
-_key_cooldowns = {}
 BANNED_MODELS_FILE = "banned_models.json"
+KEY_COOLDOWN_FILE = "key_cooldowns.json"
+KEY_COOLDOWN_SECONDS = 300
 
-def get_banned_models():
-    if not os.path.exists(BANNED_MODELS_FILE):
+
+def _load_expiry_map(path):
+    """Читает {ключ: unix_время_истечения}, отбрасывая протухшее."""
+    if not os.path.exists(path):
         return {}
     try:
-        with open(BANNED_MODELS_FILE, "r") as f:
-            return json.load(f)
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    now = time.time()
+    return {k: v for k, v in data.items() if isinstance(v, (int, float)) and v > now}
+
+
+def _save_expiry_map(path, data):
+    """
+    Атомарная запись через временный файл.
+
+    Прежний вариант писал поверх напрямую: обрыв на середине оставлял
+    обрезанный JSON, и весь список банов молча превращался в пустой — все
+    перегруженные модели снова считались рабочими.
+
+    Файл общий для параллельных подпроцессов, так что редкая потеря одной
+    записи при одновременной записи возможна и допустима: цена — один лишний
+    запрос к ключу, а не порча файла.
+    """
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        logger.warning(f"Failed to save {path}: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def get_banned_models():
+    return _load_expiry_map(BANNED_MODELS_FILE)
+
 
 def ban_model(model_name, duration_seconds):
     models = get_banned_models()
     models[model_name] = time.time() + duration_seconds
-    try:
-        with open(BANNED_MODELS_FILE, "w") as f:
-            json.dump(models, f)
-    except Exception as e:
-        logger.warning(f"Failed to save banned models: {e}")
+    _save_expiry_map(BANNED_MODELS_FILE, models)
+
+
+def _key_fingerprint(provider, api_key):
+    """
+    Устойчивый отпечаток ключа для файла кулдаунов.
+
+    На диск идёт именно хеш: сам ключ — секрет, и писать его в файл рядом с
+    логами и состоянием нельзя ни при каких обстоятельствах.
+    """
+    return hashlib.sha256(f"{provider}:{api_key}".encode("utf-8")).hexdigest()[:16]
+
+
+def get_key_cooldowns():
+    """
+    Кулдауны ключей, переживающие процесс.
+
+    Раньше это был обычный словарь в памяти модуля — а каждый LLM-вызов уходит
+    в свежий подпроцесс (blocking_tools.py), который импортирует модуль заново.
+    Словарь всегда был пуст, и пятиминутный кулдаун после 429 не действовал ни
+    одного запроса: следующее же сообщение снова било в тот же исчерпанный ключ.
+    Баны моделей автор сохранял в файл — здесь та же механика.
+    """
+    return _load_expiry_map(KEY_COOLDOWN_FILE)
+
+
+def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
+    cooldowns = get_key_cooldowns()
+    cooldowns[_key_fingerprint(provider, api_key)] = time.time() + seconds
+    _save_expiry_map(KEY_COOLDOWN_FILE, cooldowns)
 def generate_text(prompt, status_context=None, timeout=None):
     """Generate summary text through Gemini with Groq fallback."""
     kind = status_context.get("kind") if status_context else None
@@ -155,18 +230,39 @@ def generate_text(prompt, status_context=None, timeout=None):
         if not keys:
             logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
             continue
-            
+
         random.shuffle(keys)
-        
-        for attempt in range(max_attempts):
-            api_key = keys[attempt % len(keys)]
+
+        # Ключи на кулдауне отсеиваются ДО цикла попыток.
+        #
+        # Раньше проверка стояла внутри цикла и делала `continue`: «холодный»
+        # ключ съедал попытку целиком, не отправив запроса. Настроено 10 ключей
+        # Google и 7 Groq при бюджете max_attempts=3 — трёх подряд попавшихся
+        # остывающих ключей хватало, чтобы модель была пропущена при семи
+        # полностью здоровых. Когда так же осыпался весь каскад, бот писал
+        # «All AI attempts exhausted» и молча не отвечал врачу, имея на руках
+        # больше десятка рабочих ключей.
+        cooldowns = get_key_cooldowns()
+        now_ts = time.time()
+        available = [k for k in keys if cooldowns.get(_key_fingerprint(provider, k), 0) <= now_ts]
+        if not available:
+            soonest = min(cooldowns.get(_key_fingerprint(provider, k), 0) for k in keys)
+            logger.info(
+                "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
+                provider, max(0, int(soonest - now_ts)), model_name
+            )
+            continue
+        if len(available) < len(keys):
+            logger.info(
+                "%s: %s of %s keys available, rest on cooldown.",
+                provider, len(available), len(keys)
+            )
+
+        # Бюджет попыток — это число РЕАЛЬНЫХ запросов, каждый на своём ключе.
+        for attempt in range(min(max_attempts, len(available))):
+            api_key = available[attempt]
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
-            
-            # Smart cooldown check
-            if _key_cooldowns.get((provider, api_key), 0) > time.time():
-                logger.info(f"Skipping key {key_id} (on cooldown for {int(_key_cooldowns[(provider, api_key)] - time.time())}s)")
-                continue
-            
+
             try:
                 client = client_maker(api_key)
                 _write_generation_status(
@@ -215,15 +311,18 @@ def generate_text(prompt, status_context=None, timeout=None):
                     key=key_id, error=str(exc)[:500]
                 )
                 
-                if "503" in err_msg or "504" in err_msg or "deadline" in err_msg or "unavailable" in err_msg or "500" in err_msg:
+                if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
                     ban_duration = 1200  # 20 минут в секундах
                     ban_model(model_name, ban_duration)
                     logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 20 minutes. Skipping in cascade.")
                     break
 
-                if "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
-                    logger.info(f"{provider.capitalize()} rate limited (429/quota). Placing key {key_id} on 5-minute cooldown.")
-                    _key_cooldowns[(provider, api_key)] = time.time() + 300
+                if _RATE_LIMIT_RE.search(err_msg):
+                    logger.info(
+                        f"{provider.capitalize()} rate limited (429/quota). Placing key {key_id} "
+                        f"on {KEY_COOLDOWN_SECONDS}s cooldown."
+                    )
+                    set_key_cooldown(provider, api_key)
                     # Do not sleep, immediately skip to the next key or model
                     continue
                     

@@ -23,6 +23,9 @@ assistant_state.json
 assistant_state.json.tmp
 assistant_state.json.bak
 banned_models.json
+banned_models.json.tmp
+key_cooldowns.json
+key_cooldowns.json.tmp
 
 # Databases and backups
 *.db
