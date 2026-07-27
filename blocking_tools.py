@@ -99,15 +99,24 @@ async def _run_json_tool(action, payload, timeout=None):
         stderr=None,
     )
     request_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="replace")
+    async def _reap():
+        """Добить процесс, не зависнув на дренаже его пайпов."""
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(request_bytes), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return None, f"{action} timeout"
+        await _reap()
+        return None, f"{action} timeout after {timeout}s"
     except asyncio.CancelledError:
-        proc.kill()
-        await proc.communicate()
+        await _reap()
         raise
 
     stdout_text = stdout.decode("utf-8", errors="replace")
@@ -149,27 +158,55 @@ class TextResponse:
         self.text = text
 
 
-_LAST_GEMINI_CALL_TIME = 0.0
+_GEMINI_MIN_INTERVAL_SECONDS = 3.0
+# Страховка от вечного ожидания: без неё timeout=None превращался в
+# asyncio.wait_for(..., None), а дочерний процесс может спать до 60 с между
+# ретраями на каждой из 4 моделей каскада.
+_GEMINI_DEFAULT_TIMEOUT_SECONDS = 120.0
+
+_LAST_GEMINI_CALL_START = 0.0
+# Блокировка удерживается только на время расчёта паузы и самого сна, а не на
+# время запроса — иначе все LLM-вызовы выстроились бы в один поток.
+_GEMINI_PACE_LOCK = asyncio.Lock()
+
+
+async def _pace_gemini_calls():
+    """
+    Разносит СТАРТЫ запросов минимум на _GEMINI_MIN_INTERVAL_SECONDS.
+
+    Прежняя версия читала и писала таймстамп без блокировки: N корутин,
+    зашедших одновременно, видели одно и то же значение, спали одинаково и
+    просыпались вместе — то есть гейт не разносил ничего и стабильно давал
+    залп из N параллельных запросов, ловящий 429 и отправляющий ключи
+    в пятиминутный cooldown. Под блокировкой каждый следующий ожидающий
+    считает паузу уже от обновлённого времени.
+    """
+    global _LAST_GEMINI_CALL_START
+    async with _GEMINI_PACE_LOCK:
+        # monotonic, а не time(): интервал не должен ломаться от перевода часов.
+        wait = _GEMINI_MIN_INTERVAL_SECONDS - (time.monotonic() - _LAST_GEMINI_CALL_START)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _LAST_GEMINI_CALL_START = time.monotonic()
+
 
 async def generate_gemini_text_async(prompt, context, timeout=None):
-    global _LAST_GEMINI_CALL_TIME
-    time_since_last_call = time.time() - _LAST_GEMINI_CALL_TIME
-    if time_since_last_call < 3.0:
-        await asyncio.sleep(3.0 - time_since_last_call)
-    _LAST_GEMINI_CALL_TIME = time.time()
-    
+    await _pace_gemini_calls()
+
+    effective_timeout = float(timeout) if timeout else _GEMINI_DEFAULT_TIMEOUT_SECONDS
+
     try:
         payload, error = await _run_json_tool(
             "gemini-text",
-            {"prompt": prompt, "context": context, "timeout": timeout},
-            timeout=timeout,
+            {"prompt": prompt, "context": context, "timeout": effective_timeout},
+            timeout=effective_timeout,
         )
         if error:
             return None, error
 
         text = payload.get("text")
         if not text:
-            return None, None
+            return None, "gemini-text returned empty text"
         return TextResponse(text), None
     finally:
         try:
