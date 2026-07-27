@@ -1734,6 +1734,23 @@ async def start_bot():
     runtime_guard.start_watchdog()
     runtime_guard.write_heartbeat("start_bot")
     runtime_guard.clear_summary_status("startup")
+
+    # Сердцебиение запускается ЗДЕСЬ, а не в конце вместе с остальными задачами.
+    #
+    # Сторож убивает процесс, если heartbeat не обновлялся WATCHDOG_STALE_SECONDS
+    # (300 с). До этой правки между write_heartbeat("start_bot") и запуском
+    # heartbeat_task шёл весь сетевой подъём, и его собственные таймауты
+    # складывались в бюджет БОЛЬШЕ сторожевого: client.start() 120 +
+    # bot_client.start() 120 + get_my_id() 60 плюс init_assistant — свыше 300 с.
+    # На медленной сети, то есть ровно тогда, когда подъём и без того труден,
+    # сторож стрелял в процесс посреди подключения, start.bat поднимал его
+    # заново, и бот уходил в цикл перезапусков, ни разу не встав.
+    #
+    # Держать сердцебиение с самого начала безопасно: каждый шаг подъёма и так
+    # ограничен своим asyncio.wait_for, зависнуть навсегда ни один не может, а
+    # сторож проверяет живость цикла событий — во время подключения цикл жив.
+    runtime_guard.create_task(heartbeat_task(), "heartbeat")
+
     logger.info("🚀 Инициализация базы данных...")
     await asyncio.wait_for(database.init_db(), timeout=30)
     
@@ -1755,7 +1772,7 @@ async def start_bot():
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()
     
-    runtime_guard.create_task(heartbeat_task(), "heartbeat")
+    # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
     runtime_guard.create_task(pm_ping_scheduler_task(bot_client), "pm_ping_scheduler")
     runtime_guard.create_task(runtime_telemetry_task(), "runtime_telemetry")
