@@ -43,9 +43,46 @@ def _write_summary_stage(stage, **payload):
 
 
 def _normalize_delivery_text(value):
-    text = re.sub(r"<[^>]+>", "", value or "")
+    """
+    Приводит текст к виду, по которому сравниваются «то же самое сообщение».
+
+    Тег заменяется ПРОБЕЛОМ, а не пустой строкой. Иначе «<b>Дайджест</b>тело»
+    превращалось в «Дайджесттело», тогда как Telegram отдаёт текст уже без
+    разметки — «Дайджест тело», — и защита от дубля не узнавала собственный
+    только что опубликованный отчёт. Практически она не срабатывала никогда:
+    в дайджесте теги стоят вплотную к словам всегда. Смысл защиты — не
+    опубликовать отчёт второй раз после таймаута отправки.
+    """
+    text = re.sub(r"<[^>]+>", " ", value or "")
     text = html.unescape(text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_to_plain(value):
+    """HTML -> плоский текст с сохранением абзацев (для запасной отправки)."""
+    plain = re.sub(r"(?i)<br\s*/?>", "\n", value or "")
+    plain = re.sub(r"(?i)</p\s*>", "\n\n", plain)
+    plain = re.sub(r"<[^>]+>", "", plain)
+    plain = html.unescape(plain)
+    plain = re.sub(r"[ \t]+", " ", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return plain.strip()
+
+
+# Признаки того, что Telegram не смог разобрать разметку. Обрабатывать их
+# отдельно необходимо: на такую ошибку отчёт не уходит целиком, планировщик не
+# помечает день отправленным и каждые 10 минут ЗАНОВО генерирует дайджест
+# LLM-вызовом — до конца суток это десятки платных генераций, и ни одной
+# доставки.
+_HTML_PARSE_MARKERS = (
+    "parse entities",
+    "unsupported start tag",
+    "unmatched end tag",
+    "unexpected end tag",
+    "can't find end",
+    "entity",
+)
+TELEGRAM_PLAIN_TEXT_LIMIT = 4000
 
 
 def _message_matches_topic(message, topic_id):
@@ -112,6 +149,26 @@ async def _send_message_once(client, chat_id, topic_id, text, send_params, label
             )
             return existing
         raise
+    except Exception as exc:
+        # Запасного пути не было вообще: любая ошибка разбора разметки роняла
+        # отправку, дайджест за день терялся, а планировщик заново генерировал
+        # его каждые 10 минут с тем же битым HTML. Лучше доставить отчёт
+        # плоским текстом, чем не доставить никак.
+        if not any(marker in str(exc).lower() for marker in _HTML_PARSE_MARKERS):
+            raise
+
+        logger.error(
+            "%s HTML rejected by Telegram chat=%s topic=%s (%s); resending as plain text",
+            label, chat_id, topic_id, exc,
+        )
+        plain_params = {k: v for k, v in send_params.items() if k != "parse_mode"}
+        plain_text = _html_to_plain(text)[:TELEGRAM_PLAIN_TEXT_LIMIT]
+        if not plain_text:
+            raise
+        return await asyncio.wait_for(
+            client.send_message(chat_id, plain_text, **plain_params),
+            timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+        )
 
 
 async def _pin_message_safely(client, chat_id, message_id):
@@ -173,38 +230,116 @@ def get_russian_date(date_input):
     
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
     
-def _safe_truncate_html(html_str, max_len=9500):
-    if len(html_str) <= max_len:
-        return html_str
-        
-    truncated = html_str[:max_len]
-    # Try to find last paragraph tag or line break
-    last_p = truncated.rfind("<p>")
-    if last_p != -1 and last_p > 2000:
-        truncated = truncated[:last_p]
-    else:
-        last_br = truncated.rfind("<br>")
-        if last_br != -1 and last_br > 2000:
-            truncated = truncated[:last_br]
-            
-    # Close any unclosed tags
-    open_tags = []
-    for tag in re.findall(r'<(/?[a-zA-Z0-9]+)(?:\s|>)', truncated):
-        name = tag.lower()
-        if name in ["img", "br", "hr"]:
+_VOID_TAGS = frozenset({"br", "img", "hr"})
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)")
+
+
+_FULL_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
+
+
+def _balance_html(fragment):
+    """
+    Возвращает (текст_без_непарных_закрывающих, список_незакрытых_тегов).
+
+    Незакрытые теги идут в порядке от внешнего к внутреннему — дописывать их
+    нужно в обратном.
+
+    Прежний обход закрывающий тег учитывал только при совпадении с вершиной
+    стека, иначе молча его игнорировал; открывающий оставался на стеке, и в
+    конец дописывался лишний закрывающий. Непарные закрывающие теги вообще не
+    убирались, а Telegram отклоняет сообщение и из-за них тоже — «Unmatched
+    end tag». Здесь при несовпадении снимаем всё до парного элемента, как это
+    делает разбор HTML, а закрывающий без пары выбрасываем: смысла он не несёт.
+    """
+    stack = []
+    pieces = []
+    position = 0
+    for match in _FULL_TAG_RE.finditer(fragment):
+        closing, name = match.group(1), match.group(2).lower()
+        if name in _VOID_TAGS:
             continue
-        if name.startswith('/'):
-            name = name[1:]
-            if open_tags and open_tags[-1] == name:
-                open_tags.pop()
+        if closing:
+            if name in stack:
+                del stack[stack.index(name):]
+            else:
+                # Непарный закрывающий: копируем текст до него и пропускаем сам тег.
+                pieces.append(fragment[position:match.start()])
+                position = match.end()
         else:
-            open_tags.append(name)
-            
-    for tag in reversed(open_tags):
-        truncated += f"</{tag}>"
-        
-    suffix = "<br><br><b>[Отчет сокращен из-за лимитов Telegram]</b>" if max_len <= 4000 else "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
-    return truncated + suffix
+            stack.append(name)
+    pieces.append(fragment[position:])
+    return "".join(pieces), stack
+
+
+def _unclosed_tags(fragment):
+    return _balance_html(fragment)[1]
+
+
+def _safe_cut_index(text, limit):
+    """
+    Наибольшая позиция не дальше limit, на которой резать безопасно.
+
+    Резать нельзя ни внутри тега, ни внутри HTML-сущности. Telegram на
+    нераспознанную разметку отклоняет ВЕСЬ отчёт, а не испорченный фрагмент,
+    поэтому дайджест не доходит вообще — а планировщик, не пометив день
+    отправленным, каждые 10 минут заново генерирует его LLM-вызовом.
+    Проверено: срез ровно на "<a href=" давал в результате «<a href="h</a>».
+    """
+    cut = min(limit, len(text))
+    if cut <= 0:
+        return 0
+
+    bracket = text.rfind("<", 0, cut)
+    if bracket != -1 and text.find(">", bracket, cut) == -1:
+        cut = bracket
+
+    ampersand = text.rfind("&", 0, cut)
+    if ampersand != -1 and cut - ampersand <= 10 and text.find(";", ampersand, cut) == -1:
+        cut = ampersand
+
+    return max(cut, 0)
+
+
+def _safe_truncate_html(html_str, max_len=9500):
+    html_str = html_str or ""
+    suffix = (
+        "<br><br><b>[Отчет сокращен из-за лимитов Telegram]</b>"
+        if max_len <= 4000
+        else "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
+    )
+
+    if len(html_str) <= max_len:
+        # Разметку правим и без обрезки: незакрытые и непарные теги оставляет
+        # сама модель, а Telegram отклоняет такое сообщение точно так же.
+        body, unclosed = _balance_html(html_str)
+        tail = "".join(f"</{tag}>" for tag in reversed(unclosed))
+        if tail or body != html_str:
+            logger.warning(
+                "summary html was unbalanced: closed=%s stripped=%s chars",
+                tail or "-", len(html_str) - len(body),
+            )
+        return body + tail
+
+    # Место под закрывающие теги и суффикс резервируем ЗАРАНЕЕ, иначе результат
+    # выходит за max_len — замер до правки: запрошено 3900, получено 3958.
+    budget = max_len - len(suffix)
+    reserve = sum(len(tag) + 3 for tag in _unclosed_tags(html_str[:budget]))
+    budget -= reserve
+    if budget <= 0:
+        return _html_to_plain(html_str)[: max(0, max_len)]
+
+    truncated = html_str[: _safe_cut_index(html_str, budget)]
+
+    # Обрезаем по границе абзаца, если она достаточно далеко.
+    for marker in ("<p>", "<br>"):
+        position = truncated.rfind(marker)
+        if position > 2000:
+            truncated = truncated[:position]
+            break
+
+    body, unclosed = _balance_html(truncated)
+    body += "".join(f"</{tag}>" for tag in reversed(unclosed))
+    return body + suffix
 
 def clean_markdown_to_html(text):
     if not text: return ""
