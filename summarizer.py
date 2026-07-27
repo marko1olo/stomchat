@@ -350,47 +350,86 @@ def clean_markdown_to_html(text):
     # 2. Превращаем заголовки ### в жирный
     text = re.sub(r'^#{1,6}\s+(.*)', r'<b>\1</b>', text, flags=re.MULTILINE)
 
-    # 3. Чистим маркеры списков в начале строк
-    text = re.sub(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*', '', text, flags=re.MULTILINE)
+    # 3. Маркеры списков убираем, но ЗАПОМИНАЕМ, что строка была пунктом.
+    # Два пункта склеивать нельзя: «Совет: убрать под микроскопом» и
+    # «Альтернатива: резекция» превращались в одну фразу и читались как
+    # единое предложение.
+    marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
+    lines = []
+    list_flags = []
+    for raw_line in text.split('\n'):
+        without_marker = marker_re.sub('', raw_line)
+        lines.append(without_marker)
+        list_flags.append(without_marker != raw_line)
 
     # 4. АЛГОРИТМ СЕМАНТИЧЕСКОЙ СКЛЕЙКИ
-    lines = text.split('\n')
     final_lines = []
+    final_is_list = []
     # Жесткие терминаторы (конец мысли)
     hard_stops = ".!?:;" 
     # Союзы и знаки продолжения
     conjunctions = r'\b(и|а|но|или|к|в|с|от|до|за|для|на|по)\s*$'
 
-    for line in lines:
+    def looks_like_heading(rendered, plain):
+        """
+        Строка целиком выделена жирным и коротка — это заголовок раздела.
+
+        Проверять надо ИМЕННО текущую строку. Прежний код смотрел только на
+        предыдущую, поэтому заголовок всегда затягивался в конец абзаца перед
+        ним, если тот не оканчивался точкой: врач видел «...резекция
+        <b>Ортопедия</b> Спор о границах уступа...» — название раздела посреди
+        предложения.
+        """
+        stripped = rendered.strip()
+        return (
+            stripped.startswith("<b>")
+            and stripped.endswith("</b>")
+            and "</b>" not in stripped[:-4]
+            and len(plain) < 60
+            and plain[-1:] not in (",", ":", ";")
+        )
+
+    def append(rendered, is_list_item):
+        final_lines.append(rendered)
+        final_is_list.append(is_list_item)
+
+    for line, is_list_item in zip(lines, list_flags):
         clean_line = line.strip()
-        
+
         if not clean_line:
             if final_lines and final_lines[-1] != "":
                 last_txt = re.sub(r'<[^>]+>', '', final_lines[-1]).strip()
                 # Разрыв только если точка/двоеточие в конце
                 if last_txt and last_txt[-1] in hard_stops:
-                    final_lines.append("")
+                    append("", False)
             continue
 
+        stripped_curr = re.sub(r'<[^>]+>', '', clean_line).strip()
+        current_is_heading = looks_like_heading(clean_line, stripped_curr)
+
+        # Перед заголовком раздела — всегда пустая строка. Без этого разделы
+        # слипались в один абзац, когда предыдущий не оканчивался точкой.
+        if current_is_heading and final_lines and final_lines[-1] != "":
+            append("", False)
+
         if not final_lines or final_lines[-1] == "":
-            final_lines.append(clean_line)
+            append(clean_line, is_list_item)
             continue
 
         prev_line = final_lines[-1]
         stripped_prev = re.sub(r'<[^>]+>', '', prev_line).strip()
-        stripped_curr = re.sub(r'<[^>]+>', '', clean_line).strip()
 
         if not stripped_prev or not stripped_curr:
-            final_lines.append(clean_line)
+            append(clean_line, is_list_item)
             continue
 
         # ПРОВЕРКА НА СКЛЕЙКУ
         should_join = False
-        
+
         # Условие 1: Предыдущая строка не закончена жестким знаком
         if stripped_prev[-1] not in hard_stops:
             should_join = True
-            
+
         # Условие 2: Предыдущая строка заканчивается на запятую или союз
         if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
             should_join = True
@@ -410,16 +449,26 @@ def clean_markdown_to_html(text):
                 if not stripped_curr[0].islower():
                     should_join = False
 
+        # Заголовок раздела не приклеивается к предыдущему тексту никогда.
+        if current_is_heading:
+            should_join = False
+
+        # Два пункта списка — две строки. Маркеры уже сняты, поэтому склейка
+        # превращала перечисление в неразборчивую строку.
+        if is_list_item and final_is_list and final_is_list[-1]:
+            should_join = False
+
         if should_join:
             final_lines[-1] = f"{prev_line} {clean_line}"
+            final_is_list[-1] = final_is_list[-1] or is_list_item
         else:
-            final_lines.append(clean_line)
+            append(clean_line, is_list_item)
 
     # 5. Финальная чистка
     text = "\n".join(final_lines)
-    text = text.replace('  ', ' ')
+    text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
-    
+
     return text.strip()
 
 def create_telegraph_page(title, html_content):
