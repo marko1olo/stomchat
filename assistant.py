@@ -3175,6 +3175,90 @@ async def handle_group_quiz(bot_client, event):
     )
 
 
+# Сколько строк тянуть при запасном поиске по ключевым словам. Основной путь
+# теперь листает базу постранично и в этот предел не упирается.
+WIKI_FALLBACK_ROWS_PER_CODE = 15
+
+WIKI_SUBTOPIC_CODES = {
+    "ortho_bopt": ["2.2.1"],
+    "ortho_vin": ["2.1.1", "2.1.4"],
+    "ortho_crown": ["2.1.2", "2.1.3"],
+    "endo_irr": ["1.1.3"],
+    "endo_obt": ["1.1.4"],
+    "endo_files": ["1.1.2", "1.1.1"],
+    "perio_dis": ["1.3.2"],
+    "perio_clean": ["1.3.1"],
+    "perio_plast": ["3.3.1"],
+    "surg_impl": ["3.2.1", "3.2.2", "3.2.3"],
+    "surg_rem": ["3.1.1"],
+    "surg_bone": ["3.3.2"],
+    # Раньше здесь было ["2.3.1", "2.3.2"] против ["2.3.2"] у сплинтов, то есть
+    # «Окклюзия» была надмножеством «Сплинтов»: из 505 статей по сплинтам 461
+    # показывалась и в соседней кнопке. Каждый код закреплён за своей подтемой.
+    "gnat_joint": ["2.3.1"],
+    "gnat_splint": ["2.3.2"],
+}
+
+
+def _wiki_code_filter(subtopic_id):
+    """SQL-условие по кодам подтемы и параметры к нему."""
+    codes = WIKI_SUBTOPIC_CODES.get(subtopic_id, [])
+    if not codes:
+        return None, []
+    clause = " OR ".join("category_code LIKE ?" for _ in codes)
+    return f"({clause})", [f"%{code}%" for code in codes]
+
+
+async def query_wiki_fact_page(subtopic_id, page_idx):
+    """
+    Одна статья подтемы и общее их число.
+
+    Раньше подтема грузилась целиком через LIMIT 15 на код, и энциклопедия
+    показывала 284 статьи из 12 784 — 2.2% базы. В разделе «Коронки и мосты»
+    доступно 4149 статей, врач видел 29. Листание в SQL стоит 4 мс на самом
+    крупном разделе, поэтому предела больше нет: пагинация ходит за одной
+    строкой по OFFSET, а не тянет раздел в память на каждое нажатие кнопки.
+    """
+    where, params = _wiki_code_filter(subtopic_id)
+    if not where or not os.path.exists("stomat_wiki.db"):
+        return None, 0
+
+    async def keyword_fallback():
+        """Запасной поиск по словам, как было раньше: если по кодам пусто."""
+        facts = await query_wiki_subtopic(subtopic_id)
+        if not facts:
+            return None, 0
+        return facts[page_idx % len(facts)], len(facts)
+
+    def sync_query():
+        conn = sqlite3.connect("stomat_wiki.db", timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout = 10000")
+            base = (f"FROM distilled_facts WHERE {where} "
+                    f"AND content IS NOT NULL AND TRIM(content) <> '' GROUP BY content")
+            total = conn.execute(f"SELECT COUNT(*) FROM (SELECT 1 {base})", params).fetchone()[0]
+            if not total:
+                return None, 0
+            offset = page_idx % total
+            row = conn.execute(
+                f"SELECT content, MIN(id) AS ord {base} ORDER BY ord LIMIT 1 OFFSET ?",
+                params + [offset],
+            ).fetchone()
+            return (row[0].strip() if row else None), total
+        finally:
+            conn.close()
+
+    try:
+        fact, total = await asyncio.get_running_loop().run_in_executor(None, sync_query)
+    except Exception as e:
+        logger.error(f"Error paging wiki subtopic {subtopic_id}: {e}")
+        return await keyword_fallback()
+
+    if not total:
+        return await keyword_fallback()
+    return fact, total
+
+
 async def query_wiki_subtopic(subtopic_id):
     codes_map = {
         "ortho_bopt": ["2.2.1"],
@@ -3199,16 +3283,17 @@ async def query_wiki_subtopic(subtopic_id):
             import sqlite3
             conn = sqlite3.connect("stomat_wiki.db", timeout=10)
             c = conn.cursor()
-            
+
             # 1. Try category code search
             codes = codes_map.get(subtopic_id, [])
             for code in codes:
-                c.execute("SELECT content FROM distilled_facts WHERE category_code LIKE ? LIMIT 15", (f"%{code}%",))
+                c.execute("SELECT content FROM distilled_facts WHERE category_code LIKE ? LIMIT ?",
+                          (f"%{code}%", WIKI_FALLBACK_ROWS_PER_CODE))
                 for row in c.fetchall():
                     fact = row[0].strip()
                     if fact not in facts:
                         facts.append(fact)
-                        
+
             # 2. Fallback to keyword search if category code yields no results
             if not facts:
                 keywords_map = {
@@ -3464,9 +3549,11 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         subtopic_id = parts[1]
         page_idx = int(parts[2])
-        
-        facts = await query_wiki_subtopic(subtopic_id)
-        
+
+        # Одна статья одним запросом вместо загрузки всего раздела в память на
+        # каждое нажатие кнопки листания.
+        fact_content, total = await query_wiki_fact_page(subtopic_id, page_idx)
+
         subtopic_names = {
             "ortho_bopt": "🦷 BOPT / Преп без уступа",
             "ortho_vin": "💎 Виниры и накладки",
@@ -3485,7 +3572,7 @@ async def handle_quiz_callback(bot_client, event):
         }
         subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
         
-        if not facts:
+        if not total:
             response_text = f"📚 <b>{subtopic_title}:</b>\n\n<i>В данной категории пока нет статей в базе знаний.</i>"
             from telethon import Button
             back_cat = subtopic_id.split("_")[0]
@@ -3493,14 +3580,11 @@ async def handle_quiz_callback(bot_client, event):
             await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html')
             await event.answer()
             return
-            
-        total = len(facts)
-        if page_idx < 0:
-            page_idx = total - 1
-        elif page_idx >= total:
-            page_idx = 0
-            
-        fact_content = facts[page_idx]
+
+        # Индекс страницы нормализует сам запрос (page_idx % total), поэтому
+        # «Пред» с первой статьи уводит на последнюю, а «След» с последней — на
+        # первую, без отдельной арифметики здесь.
+        page_idx %= total
         fact_cleaned = clean_html_formatting(fact_content)
         
         response_text = (
@@ -3535,7 +3619,11 @@ async def handle_quiz_callback(bot_client, event):
         subtopic_id = parts[1]
         page_idx = int(parts[2])
         
-        facts = await query_wiki_subtopic(subtopic_id)
+        # Тем же запросом, что и показ страницы. Раньше здесь грузился весь
+        # раздел старой выборкой, и после перехода на пагинацию в SQL номер
+        # страницы означал бы уже другую статью — в закладки сохранялось бы не
+        # то, что врач видит на экране.
+        fact_content, total = await query_wiki_fact_page(subtopic_id, page_idx)
         subtopic_names = {
             "ortho_bopt": "🦷 BOPT / Преп без уступа",
             "ortho_vin": "💎 Виниры и накладки",
@@ -3553,9 +3641,8 @@ async def handle_quiz_callback(bot_client, event):
             "gnat_splint": "🦷 Сплинты и шины"
         }
         subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
-        
-        if facts and page_idx < len(facts):
-            fact_content = facts[page_idx]
+
+        if fact_content:
             fact_cleaned = clean_html_formatting(fact_content)
             
             bookmark_text = f"📚 <b>{subtopic_title}</b>\n\n{fact_cleaned}"
