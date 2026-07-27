@@ -547,14 +547,20 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None):
     def operation():
         with _connection() as db:
             if query:
+                # Поиск идёт и по автору. Раньше искали только в тексте и в
+                # описании снимка, поэтому «тот пост Иванова» найти было нельзя
+                # — а по автору коллеги вспоминают сохранённое ничуть не реже,
+                # чем по словам.
+                like = f"%{query}%"
                 return db.execute(
                     """
                     SELECT msg_id, chat_id, sender_name, text, media_description, date
                     FROM clinical_bookmarks
-                    WHERE saved_by_user_id = ? AND (text LIKE ? OR media_description LIKE ?)
+                    WHERE saved_by_user_id = ?
+                      AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
                     ORDER BY date DESC
                     """,
-                    (saved_by_user_id, f"%{query}%", f"%{query}%"),
+                    (saved_by_user_id, like, like, like),
                 ).fetchall()
             else:
                 return db.execute(

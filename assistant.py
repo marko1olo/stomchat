@@ -1,6 +1,7 @@
 import os
 import re
 import copy
+import html
 import json
 import sqlite3
 import asyncio
@@ -1656,6 +1657,27 @@ PROTOCOL_EXCERPT_MAX_CHARS = 1500
 # когда обещанное и работающее разъезжаются без единого сигнала.
 PM_HISTORY_LIMIT = 35
 
+BOOKMARK_SNIPPET_CHARS = 80
+
+
+def _bookmark_snippet(value, limit=BOOKMARK_SNIPPET_CHARS):
+    """
+    Безопасная выдержка из закладки для HTML-сообщения.
+
+    Порядок операций принципиален: сначала режем СЫРОЙ текст, затем
+    экранируем. В обратном порядке срез попадал бы внутрь «&amp;» и ломал
+    сущность — то же самое, от чего страдала обрезка дайджеста.
+
+    Многоточие ставится только когда текст действительно обрезан: прежний код
+    дописывал его всегда, обещая продолжение там, где его нет.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    clipped = raw[:limit]
+    suffix = "…" if len(raw) > limit else ""
+    return html.escape(clipped, quote=False) + suffix
+
 
 # --- Статистика тем чата (/stats) ------------------------------------------
 #
@@ -2376,11 +2398,16 @@ async def handle_private_message(bot_client, event):
             text_out = title
             for i, row in enumerate(page_rows, start_idx + 1):
                 msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
-                msg_text_snippet = (msg_text[:80] + "...") if len(msg_text) > 80 else msg_text
-                text_out += f"{i}. <b>{sender_name}</b> ({date}):\n"
-                text_out += f"«{msg_text_snippet}»\n"
+                # Текст закладки и имя автора приходят из чата и уходили в HTML
+                # БЕЗ экранирования. Одна угловая скобка в сохранённом посте
+                # («уступ <0.5 мм») — и Telegram отклоняет ВЕСЬ список: врач не
+                # увидит ни одной своей закладки, а не только испорченную.
+                # В живой базе такой символ пока в одном сообщении из 30 082,
+                # но закладки выбирают осознанно и как раз в постах с цифрами.
+                text_out += f"{i}. <b>{_bookmark_snippet(sender_name, limit=64)}</b> ({date}):\n"
+                text_out += f"«{_bookmark_snippet(msg_text)}»\n"
                 if media_desc:
-                    text_out += f"🖼️ <i>Описание снимка:</i> {media_desc[:80]}...\n"
+                    text_out += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc)}\n"
                 # Ссылку рисуем только для реальных сообщений группы.
                 # Закладки на статьи энциклопедии сохраняются с синтетическим
                 # отрицательным msg_id и chat_id личного чата, а
@@ -2393,7 +2420,15 @@ async def handle_private_message(bot_client, event):
                 else:
                     text_out += "📖 <i>Статья энциклопедии</i>\n\n"
                 
-            if not query_filter and total_pages > 1:
+            if query_filter:
+                # Для поиска счётчика не было вовсе: при 50 совпадениях врач
+                # видел первые 10 и считал, что это все его закладки по теме.
+                if total_items > len(page_rows):
+                    text_out += (f"<i>Показано {len(page_rows)} из {total_items} совпадений. "
+                                 f"Уточните запрос, чтобы увидеть остальные.</i>")
+                else:
+                    text_out += f"<i>Найдено совпадений: {total_items}.</i>"
+            elif total_pages > 1:
                 text_out += f"<i>Показано {len(page_rows)} из {total_items} закладок. Страница {page} из {total_pages}.\nИспользуйте <code>/bookmarks [номер_страницы]</code> для перехода.</i>"
                 
             await bot_client.send_message(entity=chat_id, message=text_out, parse_mode='html', link_preview=False)
