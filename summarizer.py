@@ -84,6 +84,47 @@ _HTML_PARSE_MARKERS = (
 )
 TELEGRAM_PLAIN_TEXT_LIMIT = 4000
 
+# Длина цитаты из сообщения, на которое ответили. Подставляется только когда
+# родителя в выборке нет — иначе хватает ссылки на MSG.
+REPLY_QUOTE_MAX_CHARS = 80
+
+
+def _reply_context(reply_id, reply_lookup, batch_ids):
+    """
+    Префикс с контекстом ответа. Возвращает (текст, подставлена_ли_цитата).
+
+    В дневной сборке цитата ВЫЧИСЛЯЛАСЬ (short_p_text) и не использовалась
+    нигде — модель получала только имя. В недельной ответы не учитывались
+    вообще, и в промпте это компенсировалось указанием «сообщения подряд считай
+    монологом».
+
+    Замер на живом дневном окне: 403 из 695 сообщений выборки — ответы, и у 105
+    из них родитель в выборку не попал. Модель видела «(Ответ Петру) А стоит
+    это того? Сколько лет этим конструкциям?» — без единого указания, о чём
+    речь, и достраивала контекст сама.
+
+    Цитата подставляется ТОЛЬКО когда родителя в выборке нет; если есть —
+    достаточно ссылки на MSG. Замер: адресная подстановка +5% к дневному
+    промпту и +2% к недельному, тогда как цитата ко всем ответам дала бы +18%.
+    """
+    if not reply_id:
+        return "", 0
+
+    parent = reply_lookup.get(reply_id)
+    if not parent:
+        return "", 0
+
+    parent_name, parent_text = parent
+    parent_text = (parent_text or "").strip()
+
+    if reply_id in batch_ids or not parent_text:
+        return f"(Ответ {parent_name}, MSG_{reply_id}) ", 0
+
+    quote = parent_text[:REPLY_QUOTE_MAX_CHARS]
+    if len(parent_text) > REPLY_QUOTE_MAX_CHARS:
+        quote += "…"
+    return f"(Ответ {parent_name} на «{quote}») ", 1
+
 
 def _message_matches_topic(message, topic_id):
     if not topic_id:
@@ -605,28 +646,29 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         timeout=30,
     )
 
+    batch_ids = {msg[0] for msg in filtered_messages}
+    quoted_context = 0
+
     for msg in filtered_messages:
         # Распаковка всех полей из БД
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg
-        
-        quote_text = ""
-        if reply_id:
-            parent_msg = reply_lookup.get(reply_id)
-            if parent_msg:
-                p_name, p_text = parent_msg
-                short_p_text = p_text[:50] + "..." if len(p_text) > 50 else p_text
-                quote_text = f"(Ответ {p_name}) "
-        
-        full_text_parts.append(f"MSG_{m_id} | {name}: {quote_text}{text}\n")
-        
+
+        quote_text, was_quoted = _reply_context(reply_id, reply_lookup, batch_ids)
+        quoted_context += was_quoted
+
+        full_text_parts.append(f"MSG_{m_id} | {name}: {quote_text}{text or ''}\n")
+
         if m_desc:
             full_text_parts.append(f"(На фото в MSG_{m_id}: {m_desc})\n")
-        
+
         if m_url:
             media_map[m_id] = m_url
 
     full_text = "".join(full_text_parts)
-    logger.info(f"summary build done chat={chat_id} chars={len(full_text)} replies={len(reply_lookup)} media={len(media_map)}")
+    logger.info(
+        f"summary build done chat={chat_id} chars={len(full_text)} "
+        f"replies={len(reply_lookup)} quoted={quoted_context} media={len(media_map)}"
+    )
 
     bonus_variants = [
         """
@@ -1033,22 +1075,41 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # 1. СБОРКА ПОЛНОГО ЛОГА
     # Собираем абсолютно всё, чтобы у нейронки была вся фактура
     full_text_parts = ["ПОЛНЫЙ ЛОГ НЕДЕЛИ (Raw Data):\n\n"]
-    media_map = {} 
-    
+    media_map = {}
+
+    # Ветвление диалогов недельная сборка не учитывала вообще — модель получала
+    # плоский лог, и это компенсировалось в промпте указанием «сообщения подряд
+    # считай монологом». Замер на живой неделе: 98 ответов из 205 сообщений
+    # выборки, у 16 родитель в выборку не попал. Стоимость контекста +2%.
+    reply_ids = [msg[6] for msg in filtered_messages if msg[6]]
+    reply_lookup = await asyncio.wait_for(
+        database.get_texts_by_ids(reply_ids),
+        timeout=30,
+    )
+    batch_ids = {msg[0] for msg in filtered_messages}
+    quoted_context = 0
+
     for msg in filtered_messages:
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg
         dt_str = date.strftime('%d.%m') if isinstance(date, datetime) else str(date)[:10]
-        
+
+        quote_text, was_quoted = _reply_context(reply_id, reply_lookup, batch_ids)
+        quoted_context += was_quoted
+
         # Маркеры для нейронки, чтобы она видела структуру диалогов
-        full_text_parts.append(f"MSG_{m_id} | {dt_str} | {name}: {text}\n")
-        
+        full_text_parts.append(f"MSG_{m_id} | {dt_str} | {name}: {quote_text}{text or ''}\n")
+
         if m_desc:
             full_text_parts.append(f"[ВАЖНО: К этому сообщению прикреплено ФОТО/ВИДЕО: {m_desc}]\n")
-        
+
         if m_url:
             media_map[m_id] = m_url
 
     full_text = "".join(full_text_parts)
+    logger.info(
+        f"weekly build done chat={chat_id} chars={len(full_text)} "
+        f"replies={len(reply_lookup)} quoted={quoted_context} media={len(media_map)}"
+    )
 
     # 2. ПРОМПТ "MEDICAL JOURNALIST" (MAXIMUM DETAILS)
     prompt = f"""
