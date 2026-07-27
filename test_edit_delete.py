@@ -209,6 +209,48 @@ async def run():
     check("текст обнулён, строка на месте", await text_of(4880) == "",
           f"got {await text_of(4880)!r}")
 
+    print("\n[13] Запись сообщения переживает временный отказ базы")
+    # Потеря необратима: sync_history догоняет пропущенное по MAX(msg_id), и
+    # если сообщение N не записалось, а N+1 записалось, граница уехала выше
+    # дыры навсегда. На Windows типовая причина отказа временная — файл держит
+    # антивирус или индексатор.
+    check("успешная запись возвращает True",
+          await database.save_message(msg_id=4890, sender_id=1, sender_name="Врач",
+                                      sender_username=None, text="обычная запись",
+                                      date=datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)) is True)
+
+    real_run_db = database._run_db
+    attempts = {"n": 0}
+
+    async def flaky(operation):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise OSError("файл временно занят другим процессом")
+        return await real_run_db(operation)
+
+    database._run_db = flaky
+    recovered = await database.save_message(
+        msg_id=4891, sender_id=1, sender_name="Врач", sender_username=None,
+        text="запись со второй попытки", date=datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    )
+    database._run_db = real_run_db
+    check("временный отказ преодолён повтором", recovered is True, f"got {recovered}")
+    check("сообщение реально в базе", await text_of(4891) == "запись со второй попытки",
+          f"got {await text_of(4891)!r}")
+    check("повтор был, а не одна попытка", attempts["n"] == 2, f"got {attempts['n']}")
+
+    async def always_fail(operation):
+        raise OSError("на диске нет места")
+
+    database._run_db = always_fail
+    lost = await database.save_message(
+        msg_id=4892, sender_id=1, sender_name="Врач", sender_username=None,
+        text="это будет потеряно", date=datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    )
+    database._run_db = real_run_db
+    check("окончательный отказ отличим от успеха", lost is False, f"got {lost}")
+    check("потерянного в базе нет", await text_of(4892) is None)
+
 
 try:
     asyncio.run(run())

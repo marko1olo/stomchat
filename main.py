@@ -954,7 +954,7 @@ async def handle_new_message(event):
 
         # Строка в базе появляется НЕМЕДЛЕННО, до любой тяжёлой обработки.
         if event.chat_id == config.SOURCE_CHAT_ID:
-            await asyncio.wait_for(
+            saved = await asyncio.wait_for(
                 database.save_message(
                     msg_id=msg_id,
                     reply_to_msg_id=reply_to_msg_id,
@@ -968,6 +968,17 @@ async def handle_new_message(event):
                 ),
                 timeout=30,
             )
+            # Раньше отказ записи был неотличим от успеха: save_message молча
+            # возвращала None, и обработчик шёл дальше как ни в чём не бывало.
+            # Сообщение при этом выпадало из дайджестов, из контекста ассистента
+            # и из поиска по истории — навсегда и без единой заметной строки в
+            # логе. Отвечать врачу продолжаем: молчать хуже, чем ответить.
+            if not saved:
+                logger.error(
+                    "MESSAGE NOT PERSISTED msg_id=%s chat=%s sender=%s — "
+                    "оно не попадёт ни в дайджест, ни в контекст",
+                    msg_id, event.chat_id, sender_id,
+                )
 
         # Расшифровка голосового идёт ПОСЛЕ сохранения, а не до него.
         #
@@ -1527,7 +1538,7 @@ async def sync_history():
             else:
                 media_type = None
             
-            await asyncio.wait_for(
+            synced_ok = await asyncio.wait_for(
                 database.save_message(
                     msg_id=message.id,
                     reply_to_msg_id=reply_to_id,
@@ -1541,7 +1552,15 @@ async def sync_history():
                 ),
                 timeout=30,
             )
-            
+            # Здесь потеря особенно дорога: догоняем как раз то, чего в базе нет,
+            # и следующий проход синхронизации стартует уже от MAX(msg_id) —
+            # то есть выше этой дыры. Второго шанса не будет.
+            if not synced_ok:
+                logger.error(
+                    "MESSAGE NOT PERSISTED during sync msg_id=%s — пропуск останется в базе",
+                    message.id,
+                )
+
             if has_media:
                 if getattr(message, 'grouped_id', None):
                     g_id = message.grouped_id

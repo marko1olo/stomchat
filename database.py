@@ -11,6 +11,9 @@ import config
 logger = logging.getLogger(__name__)
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stomchat-db")
 
+SAVE_RETRY_ATTEMPTS = 3
+SAVE_RETRY_DELAY_SECONDS = 0.25
+
 def _connect():
     db = sqlite3.connect(config.DB_PATH, timeout=30)
     db.execute("PRAGMA busy_timeout = 30000")
@@ -270,11 +273,32 @@ async def save_message(
                 ),
             )
 
-    try:
-        return await _run_db(operation)
-    except Exception:
-        logger.exception("database save_message failed msg_id=%s", msg_id)
-        return None
+    # Потеря записи здесь необратима: sync_history догоняет пропущенное по
+    # MAX(msg_id), то есть по верхней границе. Если сообщение N не сохранилось,
+    # а N+1 сохранилось — граница уехала вперёд, и N не будет найдено уже
+    # никогда. Поэтому пробуем повторно, как это делает runtime_guard при
+    # записи heartbeat: на Windows типовая причина отказа временная —
+    # антивирус или индексатор, держащий файл.
+    for attempt in range(SAVE_RETRY_ATTEMPTS):
+        try:
+            await _run_db(operation)
+            if attempt:
+                logger.info("save_message recovered on attempt %s msg_id=%s", attempt + 1, msg_id)
+            return True
+        except Exception:
+            if attempt + 1 < SAVE_RETRY_ATTEMPTS:
+                logger.warning(
+                    "save_message attempt %s failed msg_id=%s, retrying", attempt + 1, msg_id
+                )
+                await asyncio.sleep(SAVE_RETRY_DELAY_SECONDS * (attempt + 1))
+                continue
+            logger.exception(
+                "MESSAGE LOST: save_message failed after %s attempts msg_id=%s. "
+                "sync_history recovers by MAX(msg_id), so a later successful save "
+                "hides this gap permanently.",
+                SAVE_RETRY_ATTEMPTS, msg_id,
+            )
+            return False
 
 
 async def get_unsummarized_count():
