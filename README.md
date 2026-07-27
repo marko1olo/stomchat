@@ -1,11 +1,15 @@
+<div align="center">
+
 # StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg?style=flat&logo=python)](https://www.python.org/)
-[![Telethon](https://img.shields.io/badge/Telethon-MTProto-blue.svg?style=flat)](https://github.com/LonamiWebs/Telethon)
-[![Google Gemini](https://img.shields.io/badge/Google_Gemini-GenAI-orange.svg?style=flat&logo=google-gemini)](https://deepmind.google/technologies/gemini/)
-[![Groq](https://img.shields.io/badge/Groq-LPU-orange.svg?style=flat)](https://groq.com/)
-
 **StomChat** is a hybrid Telegram Userbot + Bot system powered by Google Gemini and Groq. It automatically archives dental community chat messages, analyzes media files (images, clinical photos, X-rays, videos), uses agentic search APIs to verify facts, and publishes daily/weekly AI-synthesized digests and knowledge articles to Telegraph and Telegram channels.
+
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg?style=for-the-badge&logo=python)](https://www.python.org/)
+[![Telethon](https://img.shields.io/badge/Telethon-MTProto-blue.svg?style=for-the-badge)](https://github.com/LonamiWebs/Telethon)
+[![Google Gemini](https://img.shields.io/badge/Google_Gemini-GenAI-orange.svg?style=for-the-badge&logo=google-gemini)](https://deepmind.google/technologies/gemini/)
+[![Groq](https://img.shields.io/badge/Groq-LPU-orange.svg?style=for-the-badge)](https://groq.com/)
+
+</div>
 
 ---
 
