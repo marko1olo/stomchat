@@ -1717,6 +1717,12 @@ TERM_EXPLAINER_MAX_CHARS = 120
 # сообщения врача встают в очередь за подвисшей загрузкой.
 PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 120
 
+# Область команды /итог. Без ответа на сообщение берём последние реплики; в
+# ответ на конкретное — ветку от него, потолок нужен, чтобы указание на
+# полугодовалое сообщение не утащило в промпт полчата.
+SUMMARY_RECENT_LIMIT = 30
+SUMMARY_THREAD_LIMIT = 60
+
 
 def _bookmark_snippet(value, limit=BOOKMARK_SNIPPET_CHARS):
     """
@@ -3075,10 +3081,26 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
     status_msg = await bot_client.send_message(entity=chat_id, message="📝 <i>Собираю и анализирую историю обсуждения... Подождите.</i>", reply_to=msg_id, parse_mode='html')
     
     try:
-        # Получаем последние 30 сообщений из базы данных
-        rows = await database.get_last_n_messages(limit=30)
+        # Область сводки. Параметр reply_to_msg_id передавался вызывающей
+        # стороной и НЕ ИСПОЛЬЗОВАЛСЯ: врач отвечал «/итог» на конкретный спор,
+        # а получал выжимку последних тридцати сообщений чата — часто про
+        # совсем другое. Указанное сообщение задаёт начало ветки.
+        if reply_to_msg_id:
+            rows = await database.get_messages_from(reply_to_msg_id, limit=SUMMARY_THREAD_LIMIT)
+            scope_note = "с указанного сообщения"
+        else:
+            rows = await database.get_last_n_messages(limit=SUMMARY_RECENT_LIMIT)
+            scope_note = f"последние {SUMMARY_RECENT_LIMIT} сообщений"
+
         chat_rows = [r for r in rows if r[3] and r[3].strip()]
-        
+
+        # Ответ на сообщение, которого нет в базе (старше бота), не должен
+        # оставлять врача без сводки — откатываемся к последним репликам.
+        if not chat_rows and reply_to_msg_id:
+            rows = await database.get_last_n_messages(limit=SUMMARY_RECENT_LIMIT)
+            chat_rows = [r for r in rows if r[3] and r[3].strip()]
+            scope_note = f"последние {SUMMARY_RECENT_LIMIT} сообщений"
+
         if not chat_rows:
             await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось найти сообщения для саммари.</i>", parse_mode='html')
             return
@@ -3117,7 +3139,11 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
         summary_text = response.text.strip()
         summary_text = clean_html_formatting(summary_text)
         
-        final_text = f"📋 <b>Результаты клинического анализа дискуссии:</b>\n\n{summary_text}"
+        # Область анализа называем прямо: иначе непонятно, что именно разобрано.
+        final_text = (
+            f"📋 <b>Результаты клинического анализа дискуссии</b>\n"
+            f"<i>Разобрано: {scope_note} ({len(chat_rows)} реплик)</i>\n\n{summary_text}"
+        )
         await bot_client.edit_message(chat_id, status_msg.id, final_text, parse_mode='html')
         logger.info(f"Successfully posted group summary for chat_id={chat_id}")
     except Exception as e:

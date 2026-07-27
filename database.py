@@ -224,6 +224,30 @@ async def get_messages_for_range(start_dt, end_dt):
     return await _run_db(operation)
 
 
+async def get_messages_from(start_msg_id, limit=60):
+    """
+    Сообщения начиная с указанного, по возрастанию msg_id.
+
+    Нужно для /итог в ответ на конкретное сообщение: врач указывает, откуда
+    начался разбор, и ждёт сводку именно этой ветки, а не случайных последних
+    реплик чата.
+    """
+    def operation():
+        with _connection() as db:
+            return db.execute(
+                """
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                FROM messages
+                WHERE msg_id >= ?
+                ORDER BY msg_id ASC
+                LIMIT ?
+                """,
+                (start_msg_id, limit),
+            ).fetchall()
+
+    return await _run_db(operation)
+
+
 async def get_last_n_messages(limit=300):
     def operation():
         with _connection() as db:
