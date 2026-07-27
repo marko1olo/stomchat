@@ -1,10 +1,12 @@
 import os
 import re
+import copy
 import json
 import sqlite3
 import asyncio
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timedelta
 from blocking_tools import generate_gemini_text_async
@@ -178,27 +180,249 @@ STOP_WORDS = {
     "всем", "всех", "этом", "этой", "этих", "были", "была", "были", "того", "тому"
 }
 
-DENTAL_KEYWORDS = config.DENTAL_KEYWORDS
+# Медицинский словарь триажа. Живёт ЗДЕСЬ, а не в config.py: config.py
+# перечислен в .gitignore как файл с секретами, поэтому вынесенный туда список
+# не попал в репозиторий и был потерян — модуль перестал импортироваться
+# (AttributeError на config.DENTAL_KEYWORDS), и вместе с ним не поднимался бот.
+# Клиническая логика не секрет и должна лежать под контролем версий.
+# Восстановлено дословно из коммита 631e9c2.
+DENTAL_KEYWORDS = {
+    "зуб", "канал", "уступ", "бор", "файл", "цемент", "коронка", "коронок", "имплант", 
+    "активация", "винил", "преп", "эндо", "гнатол", "окклюз", "сустав", "внчс",
+    "сплинт", "капп", "слеп", "оттис", "трансфер", "абатм", "циркон", "пмма", "pmma",
+    "керам", "ультразвук", "эйтис", "петл", "спредер", "визуали", "микроскоп",
+    "пескоструй", "коффердам", "раббердам", "кламп", "плавиков", "силан", "бонд",
+    "травлен", "адгезив", "композит", "клинич", "диагно", "анестез", "артикаин",
+    "мепивакаин", "убистезин", "ультракаин", "лидокаин", "пульп", "апекс", "периодонт",
+    "периодонтит", "пульпит", "кариес", "гингивит", "пародонт", "пародонтоз", "рецесс",
+    "десна", "десны", "десневой", "костн", "альвеол", "синус", "остеот", "мембран",
+    "шовн", "викрил", "пролен", "монофил", "хирург", "удален", "экстракц", "лунк",
+    "кюрет", "остеоинтегр", "формировател", "заглушк", "крошк", "биоосс", "bio-oss",
+    "аллоплант", "ксенотрансп", "брекет", "элайнер", "ретейнер", "дистализ", "мезиализ",
+    "дуга", "дуги", "лигатур", "ортодонт", "ортопед", "терапевт", "кт", "клкт", "оптг",
+    "визиограф", "рентген", "снимок", "снимка", "бинокуляр", "лупы", "эндомотор",
+    "апекслокатор", "автоклав", "стерилиз", "дентин", "эмаль", "эмали", "челюст",
+    "прикус", "резец", "резц", "клык", "премоляр", "моляр", "реципрок", "протейпер",
+    "мту", "mtwo", "пасс-файл", "гипохлорит", "хлоргексидин", "эдта", "edta",
+    "гуттаперч", "силер", "обтурац", "латеральн", "вертикальн", "распломбиров",
+    "анкерн", "штифт", "платок", "ирригац", "мост", "протез", "вкладк", "накладк",
+    "оверлей", "рондоклип", "сканмаркер", "ложка", "артикулятор", "депрограмматор",
+    "коис", "миостимуляц", "шина", "емакс", "e.max", "e-max", "полевошпат", "каркас",
+    "полимеризац", "фотополимер", "клиновидн", "абфракц", "стираемост", "бруксизм",
+    "флюороз", "гипоплази", "фиссур", "герметизац", "карман", "грейси", "gracey",
+    "скалер", "чистк", "налет", "камень", "сст", "сдг", "трансплантат", "вестибулопласт",
+    "микроимплант", "тяга", "пломб", "девитал", "мышьяк", "резекц", "цистэкт",
+    "гранулем", "кист", "киста", "фистул", "свищ", "перфорац", "полость", "полости",
+    "кариозн", "поддеснев", "наддеснев", "шейка", "верхушка", "апикальн", "дентальный",
+    "стоматолог", "эндодонт", "пародонтолог", "кофердам", "остеопласт", "винир",
+    "синуслифт", "костнаяпласт", "аугмент", "регенер", "остеосинтез", "стекловолокн",
+    "свш", "металлокерам", "ортодонтич", "обтуратор", "термафил", "thermafil",
+    "airflow", "air-flow", "пазух", "гайморов", "мандибул", "ментальн", "подбородоч",
+    "альвеолярн", "остеотоми"
+}
+# Совместимость: локальный config.py может переопределить/дополнить словарь.
+_config_keywords = getattr(config, "DENTAL_KEYWORDS", None)
+if _config_keywords:
+    DENTAL_KEYWORDS = set(DENTAL_KEYWORDS) | set(_config_keywords)
+
+
+STATE_TMP_PATH = STATE_PATH + ".tmp"
+STATE_BAK_PATH = STATE_PATH + ".bak"
+
+# Держится только на время чтения-слияния-записи файла. Внутри нет await,
+# поэтому взаимоблокировка невозможна; защищает от гонок, если save_state
+# когда-нибудь позовут из executor-потока.
+_STATE_FILE_LOCK = threading.Lock()
+
+STATE_DEFAULTS = {
+    "last_passive_run": "2000-01-01T00:00:00",
+    "last_passive_text_run": "2000-01-01T00:00:00",
+    "last_passive_media_run": "2000-01-01T00:00:00",
+    "last_referee_run": "2000-01-01T00:00:00",
+    "last_passive_attempt": "2000-01-01T00:00:00",
+    "processed_threads": [],
+    "pm_pings": {},
+}
+
+# Пассивный триггер (бот сам влезает в разговор) throttling'уется двумя окнами.
+# Раньше окно было одно: 120 минут списывались ДО вызова Gemini, поэтому один
+# таймаут провайдера, пустой корпус или отказ валидатора укладывали бота
+# в тишину на два часа. Теперь полное окно платится только за реально
+# отправленное сообщение, а неудачная попытка стоит короткого backoff'а.
+# Прямые обращения (упоминание, ответ на реплику бота, ЛС) этот гейт не проходят.
+PASSIVE_COOLDOWN_MINUTES = 120  # после РЕАЛЬНО отправленного пассивного ответа
+PASSIVE_RETRY_MINUTES = 10      # после попытки, не давшей сообщения
+
+
+class _TrackedState(dict):
+    """
+    Обычный dict, который помнит, каким его прочитали с диска.
+    Нужен, чтобы save_state() мог записать ТОЛЬКО реально изменённые ключи
+    и не затирать чужие правки, сделанные пока вызывающий висел на await.
+    """
+    __slots__ = ("_snapshot",)
+
+    def __init__(self, data):
+        super().__init__(data)
+        self._snapshot = copy.deepcopy(data)
+
+
+def _read_state_file(path):
+    """Читает один файл состояния. Возвращает dict или None, если файла нет/он битый."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            logger.error(f"State file {path} contains {type(data).__name__}, not an object. Ignoring.")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"Error loading assistant state from {path}: {e}")
+        return None
+
 
 def load_state():
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading assistant state: {e}")
-    return {
-        "last_passive_run": "2000-01-01T00:00:00",
-        "last_passive_text_run": "2000-01-01T00:00:00",
-        "last_passive_media_run": "2000-01-01T00:00:00",
-        "processed_threads": []
-    }
+    data = _read_state_file(STATE_PATH)
+    if data is None:
+        # Основной файл отсутствует или обрезан (например, процесс убили в момент
+        # записи). Поднимаем последнюю заведомо целую копию, чтобы не потерять
+        # silenced_until / pm_pings / processed_threads.
+        data = _read_state_file(STATE_BAK_PATH)
+        if data is not None:
+            logger.warning("Primary assistant state unreadable. Recovered from backup .bak")
+        else:
+            logger.warning("No readable assistant state found. Starting from defaults.")
+            data = {}
+
+    merged = copy.deepcopy(STATE_DEFAULTS)
+    merged.update(data)
+    return _TrackedState(merged)
+
+
 def save_state(state):
+    """
+    Атомарно сохраняет состояние, сливая изменения вызывающего с текущим
+    содержимым файла.
+
+    Вызывающий обычно держит state, прочитанный десятки секунд назад (между
+    load_state() и save_state() стоят await'ы на LLM-триаж и запросы к БД).
+    Прямая запись такого словаря затирала чужие свежие правки — в частности
+    silenced_until, выставленный, пока шла генерация. Поэтому пишем только те
+    ключи, которые вызывающий действительно тронул.
+    """
     try:
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        with _STATE_FILE_LOCK:
+            on_disk = _read_state_file(STATE_PATH)
+            if on_disk is None:
+                on_disk = _read_state_file(STATE_BAK_PATH) or {}
+
+            snapshot = getattr(state, "_snapshot", None)
+            merged = dict(on_disk)
+            preserved = []
+
+            for key, value in state.items():
+                if snapshot is None:
+                    # Не из load_state() — считаем, что вызывающий владеет всем,
+                    # но ключи, которых у него нет, с диска не выбрасываем.
+                    merged[key] = value
+                    continue
+                if key not in snapshot or snapshot[key] != value:
+                    merged[key] = value  # вызывающий изменил ключ — его версия побеждает
+                elif key in on_disk and on_disk[key] != value:
+                    preserved.append(key)  # вызывающий не трогал, а на диске новее — не трогаем
+
+            if preserved:
+                logger.info(f"save_state: preserved concurrent updates for keys {preserved}")
+
+            payload = json.dumps(merged, ensure_ascii=False, indent=2)
+
+            with open(STATE_TMP_PATH, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Целую предыдущую версию держим как .bak — с неё поднимемся,
+            # если процесс убьют между записью tmp и подменой.
+            if on_disk and os.path.exists(STATE_PATH):
+                try:
+                    os.replace(STATE_PATH, STATE_BAK_PATH)
+                except Exception as bak_err:
+                    logger.warning(f"Failed to rotate state backup: {bak_err}")
+
+            os.replace(STATE_TMP_PATH, STATE_PATH)  # атомарная подмена в пределах тома
     except Exception as e:
         logger.error(f"Error saving assistant state: {e}")
+        try:
+            if os.path.exists(STATE_TMP_PATH):
+                os.remove(STATE_TMP_PATH)
+        except Exception:
+            pass
+
+def _parse_state_dt(value, default=datetime(2000, 1, 1)):
+    """Разбирает ISO-таймстамп из состояния. Битое значение = 'никогда', без исключения."""
+    if not value:
+        return default
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Malformed timestamp in assistant state: {value!r}. Treating as never.")
+        return default
+
+
+def passive_gate_block_reason(state):
+    """
+    Причина, по которой пассивный текстовый триггер сейчас запрещён, иначе None.
+    Учитывает оба окна: полный кулдаун за отправленный ответ и короткий
+    backoff за уже сделанную попытку.
+    """
+    now = datetime.now()
+
+    since_sent = now - _parse_state_dt(state.get("last_passive_text_run"))
+    full = timedelta(minutes=PASSIVE_COOLDOWN_MINUTES)
+    if since_sent < full:
+        return f"passive cooldown, {int((full - since_sent).total_seconds() // 60) + 1} min left"
+
+    since_try = now - _parse_state_dt(state.get("last_passive_attempt"))
+    backoff = timedelta(minutes=PASSIVE_RETRY_MINUTES)
+    if since_try < backoff:
+        return f"retry backoff after failed attempt, {int((backoff - since_try).total_seconds() // 60) + 1} min left"
+
+    return None
+
+
+def record_passive_attempt():
+    """
+    Отмечает попытку пассивного ответа, которая ещё может не дойти до отправки
+    (ошибка API, пустой корпус, IGNORE, отказ валидатора, отказ триажа).
+    Читает состояние заново, чтобы не писать протухший словарь.
+    """
+    state = load_state()
+    state["last_passive_attempt"] = datetime.now().isoformat()
+    save_state(state)
+
+
+def record_passive_success(thread_id=None):
+    """
+    Списывает полное окно тишины — вызывается ТОЛЬКО после того, как сообщение
+    действительно ушло в Telegram. Здесь же тред помечается обработанным,
+    чтобы неудачная генерация не сжигала его навсегда.
+    """
+    state = load_state()
+    now_iso = datetime.now().isoformat()
+    state["last_passive_text_run"] = now_iso
+    state["last_passive_attempt"] = now_iso
+
+    if thread_id is not None:
+        threads = state.setdefault("processed_threads", [])
+        if thread_id not in threads:
+            threads.append(thread_id)
+            if len(threads) > 100:
+                del threads[:-100]
+
+    save_state(state)
+
 
 def calculate_context_length_guidelines(history_msgs):
     """Вычисляет среднюю длину реплик в истории и возвращает строгую инструкцию для LLM."""
@@ -240,42 +464,143 @@ def write_to_shadow_log(message):
     except Exception as e:
         logger.error(f"Error writing to shadow log: {e}")
 
+_RU_SUFFIXES = ["ами", "ями", "ыми", "ом", "ем", "ам", "ям", "ах", "ях", "ых", "их",
+                "ов", "ев", "ие", "ия", "ию", "ии", "ей", "ой", "а", "у", "е", "ы", "и", "о"]
+
+# Клинические термины короче 4 символов: "зуб", "бор", "кт", "мту", "свш"...
+_SHORT_DENTAL_TERMS = frozenset(t for t in DENTAL_KEYWORDS if len(t) < 4)
+
+
 def extract_keywords(text):
+    if not text:
+        return []
+
     cleaned = re.sub(r"[^\w\s-]", " ", text.lower())
     words = cleaned.split()
     keywords = []
     for w in words:
-        if len(w) >= 4 and w not in STOP_WORDS and not w.isdigit():
-            stem = w
-            for suffix in ["ами", "ями", "ыми", "ями", "ом", "ем", "ам", "ям", "ах", "ях", "ых", "их", "ов", "ев", "ие", "ия", "ию", "ии", "ей", "ой", "а", "у", "е", "ы", "и", "о"]:
-                if w.endswith(suffix) and len(w) - len(suffix) >= 4:
-                    stem = w[:-len(suffix)]
-                    break
-            keywords.append(stem)
-            
-    # Deduplicate
-    keywords = list(set(keywords))
-    
-    # Prioritize dental-specific keywords at the front of the list
-    dental_matches = []
-    other_matches = []
-    for kw in keywords:
-        is_dental = any(dk in kw for dk in DENTAL_KEYWORDS)
-        if is_dental:
-            dental_matches.append(kw)
-        else:
-            other_matches.append(kw)
-            
+        if w in STOP_WORDS or w.isdigit():
+            continue
+        # Порог len >= 4 выбрасывал самые частые слова стоматолога: "зуб", "бор",
+        # "кт". Они не попадали в поиск по базе вообще — на вопрос "болит зуб
+        # после лечения канала" слово "зуб" в RAG не участвовало.
+        if len(w) < 4 and w not in _SHORT_DENTAL_TERMS:
+            continue
+
+        stem = w
+        for suffix in _RU_SUFFIXES:
+            if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+                stem = w[:-len(suffix)]
+                break
+        keywords.append(stem)
+
+    # dict.fromkeys, а не set(): set() давал разный порядок между запусками
+    # (PYTHONHASHSEED), поэтому один и тот же вопрос приводил к разной справке
+    # и, как следствие, к разному ответу. Теперь порядок первого появления.
+    keywords = list(dict.fromkeys(keywords))
+
+    # Стоматологические термины — вперёд. Проверка через is_dental_keyword,
+    # которая сверяет префиксы в обе стороны и не теряет "коронк"/"десн"/"эмал".
+    dental_matches = [kw for kw in keywords if is_dental_keyword(kw)]
+    other_matches = [kw for kw in keywords if not is_dental_keyword(kw)]
     return dental_matches + other_matches
+
+def is_dental_keyword(word):
+    """
+    Относится ли слово/стем к стоматологической лексике.
+
+    Прямая проверка `термин in слово` промахивается на 14% словаря, потому что
+    extract_keywords РЕЖЕТ окончания, и стем оказывается КОРОЧЕ словарного
+    термина: "коронка" -> "коронк", и "коронка" уже не подстрока "коронк".
+    Так теряются "зуб", "коронка", "десна", "эмали", "верхушка", "шейка".
+    Поэтому сверяем префиксы в обе стороны.
+    """
+    if not word:
+        return False
+    w = word.lower()
+    for term in DENTAL_KEYWORDS:
+        if len(term) < 4:
+            # Короткие термины ("зуб", "бор", "кт") — только как начало слова,
+            # иначе они матчатся на случайный мусор.
+            if w.startswith(term):
+                return True
+            continue
+        if w.startswith(term) or term.startswith(w):
+            return True
+    return False
+
+
+_MAX_SEARCH_KEYWORDS = 12
+_MIN_DENTAL_FOR_STRICT = 3
+
+
+def select_search_keywords(keywords):
+    """
+    Отбирает ключи для поиска по базе знаний.
+
+    Раньше список ВСЕГДА добивался до 12 общими словами (три копии этой логики
+    в файле). На вопросе про боль после лечения канала в поиск уходили
+    "смотреть" и "посл", и справка забивалась случайными фактами. Если
+    клинических терминов набралось достаточно — общие слова не подмешиваем;
+    они нужны только когда цепляться больше не за что.
+    """
+    if not keywords:
+        return []
+    dental = [kw for kw in keywords if is_dental_keyword(kw)]
+    if len(dental) >= _MIN_DENTAL_FOR_STRICT:
+        return dental[:_MAX_SEARCH_KEYWORDS]
+    others = [kw for kw in keywords if kw not in dental]
+    return (dental + others)[:_MAX_SEARCH_KEYWORDS]
+
+
+# Сколько кандидатов тянуть на одно ключевое слово. Больше, чем нужно
+# в итоге, — чтобы ранжированию было из чего выбирать.
+_CORPUS_ROWS_PER_KEYWORD = 8
+_CORPUS_CANDIDATE_CAP = 60
+_CORPUS_OUTPUT_LIMIT = 20
+
+
+def _rank_corpus_entries(entries, keywords):
+    """
+    Сортирует найденные фрагменты по числу РАЗНЫХ ключевых слов запроса,
+    стоматологические веса выше.
+
+    Без ранжирования в промпт уходило то, что первым нашлось по первому же
+    ключевому слову: на вопрос про боль после лечения канала в справку
+    попадали факты про снятие оттисков (совпало "канал" внутри "канальцами"),
+    про BOPT и про CAD/CAM. То есть модели скармливали ровно ту приманку для
+    клинической отсебятины, которую следующие строки промпта запрещают.
+    """
+    if not entries:
+        return []
+
+    weights = {kw: (2 if is_dental_keyword(kw) else 1) for kw in keywords}
+
+    scored = []
+    for idx, entry in enumerate(entries):
+        low = entry.lower()
+        score = sum(w for kw, w in weights.items() if kw in low)
+        distinct = sum(1 for kw in weights if kw in low)
+        # idx — стабильный тай-брейк: одинаковый запрос даёт одинаковую справку.
+        scored.append((score, distinct, -idx, entry))
+
+    scored.sort(reverse=True)
+
+    # Предпочитаем фрагменты, зацепившие минимум два разных ключа, но никогда
+    # не отдаём пустую справку: при пустом корпусе вызывающий вообще молчит.
+    strong = [s for s in scored if s[1] >= 2]
+    chosen = strong if len(strong) >= 3 else scored
+    return [s[3] for s in chosen[:_CORPUS_OUTPUT_LIMIT]]
+
 
 async def search_knowledge_corpus(keywords):
     if not keywords:
         return "", ""
-        
+
     def sync_search():
         wiki_facts = []
         archive_msgs = []
-        
+
         # 1. Search stomat_wiki.db
         if os.path.exists("stomat_wiki.db"):
             try:
@@ -283,17 +608,20 @@ async def search_knowledge_corpus(keywords):
                 conn.execute("PRAGMA busy_timeout = 30000")
                 c = conn.cursor()
                 for kw in keywords:
-                    c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 4", (f"%{kw}%",))
+                    c.execute(
+                        "SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT ?",
+                        (f"%{kw}%", _CORPUS_ROWS_PER_KEYWORD),
+                    )
                     for row in c.fetchall():
                         fact = f"[{row[0]}] {row[1]}"
                         if fact not in wiki_facts:
                             wiki_facts.append(fact)
-                    if len(wiki_facts) >= 25:
+                    if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
                         break
                 conn.close()
             except Exception as e:
                 logger.error(f"Error searching stomat_wiki.db: {e}")
-                
+
         # 2. Search stomat_archive.db
         if os.path.exists("stomat_archive.db"):
             try:
@@ -301,19 +629,22 @@ async def search_knowledge_corpus(keywords):
                 conn.execute("PRAGMA busy_timeout = 30000")
                 c = conn.cursor()
                 for kw in keywords:
-                    c.execute("SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT 4", (f"%{kw}%",))
+                    c.execute(
+                        "SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT ?",
+                        (f"%{kw}%", _CORPUS_ROWS_PER_KEYWORD),
+                    )
                     for row in c.fetchall():
                         msg = f"{row[0]}: {row[1]}"
                         if msg not in archive_msgs:
                             archive_msgs.append(msg)
-                    if len(archive_msgs) >= 25:
+                    if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
                         break
                 conn.close()
             except Exception as e:
                 logger.error(f"Error searching stomat_archive.db: {e}")
-                
-        wiki_corpus = "\n".join(wiki_facts[:20])
-        archive_corpus = "\n".join(archive_msgs[:20])
+
+        wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords))
+        archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords))
         return wiki_corpus, archive_corpus
 
     loop = asyncio.get_running_loop()
@@ -413,14 +744,35 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     return False
 
 
-async def check_response_quality(context_msgs: list, draft_reply: str) -> tuple[bool, str]:
+async def check_response_quality(context_msgs: list, draft_reply: str, invited: bool = False) -> tuple[bool, str]:
     """
     Post-generation validator: проверяет черновик ответа бота на галлюцинации,
     клинический бред и несоответствие контексту.
-    Возвращает (ok: bool, reason: str).
-    ok=True — ответ можно отправлять.
-    ok=False — ответ нужно выбросить (бред/галлюцинация/не по теме).
+    Возвращает (allow: bool, reason: str).
+
+    invited=True  — пользователь спросил напрямую (ответ на реплику бота, упоминание, ЛС).
+    invited=False — бот влезает в разговор сам (пассивный триггер).
+
+    Политика при НЕДОСТУПНОМ валидаторе (таймаут, сетевая ошибка, мусор вместо JSON):
+      * invited=False -> глушим черновик. Молчание незваного бота не стоит ничего,
+        непроверенная клиническая отсебятина стоит дорого. Каскад моделей банит
+        модель на 20 минут после первого 503, так что "валидатор недоступен" —
+        это не редкий край, а регулярное состояние.
+      * invited=True  -> пропускаем. Врач задал вопрос и ждёт ответа; молча
+        проигнорировать его хуже, чем отдать текст, уже прошедший EBM-инструкции
+        основного промпта. Пишем WARNING, чтобы это было видно в логах.
+    Явный отказ валидатора (ok:false) глушит черновик ВСЕГДА, на обоих путях.
     """
+    if not draft_reply or not draft_reply.strip():
+        return False, "empty_draft"
+
+    def _unavailable(detail):
+        if invited:
+            logger.warning(f"Response validator unavailable ({detail}). Invited reply — allowing.")
+            return True, f"validator_unavailable: {detail}"
+        logger.warning(f"Response validator unavailable ({detail}). Uninvited reply — suppressing.")
+        return False, f"validator_unavailable: {detail}"
+
     try:
         context_str = "\n".join(context_msgs[-10:])
         prompt = f"""Ты — строгий клинический рецензент стоматологического Telegram-чата.
@@ -449,19 +801,31 @@ async def check_response_quality(context_msgs: list, draft_reply: str) -> tuple[
         ctx = {"kind": "response_validator", "thinking_level": "LOW"}
         response, error = await generate_gemini_text_async(prompt, ctx, timeout=15)
         if error or not response:
-            logger.warning(f"Response quality check failed: {error}. Allowing response by default.")
-            return True, "validator_unavailable"
-        
-        text = getattr(response, "text", str(response)).strip()
-        if "```" in text:
-            text = text[text.find("{"):text.rfind("}")+1]
-        data = json.loads(text)
-        ok = bool(data.get("ok", True))
-        reason = data.get("reason", "")
-        return ok, reason
+            return _unavailable(error or "empty response")
+
+        text = (getattr(response, "text", None) or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return _unavailable(f"no JSON object in verdict: {text[:120]!r}")
+
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as parse_err:
+            return _unavailable(f"unparseable verdict: {parse_err}")
+        if not isinstance(data, dict) or "ok" not in data:
+            # Нет вердикта — это НЕ одобрение. Раньше отсутствующий ключ
+            # молча превращался в ok=True и пропускал черновик.
+            return _unavailable(f"verdict without 'ok' field: {str(data)[:120]}")
+
+        reason = str(data.get("reason") or "").strip()
+        if data["ok"] is True or str(data["ok"]).strip().lower() == "true":
+            return True, reason or "approved"
+        return False, reason or "rejected by validator"
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        logger.warning(f"Response quality validator exception: {e}. Allowing response by default.")
-        return True, f"validator_error: {e}"
+        logger.warning(f"Response quality validator exception: {e}")
+        return _unavailable(f"exception: {e}")
 
 
 async def check_llm_triage(context_msgs):
@@ -572,6 +936,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     trigger_reason = ""
     context_msgs = []
     is_dialogue = False
+    pending_thread_id = None  # помечается обработанным только после успешной отправки
     
     # Try dynamic BOT_ID resolution if it is missing
     if reply_to_msg_id and not BOT_ID:
@@ -671,11 +1036,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         except Exception as e:
             logger.error(f"Error checking dialogue parent: {e}")
             
-    # Cooldown check for all passive text triggers (2 hours)
+    # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
+    # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
+    # ронял весь обработчик сообщения.
     if not is_dialogue:
-        last_run = datetime.fromisoformat(state.get("last_passive_text_run", "2000-01-01T00:00:00"))
-        if datetime.now() - last_run < timedelta(minutes=120):
-            return False  # Within 2-hour cooldown, skip all passive text triggers!
+        block_reason = passive_gate_block_reason(state)
+        if block_reason:
+            logger.debug(f"Passive text trigger suppressed: {block_reason}")
+            return False
 
     # 2. Check Reply Thread Reaction
     if not triggered and reply_to_msg_id:
@@ -690,16 +1058,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # We have a discussion under a clinical post!
                 triggered = True
                 trigger_reason = f"Clinical post {reply_to_msg_id} discussion thread (reply_count={reply_count})"
-                # Mark thread as processed
-                state.setdefault("processed_threads", []).append(reply_to_msg_id)
-                # Keep thread in processed bounds
-                if len(state["processed_threads"]) > 100:
-                    state["processed_threads"].pop(0)
-                
-                # Update last passive run timestamp
-                state["last_passive_text_run"] = datetime.now().isoformat()
-                save_state(state)
-                
+                # Тред помечается обработанным и полное окно списывается только
+                # после успешной отправки (record_passive_success ниже). Здесь
+                # ставим лишь короткий backoff, чтобы соседние сообщения треда
+                # не запускали генерацию параллельно.
+                pending_thread_id = reply_to_msg_id
+                record_passive_attempt()
+
                 # Fetch parent + last replies for context
                 rows = await query_db_async(
                     "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
@@ -730,17 +1095,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 not any(c.isalpha() for c in last_text)         # pure emoji / numbers / symbols
             )
             
-            # Enforce 120-minute (2 hours) cooldown for unrequested passive triggers
-            last_passive_str = state.get("last_passive_text_run")
-            passive_cooldown_active = False
-            if last_passive_str:
-                try:
-                    last_passive_dt = datetime.fromisoformat(last_passive_str)
-                    if datetime.now() - last_passive_dt < timedelta(minutes=120):
-                        passive_cooldown_active = True
-                except Exception:
-                    pass
-            
+            # Тот же гейт, что и выше (сюда доходим только если он уже пропустил),
+            # но пере-проверяем: между проверками стояли await'ы на БД.
+            passive_cooldown_active = passive_gate_block_reason(load_state()) is not None
+
             if not is_obviously_junk and not passive_cooldown_active:
                 triggered = True
                 trigger_reason = "Passive trigger (pending LLM triage)"
@@ -771,14 +1129,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
     # Run LLM Triage on passive triggers — the AI decides whether to reply, not regexes
     if triggered and not is_dialogue and not (reply_to_msg_id and "discussion thread" in trigger_reason):
+        # Backoff ставим ДО триажа: сам триаж — это отдельный LLM-вызов на 25 с
+        # с thinking_level=HIGH. Раньше отказ триажа не записывал ничего, и в
+        # активном чате бот платил за него на каждом входящем сообщении.
+        record_passive_attempt()
         should_reply = await check_llm_triage(context_msgs)
         if not should_reply:
             logger.info("LLM triage decided NOT to reply. Cancelling trigger.")
             return False
-        # LLM said yes — NOW record the cooldown timestamp
-        if not is_dialogue:
-            state["last_passive_text_run"] = datetime.now().isoformat()
-            save_state(state)
 
     if not triggered:
         return False
@@ -798,13 +1156,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             
     keywords = extract_keywords(keyword_source)
     
-    # Filter keywords to only those matching or relevant to dental keywords
-    dental_kw_matches = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
-    # We want up to 12 search keywords for a richer database search
-    search_keywords = dental_kw_matches if dental_kw_matches else keywords[:12]
-    if len(search_keywords) < 12:
-        other_kws = [kw for kw in keywords if kw not in search_keywords]
-        search_keywords = (search_keywords + other_kws)[:12]
+    search_keywords = select_search_keywords(keywords)
                 
 
     
@@ -976,14 +1328,17 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
             return False
     
-    # POST-GENERATION QUALITY CHECK: validate draft before sending
-    if not is_dialogue:
-        quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text)
-        if not quality_ok:
-            logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
-            return False
-        logger.info(f"Response quality validator approved draft: {quality_reason}")
-        
+    # POST-GENERATION QUALITY CHECK: validate draft before sending.
+    # Раньше диалоговые ответы проверку не проходили вообще — а это ровно те
+    # ответы, где врач переспросил бота напрямую и с наибольшей вероятностью
+    # на них опирается. Теперь проверяются оба пути, разница только в том,
+    # что делать при недоступном валидаторе (см. check_response_quality).
+    quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text, invited=is_dialogue)
+    if not quality_ok:
+        logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+        return False
+    logger.info(f"Response quality validator approved draft: {quality_reason}")
+
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
         # Shadow testing: deliver to test chat & topic
@@ -997,6 +1352,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info("Sent shadow assistant message to Telegram test topic.")
+            if not is_dialogue:
+                record_passive_success(pending_thread_id)
             return True
         except Exception as e:
             logger.error(f"Failed to send shadow assistant message to Telegram: {e}")
@@ -1018,6 +1375,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
+            # Полное окно тишины списывается только здесь — после того, как
+            # сообщение реально ушло. Тред помечается обработанным тоже здесь.
+            if not is_dialogue:
+                record_passive_success(pending_thread_id)
             return True
         except Exception as e:
             logger.error(f"Failed to send direct assistant reply: {e}")
@@ -1106,12 +1467,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     archive_corpus = ""
     is_dental = False
     
-    # Limit keywords to 12
-    dental_kw_matches = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
-    search_keywords = dental_kw_matches if dental_kw_matches else keywords[:12]
-    if len(search_keywords) < 12:
-        other_kws = [kw for kw in keywords if kw not in search_keywords]
-        search_keywords = (search_keywords + other_kws)[:12]
+    search_keywords = select_search_keywords(keywords)
         
     if is_passive:
         last_passive_media_str = state.get("last_passive_media_run")
@@ -1260,13 +1616,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
             return
     
-    # POST-GENERATION QUALITY CHECK: validate draft before sending
-    if is_passive:
-        quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text)
-        if not quality_ok:
-            logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
-            return
-        logger.info(f"Media response quality validator approved draft: {quality_reason}")
+    # POST-GENERATION QUALITY CHECK: validate draft before sending.
+    # Проверяем и запрошенные разборы тоже: чтение снимка — самый
+    # галлюциногенный выход бота, и раньше при прямом обращении оно уходило
+    # пациенту/врачу вообще без проверки.
+    quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text, invited=not is_passive)
+    if not quality_ok:
+        logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+        return
+    logger.info(f"Media response quality validator approved draft: {quality_reason}")
 
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
@@ -1292,8 +1650,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 parse_mode='html'
             )
             logger.info(f"Sent direct media assistant reply to chat {event.chat_id}, message {msg_id}.")
+            # Гард на входе функции (`if msg_id in REPLIED_MSG_IDS`) до сих пор
+            # был мёртвым: в кэш никто никогда не писал. Из-за этого одно и то
+            # же медиасообщение могло получить второй разбор — например, когда
+            # снимок с упоминанием бота в подписи одновременно уходит и в
+            # текстовый обработчик, и в очередь анализа медиа.
+            REPLIED_MSG_IDS[msg_id] = True
         except Exception as e:
             logger.error(f"Failed to send direct media assistant reply: {e}")
+
+
+CASE_TOTAL_STEPS = 4  # столько же, сколько обещает заголовок "Шаг N из 4"
 
 
 async def handle_interactive_case_step(bot_client, chat_id, user_text, user_state):
@@ -1307,26 +1674,45 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     except Exception:
         history_data = []
         
+    # Пустой ход. Симулятор работает только с текстом, а маршрутизация в него
+    # происходит до обработки медиа: присланный во время кейса снимок давал
+    # user_text = "" и уходил экзаменатору как пустое действие врача — тот
+    # оценивал пустоту и невозмутимо вёл кейс дальше.
+    if not (user_text or "").strip():
+        await bot_client.send_message(
+            entity=chat_id,
+            message="🎮 <i>В режиме клинического кейса я читаю только текст — "
+                    "опишите ваши действия словами.</i>\n"
+                    "<i>Выйти из симулятора: /abort</i>",
+            parse_mode='html'
+        )
+        return
+
     current_step = user_state.get("current_step", 1)
-    
+
     # Add user message to history
     history_data.append({"role": "user", "content": user_text})
-    
-    # Send status "typing"
-    status_msg = await bot_client.send_message(entity=chat_id, message="⚙️ <i>Анализирую ваши действия...</i>", parse_mode='html')
-    
-    # Formulate simulation prompt
-    # If step < 3, continue the case. If step >= 3, finish and evaluate.
-    is_last_step = (current_step >= 3)
-    
+
+    # Заголовок обещает "Шаг N из 4", а завершение стояло на current_step >= 3:
+    # врач видел "Шаг 2 из 4", "Шаг 3 из 4" — и следующий же его ответ обрывал
+    # кейс финальной оценкой. Четвёртого шага не существовало.
+    is_last_step = (current_step >= CASE_TOTAL_STEPS)
+
     history_str = ""
     for msg in history_data:
         role_name = "Экзаменатор (Бот)" if msg["role"] == "assistant" else "Врач (Вы)"
         history_str += f"{role_name}: {msg['content']}\n\n"
-    
+
     # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
     keywords = extract_keywords(user_text + " " + history_str)
-    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
+    wiki_corpus, _ = await search_knowledge_corpus(select_search_keywords(keywords))
+
+    # Статус отправляем ТОЛЬКО после поиска по базе. Раньше он уходил первым,
+    # а его удаление стояло за LLM-вызовом и не было защищено: любое исключение
+    # в extract_keywords или в sqlite-поиске (например, заблокированная база)
+    # оставляло врачу вечное "⚙️ Анализирую ваши действия...", без ответа и без
+    # продвижения шага — и понять это было невозможно.
+    status_msg = await bot_client.send_message(entity=chat_id, message="⚙️ <i>Анализирую ваши действия...</i>", parse_mode='html')
     if not is_last_step:
         prompt = f"""
 Ты — старший стоматолог-экзаменатор. Ведешь интерактивный разбор клинического случая.
@@ -1339,7 +1725,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 [КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
 
-Задачи на этот шаг (Шаг {current_step + 1} из 4):
+Задачи на этот шаг (Шаг {current_step + 1} из {CASE_TOTAL_STEPS}):
 1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично (опирайся на стандарты из Базы Знаний, если применимо).
 2. Предоставь новые клинические данные, соответствующие его действию (например, если врач назначил КТ — опиши, что видно на КТ; если сделал анестезию — опиши начало действия и следующий этап работы).
 3. Задай следующий конкретный вопрос о дальнейшей тактике.
@@ -1420,19 +1806,51 @@ async def handle_private_message(bot_client, event):
             cooldown_secs = check_user_cooldown(chat_id, chat_id, "pm_chat", seconds=5)
             if cooldown_secs > 0:
                 logger.info(f"PM rate limit for chat_id={chat_id}, cooldown={cooldown_secs}s")
-                return  # Silent drop - too fast, wait a bit
+                # Обрабатывать не будем, но в историю положим. Раньше здесь
+                # стоял голый return ДО save_pm_message, и врачи, пишущие
+                # мыслями в несколько сообщений подряд ("смотри, случай:" →
+                # через две секунды "37-й, боль при накусывании, что делать?"),
+                # теряли второе НАВСЕГДА: оно не попадало ни в текущий промпт,
+                # ни в контекст следующих ходов. Бот отвечал на обрывок, а сам
+                # вопрос исчезал без следа.
+                if text:
+                    try:
+                        await database.save_pm_message(chat_id, "User", text)
+                    except Exception as save_err:
+                        logger.error(f"Failed to persist rate-limited PM message: {save_err}")
+                return
         
         # Record user activity for DM proactive pings
         try:
             state = load_state()
             pings = state.setdefault("pm_pings", {})
-            pings[str(chat_id)] = {
-                "last_activity": datetime.now().isoformat(),
-                "ping_sent": False
-            }
+            # Обновляем поля, а не подменяем запись целиком: прежний вариант
+            # затирал last_group_ping, из-за чего 48-часовой кулдаун групповых
+            # пингов сбрасывался при каждом входящем ЛС и фактически работал
+            # только 24-часовой порог по last_activity.
+            user_ping = pings.setdefault(str(chat_id), {})
+            user_ping["last_activity"] = datetime.now().isoformat()
+            user_ping["ping_sent"] = False
             save_state(state)
         except Exception as ping_err:
             logger.error(f"Failed to record ping activity for {chat_id}: {ping_err}")
+
+        # Отписка от проактивных пингов.
+        # is_negative_feedback и check_and_apply_silence существовали, но в ЛС
+        # не вызывались ВООБЩЕ: врач, написавший боту "не пиши мне", продолжал
+        # получать и ЛС-пинги, и приглашения в чат. Флаг гасит только исходящую
+        # инициативу бота — на вопросы он отвечать не перестаёт, поэтому цена
+        # ложного срабатывания невелика, а цена пропуска — навязчивые DM.
+        if text and is_negative_feedback(text):
+            try:
+                set_ping_opt_out(chat_id, text)
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="Понял, сам писать больше не буду. Вопросы задавайте когда угодно — на них отвечаю всегда.",
+                )
+            except Exception as opt_err:
+                logger.error(f"Failed to process ping opt-out for {chat_id}: {opt_err}")
+            return
 
         # Map text menu button clicks to slash commands
         btn_mapping = {
@@ -1562,8 +1980,22 @@ async def handle_private_message(bot_client, event):
                         count = int(parts[1])
                     except ValueError:
                         pass
-                
-                last_msgs = await database.get_last_bot_sent_messages(count)
+                # Верхняя граница: раньше count не проверялся вообще.
+                count = max(1, min(count, 100))
+
+                # /wipe чистит бота ТОЛЬКО в целевом групповом чате.
+                # Раньше выбирались последние N сообщений бота ПО ВСЕМ чатам и
+                # удалялись в каждом: админ группы, набрав /wipe 200 в личке,
+                # стирал клинические разборы из приватных переписок других
+                # врачей. Права админа группы не распространяются на чужие ЛС.
+                wipe_target = chat_id
+                if str(chat_id) not in (str(config.REPORT_CHAT_ID), str(config.SOURCE_CHAT_ID)):
+                    wipe_target = config.SOURCE_CHAT_ID
+                if not wipe_target:
+                    await bot_client.send_message(entity=chat_id, message="⛔ <i>Целевой чат для очистки не настроен.</i>", parse_mode='html')
+                    return
+
+                last_msgs = await database.get_last_bot_sent_messages(count, chat_id=wipe_target)
                 if not last_msgs:
                     await bot_client.send_message(entity=chat_id, message="🤷‍♂️ <i>Не найдено отправленных сообщений бота для удаления.</i>", parse_mode='html')
                     return
@@ -1746,6 +2178,13 @@ async def handle_private_message(bot_client, event):
                 reply_text = getattr(response, "text", "Ошибка генерации").strip()
                 reply_text = clean_html_formatting(reply_text)
                 await bot_client.send_message(entity=chat_id, message=f"🎲 <b>Клиническая Викторина:</b>\n\n{reply_text}", parse_mode='html')
+                # Вопрос ОБЯЗАН попасть в историю ЛС. Без этого следующий ход
+                # врача ("Мой ответ Б") приходит в общий обработчик без самой
+                # задачи, и модель уверенно выносит "верно/неверно" с разбором
+                # случая, которого не видела.
+                await database.save_pm_message(
+                    chat_id, "Assistant", f"[Клиническая викторина]\n{reply_text}"
+                )
             return
 
         if text.lower() == "/stats":
@@ -1806,8 +2245,17 @@ async def handle_private_message(bot_client, event):
                 text_out += f"«{msg_text_snippet}»\n"
                 if media_desc:
                     text_out += f"🖼️ <i>Описание снимка:</i> {media_desc[:80]}...\n"
-                clean_chat_id = str(chat_id_val).replace("-100", "")
-                text_out += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+                # Ссылку рисуем только для реальных сообщений группы.
+                # Закладки на статьи энциклопедии сохраняются с синтетическим
+                # отрицательным msg_id и chat_id личного чата, а
+                # str(положительный_id).replace("-100","") ничего не меняет —
+                # получалось https://t.me/c/<user_id>/-483920117, ведущее в никуда.
+                is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
+                if is_group_message:
+                    clean_chat_id = str(chat_id_val)[4:]
+                    text_out += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+                else:
+                    text_out += "📖 <i>Статья энциклопедии</i>\n\n"
                 
             if not query_filter and total_pages > 1:
                 text_out += f"<i>Показано {len(page_rows)} из {total_items} закладок. Страница {page} из {total_pages}.\nИспользуйте <code>/bookmarks [номер_страницы]</code> для перехода.</i>"
@@ -1919,7 +2367,40 @@ async def handle_private_message(bot_client, event):
         # 3. Обработка медиафайлов (фото/видео) в ЛС
         media_description = None
         temp_path = None
-        has_media = event.message.photo is not None or event.message.video is not None
+        # Снимки часто присылают ДОКУМЕНТОМ, чтобы Telegram их не пережал —
+        # это стандартная практика для рентгена и КТ. Раньше учитывались только
+        # photo/video: у документа has_media был False, текста нет, в историю
+        # ничего не писалось, и промпт собирался из старой переписки — бот
+        # уверенно переотвечал на вопрос двадцатиминутной давности, ни словом
+        # не упомянув, что файл проигнорирован.
+        image_document = None
+        doc = getattr(event.message, "document", None)
+        if doc is not None:
+            mime = (getattr(doc, "mime_type", "") or "").lower()
+            if mime.startswith("image/"):
+                image_document = doc
+
+        has_media = (
+            event.message.photo is not None
+            or event.message.video is not None
+            or image_document is not None
+        )
+
+        # Нераспознаваемое вложение (PDF, архив, стикер) без текста: честно
+        # говорим, что не умеем, вместо ответа на прошлое сообщение.
+        unsupported_attachment = (
+            not has_media
+            and not (text or "").strip()
+            and (doc is not None or getattr(event.message, "sticker", None) is not None)
+        )
+        if unsupported_attachment:
+            await bot_client.send_message(
+                entity=chat_id,
+                message="📎 <i>Такой файл я разобрать не могу. Пришлите снимок картинкой "
+                        "(JPG/PNG) или опишите вопрос текстом.</i>",
+                parse_mode='html'
+            )
+            return
         
         if has_media:
             os.makedirs("temp_media", exist_ok=True)
@@ -1945,6 +2426,7 @@ async def handle_private_message(bot_client, event):
                 await bot_client.delete_messages(chat_id, status_msg.id)
             except Exception as e:
                 logger.error(f"Error analyzing media in PM: {e}")
+                media_error_shown = True
                 if 'status_msg' in locals():
                     await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>", parse_mode='html')
             finally:
@@ -1955,6 +2437,30 @@ async def handle_private_message(bot_client, event):
                 if 'file_to_analyze' in locals() and file_to_analyze != temp_path and os.path.exists(file_to_analyze):
                     try: os.remove(file_to_analyze)
                     except Exception: pass
+
+        # Анализ снимка мог не состояться: упало скачивание, не извлёкся кадр,
+        # vision вернул пусто. Раньше здесь не было ни return, ни отметки об
+        # этом: управление уходило в ТЕКСТОВУЮ ветку промпта, которая про
+        # изображение ничего не знает. Врач получал "❌ не удалось обработать
+        # файл", а следом — уверенный клинический ответ, который читается как
+        # интерпретация присланного снимка. Молча подменять чтение рентгена
+        # догадкой по тексту недопустимо.
+        media_failed = has_media and not media_description
+        if media_failed:
+            logger.warning(
+                f"Media analysis produced nothing for chat_id={chat_id}. "
+                f"has_text={bool((text or '').strip())}"
+            )
+            if not (text or "").strip():
+                # Отвечать не на что: снимка нет, вопроса тоже.
+                if not locals().get("media_error_shown"):
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message="❌ <i>Не смог открыть присланный файл — снимок не проанализирован. "
+                                "Пришлите его ещё раз или опишите вопрос текстом.</i>",
+                        parse_mode='html'
+                    )
+                return
 
         # Получаем стиль и портрет пользователя из БД
         user_profile = await database.get_user_profile(chat_id)
@@ -1996,11 +2502,7 @@ async def handle_private_message(bot_client, event):
         wiki_corpus, archive_corpus = "", ""
         if has_dental_topic or has_media:
             # Ищем совпадения в стоматологической базе
-            search_keywords = [kw for kw in keywords if any(dk in kw for dk in DENTAL_KEYWORDS)]
-            search_keywords = search_keywords if search_keywords else keywords[:12]
-            if len(search_keywords) < 12:
-                other_kws = [kw for kw in keywords if kw not in search_keywords]
-                search_keywords = (search_keywords + other_kws)[:12]
+            search_keywords = select_search_keywords(keywords)
             wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
 
         # 5. Сборка индивидуального глубокого промпта
@@ -2118,7 +2620,20 @@ async def handle_private_message(bot_client, event):
 {instructions}
 """
 
-        logger.info(f"Processing deep PM query from chat_id={chat_id}. Has media={has_media}.")
+        if media_failed:
+            # Текст есть — на него ответим, но модель обязана знать, что снимка
+            # она не видела, и не имеет права его описывать или трактовать.
+            prompt += """
+
+[КРИТИЧЕСКОЕ ОГРАНИЧЕНИЕ: пользователь прислал изображение, но проанализировать его НЕ УДАЛОСЬ. Ты его НЕ ВИДЕЛ.
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО описывать содержимое снимка, интерпретировать его, ставить по нему диагноз или делать любые выводы о том, что на нём изображено.
+Начни ответ с честного признания, что снимок не открылся, и попроси прислать его повторно. Затем, если в тексте есть отдельный вопрос, ответь только на него.]
+"""
+
+        logger.info(
+            f"Processing deep PM query from chat_id={chat_id}. "
+            f"Has media={has_media}. Media analyzed={bool(media_description)}."
+        )
         
         # 6. Отправка статуса "печатает"
         async with bot_client.action(chat_id, 'typing'):
@@ -3343,22 +3858,91 @@ async def handle_term_explainer(bot_client, event, term):
         logger.error(f"Failed to send term explanation: {e}")
 
 
+PING_QUIET_START_HOUR = 22   # с 22:00 …
+PING_QUIET_END_HOUR = 9      # … до 09:00 проактивных сообщений не шлём
+MAX_PINGS_PER_CYCLE = 5      # чтобы джоб не занимал LLM-шлюз на минуты
+MAX_PING_FAILURES = 3        # после стольких неудач подряд перестаём долбиться
+
+
+def is_ping_quiet_hours(now=None):
+    """
+    Ночное окно, когда проактивные сообщения запрещены.
+
+    Планировщик крутится круглосуточно, и "как продвигается твой случай?"
+    или "🔥 в чате горячо спорят" прилетало в 03:40. Часовой пояс конкретного
+    врача нам неизвестен, поэтому ориентируемся на локальное время бота —
+    аудитория чата в основном с ним в одном поясе.
+    """
+    hour = (now or datetime.now()).hour
+    if PING_QUIET_START_HOUR > PING_QUIET_END_HOUR:  # окно переходит через полночь
+        return hour >= PING_QUIET_START_HOUR or hour < PING_QUIET_END_HOUR
+    return PING_QUIET_START_HOUR <= hour < PING_QUIET_END_HOUR
+
+
+def commit_pm_ping(chat_id_str, **fields):
+    """
+    Точечно обновляет ОДНУ запись пингов, перечитывая состояние с диска.
+
+    Цикл пингов идёт минутами: LLM-вызов на пользователя плюс трёхсекундный
+    шаг глобального гейта. Прежний вариант держал снимок состояния всё это
+    время и сохранял его одним куском в конце, откатывая last_activity,
+    записанный handle_private_message в это же окно: врач писал боту в 03:05,
+    а в 04:00 получал "ты пропал на два дня".
+    """
+    state = load_state()
+    entry = state.setdefault("pm_pings", {}).setdefault(str(chat_id_str), {})
+    entry.update(fields)
+    save_state(state)
+
+
+def drop_pm_ping(chat_id_str):
+    """Удаляет запись пингов и СРАЗУ сохраняет."""
+    state = load_state()
+    if state.setdefault("pm_pings", {}).pop(str(chat_id_str), None) is not None:
+        save_state(state)
+
+
+def set_ping_opt_out(chat_id, reason=""):
+    """Врач попросил не писать — больше проактивных сообщений не отправляем."""
+    commit_pm_ping(chat_id, pings_opted_out=True, opt_out_reason=reason[:120])
+    logger.info(f"User {chat_id} opted out of proactive pings. Reason: {reason[:80]!r}")
+
+
 async def check_and_send_pm_pings(bot_client):
     """Проверяет неактивных пользователей в ЛС и отправляет им пинг."""
     try:
+        if is_ping_quiet_hours():
+            logger.debug("PM pings skipped: quiet hours.")
+            return
+
         state = load_state()
         pings = state.get("pm_pings", {})
         if not pings:
             return
-            
+
         now = datetime.now()
         updated = False
-        
+        sent_this_cycle = 0
+
         for chat_id_str, info in list(pings.items()):
             try:
-                last_activity = datetime.fromisoformat(info.get("last_activity"))
+                if sent_this_cycle >= MAX_PINGS_PER_CYCLE:
+                    logger.info(f"PM ping cycle limit reached ({MAX_PINGS_PER_CYCLE}); rest will be handled next hour.")
+                    break
+
+                # Отписавшихся не трогаем никогда.
+                if info.get("pings_opted_out"):
+                    continue
+
+                # Заблокировавший бота пользователь раньше получал свежий
+                # 60-секундный LLM-вызов и попытку отправки КАЖДЫЙ час
+                # бесконечно: ping_sent выставлялся только после успеха.
+                if info.get("ping_failures", 0) >= MAX_PING_FAILURES:
+                    continue
+
+                last_activity = _parse_state_dt(info.get("last_activity"))
                 ping_sent = info.get("ping_sent", False)
-                
+
                 # Если прошло больше 48 часов и пинг еще не отправлен
                 if now - last_activity > timedelta(hours=48) and not ping_sent:
                     chat_id = int(chat_id_str)
@@ -3387,28 +3971,50 @@ async def check_and_send_pm_pings(bot_client):
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
                         reply_text = clean_html_formatting(reply_text)
-                        
+
+                        # Генерация заняла десятки секунд. Перечитываем запись:
+                        # врач мог написать сам, пока мы сочиняли ему "ты пропал".
+                        fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
+                        if fresh.get("pings_opted_out"):
+                            continue
+                        if datetime.now() - _parse_state_dt(fresh.get("last_activity")) <= timedelta(hours=48):
+                            logger.info(f"User {chat_id} became active while ping was generating. Skipping.")
+                            continue
+
                         try:
                             await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
                             await database.save_pm_message(chat_id, "Assistant", reply_text)
-                            info["ping_sent"] = True
+                            # Коммитим сразу, а не в конце цикла.
+                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0)
+                            sent_this_cycle += 1
                         except ValueError as ve:
                             if "Could not find the input entity" in str(ve):
-                                import logging
-                                logging.getLogger(__name__).warning(f"User {chat_id} entity not found. Removing from PM pings.")
-                                pings.pop(chat_id_str, None)
+                                logger.warning(f"User {chat_id} entity not found. Removing from PM pings.")
+                                # Раньше здесь стоял `continue` в обход `updated = True`,
+                                # поэтому удаление не сохранялось и тот же пользователь
+                                # обрабатывался заново каждый час.
+                                drop_pm_ping(chat_id_str)
                                 continue
-                            else:
-                                raise ve
+                            raise
+                        except Exception as send_err:
+                            # UserIsBlockedError, FloodWait, peer-flood и прочее.
+                            failures = info.get("ping_failures", 0) + 1
+                            commit_pm_ping(chat_id_str, ping_failures=failures)
+                            logger.warning(
+                                f"Failed to deliver DM ping to {chat_id} "
+                                f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                            )
+                            continue
+
                         updated = True
                         logger.info(f"Proactive DM ping sent to chat_id={chat_id}: '{reply_text}'")
                     else:
                         logger.error(f"Failed to generate DM ping for chat_id={chat_id}: {error}")
             except Exception as e:
                 logger.error(f"Error processing DM ping for user {chat_id_str}: {e}")
-                
+
         if updated:
-            save_state(state)
+            logger.info(f"PM ping cycle finished: {sent_this_cycle} ping(s) delivered.")
     except Exception as g_err:
         logger.error(f"Global error in check_and_send_pm_pings: {g_err}")
 
@@ -3417,6 +4023,12 @@ async def check_and_send_group_activity_pings(bot_client):
     """Проверяет общую группу на наличие горячих обсуждений и приглашает пользователей из ЛС присоединиться."""
     import config
     if not config.SOURCE_CHAT_ID:
+        return
+
+    # Ночью не зовём в чат: "🔥 там горячо спорят" в 03:40 — это не приглашение,
+    # а побудка. Заодно не тратим LLM-вызов на анализ чата впустую.
+    if is_ping_quiet_hours():
+        logger.debug("Group activity pings skipped: quiet hours.")
         return
 
     try:
@@ -3496,7 +4108,17 @@ async def check_and_send_group_activity_pings(bot_client):
         candidates = []
         for uid in user_ids:
             uid_str = str(uid)
-            user_info = pings.setdefault(uid_str, {"last_activity": "2000-01-01T00:00:00", "ping_sent": False})
+            # Заводим запись СЕГОДНЯШНИМ временем, а не эпохой.
+            # Раньше здесь подставлялось "2000-01-01", и почасовой
+            # check_and_send_pm_pings видел "молчит 26 лет" -> условие
+            # (now - last_activity > 48h and not ping_sent) срабатывало сразу
+            # для КАЖДОГО, кто писал в ЛС за последние 30 дней. Всем им уходила
+            # личка "ты пропал и не писал уже 2 дня" — включая тех, кто написал
+            # вчера. Следы в боевом состоянии: записи с last_activity 2000-01-01
+            # и уже выставленным ping_sent.
+            # Правильная семантика: с этого момента начинаем следить, право на
+            # пинг появляется только после реальных 48 часов молчания.
+            user_info = pings.setdefault(uid_str, {"last_activity": now.isoformat(), "ping_sent": False})
             
             # Проверяем время последней активности или пинга
             last_activity_str = user_info.get("last_activity", "2000-01-01T00:00:00")
@@ -3509,6 +4131,12 @@ async def check_and_send_group_activity_pings(bot_client):
                 last_act = datetime(2000, 1, 1)
                 last_ping = datetime(2000, 1, 1)
                 
+            # Отписавшихся не беспокоим.
+            if user_info.get("pings_opted_out"):
+                continue
+            if user_info.get("ping_failures", 0) >= MAX_PING_FAILURES:
+                continue
+
             # Должно пройти не менее 48 часов с момента последнего пинга группы или ЛС-пинга
             if now - last_ping > timedelta(hours=48) and now - last_act > timedelta(hours=24):
                 candidates.append(uid)
@@ -3531,20 +4159,33 @@ async def check_and_send_group_activity_pings(bot_client):
                     await bot_client.send_message(entity=uid, message=msg, parse_mode='html', link_preview=True)
                     # Сохраняем в историю переписки ЛС
                     await database.save_pm_message(uid, "Assistant", f"[Проактивный пинг чата]: {teaser}")
-                    # Обновляем таймштамп пинга в состоянии
-                    if str(uid) in pings:
-                        pings[str(uid)]["last_group_ping"] = now.isoformat()
+                    # Коммитим сразу и точечно: раньше кулдаун присваивался в
+                    # общий снимок состояния и сохранялся одним куском в конце,
+                    # затирая last_activity, записанный живым диалогом.
+                    commit_pm_ping(uid, last_group_ping=datetime.now().isoformat(), ping_failures=0)
                 except ValueError as ve:
                     if "Could not find the input entity" in str(ve):
-                        import logging
-                        logging.getLogger(__name__).warning(f"User {uid} entity not found. Cannot send group ping.")
-                        pings.pop(str(uid), None)
+                        logger.warning(f"User {uid} entity not found. Cannot send group ping.")
+                        drop_pm_ping(uid)
                     else:
-                        raise ve
-            except Exception as send_err:
-                logger.error(f"Failed to send group activity ping to {uid}: {send_err}")
-                
-        save_state(state)
-        
+                        raise
+                except Exception as send_err:
+                    # Кулдаун раньше выставлялся ТОЛЬКО после успешной отправки,
+                    # поэтому заблокировавший бота оставался вечным кандидатом
+                    # и каждый раз разбавлял 20%-ную выборку.
+                    failures = pings.get(str(uid), {}).get("ping_failures", 0) + 1
+                    commit_pm_ping(
+                        uid,
+                        last_group_ping=datetime.now().isoformat(),
+                        ping_failures=failures,
+                    )
+                    logger.warning(
+                        f"Failed to send group activity ping to {uid} "
+                        f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                    )
+            except Exception as outer_err:
+                logger.error(f"Error handling group activity ping for {uid}: {outer_err}")
+
+
     except Exception as g_err:
         logger.error(f"Global error in check_and_send_group_activity_pings: {g_err}")
