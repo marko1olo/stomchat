@@ -120,32 +120,24 @@ def check_user_cooldown(chat_id, user_id, command, seconds=30):
     USER_COOLDOWNS[key] = now
     return 0
 
+TELEGRAM_MESSAGE_LIMIT = 4000
+
+
 async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
-    """Sends a long message in chunks of <= 4000 characters, splitting by paragraphs if possible."""
-    if len(text) <= 4000:
-        await bot_client.send_message(entity=chat_id, message=text, **kwargs)
-        return
-        
-    paragraphs = text.split("\n\n")
-    current_chunk = ""
-    for p in paragraphs:
-        if len(current_chunk) + len(p) + 2 > 4000:
-            if current_chunk:
-                await bot_client.send_message(entity=chat_id, message=current_chunk.strip(), **kwargs)
-                current_chunk = ""
-            if len(p) > 4000:
-                for i in range(0, len(p), 4000):
-                    await bot_client.send_message(entity=chat_id, message=p[i:i+4000], **kwargs)
-            else:
-                current_chunk = p
-        else:
-            if current_chunk:
-                current_chunk += "\n\n" + p
-            else:
-                current_chunk = p
-                
-    if current_chunk:
-        await bot_client.send_message(entity=chat_id, message=current_chunk.strip(), **kwargs)
+    """
+    Отправляет длинный ответ частями, каждая из которых валидна сама по себе.
+
+    Прежняя версия резала по абзацам, не следя за тегами: ответ с <b> через
+    границу абзаца давал часть с незакрытым тегом и часть с непарным
+    закрывающим — Telegram отклонял ОБЕ, и врач терял ответ на клинический
+    вопрос целиком. Одиночный длинный абзац рубился срезом p[i:i+4000], то
+    есть мог разорвать тег или HTML-сущность.
+
+    Разбиение вынесено в html_safe: незакрытые теги закрываются в конце части
+    и переоткрываются в начале следующей.
+    """
+    for chunk in html_safe.split_html(text, limit=TELEGRAM_MESSAGE_LIMIT):
+        await bot_client.send_message(entity=chat_id, message=chunk, **kwargs)
 
 async def resolve_bot_identity(bot_client):
     """

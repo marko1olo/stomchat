@@ -139,3 +139,77 @@ def safe_truncate_html(html_str, max_len=9500):
     body, unclosed = balance_html(truncated)
     body += "".join(f"</{tag}>" for tag in reversed(unclosed))
     return body + suffix
+
+
+# Запас под закрывающие теги в конце каждой части. Telegram понимает считаные
+# теги, вложенность неглубокая, поэтому 96 символов покрывают её с избытком.
+_CLOSER_RESERVE = 96
+
+
+def _preferred_cut(text, start, hard_end):
+    """
+    Где резать: по границе абзаца, иначе строки, иначе слова.
+
+    Результат всё равно прогоняется через safe_cut_index — граница абзаца
+    может оказаться внутри тега, если разметка кривая.
+    """
+    if hard_end >= len(text):
+        return len(text)
+
+    window = text[start:hard_end]
+    for separator in ("\n\n", "\n", " "):
+        position = window.rfind(separator)
+        # Слишком ранний разрыв делает куски рваными: требуем хотя бы половину.
+        if position > len(window) // 2:
+            return safe_cut_index(text, start + position + len(separator))
+    return safe_cut_index(text, hard_end)
+
+
+def split_html(text, limit=4000):
+    """
+    Режет размеченный текст на части, каждая из которых валидна САМА ПО СЕБЕ.
+
+    Прежний разделитель резал по абзацам и не следил за тегами. Ответ вида
+    "<b>Заголовок\n\nтекст</b>" давал первую часть с незакрытым <b> и вторую
+    с непарным </b> — Telegram отклонял ОБЕ, и врач терял весь ответ на свой
+    клинический вопрос. Одиночный длинный абзац и вовсе рубился срезом
+    p[i:i+4000], то есть мог разорвать тег или HTML-сущность.
+
+    Незакрытые теги закрываются в конце части и переоткрываются в начале
+    следующей, поэтому форматирование не рвётся на стыке.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    if len(text) <= limit:
+        body, unclosed = balance_html(text)
+        return [body + "".join(f"</{tag}>" for tag in reversed(unclosed))]
+
+    chunks = []
+    carry = []
+    position = 0
+    while position < len(text):
+        prefix = "".join(f"<{tag}>" for tag in carry)
+        budget = limit - len(prefix) - _CLOSER_RESERVE
+        if budget <= 0:
+            budget = max(1, limit - len(prefix))
+
+        end = _preferred_cut(text, position, position + budget)
+        if end <= position:
+            # Резать безопасно негде — отдаём остаток плоским текстом, чтобы не
+            # зациклиться и не потерять содержание.
+            chunks.append(html_to_plain(text[position:])[:limit])
+            break
+
+        body, unclosed = balance_html(prefix + text[position:end])
+        closers = "".join(f"</{tag}>" for tag in reversed(unclosed))
+        piece = body + closers
+        if len(piece) > limit:
+            piece = html_to_plain(piece)[:limit]
+            unclosed = []
+        chunks.append(piece.strip())
+        carry = unclosed
+        position = end
+
+    return [chunk for chunk in chunks if chunk]
