@@ -643,6 +643,68 @@ def _remove_temp_file(path):
         logger.warning("temporary media cleanup failed path=%s: %s", path, exc)
 
 
+VOICE_DOWNLOAD_TIMEOUT_SECONDS = 120
+VOICE_TRANSCRIBE_TIMEOUT_SECONDS = 60
+
+# Whisper на тишине, шуме и обрывках стабильно выдаёт один и тот же набор
+# фраз. Публиковать их как расшифровку нельзя: в чате это выглядит как реплика
+# коллеги, а в базе становится текстом сообщения и уезжает в дайджест.
+SILENCE_HALLUCINATIONS = {
+    "you", "thank you", "bye", "подпишитесь",
+    "продолжение следует", "редактор субтитров", "субтитры",
+    "youtube", "собачья чушь", "спасибо",
+}
+
+
+async def transcribe_group_voice(message):
+    """
+    Расшифровывает голосовое из группы. Возвращает текст либо None.
+
+    download_media собственного таймаута не имеет: на подвисшей загрузке
+    обработчик стоял неограниченно долго, а вместе с ним стояло и всё, что
+    шло после него в том же таске.
+    """
+    temp_path = None
+    msg_id = getattr(message, "id", None)
+    try:
+        os.makedirs("temp_media", exist_ok=True)
+        temp_path = await asyncio.wait_for(
+            message.download_media(file="temp_media/"),
+            timeout=VOICE_DOWNLOAD_TIMEOUT_SECONDS,
+        )
+        if not temp_path or not os.path.exists(temp_path):
+            return None
+
+        import blocking_tools
+        transcribed, error = await blocking_tools.transcribe_audio_async(
+            temp_path, timeout=VOICE_TRANSCRIBE_TIMEOUT_SECONDS
+        )
+        if error or not transcribed:
+            if error:
+                logger.warning("voice transcription failed msg_id=%s: %s", msg_id, error)
+            return None
+
+        corrected = await blocking_tools.correct_dental_transcription_async(transcribed.strip())
+        # Правка терминов идёт через LLM и вполне может вернуть пустое —
+        # тогда остаётся сырая расшифровка, а не молчание.
+        text = (corrected or transcribed).strip()
+        if not text:
+            return None
+
+        if text.lower().rstrip(".").rstrip(",").strip() in SILENCE_HALLUCINATIONS:
+            logger.info("voice transcription discarded as silence hallucination msg_id=%s", msg_id)
+            return None
+        return text
+    except asyncio.TimeoutError:
+        logger.warning("voice download timed out msg_id=%s", msg_id)
+        return None
+    except Exception as audio_err:
+        logger.error(f"Error handling group voice message: {audio_err}")
+        return None
+    finally:
+        _remove_temp_file(temp_path)
+
+
 async def process_media_message(messages, msg_id, text, media_type_hint=None):
     files_to_analyze = []
     media_description = None
@@ -817,39 +879,7 @@ async def handle_new_message(event):
         is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
         is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
         is_audio = is_voice or is_audio_file
-        
-        if is_audio:
-            os.makedirs("temp_media", exist_ok=True)
-            temp_path = None
-            try:
-                temp_path = await event.message.download_media(file="temp_media/")
-                if temp_path and os.path.exists(temp_path):
-                    import blocking_tools
-                    transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
-                    if not error and transcribed:
-                        raw_trans = transcribed.strip()
-                        transcribed_text = await blocking_tools.correct_dental_transcription_async(raw_trans)
-                        silence_hallucinations = {
-                            "you", "thank you", "bye", "подпишитесь", 
-                            "продолжение следует", "редактор субтитров", "субтитры", 
-                            "youtube", "собачья чушь", "спасибо"
-                        }
-                        clean_trans = transcribed_text.lower().rstrip(".").rstrip(",")
-                        if clean_trans not in silence_hallucinations:
-                            text = transcribed_text
-                            await bot_client.send_message(
-                                entity=event.chat_id,
-                                message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
-                                reply_to=msg_id,
-                                parse_mode='html'
-                            )
-            except Exception as audio_err:
-                logger.error(f"Error handling group voice message: {audio_err}")
-            finally:
-                if temp_path and os.path.exists(temp_path):
-                    try: os.remove(temp_path)
-                    except Exception: pass
-        
+
         # Получаем ID сообщения, на которое ответили (если есть)
         reply_to_msg_id = None
         if event.message.reply_to:
@@ -865,7 +895,7 @@ async def handle_new_message(event):
             media_type = None
         media_description = None
 
-        # Сохраняем и анализируем только для целевого (основного) чата
+        # Строка в базе появляется НЕМЕДЛЕННО, до любой тяжёлой обработки.
         if event.chat_id == config.SOURCE_CHAT_ID:
             await asyncio.wait_for(
                 database.save_message(
@@ -882,6 +912,43 @@ async def handle_new_message(event):
                 timeout=30,
             )
 
+        # Расшифровка голосового идёт ПОСЛЕ сохранения, а не до него.
+        #
+        # Раньше строка доезжала до базы только по завершении расшифровки:
+        # сначала скачивание без таймаута, затем Whisper (до 60 с), затем
+        # правка терминов. Всё это время сообщения в базе не существовало, а
+        # health_watchdog раз в 5 минут сверяет максимальный id в чате с
+        # максимальным в базе. Попав в это окно, он объявлял сообщение
+        # пропущенным и запускал sync_history, который прогонял его через
+        # обработчик второй раз — в чат уходила вторая «🎤 Транскрипция», а
+        # Whisper отрабатывал дважды за то же голосовое.
+        #
+        # Расшифрованный текст догоняется в базу отдельным UPDATE, поэтому
+        # обрыв на середине больше не теряет сообщение целиком — теряется
+        # только расшифровка, ровно как при обычном сбое Whisper.
+        if is_audio and not is_any_bot:
+            transcribed_text = await transcribe_group_voice(event.message)
+            if transcribed_text:
+                text = transcribed_text
+                if event.chat_id == config.SOURCE_CHAT_ID:
+                    await asyncio.wait_for(
+                        database.update_message_text(msg_id, text), timeout=30
+                    )
+                try:
+                    sent = await bot_client.send_message(
+                        entity=event.chat_id,
+                        message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
+                        reply_to=msg_id,
+                        parse_mode='html'
+                    )
+                    # Транскрипция — такое же сообщение бота, как и остальные;
+                    # без регистрации /wipe её не видит и вычистить не может.
+                    if sent is not None:
+                        await database.save_bot_sent_message(sent.id, event.chat_id)
+                except Exception as send_err:
+                    logger.error("failed to post voice transcription msg_id=%s: %s", msg_id, send_err)
+
+        if event.chat_id == config.SOURCE_CHAT_ID:
             # Сообщение бота уже сохранено в базу выше — дальше ничего не делаем.
             if is_any_bot:
                 if not is_bot:
