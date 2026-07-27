@@ -13,6 +13,7 @@ from blocking_tools import generate_gemini_text_async
 import vision
 import database
 import media_tools
+import html_safe
 import config
 logger = logging.getLogger("assistant")
 
@@ -1646,6 +1647,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             logger.error(f"Failed to send direct media assistant reply: {e}")
 
 
+# Длина выдержки из протокола в сообщении с кнопками. Обрезка идёт через
+# html_safe, чтобы не разорвать тег и не получить отказ Telegram.
+PROTOCOL_EXCERPT_MAX_CHARS = 1500
+
 CASE_TOTAL_STEPS = 4  # столько же, сколько обещает заголовок "Шаг N из 4"
 
 
@@ -2107,7 +2112,10 @@ async def handle_private_message(bot_client, event):
             from telethon import Button
             buttons = [
                 [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
-                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")]
+                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
+                # Вертикальное препарирование перечислено в тексте выше, а
+                # кнопки для него не было — открыть его врач не мог никак.
+                [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")]
             ]
             await bot_client.send_message(entity=chat_id, message=protocols_text, buttons=buttons, parse_mode='html')
             return
@@ -3171,7 +3179,8 @@ async def handle_quiz_callback(bot_client, event):
         from telethon import Button
         buttons = [
             [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
-            [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")]
+            [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
+            [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")]
         ]
         await bot_client.edit_message(event.chat_id, event.message_id, protocols_text, buttons=buttons, parse_mode='html')
         await event.answer()
@@ -3183,7 +3192,8 @@ async def handle_quiz_callback(bot_client, event):
             "irrigation": ["гипохлорит", "эдта", "ирригац", "активац"],
             "bopt": ["bopt", "уступ", "преп"],
             "etching": ["плавиков", "силан", "бонд", "травлен"],
-            "obturation": ["гуттаперч", "силер", "обтурац", "конденсац"]
+            "obturation": ["гуттаперч", "силер", "обтурац", "конденсац"],
+            "vertical": ["вертикальн", "уступ", "преп", "коронка"],
         }
         kws = keywords_map.get(proto_id, ["дентин"])
         wiki_corpus, _ = await search_knowledge_corpus(kws)
@@ -3191,13 +3201,20 @@ async def handle_quiz_callback(bot_client, event):
         if not wiki_corpus:
             wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
         else:
-            wiki_corpus = wiki_corpus[:1500] + "..."
+            # Здесь стоял голый срез wiki_corpus[:1500] + "...". clean_html_formatting
+            # сохраняет <b>, <i> и <code>, поэтому срез мог попасть внутрь тега или
+            # внутрь экранированной сущности (&amp;) — Telegram такую разметку
+            # отклоняет целиком, edit_message падает, и врач, нажавший кнопку
+            # протокола, не видит РОВНО НИЧЕГО. Плюс "..." дописывалось всегда,
+            # даже когда текст никуда не обрезали.
+            wiki_corpus = html_safe.safe_truncate_html(wiki_corpus, max_len=PROTOCOL_EXCERPT_MAX_CHARS)
             
         proto_names = {
             "irrigation": "💧 Ирригация в эндодонтии",
             "bopt": "🦷 BOPT (Препарирование)",
             "etching": "🧪 Адгезивные протоколы (Травление)",
-            "obturation": "🩸 Обтурация корневых каналов"
+            "obturation": "🩸 Обтурация корневых каналов",
+            "vertical": "📐 Вертикальное препарирование",
         }
         title = proto_names.get(proto_id, "📚 Клинический протокол")
         response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"

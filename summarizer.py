@@ -3,6 +3,7 @@ import os
 import config
 import database
 import dental_vocab
+import html_safe
 import logging
 import random
 import search_engine_safe as search_engine
@@ -58,22 +59,16 @@ def _normalize_delivery_text(value):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _html_to_plain(value):
-    """HTML -> плоский текст с сохранением абзацев (для запасной отправки)."""
-    plain = re.sub(r"(?i)<br\s*/?>", "\n", value or "")
-    plain = re.sub(r"(?i)</p\s*>", "\n\n", plain)
-    plain = re.sub(r"<[^>]+>", "", plain)
-    plain = html.unescape(plain)
-    plain = re.sub(r"[ \t]+", " ", plain)
-    plain = re.sub(r"\n{3,}", "\n\n", plain)
-    return plain.strip()
+# HTML-помощники переехали в html_safe: та же логика нужна ассистенту (кнопки
+# протоколов, статьи энциклопедии), а две копии этой обрезки — прямой путь к
+# расхождению. Локальные имена оставлены как были.
+_html_to_plain = html_safe.html_to_plain
+_balance_html = html_safe.balance_html
+_unclosed_tags = html_safe.unclosed_tags
+_safe_cut_index = html_safe.safe_cut_index
+_safe_truncate_html = html_safe.safe_truncate_html
 
 
-# Признаки того, что Telegram не смог разобрать разметку. Обрабатывать их
-# отдельно необходимо: на такую ошибку отчёт не уходит целиком, планировщик не
-# помечает день отправленным и каждые 10 минут ЗАНОВО генерирует дайджест
-# LLM-вызовом — до конца суток это десятки платных генераций, и ни одной
-# доставки.
 _HTML_PARSE_MARKERS = (
     "parse entities",
     "unsupported start tag",
@@ -271,116 +266,7 @@ def get_russian_date(date_input):
     
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
     
-_VOID_TAGS = frozenset({"br", "img", "hr"})
-_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)")
 
-
-_FULL_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
-
-
-def _balance_html(fragment):
-    """
-    Возвращает (текст_без_непарных_закрывающих, список_незакрытых_тегов).
-
-    Незакрытые теги идут в порядке от внешнего к внутреннему — дописывать их
-    нужно в обратном.
-
-    Прежний обход закрывающий тег учитывал только при совпадении с вершиной
-    стека, иначе молча его игнорировал; открывающий оставался на стеке, и в
-    конец дописывался лишний закрывающий. Непарные закрывающие теги вообще не
-    убирались, а Telegram отклоняет сообщение и из-за них тоже — «Unmatched
-    end tag». Здесь при несовпадении снимаем всё до парного элемента, как это
-    делает разбор HTML, а закрывающий без пары выбрасываем: смысла он не несёт.
-    """
-    stack = []
-    pieces = []
-    position = 0
-    for match in _FULL_TAG_RE.finditer(fragment):
-        closing, name = match.group(1), match.group(2).lower()
-        if name in _VOID_TAGS:
-            continue
-        if closing:
-            if name in stack:
-                del stack[stack.index(name):]
-            else:
-                # Непарный закрывающий: копируем текст до него и пропускаем сам тег.
-                pieces.append(fragment[position:match.start()])
-                position = match.end()
-        else:
-            stack.append(name)
-    pieces.append(fragment[position:])
-    return "".join(pieces), stack
-
-
-def _unclosed_tags(fragment):
-    return _balance_html(fragment)[1]
-
-
-def _safe_cut_index(text, limit):
-    """
-    Наибольшая позиция не дальше limit, на которой резать безопасно.
-
-    Резать нельзя ни внутри тега, ни внутри HTML-сущности. Telegram на
-    нераспознанную разметку отклоняет ВЕСЬ отчёт, а не испорченный фрагмент,
-    поэтому дайджест не доходит вообще — а планировщик, не пометив день
-    отправленным, каждые 10 минут заново генерирует его LLM-вызовом.
-    Проверено: срез ровно на "<a href=" давал в результате «<a href="h</a>».
-    """
-    cut = min(limit, len(text))
-    if cut <= 0:
-        return 0
-
-    bracket = text.rfind("<", 0, cut)
-    if bracket != -1 and text.find(">", bracket, cut) == -1:
-        cut = bracket
-
-    ampersand = text.rfind("&", 0, cut)
-    if ampersand != -1 and cut - ampersand <= 10 and text.find(";", ampersand, cut) == -1:
-        cut = ampersand
-
-    return max(cut, 0)
-
-
-def _safe_truncate_html(html_str, max_len=9500):
-    html_str = html_str or ""
-    suffix = (
-        "<br><br><b>[Отчет сокращен из-за лимитов Telegram]</b>"
-        if max_len <= 4000
-        else "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
-    )
-
-    if len(html_str) <= max_len:
-        # Разметку правим и без обрезки: незакрытые и непарные теги оставляет
-        # сама модель, а Telegram отклоняет такое сообщение точно так же.
-        body, unclosed = _balance_html(html_str)
-        tail = "".join(f"</{tag}>" for tag in reversed(unclosed))
-        if tail or body != html_str:
-            logger.warning(
-                "summary html was unbalanced: closed=%s stripped=%s chars",
-                tail or "-", len(html_str) - len(body),
-            )
-        return body + tail
-
-    # Место под закрывающие теги и суффикс резервируем ЗАРАНЕЕ, иначе результат
-    # выходит за max_len — замер до правки: запрошено 3900, получено 3958.
-    budget = max_len - len(suffix)
-    reserve = sum(len(tag) + 3 for tag in _unclosed_tags(html_str[:budget]))
-    budget -= reserve
-    if budget <= 0:
-        return _html_to_plain(html_str)[: max(0, max_len)]
-
-    truncated = html_str[: _safe_cut_index(html_str, budget)]
-
-    # Обрезаем по границе абзаца, если она достаточно далеко.
-    for marker in ("<p>", "<br>"):
-        position = truncated.rfind(marker)
-        if position > 2000:
-            truncated = truncated[:position]
-            break
-
-    body, unclosed = _balance_html(truncated)
-    body += "".join(f"</{tag}>" for tag in reversed(unclosed))
-    return body + suffix
 
 def clean_markdown_to_html(text):
     if not text: return ""
