@@ -8,8 +8,10 @@ logger = logging.getLogger(__name__)
 
 import vision
 import os
+import time
 import asyncio
 import json
+from collections import deque
 import database
 import assistant
 from datetime import datetime
@@ -172,11 +174,65 @@ async def runtime_telemetry_task():
                 )
         except Exception as exc:
             logger.warning("runtime_memory_error %s", exc)
+        cleanup_temp_media()
         await asyncio.sleep(900)
 
+
+TEMP_MEDIA_MAX_AGE_SECONDS = 6 * 3600
+
+
+def cleanup_temp_media(max_age_seconds=TEMP_MEDIA_MAX_AGE_SECONDS):
+    """
+    Подметает temp_media от файлов, переживших свою обработку.
+
+    Штатные пути уборки есть, но они не покрывают обрыв download_media по
+    таймауту (файл уже создан, а путь наверх не вернулся), падение извлечения
+    кадра и убийство процесса сторожем. Чистки по расписанию не было вообще:
+    на момент добавления в каталоге лежало 69 файлов на 43.6 МБ, включая
+    13 нулевых, самый старый — почти полугодовой давности.
+
+    Уборка по возрасту, а не по имени: так покрываются все пути утечки сразу,
+    и активная обработка не задевается — 6 часов сильно больше любого таймаута.
+    """
+    removed = 0
+    freed = 0
+    try:
+        if not os.path.isdir("temp_media"):
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for name in os.listdir("temp_media"):
+            path = os.path.join("temp_media", name)
+            try:
+                if not os.path.isfile(path) or os.path.getmtime(path) > cutoff:
+                    continue
+                size = os.path.getsize(path)
+                os.remove(path)
+                removed += 1
+                freed += size
+            except OSError:
+                # Файл может быть занят активной обработкой — заберём в следующий раз.
+                continue
+    except Exception as exc:
+        logger.warning("temp_media_cleanup_error %s", exc)
+    if removed:
+        logger.info(f"temp_media cleanup: removed {removed} stale files, freed {freed/1e6:.1f} MB")
+    return removed
+
+
 async def heartbeat_task():
+    # Единственный фоновый цикл, у которого не было try/except (остальные
+    # обёрнуты). write_heartbeat делает os.replace и на Windows ловит
+    # PermissionError, если файл в этот момент держит антивирус/индексатор;
+    # после 5 ретраев он поднимает OSError. Таск умирал навсегда, heartbeat
+    # переставал обновляться, и через WATCHDOG_STALE_SECONDS сторож убивал
+    # процесс — как правило, посреди генерации саммари или анализа снимка.
     while True:
-        runtime_guard.write_heartbeat("heartbeat")
+        try:
+            runtime_guard.write_heartbeat("heartbeat")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Heartbeat write failed, continuing: {e}")
         await asyncio.sleep(runtime_guard.HEARTBEAT_INTERVAL_SECONDS)
 
 async def summary_watchdog_task():
@@ -473,8 +529,13 @@ async def stop_media_analysis_workers():
 
 
 async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None):
-    if _media_queue is None:
-        start_media_analysis_workers()
+    # Вызываем безусловно, а не только при _media_queue is None.
+    # start_media_analysis_workers() идемпотентна: она отбрасывает завершившиеся
+    # таски и добирает недостающие. Раньше её звали лишь на старте, поэтому
+    # умерший воркер (по умолчанию он один) не поднимался никогда: очередь молча
+    # заполнялась до предела, и дальше ВСЁ медиа уходило в logger.error без
+    # анализа — до следующего перезапуска процесса.
+    start_media_analysis_workers()
 
     try:
         _media_queue.put_nowait((messages, msg_id, text, media_type_hint))
@@ -656,7 +717,20 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
             _remove_temp_file(p)
 
 
-@client.on(events.NewMessage(chats=[config.SOURCE_CHAT_ID, -1003735006121]))
+# None в списке чатов недопустим: Telethon пытается резолвить его в
+# EventBuilder.resolve, падает ВНЕ per-callback try, и цикл регистрации
+# хендлеров обрывается — ни один обработчик не срабатывает вообще, полностью
+# молча. config допускает SOURCE_CHAT_ID = None (только warning в stdout),
+# поэтому отфильтровываем здесь.
+WATCHED_CHATS = [c for c in (config.SOURCE_CHAT_ID, -1003735006121) if c is not None]
+if not config.SOURCE_CHAT_ID:
+    logger.error(
+        "SOURCE_CHAT_ID не задан — основной чат не отслеживается. "
+        "Проверьте .env, иначе бот будет работать только в тестовом чате."
+    )
+
+
+@client.on(events.NewMessage(chats=WATCHED_CHATS))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
     try:
@@ -684,6 +758,14 @@ async def handle_new_message(event):
             )
         except Exception as exc:
             logger.warning("sender lookup failed msg_id=%s sender_id=%s: %s", msg_id, sender_id, exc)
+
+        # Бот — свой или чужой — не должен запускать триггеры НИ В ОДНОМ чате.
+        # Раньше эта проверка стояла ВНУТРИ блока `if chat_id == SOURCE_CHAT_ID`,
+        # а хендлер подписан на два чата. Во втором — том, куда бот сам постит
+        # дайджесты, — фильтра не было: собственный дайджест прилетал как новое
+        # сообщение, проходил пассивный триаж, и бот комментировал сам себя.
+        # Его комментарий приходил снова; каждый круг — платный LLM-вызов.
+        is_any_bot = is_bot or bool(sender and getattr(sender, 'bot', False))
 
         # Сбор расширенных данных об авторе (с обработкой анонимных админов)
         if sender is None:
@@ -779,13 +861,10 @@ async def handle_new_message(event):
                 timeout=30,
             )
 
-            # Если сообщение от самого бота или от другого бота, мы его сохранили в базу, но больше ничего не делаем
-            is_other_bot = False
-            if sender and getattr(sender, 'bot', False) and not is_bot:
-                is_other_bot = True
-                logger.info(f"Deduplicator: Message is from another bot (sender_id={sender_id}, username={sender_username}). Skipping triggers.")
-                
-            if is_bot or is_other_bot:
+            # Сообщение бота уже сохранено в базу выше — дальше ничего не делаем.
+            if is_any_bot:
+                if not is_bot:
+                    logger.info(f"Deduplicator: Message is from another bot (sender_id={sender_id}, username={sender_username}). Skipping triggers.")
                 return
 
             # Check bookmark saving command
@@ -955,7 +1034,12 @@ async def handle_new_message(event):
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
                 
-        runtime_guard.create_task(run_assistant_safe(), name=f"assistant_{msg_id}")
+        # Второй чат до блока SOURCE_CHAT_ID не доходит, поэтому страхуемся здесь:
+        # без этой проверки бот отвечал на собственные дайджесты.
+        if is_any_bot:
+            logger.info(f"Skipping assistant triggers for bot-authored msg_id={msg_id} in chat {event.chat_id}.")
+        else:
+            runtime_guard.create_task(run_assistant_safe(), name=f"assistant_{msg_id}")
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -974,27 +1058,83 @@ async def handle_new_message(event):
     except Exception:
         logger.exception("message handler failed")
 
+# Сообщения одного пользователя обрабатываются строго по очереди.
+# Telethon диспатчит апдейты конкурентно (sequential_updates=False), и каждое
+# ЛС уходило в отдельный detached-таск. Два ответа врача во время /case шли
+# параллельно: оба читали current_step = N, оба писали N+1 через
+# INSERT OR REPLACE — шаг проглатывался, история одного из обменов терялась,
+# и приходили два ответа экзаменатора по разным веткам.
+_PM_USER_LOCKS = {}
+
+
+def _pm_user_lock(user_id):
+    lock = _PM_USER_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PM_USER_LOCKS[user_id] = lock
+        # Словарь ограничен: иначе он растёт на каждого нового собеседника
+        # и никогда не чистится. Незанятые замки можно выбрасывать свободно.
+        if len(_PM_USER_LOCKS) > 500:
+            for stale_id in [k for k, v in _PM_USER_LOCKS.items()
+                             if k != user_id and not v.locked()][:250]:
+                _PM_USER_LOCKS.pop(stale_id, None)
+    return lock
+
+
 @bot_client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handle_private_message(event):
     """Обработчик входящих личных сообщений (ЛС) бота."""
     async def run_pm_safe():
         try:
-            await assistant.handle_private_message(bot_client, event)
+            async with _pm_user_lock(event.chat_id):
+                await assistant.handle_private_message(bot_client, event)
         except Exception as e:
             logger.exception(f"Unexpected error in PM message handler: {e}")
-            
+
     runtime_guard.create_task(run_pm_safe(), name=f"pm_{event.message.id}")
+
+# Обработанные нажатия кнопок. Дедупликации не было: двойной тап по варианту
+# викторины обрабатывался дважды — двойная смена стиля, двойной edit_message,
+# потенциально двойной зачёт ответа.
+HANDLED_CALLBACK_IDS = deque(maxlen=500)
+_HANDLED_CALLBACK_SET = set()
+
 
 @bot_client.on(events.CallbackQuery)
 async def handle_callback_query(event):
     """Обработчик нажатий на инлайн-кнопки (викторины)."""
+    cb_id = getattr(event, "id", None)
+    if cb_id is not None:
+        if cb_id in _HANDLED_CALLBACK_SET:
+            logger.info(f"Deduplicator: skipping repeated callback id={cb_id}")
+            try:
+                await event.answer()
+            except Exception:
+                pass
+            return
+        if len(HANDLED_CALLBACK_IDS) == HANDLED_CALLBACK_IDS.maxlen:
+            _HANDLED_CALLBACK_SET.discard(HANDLED_CALLBACK_IDS[0])
+        HANDLED_CALLBACK_IDS.append(cb_id)
+        _HANDLED_CALLBACK_SET.add(cb_id)
+
+    answered = False
     try:
         await assistant.handle_quiz_callback(bot_client, event)
+        answered = True
     except Exception as e:
         if "MessageNotModifiedError" in type(e).__name__ or "Content of the message was not modified" in str(e):
             pass
         else:
             logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
+    finally:
+        # event.answer() вызывался только внутри handle_quiz_callback. Если
+        # исключение случалось раньше, ответ Telegram не уходил и у врача
+        # крутился спиннер на кнопке до таймаута клиента.
+        if not answered:
+            try:
+                await event.answer()
+            except Exception:
+                pass
 
 @client.on(events.NewMessage(pattern=r'\.dump', outgoing=True))
 async def dump_handler(event):
@@ -1211,9 +1351,24 @@ async def sync_history():
     if count > 0:
         logger.info(f"✅ Синхронизация завершена. Докачано {count} сообщений.")
         if last_synced_message:
-            logger.info(f"🚀 Обрабатываем последнее пропущенное сообщение msg_id={last_synced_message.id}...")
-            adapter_event = TelethonEventAdapter(last_synced_message)
-            runtime_guard.create_task(handle_new_message(adapter_event), name=f"sync_process_{last_synced_message.id}")
+            # Медиа выше уже поставлено в очередь анализа. Прогонять последнее
+            # сообщение ещё и через handle_new_message нельзя: оно скачается и
+            # проанализируется повторно, а голосовое будет заново расшифровано
+            # И ПОВТОРНО ОПУБЛИКОВАНО в чат — пользователи видели дубль
+            # транскрипции при каждом рестарте и каждом прогоне watchdog'а.
+            already_enqueued = {m.id for m in synced_singles}
+            for msgs in synced_albums.values():
+                already_enqueued.update(m.id for m in msgs)
+
+            if last_synced_message.id in already_enqueued:
+                logger.info(
+                    f"🚀 Последнее пропущенное msg_id={last_synced_message.id} уже "
+                    f"в очереди анализа медиа — повторно не обрабатываем."
+                )
+            else:
+                logger.info(f"🚀 Обрабатываем последнее пропущенное сообщение msg_id={last_synced_message.id}...")
+                adapter_event = TelethonEventAdapter(last_synced_message)
+                runtime_guard.create_task(handle_new_message(adapter_event), name=f"sync_process_{last_synced_message.id}")
     else:
         logger.info("✅ Пропущенных сообщений не обнаружено.")
 
