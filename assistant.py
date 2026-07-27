@@ -4008,9 +4008,16 @@ async def check_and_trigger_referee(bot_client, event, text):
 
     text_lower = text.lower()
     
-    # 2. Исключаем обсуждение самого бота (чтобы не было автозацикливания при критике)
-    bot_words = ["бот", "боту", "ботом", "боте", "боты", "ботов", "ботам", "ботами", "ботах", "@docendobot", "@stomchat_bot"]
-    if any(bw in text_lower for bw in bot_words):
+    # 2. Исключаем обсуждение самого бота (чтобы не было автозацикливания при критике).
+    #
+    # Здесь стоял подстрочный поиск «бот», который живёт в «работа», «суббота»,
+    # «заботиться». Замер по архиву: рефери подавлялся на 7119 сообщениях, из
+    # них реально про бота были 98 — то есть 99% подавлений ложные. Слово
+    # «работа» в профессиональном чате одно из самых частых, а конфликты как раз
+    # вокруг работы и возникают: рефери не включался именно там, где нужен.
+    if _BOT_REFERENCE_RE.search(text_lower) or (
+        BOT_USERNAME and f"@{BOT_USERNAME.lower()}" in text_lower
+    ):
         logger.info("Message mentions bot, skipping referee to avoid feedback loops.")
         return
 
