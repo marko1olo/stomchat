@@ -142,11 +142,6 @@ def image_document(message):
     return document if mime.startswith("image/") else None
 
 
-def has_analyzable_image(message):
-    """Фото или снимок-документ — то, что имеет смысл отдавать в vision."""
-    return getattr(message, "photo", None) is not None or image_document(message) is not None
-
-
 def _main():
     if len(sys.argv) != 3:
         _json_exit({"ok": False, "error": "usage: media_tools.py <action> <path>"}, 2)

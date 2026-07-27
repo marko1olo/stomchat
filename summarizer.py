@@ -6,12 +6,13 @@ import dental_vocab
 import html_safe
 import logging
 import random
-import search_engine_safe as search_engine
+# search_engine_safe сюда импортировался, но не вызывался ни разу — вместе с
+# ним впустую подтягивался web_search_async. Сам модуль оставлен: он рабочий,
+# просто нигде не подключён (см. заметку в отчёте).
 import re
 import html
 import runtime_guard
 from blocking_tools import create_telegraph_page_async, generate_gemini_text_async
-from html_telegraph_poster import TelegraphPoster
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -23,15 +24,13 @@ RECENT_DELIVERY_SCAN_LIMIT = 20
 
 _summary_generation_lock = None
 
-# --- Инициализация Telegraph (один раз) ---
-tph = TelegraphPoster(use_api=True, access_token=config.TELEGRAPH_TOKEN)
-
-# Резервный механизм, если вдруг ключ пропадет из .env
-if not config.TELEGRAPH_TOKEN:
-    try:
-        tph.create_api_token('StomatBot_Reporter') 
-    except Exception:
-        logger.exception("telegraph token bootstrap failed")
+# Публикация в Telegraph живёт в blocking_tools и исполняется подпроцессом с
+# таймаутом. Здесь лежала вторая, синхронная реализация вместе с клиентом
+# TelegraphPoster, создаваемым НА ИМПОРТЕ модуля, — и её не вызывал никто.
+# Помимо дубля это был риск на старте: при пустом токене прямо на импорте
+# уходил сетевой вызов create_api_token без таймаута, то есть подъём бота
+# зависел от доступности Telegraph. Сегодня токен задан и вызов не срабатывает,
+# но при ротации ключа сработал бы.
 
 
 def _write_summary_stage(stage, **payload):
@@ -398,27 +397,6 @@ def clean_markdown_to_html(text):
 
     return text.strip()
 
-def create_telegraph_page(title, html_content):
-    """Создает статью на Telegraph и возвращает ссылку."""
-    try:
-        # Telegraph понимает простую html разметку
-        # Преобразуем переносы строк в <br> для Telegraph
-        paragraphs = html_content.split('\n\n')
-        formated_body = ''
-        for p in paragraphs:
-            p = p.strip()
-            if p:
-                formated_body += f"<p>{p.replace('\n', '<br>')}</p>"
-        
-        page = tph.post(
-            title=title,
-            author='StomatBot AI',
-            text=formated_body
-        )
-        return page['url']
-    except Exception as e:
-        logger.error(f"Ошибка Telegraph: {e}")
-        return None
 
 # Околоклиническая лексика, которой в dental_vocab нет и быть не должно:
 # деньги, оборудование, организация работы. Для дайджеста это осмысленное
