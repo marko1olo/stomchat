@@ -16,6 +16,13 @@ bot_summary_status.json
 bot_watchdog_dump.txt
 temp_media/
 uploaded_media/
+# Live runtime state rewritten by the bot on every cycle. Versioning it means a
+# checkout/stash can silently roll cooldowns and ping timestamps back to a stale
+# snapshot, and assistant_state.json additionally carries real Telegram user ids.
+assistant_state.json
+assistant_state.json.tmp
+assistant_state.json.bak
+banned_models.json
 
 # Databases and backups
 *.db
