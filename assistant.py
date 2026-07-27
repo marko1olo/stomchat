@@ -519,15 +519,33 @@ def select_search_keywords(keywords):
     if not keywords:
         return []
     dental = [kw for kw in keywords if is_dental_keyword(kw)]
-    if len(dental) >= _MIN_DENTAL_FOR_STRICT:
+    # Общими словами добиваем ТОЛЬКО когда клинических нет вовсе.
+    #
+    # Порог в три термина был слишком мягким: на «какой уступ под цирконий и
+    # как вести мягкие ткани» находились «уступ» и «цирконий», их было меньше
+    # трёх, и в поиск добавлялось «вест». По такому ключу LIKE тянет из 107
+    # тысяч реплик что угодно. Два точных термина дают лучшую справку, чем два
+    # точных плюс один мусорный, а объём выборки восполняется бюджетом строк на
+    # ключ, а не количеством ключей.
+    if dental:
         return dental[:_MAX_SEARCH_KEYWORDS]
-    others = [kw for kw in keywords if kw not in dental]
-    return (dental + others)[:_MAX_SEARCH_KEYWORDS]
+    return keywords[:_MAX_SEARCH_KEYWORDS]
 
 
-# Сколько кандидатов тянуть на одно ключевое слово. Больше, чем нужно
-# в итоге, — чтобы ранжированию было из чего выбирать.
+# Кандидатов тянем по БЮДЖЕТУ, а не по фиксированной норме на ключ. При одном
+# точном термине норма в 8 строк давала 8 кандидатов на всё ранжирование, и
+# отбор терял смысл. Теперь чем меньше ключей, тем глубже каждый.
 _CORPUS_ROWS_PER_KEYWORD = 8
+_CORPUS_TOTAL_ROW_BUDGET = 48
+
+
+def _rows_per_keyword(keyword_count):
+    if keyword_count <= 0:
+        return _CORPUS_ROWS_PER_KEYWORD
+    return max(_CORPUS_ROWS_PER_KEYWORD, _CORPUS_TOTAL_ROW_BUDGET // keyword_count)
+# Реплика короче этого не несёт утверждения: «Контаминация.», «+», «да».
+# В справке такие только занимают место.
+_ARCHIVE_MIN_USEFUL_CHARS = 40
 _CORPUS_CANDIDATE_CAP = 60
 _CORPUS_OUTPUT_LIMIT = 20
 
@@ -565,6 +583,21 @@ def _rank_corpus_entries(entries, keywords):
     return [s[3] for s in chosen[:_CORPUS_OUTPUT_LIMIT]]
 
 
+def _corpus_entry(prefix, body):
+    """
+    Одна запись справки = одна строка.
+
+    Внутренние переводы строк схлопываются: корпус склеивается через "
+", и
+    многострочная реплика превращалась в несколько строк, между которыми модель
+    не видит границы высказываний. На практике так в клиническую справку
+    попадали правила чата — «Правила канала», «Никакой политики» — как будто
+    это отдельные факты по существу вопроса.
+    """
+    text = " ".join(str(body or "").split())
+    return f"{prefix} {text}".strip()
+
+
 async def search_knowledge_corpus(keywords):
     if not keywords:
         return "", ""
@@ -572,6 +605,7 @@ async def search_knowledge_corpus(keywords):
     def sync_search():
         wiki_facts = []
         archive_msgs = []
+        rows_per_kw = _rows_per_keyword(len(keywords))
 
         # 1. Search stomat_wiki.db
         if os.path.exists("stomat_wiki.db"):
@@ -582,10 +616,10 @@ async def search_knowledge_corpus(keywords):
                 for kw in keywords:
                     c.execute(
                         "SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT ?",
-                        (f"%{kw}%", _CORPUS_ROWS_PER_KEYWORD),
+                        (f"%{kw}%", rows_per_kw),
                     )
                     for row in c.fetchall():
-                        fact = f"[{row[0]}] {row[1]}"
+                        fact = _corpus_entry(f"[{row[0]}]", row[1])
                         if fact not in wiki_facts:
                             wiki_facts.append(fact)
                     if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
@@ -602,11 +636,23 @@ async def search_knowledge_corpus(keywords):
                 c = conn.cursor()
                 for kw in keywords:
                     c.execute(
-                        "SELECT sender_name, text FROM archive_messages WHERE text LIKE ? AND text != '' LIMIT ?",
-                        (f"%{kw}%", _CORPUS_ROWS_PER_KEYWORD),
+                        # Вопросы и обрывки из справки исключаются. Замер на
+                        # шести реальных вопросах: из 160 подтянутых реплик
+                        # архива 19 были сами вопросами и 29 короче сорока
+                        # символов вроде «Контаминация.» — 30% контекста без
+                        # знания внутри. Вопрос, прочитанный как утверждение,
+                        # ещё и уводит модель: на «протокол травления емакс»
+                        # первой в справке шла реплика «Какой протокол
+                        # травления циркона?».
+                        "SELECT sender_name, text FROM archive_messages "
+                        "WHERE text LIKE ? AND TRIM(text) <> '' "
+                        f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                        "AND TRIM(text) NOT LIKE '%?' "
+                        "LIMIT ?",
+                        (f"%{kw}%", rows_per_kw),
                     )
                     for row in c.fetchall():
-                        msg = f"{row[0]}: {row[1]}"
+                        msg = _corpus_entry(f"{row[0]}:", row[1])
                         if msg not in archive_msgs:
                             archive_msgs.append(msg)
                     if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
