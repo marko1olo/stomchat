@@ -84,13 +84,9 @@ check("вывод ограничен лимитом", len(r) <= A._CORPUS_OUTPUT
 check("пустой вход не падает", A._rank_corpus_entries([], ["канал"]) == [])
 check("корпус никогда не пустеет искусственно", len(A._rank_corpus_entries(["одно слово канал"], ["канал", "лечен"])) == 1)
 
-print("\n[5] /case: число шагов согласовано с заголовком")
-src = inspect.getsource(A.handle_interactive_case_step)
-check("завершение по константе", "current_step >= CASE_TOTAL_STEPS" in src)
-check("заголовок использует ту же константу", "из {CASE_TOTAL_STEPS}" in src)
-check("пустой ход отклоняется до LLM", 'if not (user_text or "").strip():' in src)
-check("статус отправляется после поиска по базе",
-      src.index("search_knowledge_corpus") < src.index("Анализирую ваши действия"))
+print("\n[5] /case: поведение симулятора проверяется в test_case_simulator.py")
+check("число шагов задано константой, а не литералом", A.CASE_TOTAL_STEPS == 4,
+      f"got {A.CASE_TOTAL_STEPS}")
 
 print("\n[6] Пинги и валидатор на месте (регресс прошлых раундов)")
 check("тихие часы существуют", callable(A.is_ping_quiet_hours))
@@ -98,31 +94,22 @@ check("отписка существует", callable(A.set_ping_opt_out))
 check("валидатор принимает invited", "invited" in inspect.signature(A.check_response_quality).parameters)
 check("гейт пассивных триггеров существует", callable(A.passive_gate_block_reason))
 
-print("\n[7] main: маршрутизация")
+print("\n[7] main: конфигурация маршрутизации")
+# Поведение маршрутизации — фильтр ботов, дедуп колбэков, подъём медиа-воркера,
+# живучесть heartbeat, отсутствие двойной обработки в sync_history — проверяется
+# настоящими прогонами в test_routing_behaviour.py. Здесь остаются только
+# свойства, которые видны как значения, а не как поведение.
 import main
 check("None отфильтрован из списка чатов", all(c is not None for c in main.WATCHED_CHATS))
-msrc = inspect.getsource(main.handle_new_message)
-check("фильтр ботов вычисляется до диспетчеризации", "is_any_bot" in msrc)
-check("ассистент не запускается для сообщений бота",
-      msrc.count("if is_any_bot") >= 2, f"found {msrc.count('if is_any_bot')}")
+check("тестовый чат не продублирован литералом",
+      main.WATCHED_CHATS.count(A.TEST_CHAT_ID) == 1, f"got {main.WATCHED_CHATS}")
 check("уборщик temp_media существует", callable(main.cleanup_temp_media))
 check("замки ЛС по пользователю существуют", callable(main._pm_user_lock))
 check("замки для разных пользователей различаются", main._pm_user_lock(1) is not main._pm_user_lock(2))
 check("замок для одного пользователя стабилен", main._pm_user_lock(1) is main._pm_user_lock(1))
-
-csrc = inspect.getsource(main.handle_callback_query)
-check("колбэки дедуплицируются", "_HANDLED_CALLBACK_SET" in csrc)
-check("answer() гарантирован в finally", "finally:" in csrc and "event.answer()" in csrc)
-
-esrc = inspect.getsource(main.enqueue_media_analysis)
-check("воркеры поднимаются на каждой постановке в очередь",
-      esrc.index("start_media_analysis_workers()") < esrc.index("put_nowait"))
-
-hsrc = inspect.getsource(main.heartbeat_task)
-check("heartbeat переживает ошибку записи", "except Exception" in hsrc)
-
-ssrc = inspect.getsource(main.sync_history)
-check("sync_history не переобрабатывает медиа", "already_enqueued" in ssrc)
+check("словарь замков ЛС ограничен",
+      all(main._pm_user_lock(i) is not None for i in range(600)) and len(main._PM_USER_LOCKS) <= 500,
+      f"got {len(main._PM_USER_LOCKS)}")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:

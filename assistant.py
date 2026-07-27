@@ -25,6 +25,10 @@ TEST_TOPIC_ID = 26
 SHADOW_TESTING = os.getenv("SHADOW_TESTING", "False").lower() in ("true", "1", "yes")
 from cachetools import TTLCache
 BOT_ID = None
+# @username бота. Резолвится вместе с BOT_ID: в группе к боту обращаются по
+# имени, а не по числовому id, и без этого поля единственным способом узнать
+# имя оставался литерал, зашитый в main.py.
+BOT_USERNAME = None
 LAST_REFEREE_RUN = datetime(2000, 1, 1)
 USER_COOLDOWNS = TTLCache(maxsize=10000, ttl=86400) # 24 часа
 REPLIED_MSG_IDS = TTLCache(maxsize=50000, ttl=604800) # 7 дней
@@ -141,12 +145,30 @@ async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
     if current_chunk:
         await bot_client.send_message(entity=chat_id, message=current_chunk.strip(), **kwargs)
 
+async def resolve_bot_identity(bot_client):
+    """
+    Определяет id и @username бота. Возвращает True при успехе.
+
+    Имя нужно отдельно от id: в группе бота зовут «@имя», а не числом, и до
+    сих пор единственным работающим способом его узнать был литерал
+    "@stomchat_bot", зашитый в main.py.
+    """
+    global BOT_ID, BOT_USERNAME
+    try:
+        me = await bot_client.get_me()
+    except Exception as e:
+        logger.error(f"Failed to resolve bot identity: {e}")
+        return False
+    BOT_ID = me.id
+    BOT_USERNAME = (getattr(me, "username", None) or "").lstrip("@").lower() or None
+    return True
+
+
 async def init_assistant(bot_client):
     global BOT_ID
     try:
-        me = await bot_client.get_me()
-        BOT_ID = me.id
-        logger.info(f"Assistant initialized with BOT_ID: {BOT_ID}")
+        await resolve_bot_identity(bot_client)
+        logger.info(f"Assistant initialized with BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
         
         # Set inline bot command suggestions in Telegram UI
         from telethon import functions, types
@@ -941,12 +963,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     
     # Try dynamic BOT_ID resolution if it is missing
     if reply_to_msg_id and not BOT_ID:
-        try:
-            me = await bot_client.get_me()
-            BOT_ID = me.id
-            logger.info(f"Dynamically resolved BOT_ID: {BOT_ID}")
-        except Exception as e:
-            logger.error(f"Failed to dynamically resolve BOT_ID: {e}")
+        if await resolve_bot_identity(bot_client):
+            logger.info(f"Dynamically resolved BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
 
     # 1. Check Dialogue Reaction (direct reply to the bot's own message)
     if reply_to_msg_id and BOT_ID:
@@ -4118,8 +4136,20 @@ async def check_and_send_group_activity_pings(bot_client):
             # и уже выставленным ping_sent.
             # Правильная семантика: с этого момента начинаем следить, право на
             # пинг появляется только после реальных 48 часов молчания.
-            user_info = pings.setdefault(uid_str, {"last_activity": now.isoformat(), "ping_sent": False})
-            
+            #
+            # Заведённую запись сразу пишем на диск. Без этого setdefault жил
+            # только в локальной копии состояния и пропадал по выходе из job:
+            # «начали следить» не сохранялось нигде, и точка отсчёта заново
+            # сдвигалась на now при каждом запуске. Спурьезных пингов это не
+            # давало, но и обещанного комментарием поведения не было тоже.
+            if uid_str not in pings:
+                user_info = {"last_activity": now.isoformat(), "ping_sent": False}
+                pings[uid_str] = user_info
+                commit_pm_ping(uid_str, **user_info)
+            else:
+                user_info = pings[uid_str]
+
+
             # Проверяем время последней активности или пинга
             last_activity_str = user_info.get("last_activity", "2000-01-01T00:00:00")
             last_ping_str = user_info.get("last_group_ping", "2000-01-01T00:00:00")

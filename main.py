@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 import vision
 import os
+import re
 import time
 import asyncio
 import json
@@ -49,6 +50,19 @@ def _env_int(name, default):
 
 
 MY_ID = 7716348189
+
+# Числовой id бота как запасной вариант. Основной источник —
+# assistant.BOT_ID, но он появляется только после init_assistant: до этого
+# момента (и если get_me не прошёл) свои сообщения всё равно надо уметь
+# опознавать, иначе бот отвечает на собственный дайджест.
+FALLBACK_BOT_ID = _env_int("STOMCHAT_BOT_ID", 7971556097)
+
+# Имя, по которому бота зовут в группе, пока assistant.BOT_USERNAME не
+# отрезолвился. До этого литерал был единственным работающим способом:
+# соседняя проверка f"@{assistant.BOT_ID}" сравнивала текст с числовым id и
+# не срабатывала никогда.
+FALLBACK_BOT_USERNAME = os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot").lstrip("@").lower()
+
 HEALTH_CHECK_INTERVAL_SECONDS = 300
 HEALTH_FAILURE_LIMIT = 3
 SCHEDULER_STATE_PATH = "bot_state.json"
@@ -632,6 +646,43 @@ async def media_analysis_worker(worker_id):
             _media_queue.task_done()
 
 
+def bot_mention_names():
+    """
+    Имена, по которым бота зовут в группе, — реальное и запасное.
+
+    Проверка вида f"@{assistant.BOT_ID}" была мёртвой: BOT_ID это числовой id,
+    и строка «@7971556097» в сообщениях не встречается никогда. Фактически
+    работал только зашитый литерал «@stomchat_bot», то есть при смене имени
+    бота обращения перестали бы распознаваться совершенно молча.
+    """
+    names = []
+    resolved = getattr(assistant, "BOT_USERNAME", None)
+    if resolved:
+        names.append(resolved.lower())
+    if FALLBACK_BOT_USERNAME and FALLBACK_BOT_USERNAME not in names:
+        names.append(FALLBACK_BOT_USERNAME)
+    return names
+
+
+def strip_bot_mention(text):
+    """
+    Возвращает (было_ли_упоминание, текст_без_упоминания).
+
+    Граница слова обязательна: «@stomchat_bot_old» — это другой аккаунт, и
+    засчитывать его за обращение к нам нельзя.
+    """
+    if not text:
+        return False, ""
+    found = False
+    cleaned = text
+    for name in bot_mention_names():
+        pattern = re.compile(rf"(?i)@{re.escape(name)}\b")
+        if pattern.search(cleaned):
+            found = True
+            cleaned = pattern.sub(" ", cleaned)
+    return found, " ".join(cleaned.split())
+
+
 def _remove_temp_file(path):
     if not path:
         return
@@ -798,7 +849,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
 # хендлеров обрывается — ни один обработчик не срабатывает вообще, полностью
 # молча. config допускает SOURCE_CHAT_ID = None (только warning в stdout),
 # поэтому отфильтровываем здесь.
-WATCHED_CHATS = [c for c in (config.SOURCE_CHAT_ID, -1003735006121) if c is not None]
+WATCHED_CHATS = [c for c in (config.SOURCE_CHAT_ID, assistant.TEST_CHAT_ID) if c is not None]
 
 # В таблицу messages пишется ТОЛЬКО основной чат, и колонки chat_id в ней нет.
 # Поэтому правки и удаления применяются к базе исключительно из него: id
@@ -830,7 +881,7 @@ async def handle_new_message(event):
         
         # Флаг, является ли отправителем сам бот
         is_bot = False
-        if sender_id == 7971556097 or (assistant.BOT_ID and sender_id == assistant.BOT_ID):
+        if sender_id == FALLBACK_BOT_ID or (assistant.BOT_ID and sender_id == assistant.BOT_ID):
             is_bot = True
             
         sender = None
@@ -1073,16 +1124,13 @@ async def handle_new_message(event):
                     return True
                 
                 # 2. Прямой запрос к боту
-                if cmd_lower.startswith("/ask ") or (assistant.BOT_ID and f"@{assistant.BOT_ID}" in cmd) or "@stomchat_bot" in cmd_lower:
-                    question = cmd
+                mentioned, without_mention = strip_bot_mention(cmd)
+                if cmd_lower.startswith("/ask ") or mentioned:
                     if cmd_lower.startswith("/ask "):
                         question = cmd[5:].strip()
-                    elif assistant.BOT_ID and f"@{assistant.BOT_ID}" in cmd:
-                        question = cmd.replace(f"@{assistant.BOT_ID}", "").strip()
-                    elif "@stomchat_bot" in cmd_lower:
-                        import re
-                        question = re.sub(r'(?i)@stomchat_bot', '', cmd).strip()
-                    
+                    else:
+                        question = without_mention
+
                     if question:
                         await assistant.handle_group_direct_ask(bot_client, event, question)
                     return True

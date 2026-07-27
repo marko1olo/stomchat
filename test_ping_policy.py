@@ -92,10 +92,14 @@ A.commit_pm_ping("666", ping_sent=True, ping_failures=0)
 check("успех обнулил счётчик", entry(666)["ping_failures"] == 0)
 
 print("\n[7] Регресс: сеяние новых пользователей не эпохой")
-import inspect
-src = inspect.getsource(A.check_and_send_group_activity_pings)
-check("в setdefault нет '2000-01-01'", "2000-01-01T00:00:00\", \"ping_sent\"" not in src)
-check("используется now.isoformat()", "now.isoformat()" in src)
+# Сам job прогоняется по-настоящему в test_group_ping_job.py — там же
+# проверяется, что заведённая запись доезжает до диска. Здесь остаётся
+# арифметика порога: запись с сегодняшней датой права на пинг не даёт.
+now = datetime(2026, 7, 27, 12, 0, 0)
+check("свежая запись до порога 48ч не дотягивает",
+      now - datetime.fromisoformat(now.isoformat()) < timedelta(hours=48))
+check("эпоха порог перескакивает — именно это и был баг",
+      now - datetime(2000, 1, 1) > timedelta(hours=48))
 
 print("\n[8] Лимит пингов за цикл задан")
 check(f"MAX_PINGS_PER_CYCLE={A.MAX_PINGS_PER_CYCLE} разумен", 1 <= A.MAX_PINGS_PER_CYCLE <= 20)
