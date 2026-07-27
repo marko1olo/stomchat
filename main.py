@@ -32,7 +32,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import summarizer
-from media_tools import extract_first_frame_async
+from media_tools import extract_first_frame_async, image_document
 try:
     import psutil
 except Exception:
@@ -721,7 +721,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                 if temp_path:
                     temp_paths.append(temp_path)
                     
-                    if message.photo or media_type_hint == "photo":
+                    if message.photo or image_document(message) is not None or media_type_hint == "photo":
                         files_to_analyze.append(temp_path)
                     elif message.video or media_type_hint == "video":
                         logger.info(f"🎞️ Извлечение первого кадра из видео {message.id}...")
@@ -885,9 +885,15 @@ async def handle_new_message(event):
         if event.message.reply_to:
             reply_to_msg_id = event.message.reply_to.reply_to_msg_id
 
-        # Проверка медиа
-        has_media = event.message.photo is not None or event.message.video is not None
-        if event.message.photo:
+        # Проверка медиа. Снимок-документ (несжатый рентген/КТ) считается фото:
+        # для базы, дайджеста и vision разницы между ним и photo нет.
+        snapshot_document = image_document(event.message)
+        has_media = (
+            event.message.photo is not None
+            or event.message.video is not None
+            or snapshot_document is not None
+        )
+        if event.message.photo or snapshot_document is not None:
             media_type = "photo"
         elif event.message.video:
             media_type = "video"
@@ -1003,7 +1009,7 @@ async def handle_new_message(event):
                 cmd_test = text.strip().lower()
                 is_media_command = cmd_test.startswith(("/", "итог", "викторина", "опрос", "удалить", "wipe"))
 
-            if (event.photo or event.video) and not is_media_command:
+            if (event.photo or event.video or snapshot_document is not None) and not is_media_command:
                 if getattr(event, "grouped_id", None):
                     if event.grouped_id not in _pending_albums:
                         _pending_albums[event.grouped_id] = []
@@ -1103,8 +1109,9 @@ async def handle_new_message(event):
             try:
                 if await run_group_features():
                     return
-                # Если сообщение содержит медиа (фото/видео), пропускаем текстовый триггер, так как его обработает медиа-ассистент
-                if event.photo or event.video:
+                # Если сообщение содержит медиа (фото/видео/снимок-документ),
+                # пропускаем текстовый триггер — его обработает медиа-ассистент.
+                if event.photo or event.video or snapshot_document is not None:
                     return
                 # Запускаем авто-ассистента. Если он сработал и ответил (вернул True), то mention_trigger пропускаем, чтобы не было двойных ответов
                 replied = await assistant.check_and_trigger_assistant(
@@ -1459,8 +1466,18 @@ async def sync_history():
             
             reply_to_id = message.reply_to.reply_to_msg_id if message.reply_to else None
             
-            has_media = message.photo is not None or message.video is not None
-            media_type = "photo" if message.photo else ("video" if message.video else None)
+            synced_snapshot = image_document(message)
+            has_media = (
+                message.photo is not None
+                or message.video is not None
+                or synced_snapshot is not None
+            )
+            if message.photo or synced_snapshot is not None:
+                media_type = "photo"
+            elif message.video:
+                media_type = "video"
+            else:
+                media_type = None
             
             await asyncio.wait_for(
                 database.save_message(

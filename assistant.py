@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from blocking_tools import generate_gemini_text_async
 import vision
 import database
+import media_tools
 import config
 logger = logging.getLogger("assistant")
 
@@ -2373,12 +2374,11 @@ async def handle_private_message(bot_client, event):
         # ничего не писалось, и промпт собирался из старой переписки — бот
         # уверенно переотвечал на вопрос двадцатиминутной давности, ни словом
         # не упомянув, что файл проигнорирован.
-        image_document = None
+        # Определение общее с групповым путём (media_tools). Оно же отсекает
+        # стикеры: статический стикер Telegram — документ с mime image/webp, и
+        # без этой проверки каждый стикер в ЛС уходил бы в vision как снимок.
         doc = getattr(event.message, "document", None)
-        if doc is not None:
-            mime = (getattr(doc, "mime_type", "") or "").lower()
-            if mime.startswith("image/"):
-                image_document = doc
+        image_document = media_tools.image_document(event.message)
 
         has_media = (
             event.message.photo is not None

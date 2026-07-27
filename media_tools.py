@@ -120,6 +120,33 @@ async def extract_first_frame_async(video_path, timeout):
     return payload.get("path")
 
 
+def image_document(message):
+    """
+    Снимок, присланный ДОКУМЕНТОМ, а не фотографией. Возвращает документ или None.
+
+    Рентген, КТ и внутриротовые снимки шлют именно так — чтобы Telegram не
+    пережал изображение. Для клинического чата это не редкий случай, а норма.
+    Учитывались только photo/video, поэтому такой снимок не доходил ни до
+    анализа, ни до базы: has_media=False, описания нет, и от разбора случая в
+    дайджесте оставалась пустая строка.
+
+    Стикеры отсекаются отдельно: статический стикер Telegram — это документ с
+    mime image/webp, и без этой проверки каждый стикер уезжал бы в vision.
+    """
+    if getattr(message, "sticker", None) is not None:
+        return None
+    document = getattr(message, "document", None)
+    if document is None:
+        return None
+    mime = (getattr(document, "mime_type", "") or "").lower()
+    return document if mime.startswith("image/") else None
+
+
+def has_analyzable_image(message):
+    """Фото или снимок-документ — то, что имеет смысл отдавать в vision."""
+    return getattr(message, "photo", None) is not None or image_document(message) is not None
+
+
 def _main():
     if len(sys.argv) != 3:
         _json_exit({"ok": False, "error": "usage: media_tools.py <action> <path>"}, 2)
