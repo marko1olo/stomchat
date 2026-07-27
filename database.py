@@ -3,6 +3,7 @@ import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import timezone
 
 import config
 
@@ -26,7 +27,22 @@ def _connection():
 
 
 def _date_text(dt):
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    """
+    Приводит любой datetime к строке в UTC — именно UTC лежит в колонке `date`.
+
+    Сюда приходят значения двух видов, и раньше они трактовались одинаково:
+      * tz-aware UTC от Telethon (save_message) — записывались верно;
+      * НАИВНЫЕ локальные границы окон от планировщика (datetime.now()) —
+        сравнивались с UTC-строками как есть.
+    При смещении хоста UTC+4 запрошенное "вчера 20:00 — сейчас" фактически
+    начиналось с сегодняшних 00:00 локального времени, и вечерние часы —
+    самые активные в этом чате — не попадали ни в один дайджест: ни во
+    вчерашний, ни в сегодняшний. Терялись безвозвратно.
+
+    astimezone() наивное значение считает локальным, а tz-aware корректно
+    переводит, поэтому одна ветка покрывает оба случая.
+    """
+    return dt.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def _run_db(operation):
@@ -75,6 +91,27 @@ async def init_db():
                 """
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_user ON clinical_bookmarks(saved_by_user_id)")
+            # Закладки сохраняются через INSERT OR IGNORE, но подавлять было
+            # нечего: UNIQUE-констрейнта в схеме нет, и повторный /save на тот
+            # же пост давал дубль в списке. Сначала схлопываем уже накопленные
+            # дубли (оставляя самую раннюю запись), затем ставим индекс —
+            # иначе CREATE UNIQUE INDEX упадёт на существующих данных.
+            try:
+                db.execute(
+                    """
+                    DELETE FROM clinical_bookmarks
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM clinical_bookmarks
+                        GROUP BY saved_by_user_id, msg_id
+                    )
+                    """
+                )
+                db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookmark_unique "
+                    "ON clinical_bookmarks(saved_by_user_id, msg_id)"
+                )
+            except Exception as e:
+                logger.warning(f"Could not enforce bookmark uniqueness: {e}")
 
             db.execute(
                 """
@@ -109,6 +146,11 @@ async def init_db():
                 )
                 """
             )
+            # get_last_pm_messages делает WHERE user_id = ? ORDER BY id DESC —
+            # без индекса это полный скан на каждое личное сообщение и на
+            # каждого пользователя в почасовом цикле пингов. Таблица не чистится
+            # и растёт бессрочно.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_pm_user ON pm_messages(user_id, id)")
 
             db.execute(
                 """
@@ -492,13 +534,24 @@ async def save_bot_sent_message(msg_id, chat_id):
     return await _run_db(operation)
 
 
-async def get_last_bot_sent_messages(count=10):
+async def get_last_bot_sent_messages(count=10, chat_id=None):
+    """
+    Последние сообщения бота. chat_id=None — выборка по ВСЕМ чатам; для /wipe
+    это опасно (заденет личные переписки других врачей), туда следует
+    передавать конкретный чат.
+    """
     def operation():
         with _connection() as db:
-            cursor = db.execute(
-                "SELECT msg_id, chat_id FROM bot_sent_messages ORDER BY id DESC LIMIT ?",
-                (count,)
-            )
+            if chat_id is None:
+                cursor = db.execute(
+                    "SELECT msg_id, chat_id FROM bot_sent_messages ORDER BY id DESC LIMIT ?",
+                    (count,)
+                )
+            else:
+                cursor = db.execute(
+                    "SELECT msg_id, chat_id FROM bot_sent_messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+                    (chat_id, count)
+                )
             return cursor.fetchall()
     return await _run_db(operation)
 
