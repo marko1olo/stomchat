@@ -1659,6 +1659,9 @@ PM_HISTORY_LIMIT = 35
 
 BOOKMARK_SNIPPET_CHARS = 80
 
+# Предел длины термина для /что. Он подставляется прямо в промпт.
+TERM_EXPLAINER_MAX_CHARS = 120
+
 
 def _bookmark_snippet(value, limit=BOOKMARK_SNIPPET_CHARS):
     """
@@ -3093,6 +3096,14 @@ async def handle_group_direct_ask(bot_client, event, question):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
+            logger.warning("group direct ask generation failed chat=%s: %s", chat_id, error)
+            await bot_client.send_message(
+                entity=chat_id,
+                message="⚠️ <i>Сейчас не получилось собрать ответ — модели недоступны. "
+                    "Повторите вопрос через пару минут.</i>",
+                reply_to=msg_id,
+                parse_mode='html',
+            )
             return
             
         reply_text = response.text.strip()
@@ -4100,9 +4111,21 @@ async def handle_term_explainer(bot_client, event, term):
         await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед повторным запросом термина.", reply_to=msg_id)
         return
         
+    # Термин уходит в промпт как есть, поэтому его длина ограничена: запрос на
+    # четыре тысячи символов раздул бы промпт и вытеснил из него справку.
+    term = (term or "").strip()[:TERM_EXPLAINER_MAX_CHARS]
+    if not term:
+        await bot_client.send_message(
+            entity=chat_id,
+            message="📖 <i>Укажите термин: например</i> <code>/что BOPT</code>",
+            reply_to=msg_id,
+            parse_mode='html',
+        )
+        return
+
     keywords = extract_keywords(term)
     wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
-    
+
     prompt = f"""
 Ты — толковый словарь стоматологического сообщества "StomChat".
 Объясни стоматологический термин или аббревиатуру: "{term}".
@@ -4123,6 +4146,15 @@ async def handle_term_explainer(bot_client, event, term):
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
     
     if error or not response or not getattr(response, "text", None):
+        # Голый return оставлял врача, спросившего термин, вообще без ответа.
+        logger.warning("term explainer generation failed chat=%s: %s", chat_id, error)
+        await bot_client.send_message(
+            entity=chat_id,
+            message="⚠️ <i>Не удалось разобрать термин — модели сейчас недоступны. "
+                    "Попробуйте через пару минут.</i>",
+            reply_to=msg_id,
+            parse_mode='html',
+        )
         return
         
     reply_text = response.text.strip()
