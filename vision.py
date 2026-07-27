@@ -59,6 +59,33 @@ VISION_MIN_CALL_INTERVAL_SECONDS = 3.0
 VISION_TLS_VERIFY = _env_flag("STOMCHAT_VISION_TLS_VERIFY", True)
 
 
+# Какая доля букв должна быть кириллицей, чтобы считать описание русским.
+# 0.3, а не больше: в нормальном русском описании хватает латиницы — «e.max»,
+# «BOPT», «CAD/CAM», названия материалов.
+VISION_MIN_CYRILLIC_RATIO = 0.3
+
+
+# Доля букв вне кириллицы и латиницы, после которой текст считается мусором.
+# Модель зрения изредка выдаёт кашу из случайных токенов на разных письменностях
+# — в базе есть «=`ື່ອ picojax expandingື່ອ associative romatРанее MAL». Такая
+# строка проходила порог по кириллице за счёт нескольких русских слов внутри.
+VISION_MAX_FOREIGN_SCRIPT_RATIO = 0.1
+
+
+def _is_mostly_cyrillic(text):
+    letters = [ch for ch in (text or "") if ch.isalpha()]
+    if not letters:
+        return False
+
+    cyrillic = sum(1 for ch in letters if "а" <= ch.lower() <= "я" or ch.lower() == "ё")
+    latin = sum(1 for ch in letters if "a" <= ch.lower() <= "z")
+    foreign = len(letters) - cyrillic - latin
+    if foreign / len(letters) > VISION_MAX_FOREIGN_SCRIPT_RATIO:
+        return False
+
+    return cyrillic / len(letters) >= VISION_MIN_CYRILLIC_RATIO
+
+
 def _get_vision_semaphore():
     global _VISION_SEMAPHORE
     if _VISION_SEMAPHORE is None:
@@ -101,6 +128,9 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
 
     async with _get_vision_semaphore():
         try:
+            # Английское описание — запасной вариант: если ни одна модель
+            # каскада не ответит по-русски, отдадим его, а не пустоту.
+            english_fallback = None
             image_urls = []
             for fp in file_paths:
                 resized_bytes, error = await prepare_image_for_analysis(
@@ -229,9 +259,24 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         else:
                                             parts2 = content.split("<think>", 1)
                                             content = parts2[0].strip() or parts2[1].strip()
-                                if content.strip():
-                                    logger.info(f"Vision success via {provider} ({model_name})")
-                                    return content.strip()
+                                text = content.strip()
+                                if text:
+                                    # Инструкции «отвечай строго по-русски» мало:
+                                    # замер по живой базе показал 1285 английских
+                                    # описаний из 3375 — 38%. Они уходят в промпт
+                                    # русского чата, и отвечающая модель вынуждена
+                                    # переводить чужой текст. Проверяем результат,
+                                    # а не надеемся на послушание модели.
+                                    if _is_mostly_cyrillic(text):
+                                        logger.info(f"Vision success via {provider} ({model_name})")
+                                        return text
+                                    if english_fallback is None:
+                                        english_fallback = text
+                                    logger.warning(
+                                        "Vision answered not in Russian via %s (%s); trying next model",
+                                        provider, model_name,
+                                    )
+                                    break
 
                         except Exception as e:
                             err_str = str(e).lower()
@@ -260,6 +305,12 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 continue
                             logger.warning(f"Vision {provider} key failed ({model_name}): {e}")
 
+            if english_fallback:
+                # Ни одна модель каскада не ответила по-русски. Английское
+                # описание всё же лучше, чем ничего: без него врач получит
+                # ответ, в котором снимок вообще не упомянут.
+                logger.warning("Vision: no Russian answer from cascade, using non-Russian description")
+                return english_fallback
             return None
 
         except Exception as e:

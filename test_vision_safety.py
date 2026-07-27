@@ -94,7 +94,46 @@ check("в шутливой ветке нет клинических предуп
       "ДОСТОВЕРНОСТЬ ОПИСАНИЯ" not in meme_prompt,
       "медицинская оговорка попала в ответ на котика")
 
-print("\n[7] Промпт зрения не раздут")
+print("\n[7] Ответ модели проверяется на язык, а не принимается на веру")
+# Инструкции «отвечай строго по-русски» оказалось мало: замер по живой базе —
+# 1285 английских описаний из 3375, то есть 38%. Они уходят в промпт русского
+# чата, и отвечающая модель вынуждена переводить чужой текст.
+import vision
+
+for good in ("Прицельный снимок 36 зуба, очаг разрежения у апекса.",
+             "Установлен Straumann BLX, абатмент Variobase, торк 35 Нсм",
+             "Коронка e.max на 21, краевое прилегание удовлетворительное. CAD/CAM",
+             "КЛКТ 3D"):
+    check(f"русское описание принимается: «{good[:38]}»",
+          vision._is_mostly_cyrillic(good) is True)
+
+for bad in ("The image depicts a dental radiograph showing a tooth.",
+            "Unfortunately, the provided image is not a dental image."):
+    check(f"английское отвергается: «{bad[:38]}»",
+          vision._is_mostly_cyrillic(bad) is False)
+
+check("абракадабра из чужих письменностей отвергается",
+      vision._is_mostly_cyrillic("=`ື່ອ picojax expandingື່ອ associative romatРанее MAL карта") is False,
+      "мусор модели прошёл как описание")
+check("пустое отвергается", vision._is_mostly_cyrillic("") is False)
+check("None не роняет", vision._is_mostly_cyrillic(None) is False)
+
+# Осознанный компромисс: смешанный текст с русскими вкраплениями проходит.
+# Ужесточение порога отсекло бы описания вроде «Straumann BLX, абатмент
+# Variobase», которых больше и которые ценнее.
+check("порог допускает латиницу брендов",
+      vision.VISION_MIN_CYRILLIC_RATIO <= 0.4,
+      f"порог {vision.VISION_MIN_CYRILLIC_RATIO} отсечёт описания с названиями материалов")
+
+source = io.open("vision.py", encoding="utf-8").read()
+check("непрошедший ответ уводит к следующей модели каскада",
+      "trying next model" in source, "нет перехода к следующей модели")
+check("английский ответ сохраняется как запасной, а не теряется",
+      "english_fallback" in source, "нет запасного варианта")
+check("использование запасного пишется в лог",
+      "no Russian answer from cascade" in source)
+
+print("\n[8] Промпт зрения не раздут")
 # Он уходит с каждым изображением, поэтому размер имеет цену.
 rendered = re.sub(r'^\s*f?"|"\s*$', "", vision_prompt, flags=re.M)
 check(f"длина промпта разумна ({len(rendered)} символов)", len(rendered) < 2500,
