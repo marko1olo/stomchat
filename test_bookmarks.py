@@ -36,6 +36,13 @@ _ORIGINAL_CWD = os.getcwd()
 import database
 import assistant
 
+# Состояние — во временный каталог: обработчик ЛС по пути к /bookmarks
+# записывает активность врача для пингов и без этой подмены оставлял в боевом
+# assistant_state.json фантомного пользователя 777.
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
+assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
+assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
+
 PASS, FAIL = [], []
 USER = 777
 

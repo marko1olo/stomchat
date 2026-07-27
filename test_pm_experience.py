@@ -38,6 +38,16 @@ config.DB_PATH = os.path.join(_TMPDIR, "test.db")
 import database
 import assistant
 
+# Файл состояния УВОДИМ во временный каталог.
+#
+# handle_private_message записывает активность врача для проактивных пингов
+# через load_state/save_state. Без этой подмены тест писал в БОЕВОЙ
+# assistant_state.json и оставлял там фантомного пользователя 4242: в бою по
+# нему пошли бы попытки личных сообщений в никуда.
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
+assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
+assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
+
 PASS, FAIL = [], []
 USER = 4242
 
