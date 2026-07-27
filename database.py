@@ -372,19 +372,82 @@ async def mark_messages_as_summarized(msg_ids):
     return await _run_db(operation)
 
 
-async def delete_messages_by_ids(msg_ids):
-    clean_ids = sorted({int(msg_id) for msg_id in msg_ids if msg_id})
-    if not clean_ids:
-        return
+async def update_message_text(msg_id, text):
+    """
+    Догоняет правку сообщения в Telegram.
 
+    Без этого база годами отдаёт первую редакцию: автор исправил дозировку,
+    номер зуба или опечатку в протоколе, а дайджест, цитаты в ответах и
+    контекст ассистента продолжают тянуть исходный — уже неверный — текст и
+    подают его как факт коллеги.
+
+    is_summarized намеренно НЕ сбрасывается: сообщение, уже ушедшее в сводку,
+    не должно всплыть в следующей ещё раз.
+
+    Возвращает число обновлённых строк (0 — сообщения в базе нет).
+    """
     def operation():
         with _connection() as db:
-            db.executemany(
-                "DELETE FROM messages WHERE msg_id = ?",
-                [(m_id,) for m_id in clean_ids],
+            cursor = db.execute(
+                "UPDATE messages SET text = ? WHERE msg_id = ?",
+                (text, msg_id),
             )
+            return cursor.rowcount or 0
 
-    return await _run_db(operation)
+    try:
+        return await _run_db(operation)
+    except Exception:
+        logger.exception("database update_message_text failed msg_id=%s", msg_id)
+        return 0
+
+
+async def delete_messages_by_ids(msg_ids, chat_id=None):
+    """
+    Убирает удалённые в Telegram сообщения из локальной базы.
+
+    ВАЖНО: таблица messages не хранит chat_id — в неё пишется только основной
+    чат. Вызывать эту функцию можно ТОЛЬКО для SOURCE_CHAT_ID: id сообщений
+    уникальны лишь в пределах чата, и удаление #4821 в тестовом чате снесло бы
+    чужую строку с тем же номером из основного.
+
+    Заодно чистит bot_sent_messages, иначе /wipe потом ломится удалять уже
+    удалённые сообщения. Эта таблица chat_id хранит, поэтому чистка по нему
+    и ограничивается.
+
+    clinical_bookmarks оставляем намеренно: это личный архив врача со снимком
+    текста на момент сохранения, и молча стирать сохранённое им — хуже, чем
+    хранить копию удалённого поста в профессиональном чате коллег.
+
+    Возвращает (удалено_сообщений, удалено_записей_бота).
+    """
+    clean_ids = sorted({int(msg_id) for msg_id in msg_ids if msg_id})
+    if not clean_ids:
+        return (0, 0)
+
+    def operation():
+        placeholders = ",".join("?" for _ in clean_ids)
+        with _connection() as db:
+            removed = db.execute(
+                f"DELETE FROM messages WHERE msg_id IN ({placeholders})",
+                clean_ids,
+            ).rowcount or 0
+            if chat_id is None:
+                bot_removed = db.execute(
+                    f"DELETE FROM bot_sent_messages WHERE msg_id IN ({placeholders})",
+                    clean_ids,
+                ).rowcount or 0
+            else:
+                bot_removed = db.execute(
+                    f"DELETE FROM bot_sent_messages WHERE chat_id = ? AND msg_id IN ({placeholders})",
+                    [chat_id] + clean_ids,
+                ).rowcount or 0
+            return (removed, bot_removed)
+
+    try:
+        return await _run_db(operation)
+    except Exception:
+        logger.exception("database delete_messages_by_ids failed count=%s", len(clean_ids))
+        return (0, 0)
 
 
 async def update_media_description(msg_id, description):

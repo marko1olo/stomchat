@@ -1,3 +1,17 @@
+import sys
+
+# Кодировку stdio выставляем ДО первого импорта: config.py печатает статус с
+# эмодзи прямо при импорте, и когда stdout не UTF-8 — запуск мимо start.bat,
+# перенаправление в лог-файл, супервизор, планировщик задач — этот print
+# падает с UnicodeEncodeError ещё до старта бота. В логе не остаётся ничего:
+# логирование к тому моменту не настроено. Тот же класс отказа, что и с
+# потерянным DENTAL_KEYWORDS — бот просто не поднимается.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import logging
 from telethon import TelegramClient, events
 import config
@@ -723,6 +737,13 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
 # молча. config допускает SOURCE_CHAT_ID = None (только warning в stdout),
 # поэтому отфильтровываем здесь.
 WATCHED_CHATS = [c for c in (config.SOURCE_CHAT_ID, -1003735006121) if c is not None]
+
+# В таблицу messages пишется ТОЛЬКО основной чат, и колонки chat_id в ней нет.
+# Поэтому правки и удаления применяются к базе исключительно из него: id
+# сообщений уникальны лишь в пределах чата, и удаление #4821 в тестовом чате
+# снесло бы строку с тем же номером из основного.
+SAVED_CHATS = [config.SOURCE_CHAT_ID] if config.SOURCE_CHAT_ID else []
+
 if not config.SOURCE_CHAT_ID:
     logger.error(
         "SOURCE_CHAT_ID не задан — основной чат не отслеживается. "
@@ -1057,6 +1078,79 @@ async def handle_new_message(event):
         # --- КОНЕЦ НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
     except Exception:
         logger.exception("message handler failed")
+
+
+# Правки и удаления в Telegram до базы не доезжали вообще: обработчиков не
+# существовало, а database.delete_messages_by_ids лежала мёртвым кодом без
+# единого вызова. Практически это значит, что бот годами оперирует первой
+# редакцией сообщения и хранит удалённые коллегами посты — цитирует их в
+# ответах, тянет в контекст и включает в дайджест.
+EDIT_RESAVE_RETRY_SECONDS = 2.0
+
+
+@client.on(events.MessageEdited(chats=SAVED_CHATS))
+async def handle_edited_message(event):
+    """Догоняет правку сообщения: в базе должна лежать текущая редакция."""
+    try:
+        if event.chat_id != config.SOURCE_CHAT_ID:
+            return
+
+        msg_id = event.message.id
+        new_text = event.message.message or ""
+
+        updated = await asyncio.wait_for(
+            database.update_message_text(msg_id, new_text), timeout=30
+        )
+
+        # Гонка с сохранением: Telegram присылает UpdateEditMessage и просто
+        # так — например, когда через секунду подгружается превью ссылки. Если
+        # исходный save_message в этот момент ещё в полёте, правка попадает в
+        # ноль строк, а следом записывается СТАРЫЙ текст. Одна отложенная
+        # попытка закрывает окно; дальше молчим — сообщения может не быть в
+        # базе законно (правка поста старше бота, правка в другом чате).
+        if not updated:
+            await asyncio.sleep(EDIT_RESAVE_RETRY_SECONDS)
+            updated = await asyncio.wait_for(
+                database.update_message_text(msg_id, new_text), timeout=30
+            )
+
+        if updated:
+            logger.info(
+                "message edited msg_id=%s new_len=%s", msg_id, len(new_text)
+            )
+        else:
+            logger.debug("edit for unknown msg_id=%s ignored", msg_id)
+    except Exception:
+        logger.exception("edited message handler failed")
+
+
+@client.on(events.MessageDeleted(chats=SAVED_CHATS))
+async def handle_deleted_messages(event):
+    """Убирает удалённые сообщения из базы, чтобы бот перестал их цитировать."""
+    try:
+        # Для супергрупп Telegram присылает UpdateDeleteChannelMessages с
+        # известным каналом. Удаления без чата (личка, обычные группы) до
+        # обработчика не доходят из-за chats-фильтра — и правильно: применить
+        # их к таблице без chat_id значило бы снести чужие строки.
+        if event.chat_id != config.SOURCE_CHAT_ID:
+            return
+
+        deleted_ids = [i for i in (event.deleted_ids or []) if i]
+        if not deleted_ids:
+            return
+
+        removed, bot_removed = await asyncio.wait_for(
+            database.delete_messages_by_ids(deleted_ids, chat_id=event.chat_id),
+            timeout=30,
+        )
+        if removed or bot_removed:
+            logger.info(
+                "messages deleted in chat: reported=%s purged=%s bot_rows=%s",
+                len(deleted_ids), removed, bot_removed,
+            )
+    except Exception:
+        logger.exception("deleted message handler failed")
+
 
 # Сообщения одного пользователя обрабатываются строго по очереди.
 # Telethon диспатчит апдейты конкурентно (sequential_updates=False), и каждое
