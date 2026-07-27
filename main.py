@@ -105,12 +105,51 @@ def parse_state_date(value):
     except ValueError:
         return None
 
-def load_scheduler_state_raw():
+SCHEDULER_STATE_BAK_PATH = SCHEDULER_STATE_PATH + ".bak"
+
+# Сколько дней хранить отметки о доставке отчётов. Корзины накапливались с
+# первого запуска и не чистились никогда: на момент правки их 22 с 22 мая.
+# Роста немного, но файл решает, отправлять ли дайджест, и разрастаться ему
+# незачем.
+SCHEDULER_DELIVERY_RETENTION_DAYS = 30
+
+
+def _read_scheduler_file(path):
     try:
-        with open(SCHEDULER_STATE_PATH, "r", encoding="utf-8") as state_file:
-            return json.load(state_file)
-    except (OSError, json.JSONDecodeError):
+        with open(path, "r", encoding="utf-8") as state_file:
+            data = json.load(state_file)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        # ValueError, а не только JSONDecodeError: повреждённый файл ловится и
+        # раньше разбора JSON — UnicodeDecodeError летит из самого чтения, если
+        # в файле оказались невалидные байты. Прежний перехват его пропускал,
+        # и вместо отката на резервную копию падал весь цикл планировщика.
+        return None
+
+
+def load_scheduler_state_raw():
+    # Этот файл — единственное, что помнит, ушёл ли сегодняшний дайджест.
+    # Пустой или обрезанный файл читается как «ничего не отправляли», и отчёт
+    # уходит в чат ВТОРОЙ раз, поэтому при неудаче пробуем резервную копию.
+    state = _read_scheduler_file(SCHEDULER_STATE_PATH)
+    if state is None:
+        state = _read_scheduler_file(SCHEDULER_STATE_BAK_PATH)
+        if state is not None:
+            logger.warning("scheduler state unreadable, recovered from %s", SCHEDULER_STATE_BAK_PATH)
+    return state or {}
+
+
+def _prune_deliveries(deliveries):
+    """Отметки доставки старше SCHEDULER_DELIVERY_RETENTION_DAYS не нужны."""
+    if not isinstance(deliveries, dict):
         return {}
+    cutoff = datetime.now().date() - timedelta(days=SCHEDULER_DELIVERY_RETENTION_DAYS)
+    kept = {}
+    for bucket_name, value in deliveries.items():
+        bucket_date = parse_state_date(bucket_name.split(":", 1)[-1])
+        if bucket_date is None or bucket_date >= cutoff:
+            kept[bucket_name] = value
+    return kept
 
 def load_scheduler_state():
     state = load_scheduler_state_raw()
@@ -128,12 +167,36 @@ def save_scheduler_state(last_daily_date, last_weekly_date, deliveries=None):
     state = {
         "last_daily_date": last_daily_date.isoformat() if last_daily_date else None,
         "last_weekly_date": last_weekly_date.isoformat() if last_weekly_date else None,
-        "deliveries": deliveries,
+        "deliveries": _prune_deliveries(deliveries),
     }
     temp_path = SCHEDULER_STATE_PATH + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as state_file:
-        json.dump(state, state_file, ensure_ascii=False, indent=2)
-    os.replace(temp_path, SCHEDULER_STATE_PATH)
+    try:
+        # os.replace атомарна, но без fsync содержимое временного файла может не
+        # дойти до диска раньше переименования: после сбоя питания на месте
+        # состояния оказывается пустой файл, «дайджест не отправлялся», и отчёт
+        # уходит в чат второй раз. Та же связка, что уже стоит в
+        # assistant.save_state: временный файл, fsync, замена, резервная копия.
+        with open(temp_path, "w", encoding="utf-8") as state_file:
+            json.dump(state, state_file, ensure_ascii=False, indent=2)
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        if os.path.exists(SCHEDULER_STATE_PATH):
+            try:
+                os.replace(SCHEDULER_STATE_PATH, SCHEDULER_STATE_BAK_PATH)
+            except OSError as backup_err:
+                logger.warning("scheduler state backup failed: %s", backup_err)
+        os.replace(temp_path, SCHEDULER_STATE_PATH)
+        return True
+    except OSError as write_err:
+        # Молча провалить запись нельзя: в памяти день уже помечен отправленным,
+        # а после перезапуска отчёт уйдёт повторно.
+        logger.error("SCHEDULER STATE NOT SAVED: %s — отчёт может уйти повторно", write_err)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return False
 
 def target_delivery_key(chat_id, topic_id):
     topic = "main" if topic_id is None else str(topic_id)
