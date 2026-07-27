@@ -179,9 +179,9 @@ async def run():
           SENT and "канал тридцать шестого" in SENT[0]["message"])
     check("ответ привязан к исходному голосовому", SENT and SENT[0]["reply_to"] == 6001)
 
-    bot_rows = {r[0] for r in await database.get_last_bot_sent_messages(count=50)}
-    check("транскрипция зарегистрирована как сообщение бота (иначе /wipe её не видит)",
-          len(bot_rows) == 1, f"got {sorted(bot_rows)}")
+    # Регистрацию отправленного в bot_sent_messages проверяет
+    # test_wipe_tracking.py: делает это обёртка patched_send_message, которую
+    # этот тест как раз подменяет заглушкой.
 
     print("\n[2] Галлюцинация Whisper на тишине не публикуется и не пишется в базу")
     main.PROCESSED_MSG_IDS.clear()

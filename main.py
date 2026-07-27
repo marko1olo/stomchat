@@ -14,6 +14,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import logging
 from telethon import TelegramClient, events
+from telethon import utils as telethon_utils
 import config
 import runtime_guard
 
@@ -516,13 +517,12 @@ async def patched_send_message(*args, **kwargs):
     sent_msg = await original_send_message(*args, **kwargs)
     if sent_msg and hasattr(sent_msg, 'id') and hasattr(sent_msg, 'peer_id'):
         try:
-            peer = sent_msg.peer_id
-            chat_id = getattr(peer, 'channel_id', None) or getattr(peer, 'chat_id', None) or getattr(peer, 'user_id', None)
+            # Пересчёт peer -> chat_id отдаём самой библиотеке. Ручная
+            # арифметика здесь была верной (проверено на PeerChannel/PeerChat/
+            # PeerUser), но она повторяет utils.get_peer_id и молча разойдётся
+            # с ним, если Telethon добавит новый тип peer.
+            chat_id = telethon_utils.get_peer_id(sent_msg.peer_id)
             if chat_id:
-                if getattr(peer, 'channel_id', None):
-                    chat_id = -1000000000000 - chat_id
-                elif getattr(peer, 'chat_id', None):
-                    chat_id = -chat_id
                 import database
                 await database.save_bot_sent_message(sent_msg.id, chat_id)
         except Exception as e:
@@ -1003,16 +1003,15 @@ async def handle_new_message(event):
                         database.update_message_text(msg_id, text), timeout=30
                     )
                 try:
-                    sent = await bot_client.send_message(
+                    # Регистрировать сообщение в bot_sent_messages здесь не
+                    # нужно: bot_client.send_message обёрнут patched_send_message,
+                    # который делает это для КАЖДОЙ отправки бота.
+                    await bot_client.send_message(
                         entity=event.chat_id,
                         message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
                         reply_to=msg_id,
                         parse_mode='html'
                     )
-                    # Транскрипция — такое же сообщение бота, как и остальные;
-                    # без регистрации /wipe её не видит и вычистить не может.
-                    if sent is not None:
-                        await database.save_bot_sent_message(sent.id, event.chat_id)
                 except Exception as send_err:
                     logger.error("failed to post voice transcription msg_id=%s: %s", msg_id, send_err)
 
