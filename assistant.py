@@ -1651,6 +1651,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 # html_safe, чтобы не разорвать тег и не получить отказ Telegram.
 PROTOCOL_EXCERPT_MAX_CHARS = 1500
 
+# Глубина памяти диалога в ЛС. Держим одним числом: /help обещал 30
+# сообщений, а код брал 35 — расхождение мелкое, но это ровно тот случай,
+# когда обещанное и работающее разъезжаются без единого сигнала.
+PM_HISTORY_LIMIT = 35
+
 
 # --- Статистика тем чата (/stats) ------------------------------------------
 #
@@ -2198,7 +2203,7 @@ async def handle_private_message(bot_client, event):
                 "• /abort — сбросить текущий клинический симулятор.\n\n"
                 "• <b>Текстовый/Голосовой вопрос:</b> Просто напишите его или отправьте голосовое сообщение. Я отвечу с использованием базы знаний.\n"
                 "• <b>Анализ снимка:</b> Прикрепите фото или рентген. Я опишу, что на нем изображено, и предложу клиническую тактику.\n"
-                "• <b>Контекстная память:</b> Я анализирую последние <b>30 сообщений</b> нашего диалога."
+                f"• <b>Контекстная память:</b> Я анализирую последние <b>{PM_HISTORY_LIMIT} сообщений</b> нашего диалога."
             )
             await bot_client.send_message(entity=chat_id, message=help_text, parse_mode='html')
             return
@@ -2482,7 +2487,7 @@ async def handle_private_message(bot_client, event):
             return
 
         # 2. Восстановление динамического диалога (контекст до 35 сообщений)
-        history = await database.get_last_pm_messages(chat_id, limit=35)
+        history = await database.get_last_pm_messages(chat_id, limit=PM_HISTORY_LIMIT)
         context_msgs = []
         try:
             recent_pm_texts = [m["text"] for m in history[-6:] if m["text"]]
@@ -3117,10 +3122,21 @@ async def handle_group_quiz(bot_client, event):
             raw_text = "\n".join(lines).strip()
             
         data = json.loads(raw_text)
-        question = data["question"]
-        options = data["options"]
+        question = str(data["question"]).strip()
+        options = [str(option).strip() for option in data["options"]]
         correct = int(data["correct"])
-        explanation = data["explanation"]
+        explanation = str(data["explanation"]).strip()
+
+        # Валидации не было вообще, а разобранный JSON ещё не значит пригодный.
+        # options[3] читался безусловно: три варианта от модели — IndexError и
+        # молчание после «Конструирую задачу...». А correct не проверялся на
+        # диапазон: при correct=7 кнопки уходили с data="qa:7:...", ни один
+        # клик не совпадал, и КАЖДОМУ отвечавшему сообщалось, что он неправ.
+        if len(options) < 4 or not all(options[:4]) or not question:
+            raise ValueError(f"quiz needs 4 non-empty options, got {options!r}")
+        options = options[:4]
+        if not 0 <= correct <= 3:
+            raise ValueError(f"correct index out of range: {correct}")
     except Exception as parse_err:
         logger.error(f"Failed to parse quiz JSON: {parse_err}. Raw: {response.text}")
         question = "Пациент жалуется на боли при накусывании в зубе 3.6 (лечен эндодонтически 2 года назад). На снимке: недопломбировка язычного канала на 2 мм, очаг разрежения костной ткани в области апекса 3 мм. Какова первоочередная тактика?"
@@ -3133,7 +3149,12 @@ async def handle_group_quiz(bot_client, event):
         correct = 2
         explanation = "Перелечивание — метод первого выбора при наличии проходимых каналов и апикального периодонтита."
 
-    quiz_id = str(random.randint(100000, 999999))
+    # Состояние викторины хранится в user_interactive_states, где ключ —
+    # user_id. Диапазон 100000..999999 пересекается с id старых аккаунтов
+    # Telegram: совпадение затёрло бы врачу его активный /case, а его /abort
+    # убил бы живую викторину в группе. Отрицательные значения id пользователя
+    # не бывают никогда.
+    quiz_id = str(-random.randint(100000, 999999))
     init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
     await database.set_user_interactive_state(
         user_id=int(quiz_id),
