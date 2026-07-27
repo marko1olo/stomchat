@@ -820,7 +820,13 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     return False
 
 
-async def check_response_quality(context_msgs: list, draft_reply: str, invited: bool = False) -> tuple[bool, str]:
+# Сколько справки показывать рецензенту. Он работает на LOW с таймаутом 15 с,
+# поэтому промпт держим коротким.
+VALIDATOR_REFERENCE_MAX_CHARS = 3000
+
+
+async def check_response_quality(context_msgs: list, draft_reply: str, invited: bool = False,
+                                 reference: str = "") -> tuple[bool, str]:
     """
     Post-generation validator: проверяет черновик ответа бота на галлюцинации,
     клинический бред и несоответствие контексту.
@@ -851,13 +857,28 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 
     try:
         context_str = "\n".join(context_msgs[-10:])
+        # Рецензент видит и справку, на которой строился ответ. Без неё он не мог
+        # отличить число из базы знаний от выдуманного: оба выглядят одинаково
+        # правдоподобно. Даём ТОЛЬКО выжимку вики — дистиллированные факты.
+        # Архив это живые мнения коллег с ошибками, и отклонять верный
+        # EBM-ответ за расхождение с чужой ошибкой было бы ровно наоборот.
+        reference_block = ""
+        if reference and reference.strip():
+            trimmed = reference.strip()[:VALIDATOR_REFERENCE_MAX_CHARS]
+            reference_block = (
+                "\nСправка из Базы Знаний, на которой строился ответ:\n"
+                f"{trimmed}\n"
+                "[Справка НЕ исчерпывающая: отсутствие темы в ней само по себе "
+                "не повод отклонять общее клиническое рассуждение.]\n"
+            )
+
         prompt = f"""Ты — строгий клинический рецензент стоматологического Telegram-чата.
-Тебе дан контекст переписки и черновик ответа ИИ-ассистента.
+Тебе дан контекст переписки, справка из базы знаний и черновик ответа ИИ-ассистента.
 Твоя задача: оценить, является ли черновик корректным, клинически обоснованным ответом.
 
 Контекст переписки:
 {context_str}
-
+{reference_block}
 Черновик ответа ИИ-ассистента:
 {draft_reply}
 
@@ -865,6 +886,7 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 1. В нём содержится клиническая галлюцинация: связываются патологии, между которыми нет доказанной причинно-следственной связи.
 2. Ответ не относится к теме переписки — уводит в сторону, приплетает нерелевантные протоколы или факты.
 3. Ответ содержит выдуманные дозировки, протоколы, торговые названия или несуществующие методики.
+3.1. Ответ называет КОНКРЕТНЫЕ ЦИФРЫ — дозировку, концентрацию, торк, время экспозиции, размер уступа, — которых нет ни в справке выше, ни в общепризнанных стандартах. Цифра, взятая с потолка, опаснее отсутствия ответа: по ней работают.
 4. Ответ уверенно утверждает то, в чём нет консенсуса в EBM (доказательной медицине).
 5. Тон ответа неуместно агрессивен, высокомерен или явно обидит коллег в чате.
 
@@ -1417,7 +1439,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     # ответы, где врач переспросил бота напрямую и с наибольшей вероятностью
     # на них опирается. Теперь проверяются оба пути, разница только в том,
     # что делать при недоступном валидаторе (см. check_response_quality).
-    quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text, invited=is_dialogue)
+    quality_ok, quality_reason = await check_response_quality(
+        context_msgs, reply_text, invited=is_dialogue, reference=wiki_corpus
+    )
     if not quality_ok:
         logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
         return False
@@ -1704,7 +1728,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     # Проверяем и запрошенные разборы тоже: чтение снимка — самый
     # галлюциногенный выход бота, и раньше при прямом обращении оно уходило
     # пациенту/врачу вообще без проверки.
-    quality_ok, quality_reason = await check_response_quality(context_msgs, reply_text, invited=not is_passive)
+    quality_ok, quality_reason = await check_response_quality(
+        context_msgs, reply_text, invited=not is_passive, reference=wiki_corpus
+    )
     if not quality_ok:
         logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
         return

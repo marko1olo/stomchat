@@ -88,6 +88,66 @@ print("\n[5] Регресс: старое поведение fail-open боль�
 stub(text="полный мусор без json")
 check("недоступный валидатор НЕ одобряет незваный ответ", run(invited=False)[0] is False)
 
+print("\n[6] Рецензент видит справку, на которой строился ответ")
+# Без справки он не мог отличить число из базы знаний от выдуманного: и то и
+# другое выглядит одинаково правдоподобно. Архив коллег сюда сознательно НЕ
+# передаётся — иначе верный EBM-ответ отклонялся бы за расхождение с чужой
+# ошибкой в чате.
+CAPTURED = {}
+
+
+def spy_stub(verdict='{"ok": true, "reason": "ок"}'):
+    async def _fake(prompt, ctx, timeout=None):
+        CAPTURED["prompt"] = prompt
+        return Resp(verdict), None
+    A.generate_gemini_text_async = _fake
+
+
+spy_stub()
+asyncio.run(A.check_response_quality(
+    CTX, "Ставьте на 45 Нсм.", invited=True,
+    reference="[3.2.1] Рекомендуемый торк установки имплантата 30-35 Нсм."))
+prompt = CAPTURED["prompt"]
+check("справка попала в промпт рецензента", "30-35 Нсм" in prompt)
+check("сказано, что справка не исчерпывающая",
+      "НЕ исчерпывающая" in prompt, "нет оговорки — рецензент начнёт отклонять лишнее")
+check("есть правило про конкретные цифры",
+      "КОНКРЕТНЫЕ ЦИФРЫ" in prompt, "правило о выдуманных числах не добавлено")
+check("черновик по-прежнему в промпте", "45 Нсм" in prompt)
+check("контекст переписки на месте", CTX[0][:20] in prompt)
+
+CAPTURED.clear()
+spy_stub()
+asyncio.run(A.check_response_quality(CTX, DRAFT, invited=True))
+check("без справки блок не вставляется",
+      "Справка из Базы Знаний" not in CAPTURED["prompt"])
+
+CAPTURED.clear()
+spy_stub()
+asyncio.run(A.check_response_quality(CTX, DRAFT, invited=True, reference="   "))
+check("пустая справка блок не вставляет",
+      "Справка из Базы Знаний" not in CAPTURED["prompt"])
+
+CAPTURED.clear()
+spy_stub()
+marker = "уступ0.8мм"
+asyncio.run(A.check_response_quality(
+    CTX, DRAFT, invited=True, reference=marker + "щ" * 9000))
+block = CAPTURED["prompt"].split("Справка из Базы Знаний", 1)[1].split("[Справка НЕ", 1)[0]
+check("длинная справка обрезана по пределу",
+      len(block) <= A.VALIDATOR_REFERENCE_MAX_CHARS + 80,
+      f"длина блока {len(block)} при пределе {A.VALIDATOR_REFERENCE_MAX_CHARS}")
+check("начало справки не потеряно при обрезке", marker in block)
+
+CAPTURED.clear()
+spy_stub('{"ok": false, "reason": "цифра не подтверждается справкой"}')
+ok_num, why_num = asyncio.run(A.check_response_quality(
+    CTX, "Ставьте на 95 Нсм.", invited=True,
+    reference="[3.2.1] Рекомендуемый торк 30-35 Нсм."))
+check("отказ по несоответствию цифры глушит ответ и на прямой вопрос",
+      ok_num is False, f"got {ok_num}")
+check("причина отказа доносится", "цифра" in why_num, f"got {why_num!r}")
+
 print(f"\n{'='*60}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
