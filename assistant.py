@@ -1662,6 +1662,11 @@ BOOKMARK_SNIPPET_CHARS = 80
 # Предел длины термина для /что. Он подставляется прямо в промпт.
 TERM_EXPLAINER_MAX_CHARS = 120
 
+# Скачивание медиа в ЛС. Собственного таймаута у download_media нет, а
+# обработчик держит замок на пользователя: без предела все следующие
+# сообщения врача встают в очередь за подвисшей загрузкой.
+PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 120
+
 
 def _bookmark_snippet(value, limit=BOOKMARK_SNIPPET_CHARS):
     """
@@ -1943,6 +1948,22 @@ async def handle_private_message(bot_client, event):
                         await database.save_pm_message(chat_id, "User", text)
                     except Exception as save_err:
                         logger.error(f"Failed to persist rate-limited PM message: {save_err}")
+
+                # И говорим об этом вслух. Раньше сообщение просто исчезало:
+                # врач ждал ответа, которого никогда не будет, и не мог понять,
+                # дошёл ли вопрос. Предупреждение само под кулдауном, чтобы
+                # серия из пяти сообщений не превратилась в пять уведомлений.
+                if not check_user_cooldown(chat_id, chat_id, "pm_rate_notice", seconds=30):
+                    try:
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message=f"⏳ <i>Секунду — дочитываю предыдущее сообщение. "
+                                    f"Задайте вопрос одним сообщением через {cooldown_secs} с, "
+                                    f"я учту всё написанное.</i>",
+                            parse_mode='html',
+                        )
+                    except Exception as notice_err:
+                        logger.error(f"Failed to send PM rate notice: {notice_err}")
                 return
         
         # Record user activity for DM proactive pings
@@ -2581,7 +2602,14 @@ async def handle_private_message(bot_client, event):
                 # Отправляем статус ожидания
                 status_msg = await bot_client.send_message(entity=chat_id, message="📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>", parse_mode='html')
                 
-                temp_path = await event.message.download_media(file=f"temp_media/{event.message.id}_")
+                # Таймаута у download_media нет своего. В ЛС это опаснее, чем в
+                # группе: обработчик держит замок на пользователя, и все
+                # следующие сообщения врача встают в очередь за подвисшей
+                # загрузкой — навсегда.
+                temp_path = await asyncio.wait_for(
+                    event.message.download_media(file=f"temp_media/{event.message.id}_"),
+                    timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                )
                 file_to_analyze = temp_path
                 
                 # Если видео, извлекаем первый кадр
@@ -2603,13 +2631,22 @@ async def handle_private_message(bot_client, event):
                 if 'status_msg' in locals():
                     await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>", parse_mode='html')
             finally:
-                # Очистка временных файлов
-                if temp_path and os.path.exists(temp_path):
-                    try: os.remove(temp_path)
-                    except Exception: pass
-                if 'file_to_analyze' in locals() and file_to_analyze != temp_path and os.path.exists(file_to_analyze):
-                    try: os.remove(file_to_analyze)
-                    except Exception: pass
+                # Очистка временных файлов.
+                #
+                # Здесь было os.path.exists(file_to_analyze) без проверки на
+                # None, а extract_first_frame_async именно None и возвращает,
+                # когда кадр вытащить не удалось. os.path.exists(None) бросает
+                # TypeError — прямо из finally, поверх любой обработки. Итог:
+                # видео в ЛС с неудачным извлечением кадра оставляло висеть
+                # статус «Скачиваю и анализирую...» навсегда, и ответа не было.
+                for path in {temp_path, locals().get('file_to_analyze')}:
+                    if not path:
+                        continue
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError as cleanup_err:
+                        logger.warning("PM temp cleanup failed path=%s: %s", path, cleanup_err)
 
         # Анализ снимка мог не состояться: упало скачивание, не извлёкся кадр,
         # vision вернул пусто. Раньше здесь не было ни return, ни отметки об
