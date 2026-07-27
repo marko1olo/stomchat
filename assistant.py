@@ -1651,6 +1651,110 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 # html_safe, чтобы не разорвать тег и не получить отказ Telegram.
 PROTOCOL_EXCERPT_MAX_CHARS = 1500
 
+
+# --- Статистика тем чата (/stats) ------------------------------------------
+#
+# Раньше /stats был статичным текстом с числами вида «~5 400 упоминаний» и
+# подписью «на основе анализа 117 000+ сообщений». Числа не менялись никогда, а
+# к сегодняшнему дню разошлись с архивом: имплантация занижена в 2.3 раза, и
+# порядок неверен — имплантация обогнала эндодонтию, а адгезивы обе. Колонки
+# category_l1/l2/l3 в архиве, на которые это могло опираться, пусты: 0 из 117 847.
+#
+# Считаем сами, по обеим базам, с границей слова. Подстрочный поиск здесь
+# особенно коварен: «кт» встречается в «доктор», «практика», «который», и по
+# подстроке тема «Диагностика и снимки» выходила на первое место с 12 093
+# упоминаниями вместо реальных 1 322 — завышение в девять раз.
+STATS_TOPICS = {
+    "👑 Ортопедия и коронки": ("корон", "циркон", "pmma", "e.max", "емакс", "винир", "вкладк"),
+    "📐 Препарирование и уступ": ("уступ", "вертипреп", "вертикальн", "препариров", "bopt"),
+    "🩸 Десна и мягкие ткани": ("десн", "ретракц", "пародонт", "рецесс"),
+    "🧪 Адгезия и композиты": ("бонд", "адгезив", "композит", "пескоструй", "травлен", "силан"),
+    "🔩 Имплантация": ("имплант", "абатм", "остеоинтегр", "синус-лифт", "аугмент"),
+    "🦷 Эндодонтия": ("канал", "гипохлорит", "эндодонт", "обтурац", "гуттаперч"),
+    "📸 Диагностика и снимки": ("кт", "клкт", "оптг", "рентген", "прицельн", "снимок", "снимк"),
+    "💉 Анестезия": ("анестез", "артикаин", "убистезин", "мепивакаин", "лидокаин", "карпул"),
+}
+STATS_CACHE_TTL_SECONDS = 6 * 3600
+_stats_cache = {"computed_at": 0.0, "payload": None}
+
+
+_WORD_BOUNDARY = r"\b"
+
+
+def _build_topic_pattern(keywords):
+    """Термин ищем как НАЧАЛО слова; двухбуквенные аббревиатуры — целиком."""
+    parts = []
+    for keyword in keywords:
+        escaped = re.escape(keyword)
+        if len(keyword) <= 2:
+            parts.append(_WORD_BOUNDARY + escaped + _WORD_BOUNDARY)
+        else:
+            parts.append(_WORD_BOUNDARY + escaped)
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+_STATS_PATTERNS = {label: _build_topic_pattern(kws) for label, kws in STATS_TOPICS.items()}
+
+
+def _scan_topic_statistics():
+    """Один проход по архиву и живой базе. Порядка 5 с на 137 тысяч сообщений."""
+    counts = {label: 0 for label in STATS_TOPICS}
+    scanned = 0
+    for path, table in (("stomat_archive.db", "archive_messages"), (config.DB_PATH, "messages")):
+        if not os.path.exists(path):
+            continue
+        try:
+            conn = sqlite3.connect(path, timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            for (text,) in conn.execute(f"SELECT text FROM {table}"):
+                if not text:
+                    continue
+                scanned += 1
+                for label, pattern in _STATS_PATTERNS.items():
+                    if pattern.search(text):
+                        counts[label] += 1
+            conn.close()
+        except Exception as e:
+            logger.error(f"Topic statistics scan failed for {path}: {e}")
+    return counts, scanned
+
+
+async def get_topic_statistics(force=False):
+    """Кэшированная статистика тем. Возвращает (counts, scanned)."""
+    now = time.time()
+    cached = _stats_cache["payload"]
+    if not force and cached and now - _stats_cache["computed_at"] < STATS_CACHE_TTL_SECONDS:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    started = time.perf_counter()
+    payload = await loop.run_in_executor(None, _scan_topic_statistics)
+    logger.info("topic statistics computed in %.2fs over %s messages",
+                time.perf_counter() - started, payload[1])
+    if payload[1]:
+        _stats_cache["payload"] = payload
+        _stats_cache["computed_at"] = now
+    return payload
+
+
+def render_topic_statistics(counts, scanned):
+    """Готовый текст /stats. Пустая статистика -> None, чтобы не врать нулями."""
+    ranked = [(label, n) for label, n in sorted(counts.items(), key=lambda x: -x[1]) if n]
+    if not scanned or not ranked:
+        return None
+    lines = [
+        "📊 <b>Популярные клинические темы в чате StomChat</b>",
+        f"<i>Посчитано по {scanned:,} сообщениям чата и архива</i>".replace(",", " "),
+        "",
+    ]
+    for position, (label, count) in enumerate(ranked, start=1):
+        share = count * 100.0 / scanned
+        lines.append(f"{position}. <b>{label}</b> — {count:,} упоминаний ({share:.1f}%)".replace(",", " "))
+    lines.append("")
+    lines.append("<i>Считается по вхождению профильных терминов; одно сообщение может попасть в несколько тем.</i>")
+    return "\n".join(lines)
+
+
 CASE_TOTAL_STEPS = 4  # столько же, сколько обещает заголовок "Шаг N из 4"
 
 
@@ -2203,16 +2307,28 @@ async def handle_private_message(bot_client, event):
             return
 
         if text.lower() == "/stats":
-            stats_text = (
-                "📊 <b>Популярные клинические темы в чате StomChat</b>\n"
-                "<i>(на основе анализа 117,000+ сообщений архива):</i>\n\n"
-                "1. 👑 <b>Ортопедия и коронки</b> (~5,400+ упоминаний) — выбор материалов (диоксид циркония, PMMA, E.max) и методы фиксации.\n"
-                "2. 🔪 <b>Вертипреп (Vertiprep) vs Уступы</b> (~4,300+ упоминаний) — дискуссии о границе препарирования и ведении мягких тканей.\n"
-                "3. 🩸 <b>Состояние десны и биологическая ширина</b> (~3,800+ упоминаний) — реакция периодонта, ретракционные нити, временное протезирование.\n"
-                "4. 🧪 <b>Адгезивные протоколы и композиты</b> (~1,800+ упоминаний) — бондинг к разным типам керамики, пескоструй, фиксация виниров.\n"
-                "5. 🦷 <b>Эндодонтия (Лечение каналов)</b> (~1,300+ упоминаний) — инструментация, гипохлорит натрия, ультразвуковая активация.\n"
-                "6. 🔩 <b>Имплантация и протезирование</b> (~1,000+ упоминаний) — позиционирование имплантатов, выбор абатментов."
-            )
+            # Раньше здесь лежал статичный текст: одни и те же числа при любом
+            # содержании чата. Теперь считаем по архиву и живой базе.
+            cached = _stats_cache["payload"] is not None
+            status_msg = None
+            if not cached:
+                status_msg = await bot_client.send_message(
+                    entity=chat_id,
+                    message="📊 <i>Считаю темы по архиву чата, это займёт несколько секунд...</i>",
+                    parse_mode='html',
+                )
+            counts, scanned = await get_topic_statistics()
+            if status_msg is not None:
+                try:
+                    await bot_client.delete_messages(chat_id, status_msg.id)
+                except Exception:
+                    pass
+
+            stats_text = render_topic_statistics(counts, scanned)
+            if not stats_text:
+                # Пустой результат — честно говорим, а не показываем нули.
+                stats_text = ("📊 <i>Статистику посчитать не удалось: база сообщений "
+                              "сейчас недоступна. Попробуйте позже.</i>")
             await bot_client.send_message(entity=chat_id, message=stats_text, parse_mode='html')
             return
 
