@@ -237,7 +237,7 @@ STOP_WORDS = {
 # фильтру дайджеста в summarizer, а держать две копии значит, что клинические
 # реплики выпадают из дайджеста молча (замер: 166 сообщений из 4000). Имена
 # оставлены на месте — остальной код обращается к ним как раньше.
-from dental_vocab import DENTAL_KEYWORDS, SHORT_DENTAL_TERMS, is_dental_keyword
+from dental_vocab import DENTAL_KEYWORDS, SHORT_DENTAL_TERMS, has_dental_term, is_dental_keyword
 
 _SHORT_DENTAL_TERMS = SHORT_DENTAL_TERMS
 
@@ -1602,8 +1602,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     full_context_str = caption_text + " " + media_description
     keywords = extract_keywords(full_context_str)
     
-    # Check if there is dental content
-    has_dental_topic = any(kw in full_context_str.lower() for kw in DENTAL_KEYWORDS)
+    # Клиническая тема — по словам, а не подстрокой: «кт» сидит внутри «кто»,
+    # «эффективно» и «комплекта», «бор» — внутри «выбора». См. has_dental_term.
+    has_dental_topic = has_dental_term(full_context_str)
     has_question = "?" in caption_text
     
     triggered = False
@@ -2869,8 +2870,10 @@ async def handle_private_message(bot_client, event):
         full_context_str = (text or "") + " " + (media_description or "") + " " + history_context_text
         full_context_str_lower = full_context_str.lower()
         
-        # Проверяем наличие стоматологической темы во всем контексте
-        has_dental_topic = any(kw in full_context_str_lower for kw in DENTAL_KEYWORDS)
+        # Клиническая тема — по словам, а не подстрокой (см. has_dental_term):
+        # подстрочная проверка на 20 000 живых сообщений давала 1291 лишнее
+        # срабатывание, из них 901 из-за «кт» внутри «кто» и «эффективно».
+        has_dental_topic = has_dental_term(full_context_str)
         
         # Извлекаем ключевые слова из всего контекста (текущий запрос + медиа + история), чтобы искать статьи
         keywords = extract_keywords(full_context_str)
