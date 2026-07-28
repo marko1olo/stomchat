@@ -512,7 +512,9 @@ def _remove_converted_wav(file_path):
 async def transcribe_audio_async(file_path, timeout):
     payload, error = await _run_json_tool(
         "whisper-transcribe",
-        {"file_path": file_path},
+        # Бюджет уходит и в payload: ребёнок раскладывает его по попыткам ключей,
+        # иначе перебор складывался в 222 с против 70 с родительского дедлайна.
+        {"file_path": file_path, "timeout": timeout},
         timeout=timeout,
     )
     if error:
@@ -542,9 +544,11 @@ async def correct_dental_transcription_async(raw_text, timeout=20):
     return raw_text
 
 
-def _transcribe_audio_sync(file_path):
+def _transcribe_audio_sync(file_path, timeout=None):
     import gemini_client
-    return gemini_client.transcribe_audio_bytes_or_file(file_path)
+    # Бюджет передаём внутрь: без него перебор ключей складывался в 222 с
+    # против 70 с родительского дедлайна, и пять ключей оставались нетронутыми.
+    return gemini_client.transcribe_audio_bytes_or_file(file_path, timeout=timeout)
 
 
 def _main():
@@ -616,7 +620,12 @@ def _main():
             _json_exit({"ok": True, "results": results})
 
         if action == "whisper-transcribe":
-            text = _transcribe_audio_sync(payload.get("file_path") or "")
+            # Бюджет из payload передаём внутрь: без него перебор ключей
+            # складывался в 222 с против 70 с родительского дедлайна, и пять
+            # ключей оставались нетронутыми.
+            text = _transcribe_audio_sync(
+                payload.get("file_path") or "", timeout=payload.get("timeout")
+            )
             _json_exit({"ok": bool(text), "text": text})
 
         _json_exit({"ok": False, "error": f"unknown action: {action}"}, 2)

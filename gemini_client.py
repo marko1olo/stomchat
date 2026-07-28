@@ -655,24 +655,58 @@ def convert_to_wav(file_path):
     return file_path
 
 
-def transcribe_audio_bytes_or_file(file_path):
-    """Transcribe audio using Groq Whisper API (whisper-large-v3) with key rotation."""
+def transcribe_audio_bytes_or_file(file_path, timeout=None):
+    """
+    Расшифровка голосового через Groq Whisper с ротацией ключей.
+
+    Бюджет разложен по попыткам, а не взят с потолка на каждую. Раньше каждый
+    ключ получал таймаут клиента по умолчанию (30 с), и перебор всех ключей
+    складывался в бюджет БОЛЬШЕ внешнего: замер на живом наборе — 7 ключей по
+    30 с плюс 6 пауз по 2 с на 429 = 222 секунды внутреннего против 70 секунд
+    родительского дедлайна (60 внешних плюс 10 на подъём подпроцесса).
+
+    Сценарий отказа: Groq тормозит или отдаёт 429 по первым двум ключам — для
+    квоты whisper это норма при залпе голосовых, — остальные пять свежие. На
+    70-й секунде родитель убивает дерево процессов, врач не получает ничего ПРИ
+    ПЯТИ НЕИСПОЛЬЗОВАННЫХ КЛЮЧАХ. Та же арифметика для текстового каскада
+    сделана давно, в whisper-путь её не перенесли.
+
+    Теперь: на попытку отводится доля общего бюджета, и перебор прекращается по
+    ИСТЕЧЕНИЮ остатка, а не по числу ключей. Так до последнего ключа доходит
+    любой залп, а не только идеальный.
+    """
     keys = list(config.GROQ_KEYS)
     if not keys:
         logger.error("No Groq keys found for transcription.")
         return None
 
+    started = time.monotonic()
+    # Запас на конвертацию в wav и на выгрузку файла провайдеру: они идут внутри
+    # того же родительского дедлайна.
+    budget = float(timeout) if timeout else 0.0
+    reserve = 12.0
+    usable = max(0.0, budget - reserve) if budget else 0.0
+
     actual_file_path = convert_to_wav(file_path)
-    
+
     random.shuffle(keys)
     max_attempts = len(keys)
+    # Доля на попытку: минимум 7 с, иначе запрос не успеет даже соединиться.
+    per_attempt = max(7.0, usable / max_attempts) if usable else 30.0
 
     for attempt in range(max_attempts):
+        if usable and (time.monotonic() - started) >= usable:
+            logger.warning(
+                "Whisper: бюджет %.0f с исчерпан после %s попыток из %s — остальные ключи не пробуем",
+                usable, attempt, max_attempts,
+            )
+            break
         api_key = keys[attempt]
         key_id = f"groq_whisper...{api_key[-5:]}" if api_key else "groq_none"
         try:
             logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
-            client = get_openai_client(api_key, "https://api.groq.com/openai/v1")
+            client = get_openai_client(api_key, "https://api.groq.com/openai/v1",
+                                       timeout=per_attempt)
             with open(actual_file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model="whisper-large-v3",
@@ -691,7 +725,10 @@ def transcribe_audio_bytes_or_file(file_path):
         except Exception as e:
             logger.warning(f"Whisper transcription failed key={key_id}: {e}")
             if "429" in str(e).lower() or "rate limit" in str(e).lower():
-                time.sleep(2)
+                # Пауза не длиннее остатка бюджета: иначе она съедает время,
+                # которого хватило бы на следующий, свежий ключ.
+                left = (usable - (time.monotonic() - started)) if usable else 2.0
+                time.sleep(max(0.0, min(2.0, left)))
             continue
             
     if actual_file_path != file_path and os.path.exists(actual_file_path):
