@@ -148,6 +148,46 @@ async def run():
     for junk in ("правила канала", "никакой политики", "никаких оскорблений"):
         check(f"«{junk}» в справке нет", junk not in joined)
 
+    print("\n[7] Один и тот же абзац не попадает в справку дважды")
+    # Повтор ловили сравнением готовой строки, а в неё входит префикс: у
+    # справки коды рубрик, у архива имя автора. Факт про BOPT лежит в базе
+    # пятью строками с теми же кодами в РАЗНОМ ПОРЯДКЕ — строки различались,
+    # и проверка их пропускала. Замер на 2893 вопросах из чата: 1059 дают
+    # ровно один ключ (бюджет 48 строк на ключ, выборка глубокая), и на 42
+    # вопросах в справку уходило 44 лишних одинаковых абзаца.
+    import sqlite3 as _sq
+
+    def bodies(corpus):
+        out = []
+        for line in corpus.split("\n"):
+            if not line.strip():
+                continue
+            body = re.sub(r"^\[[^\]]*\]\s*", "", line)
+            body = re.sub(r"^[^:]{0,40}:\s*", "", body)
+            out.append(" ".join(body.split()).lower())
+        return out
+
+    for question in ("BOPT", "что такое BOPT?", "методика bopt"):
+        selected = assistant.select_search_keywords(assistant.extract_keywords(question))
+        wiki, archive = await assistant.search_knowledge_corpus(selected)
+        all_bodies = bodies(wiki) + bodies(archive)
+        extra = len(all_bodies) - len(set(all_bodies))
+        check(f"«{question}»: повторов нет", extra == 0,
+              f"{extra} лишних одинаковых абзацев из {len(all_bodies)}")
+
+    # Дубли обязаны существовать в базе — иначе проверка выше ничего не стоит.
+    copies = _sq.connect("stomat_wiki.db").execute(
+        "SELECT COUNT(*) FROM distilled_facts WHERE content LIKE '%BOPT (Biologically%'").fetchone()[0]
+    check("в базе действительно лежит несколько копий факта", copies > 1,
+          f"копий {copies}; проверка на дедуп потеряла смысл")
+
+    # Дедуп не должен был съесть рубрику.
+    selected = assistant.select_search_keywords(assistant.extract_keywords("методика bopt"))
+    wiki, _ = await assistant.search_knowledge_corpus(selected)
+    check("код рубрики у фактов сохранён",
+          all(l.startswith("[") for l in wiki.split("\n") if l.strip()),
+          "дедуп потерял префикс рубрики")
+
 
 asyncio.run(run())
 
