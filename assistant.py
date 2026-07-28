@@ -750,6 +750,45 @@ def _corpus_entry(prefix, body):
     return f"{prefix} {text}".strip()
 
 
+def like_any_case(column, keyword):
+    """
+    Условие LIKE, которое находит ключ в ЛЮБОМ регистре, и параметры к нему.
+
+    SQLite складывает регистр ТОЛЬКО для ASCII: `'А' LIKE 'а'` даёт 0, а
+    `'A' LIKE 'a'` даёт 1. LOWER() тоже ASCII-only — `LOWER('ВНЧС')`
+    возвращает 'ВНЧС' без изменений. Ключи же приходят из extract_keywords,
+    который делает text.lower().
+
+    Итог был такой: аббревиатуры, которые врач всегда пишет капсом, не
+    находились в базе знаний НИКОГДА. Замер по живой вики (12784 факта):
+
+        ВНЧС  0 из 88 фактов      КЛКТ  0 из 21      МТА  0 из 18
+        ЭДТА  0 из 13             ТРГ   0 из 5       БОПТ 0 из 4
+        ЭОД   0 из 2
+
+    Страдали и обычные слова, просто меньше: «цирконий» находил 49 из 61,
+    «адгезив» 607 из 627 — терялось написанное с заглавной в начале фразы.
+    Врач спрашивал про ВНЧС, справка уходила в промпт ПУСТОЙ, и модель отвечала
+    по памяти, хотя в базе лежало 88 фактов по теме. При этом /start и /help
+    обещают ответ «с использованием базы знаний».
+
+    Почему три формы, а не питоновский lower() через create_function: замер на
+    живых базах показал, что три формы в одном запросе и полнее, и дешевле.
+        вики:  три формы 88 находок за 63.8 мс, rulower 88 за 82.5 мс
+        архив: три формы 53 находки за 202.9 мс, rulower 54 за 560.3 мс
+    Полнота 100% и 98% при цене в 2.8 раза меньше на большом корпусе. Одна
+    пропущенная строка архива — написание вида «вНчс», ради которого платить
+    втрое за каждый запрос смысла нет.
+    """
+    forms = []
+    for form in (keyword.lower(), keyword.upper(), keyword.capitalize()):
+        pattern = f"%{form}%"
+        if pattern not in forms:
+            forms.append(pattern)
+    clause = " OR ".join(f"{column} LIKE ?" for _ in forms)
+    return f"({clause})", tuple(forms)
+
+
 def _corpus_body_key(body):
     """
     Ключ для отсева повторов: только суть, без префикса.
@@ -789,9 +828,14 @@ async def search_knowledge_corpus(keywords):
                 conn.execute("PRAGMA busy_timeout = 30000")
                 c = conn.cursor()
                 for kw in keywords:
+                    # like_any_case: ключ приходит в нижнем регистре, а
+                    # аббревиатуры в фактах заглавные, и SQLite кириллицу не
+                    # складывает — ВНЧС не находился ни разу из 88 фактов.
+                    where, params = like_any_case("content", kw)
                     c.execute(
-                        "SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT ?",
-                        (f"%{kw}%", rows_per_kw),
+                        "SELECT category_code, content FROM distilled_facts "
+                        f"WHERE {where} LIMIT ?",
+                        params + (rows_per_kw,),
                     )
                     for row in c.fetchall():
                         body_key = _corpus_body_key(row[1])
@@ -812,6 +856,9 @@ async def search_knowledge_corpus(keywords):
                 conn.execute("PRAGMA busy_timeout = 30000")
                 c = conn.cursor()
                 for kw in keywords:
+                    # Тот же регистронезависимый поиск, что и по вике: реплики
+                    # коллег пишутся как попало, а ключ всегда в нижнем.
+                    _arch_where, _arch_params = like_any_case("text", kw)
                     c.execute(
                         # Вопросы и обрывки из справки исключаются. Замер на
                         # шести реальных вопросах: из 160 подтянутых реплик
@@ -822,11 +869,11 @@ async def search_knowledge_corpus(keywords):
                         # первой в справке шла реплика «Какой протокол
                         # травления циркона?».
                         "SELECT sender_name, text FROM archive_messages "
-                        "WHERE text LIKE ? AND TRIM(text) <> '' "
+                        f"WHERE {_arch_where} AND TRIM(text) <> '' "
                         f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
                         "AND TRIM(text) NOT LIKE '%?' "
                         "LIMIT ?",
-                        (f"%{kw}%", rows_per_kw),
+                        _arch_params + (rows_per_kw,),
                     )
                     for row in c.fetchall():
                         body_key = _corpus_body_key(row[1])
@@ -2843,7 +2890,9 @@ async def handle_private_message(bot_client, event):
                     conn = sqlite3.connect("stomat_wiki.db", timeout=10)
                     c = conn.cursor()
                     for kw in keywords:
-                        c.execute("SELECT category_code, content FROM distilled_facts WHERE content LIKE ? LIMIT 5", (f"%{kw}%",))
+                        _w, _p = like_any_case("content", kw)
+                        c.execute("SELECT category_code, content FROM distilled_facts "
+                                  f"WHERE {_w} LIMIT 5", _p)
                         for row in c.fetchall():
                             cat_code, content = row
                             import re
@@ -4067,7 +4116,9 @@ async def query_wiki_subtopic(subtopic_id):
                 }
                 kws = keywords_map.get(subtopic_id, ["дентин"])
                 for kw in kws:
-                    c.execute("SELECT content FROM distilled_facts WHERE content LIKE ? LIMIT 10", (f"%{kw}%",))
+                    _w, _p = like_any_case("content", kw)
+                    c.execute("SELECT content FROM distilled_facts "
+                              f"WHERE {_w} LIMIT 10", _p)
                     for row in c.fetchall():
                         fact = row[0].strip()
                         if fact not in facts:
