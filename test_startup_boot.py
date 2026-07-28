@@ -257,8 +257,108 @@ async def run_sync_checks():
           all(n[0].startswith("Врач") for n in names), f"got {names[:4]}")
 
 
+async def run_media_checks():
+    print("\n[11] Долг медиа после простоя не топит журнал и не теряется")
+    # За 37 дней простоя набирается около 985 сообщений с медиа (26.6 в сутки
+    # по живой базе), а очередь разбора вмещает MEDIA_QUEUE_MAX_SIZE=128 при
+    # одном воркере. Раньше каждое непоместившееся писало отдельную строку
+    # ERROR: около 857 подряд. Разбор — вещь дорогая и небыстрая, поэтому
+    # отложить их правильно; неправильно было делать это шумно и молча.
+    import logging
+    from datetime import datetime, timezone
+
+    errors = []
+
+    class Catch(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.ERROR:
+                errors.append(record.getMessage())
+
+    catcher = Catch()
+    logging.getLogger().addHandler(catcher)
+
+    def media_message(index):
+        message = MagicMock()
+        message.id = 700000 + index
+        message.sender_id = 42
+        message.message = f"снимок {index}"
+        message.reply_to = None
+        message.photo = MagicMock()
+        message.video = None
+        message.document = None
+        message.grouped_id = None
+        message.date = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+        async def get_sender():
+            sender = MagicMock()
+            sender.first_name = "Врач"
+            sender.last_name = ""
+            sender.username = "u"
+            del sender.title
+            return sender
+
+        message.get_sender = get_sender
+        return message
+
+    messages = [media_message(i) for i in range(200)]
+    capacity = 20
+
+    async def iter_messages(*args, **kwargs):
+        for message in messages:
+            yield message
+
+    real_client = main.client
+    real_start = main.start_media_analysis_workers
+    real_queue = main._media_queue
+    main.client = MagicMock()
+    main.client.iter_messages = iter_messages
+    main.start_media_analysis_workers = lambda *a, **k: None
+    main._media_queue = asyncio.Queue(maxsize=capacity)
+    try:
+        await main.sync_history()
+        queued = main._media_queue.qsize()
+    finally:
+        main.client = real_client
+        main.start_media_analysis_workers = real_start
+        main._media_queue = real_queue
+        logging.getLogger().removeHandler(catcher)
+
+    overflow_errors = [e for e in errors if "queue full" in e]
+    check("очередь заполнена ровно до предела", queued == capacity,
+          f"got {queued} при пределе {capacity}")
+    check("переполнение не пишет строку ERROR на каждый снимок",
+          not overflow_errors, f"{len(overflow_errors)} строк вместо сводной")
+
+    import sqlite3
+    pending = sqlite3.connect(config.DB_PATH).execute(
+        "SELECT COUNT(*) FROM messages WHERE msg_id >= 700000 AND has_media = 1 "
+        "AND (media_description IS NULL OR TRIM(media_description) = '')").fetchone()[0]
+    check("отложенные остались в базе и восстановимы", pending == len(messages),
+          f"в базе {pending} из {len(messages)}")
+
+    print("\n[12] Механизм догона медиа на месте")
+    check("recover_pending_media_analysis существует",
+          callable(getattr(main, "recover_pending_media_analysis", None)))
+    check("у догона есть настраиваемый предел",
+          isinstance(main.MEDIA_RECOVERY_LIMIT, int) and main.MEDIA_RECOVERY_LIMIT >= 0,
+          f"got {main.MEDIA_RECOVERY_LIMIT}")
+    check("очередь вмещает больше, чем берёт один заход догона",
+          main.MEDIA_QUEUE_MAX_SIZE > main.MEDIA_RECOVERY_LIMIT,
+          f"очередь {main.MEDIA_QUEUE_MAX_SIZE}, догон {main.MEDIA_RECOVERY_LIMIT}")
+    # Живая работа — другое дело: там переполнение означает потерянный снимок
+    # коллеги, и молчать о нём нельзя.
+    source = io.open("main.py", encoding="utf-8").read()
+    enqueue = source.split("async def enqueue_media_analysis", 1)[1].split("\nasync def ", 1)[0]
+    check("в живой работе переполнение остаётся ошибкой",
+          "if bulk:" in enqueue and "logger.error" in enqueue,
+          "тихий отказ распространился на обычную работу")
+
+
+import io  # noqa: E402
+
 asyncio.run(run())
 asyncio.run(run_sync_checks())
+asyncio.run(run_media_checks())
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")

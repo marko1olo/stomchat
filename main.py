@@ -631,7 +631,15 @@ async def stop_media_analysis_workers():
     _media_worker_tasks = []
 
 
-async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None):
+async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, bulk=False):
+    """
+    Ставит медиа в очередь разбора. Возвращает True, если место нашлось.
+
+    bulk=True — постановка пачкой из догоняющей синхронизации: там переполнение
+    очереди штатно и не должно писать строку ERROR на каждый снимок.
+    Непоставленные никуда не пропадают: в базе у них пустое media_description,
+    и их подбирает recover_pending_media_analysis при следующих запусках.
+    """
     # Вызываем безусловно, а не только при _media_queue is None.
     # start_media_analysis_workers() идемпотентна: она отбрасывает завершившиеся
     # таски и добирает недостающие. Раньше её звали лишь на старте, поэтому
@@ -643,13 +651,21 @@ async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None):
     try:
         _media_queue.put_nowait((messages, msg_id, text, media_type_hint))
         logger.info("media analysis queued msg_id=%s queue_size=%s", msg_id, _media_queue.qsize())
+        return True
     except asyncio.QueueFull:
+        # В живой работе переполнение — авария: снимок коллеги остался без
+        # разбора. В догоняющей синхронизации оно ОЖИДАЕМО (см. bulk=True):
+        # за месяц простоя набирается около 985 медиа при очереди на 128,
+        # и 857 строк ERROR подряд только топят журнал.
+        if bulk:
+            return False
         logger.error(
             "media analysis queue full; skipped msg_id=%s queue_size=%s max_size=%s",
             msg_id,
             _media_queue.qsize(),
             MEDIA_QUEUE_MAX_SIZE,
         )
+        return False
 
 
 async def recover_pending_media_analysis():
@@ -1666,21 +1682,40 @@ async def sync_history():
         except Exception as e:
             logger.error(f"Ошибка синхронизации сообщения {message.id}: {e}")
     
-    # Enqueue media analysis for all synced media items in the background
+    # Медиа из догона ставим пачкой. Очередь вмещает MEDIA_QUEUE_MAX_SIZE, а за
+    # месяц простоя набирается около 985 снимков — влезет не всё, и это штатно:
+    # непоставленные остаются в базе с пустым media_description и достаются
+    # оттуда recover_pending_media_analysis на следующих запусках. Считаем
+    # отложенные и пишем ОДНУ сводную строку вместо сотен ERROR подряд.
+    media_queued = 0
+    media_deferred = 0
+
     for g_id, msgs in synced_albums.items():
         try:
             combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
-            await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
-            logger.info(f"🔄 Enqueued synced album {g_id} for media analysis ({len(msgs)} items).")
+            if await enqueue_media_analysis(msgs, msgs[0].id, combined_text, bulk=True):
+                media_queued += 1
+            else:
+                media_deferred += 1
         except Exception as e:
             logger.error(f"Failed to enqueue synced album {g_id}: {e}")
-        
+
     for msg in synced_singles:
         try:
-            await enqueue_media_analysis([msg], msg.id, msg.message or "")
-            logger.info(f"🔄 Enqueued synced single message {msg.id} for media analysis.")
+            if await enqueue_media_analysis([msg], msg.id, msg.message or "", bulk=True):
+                media_queued += 1
+            else:
+                media_deferred += 1
         except Exception as e:
             logger.error(f"Failed to enqueue synced single message {msg.id}: {e}")
+
+    if media_queued or media_deferred:
+        logger.info(
+            "sync media analysis queued=%s deferred=%s queue_max=%s "
+            "(отложенные ждут в базе с пустым описанием, их подберёт "
+            "recover_pending_media_analysis)",
+            media_queued, media_deferred, MEDIA_QUEUE_MAX_SIZE,
+        )
 
     if count > 0:
         logger.info(f"✅ Синхронизация завершена. Докачано {count} сообщений.")
