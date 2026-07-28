@@ -2,8 +2,11 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 def _json_exit(payload, code=0):
@@ -114,10 +117,28 @@ async def prepare_image_for_analysis(file_path, timeout):
 
 
 async def extract_first_frame_async(video_path, timeout):
+    """
+    Первый кадр видео или None.
+
+    Причина отказа ПИШЕТСЯ В ЖУРНАЛ, а не возвращается: вызывающий
+    (main.py, ветка подготовки медиа) ожидает один путь и молча пропускает
+    видео, если пришло None. До этого не логировалось ничего, и отличить
+    битый файл от таймаута, от отсутствующего cv2 было нельзя вообще — при
+    этом соседняя prepare_image_for_analysis причину как раз возвращает.
+    Контракт не меняем: подпись используется в чужом файле.
+    """
     payload, error = await _run_tool("extract-frame", video_path, timeout)
     if error:
+        logger.warning("extract-frame failed path=%s: %s", video_path, error)
         return None
-    return payload.get("path")
+    frame_path = payload.get("path")
+    if not frame_path:
+        # Ребёнок отчитался успехом, но пути не дал: молча вернуть None здесь
+        # означало бы потерять видео без единого следа.
+        logger.warning("extract-frame returned ok without path path=%s payload=%s",
+                       video_path, payload)
+        return None
+    return frame_path
 
 
 def image_document(message):
