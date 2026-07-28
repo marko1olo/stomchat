@@ -408,6 +408,21 @@ BUSINESS_KEYWORDS = frozenset({
     "gbt", "srp", "ids", "вертипреп", "матриц", "панорам", "кллт",
 })
 
+# Эти ключи ищутся ТОЛЬКО с начала слова: внутри слова они цепляют бытовую
+# речь. Замер на живой базе: «руб» сидит в «грубо» (15), «грубости», «зарубеж»,
+# «вырубаю», «срубить»; «цена» — в «сценарии»; «3d» и «ids» — в ссылках и
+# латинских словах («acids», «avoids»). 31 реплика чистого трёпа попадала в
+# дайджест всего сообщества только из-за них: «Ой что-то грубо вышло»,
+# «Я уже даже не вырубаю впн)».
+#
+# Остальные ключи ищутся где угодно намеренно: внутри слова у них истинные
+# попадания — «фотопротокол» (31), «поликлиника» (10), «микромотор»,
+# «эндомотор», «себестоимость», «суперсканер», «оверпрайс».
+BUSINESS_PREFIX_ONLY = frozenset({"руб", "цена", "3d", "ids"})
+_BUSINESS_ANYWHERE = BUSINESS_KEYWORDS - BUSINESS_PREFIX_ONLY
+
+_WORD_RE = re.compile(r"[\w-]+", re.UNICODE)
+
 def _is_useful_text(text_lower):
     """
     Есть ли в реплике профессиональное содержание.
@@ -420,7 +435,11 @@ def _is_useful_text(text_lower):
     отверждения», «Ретрит файлы и протейперы»). Из 227 терминов ассистента 169
     не имели в том списке ни одного соответствия.
     """
-    if any(kw in text_lower for kw in BUSINESS_KEYWORDS):
+    if any(kw in text_lower for kw in _BUSINESS_ANYWHERE):
+        return True
+    if any(word.startswith(kw)
+           for word in _WORD_RE.findall(text_lower)
+           for kw in BUSINESS_PREFIX_ONLY):
         return True
     return dental_vocab.has_dental_term(text_lower)
 
