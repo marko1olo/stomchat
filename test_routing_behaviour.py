@@ -299,8 +299,13 @@ async def run():
     # второй раз.
     enqueued, redispatched = [], []
 
-    async def rec_enqueue(messages, msg_id, text, media_type_hint=None):
+    # Сигнатура обязана совпадать с настоящей: sync_history глотает исключение
+    # по каждому сообщению отдельно, поэтому расхождение не падает с ошибкой, а
+    # МОЛЧА теряет медиа. Так и вышло, когда у enqueue_media_analysis появился
+    # параметр bulk — эта проверка и поймала пропажу.
+    async def rec_enqueue(messages, msg_id, text, media_type_hint=None, bulk=False):
         enqueued.append(msg_id)
+        return True
 
     async def rec_handle(event):
         redispatched.append(event.message.id)
