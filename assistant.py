@@ -3,6 +3,7 @@ import re
 import copy
 import html
 import json
+import math
 import sqlite3
 import asyncio
 import logging
@@ -141,12 +142,29 @@ NO — если Боту лучше промолчать (тема сменил�
         return False
 
 def check_user_cooldown(chat_id, user_id, command, seconds=30):
+    """
+    Сколько секунд осталось ждать. 0 — можно работать, отсчёт начат заново.
+
+    Округление ВВЕРХ, а не int(). int() отбрасывает дробную часть, и последняя
+    секунда окна теряется целиком: замер на живом вызове — два обращения подряд
+    к pm_chat (seconds=5) дают elapsed=0.0001 и int(4.9999) = 4, то есть врачу
+    обещают 4 секунды при фактических 5. Хуже другое: при elapsed=4.5 остаток
+    0.5 превращается в int(0.5) = 0, а все вызывающие читают 0 как «кулдауна
+    нет» (`if cooldown > 0`, `if not check_user_cooldown(...)`). Отметка времени
+    при этом НЕ обновляется — она переписывается только на выходе из функции
+    после `if`. Итог: в последнюю секунду каждого окна запрос проходит, и
+    подряд идущие сообщения могут проскакивать вечно, сдвигаясь на эту секунду.
+    Для /quiz (60 с) и pm_rate_notice (30 с) это та же дыра, только шире.
+
+    ceil даёт минимум 1, пока окно не закрылось, поэтому «осталось 0» теперь
+    означает ровно то, что написано.
+    """
     key = (chat_id, user_id, command)
     now = datetime.now()
     if key in USER_COOLDOWNS:
         elapsed = (now - USER_COOLDOWNS[key]).total_seconds()
         if elapsed < seconds:
-            return int(seconds - elapsed)
+            return math.ceil(seconds - elapsed)
     USER_COOLDOWNS[key] = now
     return 0
 
@@ -691,11 +709,20 @@ def _fit_pm_history(lines):
 
     Идём с конца: терять нужно старое, а не последний вопрос врача — именно на
     него бот и отвечает. Возвращается хронологический порядок.
+
+    САМАЯ СВЕЖАЯ реплика не подрезается вообще. Порог 1200 символов на запись
+    задумывался против распухших ответов бота в старой части истории, но в
+    текстовой ветке ЛС отдельного поля «Вопрос пользователя» в промпте нет
+    (оно есть только в ветке со снимком): текущее сообщение врача попадает
+    модели ТОЛЬКО как последняя строка этого блока. Telegram разрешает 4096
+    символов, и подробное описание случая на 2000+ обрезалось бы до 1200 —
+    модель отвечала бы на усечённый вопрос, не зная об этом. Полная реплика
+    (≤4096 + имя) укладывается в бюджет 6000 сама, остаток достаётся истории.
     """
     kept = []
     used = 0
-    for line in reversed(lines):
-        if len(line) > _PM_HISTORY_ENTRY_MAX_CHARS:
+    for position, line in enumerate(reversed(lines)):
+        if position > 0 and len(line) > _PM_HISTORY_ENTRY_MAX_CHARS:
             line = _clip_at_sentence(line, _PM_HISTORY_ENTRY_MAX_CHARS)
         # Реплики склеиваются через "\n", и разделитель тоже занимает место:
         # без его учёта блок выходил за бюджет на число строк минус одна.
@@ -2224,6 +2251,28 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
         )
         await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
 
+    # Реплика экзаменатора уходит и в историю ЛС, а не только в state кейса.
+    #
+    # Ходы врача пишутся туда безусловно: save_pm_message стоит в
+    # handle_private_message ДО маршрутизации в симулятор, то есть до этой
+    # функции. Ответы экзаменатора не писались нигде, а state кейса удаляется
+    # на последнем шаге и по /abort. Итог для кейса из 4 шагов: в pm_messages
+    # оставались 4 сообщения врача подряд ("назначу КТ", "распломбирую",
+    # "поставлю МТА") без единого ответа между ними. Следующий обычный вопрос
+    # в ЛС собирает промпт из этой односторонней ленты — модель читает ходы
+    # кейса как реплики, адресованные ей, и отвечает на вопросы, которых не
+    # видела. Тот же перекос портит и клинический портрет, и оценку длины
+    # ответа (calculate_context_length_guidelines считает по history[-6:]).
+    #
+    # Метка в начале — как у /quiz: без неё разбор кейса неотличим от обычного
+    # клинического ответа бота.
+    try:
+        await database.save_pm_message(
+            chat_id, "Assistant", f"[Клинический кейс] {reply_text}"
+        )
+    except Exception as save_err:
+        logger.error(f"Failed to persist case examiner reply: {save_err}")
+
 
 async def handle_private_message(bot_client, event):
     """Глубокий обработчик входящих личных сообщений (ЛС) бота с RAG, зрением и памятью."""
@@ -2874,6 +2923,17 @@ async def handle_private_message(bot_client, event):
                 f"{starting_text}"
             )
             await bot_client.send_message(entity=chat_id, message=case_welcome, parse_mode='html')
+            # Условие кейса тоже в историю ЛС: без него первый ход врача
+            # ("назначу КТ 3.6") лежит в pm_messages как реплика ни на что —
+            # ни жалоб, ни анамнеза, на которые он отвечает, в истории нет.
+            # Ответы экзаменатора на следующих шагах пишет
+            # handle_interactive_case_step, там же объяснение целиком.
+            try:
+                await database.save_pm_message(
+                    chat_id, "Assistant", f"[Клинический кейс] {starting_text}"
+                )
+            except Exception as save_err:
+                logger.error(f"Failed to persist case intro: {save_err}")
             return
 
         # 2. Восстановление динамического диалога.
