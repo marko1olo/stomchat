@@ -174,7 +174,91 @@ async def run():
           "соединение осталось висеть")
 
 
+async def run_sync_checks():
+    print("\n[9] Догоняющая синхронизация после долгого простоя")
+    # Бот не поднимался с 21 июня, в чате в среднем 228 сообщений в сутки —
+    # долг порядка 8450 реплик. Синхронизация обёрнута в wait_for, и если она
+    # не укладывается, падает ВЕСЬ подъём: start.bat поднимает процесс заново,
+    # и это выглядит как «бот не запускается».
+    check("бюджет синхронизации больше бюджета подключения",
+          main.SYNC_HISTORY_TIMEOUT_SECONDS > main.START_TIMEOUT_SECONDS,
+          f"{main.SYNC_HISTORY_TIMEOUT_SECONDS} против {main.START_TIMEOUT_SECONDS}")
+    per_message_budget = main.SYNC_HISTORY_TIMEOUT_SECONDS / 8450
+    check("на сообщение остаётся хотя бы 0.05 с при долге в 8450 реплик",
+          per_message_budget >= 0.05, f"{per_message_budget:.3f} с на сообщение")
+    # Запрос автора необязателен: при отказе пишется "Unknown". Его таймаут
+    # обязан быть НАМНОГО меньше общего, иначе несколько зависаний съедают
+    # весь подъём. При 60 с хватало пяти.
+    stalls = main.SYNC_HISTORY_TIMEOUT_SECONDS / main.SYNC_SENDER_TIMEOUT_SECONDS
+    check("одно зависание запроса автора не съедает подъём", stalls >= 30,
+          f"хватит {stalls:.0f} зависаний, чтобы сорвать синхронизацию")
+    check("таймаут автора меньше общего сетевого",
+          main.SYNC_SENDER_TIMEOUT_SECONDS < main.TELEGRAM_REQUEST_TIMEOUT_SECONDS)
+
+    print("\n[10] Автор запрашивается один раз на отправителя, а не на сообщение")
+    from datetime import datetime, timezone
+
+    lookups = {"count": 0}
+
+    def fake_message(index, sender_id):
+        message = MagicMock()
+        message.id = 500000 + index
+        message.sender_id = sender_id
+        message.message = f"клиническая реплика {index}"
+        message.reply_to = None
+        message.photo = None
+        message.video = None
+        message.document = None
+        message.grouped_id = None
+        message.date = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        async def get_sender():
+            lookups["count"] += 1
+            sender = MagicMock()
+            sender.first_name = f"Врач{sender_id}"
+            sender.last_name = ""
+            sender.username = f"user{sender_id}"
+            del sender.title
+            return sender
+
+        message.get_sender = get_sender
+        return message
+
+    senders = [900 + i for i in range(20)]
+    messages = [fake_message(i, senders[i % len(senders)]) for i in range(400)]
+
+    async def iter_messages(*args, **kwargs):
+        for message in messages:
+            yield message
+
+    real_client = main.client
+    main.client = MagicMock()
+    main.client.iter_messages = iter_messages
+    try:
+        await main.sync_history()
+    finally:
+        main.client = real_client
+
+    check("запросов ровно по числу отправителей",
+          lookups["count"] == len(senders),
+          f"{lookups['count']} запросов на {len(messages)} сообщений при {len(senders)} авторах")
+    check("экономия запросов не меньше 90%",
+          lookups["count"] <= len(messages) * 0.1,
+          f"{100 * (1 - lookups['count'] / len(messages)):.0f}%")
+
+    import sqlite3
+    saved = sqlite3.connect(config.DB_PATH).execute(
+        "SELECT COUNT(*) FROM messages WHERE msg_id >= 500000").fetchone()[0]
+    check("все догнанные сообщения сохранены", saved == len(messages),
+          f"сохранено {saved} из {len(messages)}")
+    names = sqlite3.connect(config.DB_PATH).execute(
+        "SELECT DISTINCT sender_name FROM messages WHERE msg_id >= 500000").fetchall()
+    check("имена авторов проставлены, а не Unknown",
+          all(n[0].startswith("Врач") for n in names), f"got {names[:4]}")
+
+
 asyncio.run(run())
+asyncio.run(run_sync_checks())
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")

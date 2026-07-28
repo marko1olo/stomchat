@@ -70,8 +70,20 @@ SCHEDULER_STATE_PATH = "bot_state.json"
 SUMMARY_STATUS_CHECK_SECONDS = 60
 SUMMARY_STALE_SECONDS = 1800
 START_TIMEOUT_SECONDS = 120
-SYNC_HISTORY_TIMEOUT_SECONDS = 300
+# Догоняющая синхронизация упирается в размер долга, а не в скорость сети.
+# Живой замер: в чате в среднем 228 сообщений в сутки, а бот не поднимался с
+# 21 июня — это около 8450 пропущенных реплик. В прежние 300 с они укладывались
+# только при 28 сообщениях в секунду; не уложившись, синхронизация валила ВЕСЬ
+# подъём, start.bat поднимал процесс заново, и так по кругу. Сообщения при этом
+# сохраняются по ходу, поэтому каждый заход продвигался, но выглядело это как
+# «бот не запускается». Держать долгую синхронизацию безопасно: внутри цикла
+# каждые 25 сообщений пишется heartbeat, и сторож видит процесс живым.
+SYNC_HISTORY_TIMEOUT_SECONDS = 900
 TELEGRAM_REQUEST_TIMEOUT_SECONDS = 60
+# Автор сообщения — необязательное обогащение: при отказе в базу пишется
+# "Unknown", и таких строк уже 917. Держать здесь общий таймаут в 60 с нельзя:
+# пяти зависших запросов хватало, чтобы съесть весь бюджет подъёма.
+SYNC_SENDER_TIMEOUT_SECONDS = 10
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 120
 MEDIA_ANALYSIS_TIMEOUT_SECONDS = 180
 MEDIA_FRAME_TIMEOUT_SECONDS = 60
@@ -1559,32 +1571,47 @@ async def sync_history():
     
     synced_albums = {}
     synced_singles = []
-    
+    # Автора спрашиваем один раз на догоняющий проход, а не на каждое
+    # сообщение. В чате 749 уникальных отправителей, а догонять после месяца
+    # простоя приходится тысячи реплик: без этого одна и та же справка
+    # запрашивалась бы сотни раз. Неудачи кэшируются тоже — у удалённого
+    # аккаунта запрос падает всегда, и платить за него на каждой его реплике
+    # незачем.
+    sender_cache = {}
+
     # Запрашиваем сообщения, которые ID которых больше последнего в базе
     async for message in client.iter_messages(config.SOURCE_CHAT_ID, min_id=last_id, reverse=True):
         try:
             # Используем ту же логику парсинга, что в handle_new_message
-            sender = None
-            try:
-                sender = await asyncio.wait_for(
-                    message.get_sender(),
-                    timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                logger.warning("sync sender lookup failed msg_id=%s sender_id=%s: %s", message.id, message.sender_id, exc)
-
-            if sender is None:
-                sender_name = "Unknown"
-                sender_username = None
-            elif hasattr(sender, 'title'):
-                sender_name = sender.title or "Администрация"
-                sender_username = getattr(sender, 'username', None)
+            cache_key = message.sender_id
+            if cache_key is not None and cache_key in sender_cache:
+                sender_name, sender_username = sender_cache[cache_key]
             else:
-                first_name = getattr(sender, 'first_name', '') or ''
-                last_name = getattr(sender, 'last_name', '') or ''
-                sender_name = f"{first_name} {last_name}".strip() or "Unknown"
-                sender_username = getattr(sender, 'username', None)
-            
+                sender = None
+                try:
+                    sender = await asyncio.wait_for(
+                        message.get_sender(),
+                        timeout=SYNC_SENDER_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    logger.warning("sync sender lookup failed msg_id=%s sender_id=%s: %s", message.id, message.sender_id, exc)
+
+                if sender is None:
+                    sender_name = "Unknown"
+                    sender_username = None
+                elif hasattr(sender, 'title'):
+                    sender_name = sender.title or "Администрация"
+                    sender_username = getattr(sender, 'username', None)
+                else:
+                    first_name = getattr(sender, 'first_name', '') or ''
+                    last_name = getattr(sender, 'last_name', '') or ''
+                    sender_name = f"{first_name} {last_name}".strip() or "Unknown"
+                    sender_username = getattr(sender, 'username', None)
+
+                if cache_key is not None:
+                    sender_cache[cache_key] = (sender_name, sender_username)
+
+
             reply_to_id = message.reply_to.reply_to_msg_id if message.reply_to else None
             
             synced_snapshot = image_document(message)
