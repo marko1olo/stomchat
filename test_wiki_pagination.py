@@ -145,6 +145,40 @@ finally:
     os.chdir(_ORIGINAL_CWD)
     shutil.rmtree(_TMPDIR, ignore_errors=True)
 
+
+print("\n[N] Карта кодов рубрик существует в одном экземпляре")
+# Копий было ДВЕ: модульный WIKI_SUBTOPIC_CODES и локальный codes_map внутри
+# query_wiki_subtopic. Они уже разъехались — в локальной осталось
+# "gnat_joint": ["2.3.1", "2.3.2"], то есть значение, которое модульный словарь
+# описывает как исправленный дефект: «Окклюзия» была надмножеством «Сплинтов»,
+# из 505 статей по сплинтам 461 показывалась в соседней кнопке. Правку внесли в
+# одну копию. Проявиться не успело только потому, что запасной путь достижим
+# лишь при пустой подтеме.
+import io as _io2
+import re as _re2
+
+_SRC = _io2.open(os.path.join(_ORIGINAL_CWD, "assistant.py"), encoding="utf-8").read()
+_CODE = "\n".join(l for l in _SRC.split("\n") if not l.lstrip().startswith("#"))
+
+# Литеральных словарей с КОДАМИ рубрик быть не должно больше одного. Отличаем
+# их от карты слов для запасного поиска (там у ortho_bopt значения "bopt",
+# "уступ", "преп") по тому, что код начинается с цифры: "2.2.1".
+_literal_maps = _re2.findall(r'\{[^{}]*"ortho_bopt"\s*:\s*\[\s*"\d[^{}]*\}', _CODE, _re2.S)
+check("литеральная карта кодов ровно одна", len(_literal_maps) == 1,
+      f"найдено {len(_literal_maps)} — копии разъедутся")
+check("запасной путь использует общий словарь",
+      "codes_map = WIKI_SUBTOPIC_CODES" in _CODE,
+      "внутри query_wiki_subtopic снова своя карта")
+
+# Подтемы не должны перекрываться: иначе одна статья живёт в двух кнопках.
+_pairs = [(a, b) for a in assistant.WIKI_SUBTOPIC_CODES for b in assistant.WIKI_SUBTOPIC_CODES if a < b]
+_overlap = [(a, b, sorted(set(assistant.WIKI_SUBTOPIC_CODES[a]) & set(assistant.WIKI_SUBTOPIC_CODES[b])))
+            for a, b in _pairs
+            if set(assistant.WIKI_SUBTOPIC_CODES[a]) & set(assistant.WIKI_SUBTOPIC_CODES[b])]
+check("ни одна пара подтем не делит код", not _overlap, f"пересечения: {_overlap}")
+check("подтем столько же, сколько кнопок в меню",
+      len(assistant.WIKI_SUBTOPIC_CODES) == 14, f"got {len(assistant.WIKI_SUBTOPIC_CODES)}")
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
