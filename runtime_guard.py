@@ -140,7 +140,7 @@ def read_summary_status():
 SUMMARY_KINDS = frozenset({"daily", "weekly"})
 
 
-def release_generation_status(kind=None, reason=None):
+def release_generation_status(kind=None, reason=None, extra=None):
     """
     Снять флаг «идёт генерация», не погасив чужую работу.
 
@@ -157,6 +157,14 @@ def release_generation_status(kind=None, reason=None):
       * чужая работа — сводка идёт, а закончился посторонний ответ. Тем более
         не трогаем.
 
+    Снятие флага и СОХРАНЕНИЕ разбора — разные вещи, и раньше первое стирало
+    второе. Каскад моделей записывал в статус stage=all_exhausted вместе с
+    причиной и текстом ошибки провайдера, после чего сразу снимал флаг — и
+    файл превращался в «active: false, stage: pm_chat_done». Оператор, открывший
+    статус после того, как бот не ответил, не находил там ни причины, ни
+    ошибки. Поэтому extra позволяет погасить флаг И оставить разбор в том же
+    файле: сторож обезоружен, диагностика на месте.
+
     Возвращает True, если флаг снят.
     """
     if kind in SUMMARY_KINDS:
@@ -164,7 +172,10 @@ def release_generation_status(kind=None, reason=None):
     current = read_summary_status()
     if current.get("active") and current.get("kind") in SUMMARY_KINDS:
         return False
-    clear_summary_status(reason or f"{kind or 'generation'}_done")
+    payload = {"active": False, "stage": reason or f"{kind or 'generation'}_done"}
+    if extra:
+        payload.update(extra)
+    write_summary_status(payload)
     return True
 
 

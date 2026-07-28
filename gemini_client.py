@@ -100,7 +100,7 @@ def _write_generation_status(context, **updates):
     runtime_guard.write_summary_status(payload)
 
 
-def _release_generation_status(context):
+def _release_generation_status(context, reason=None, extra=None):
     """
     Снимает флаг «идёт работа» после обычного вызова ассистента.
 
@@ -120,7 +120,9 @@ def _release_generation_status(context):
     if not context:
         return
     try:
-        runtime_guard.release_generation_status(context.get("kind"))
+        runtime_guard.release_generation_status(
+            context.get("kind"), reason=reason, extra=extra
+        )
     except Exception as status_err:
         logger.warning("Failed to release generation status: %s", status_err)
 
@@ -285,13 +287,35 @@ def _reset_failure():
     LAST_FAILURE = None
 
 
+def _all_known_keys(extra_key=None):
+    """Все настроенные ключи: их не должно быть ни в журнале, ни в файле статуса."""
+    keys = []
+    for attr in ("GOOGLE_KEYS", "GROQ_KEYS", "OPENROUTER_KEYS"):
+        value = getattr(config, attr, None)
+        if isinstance(value, (list, tuple, set)):
+            keys.extend(k for k in value if isinstance(k, str) and len(k) >= 8)
+    if extra_key:
+        keys.append(extra_key)
+    # Длинные вперёд: короткий ключ может быть началом длинного, и замена
+    # короткого первой оставила бы хвост длинного в тексте.
+    return sorted(set(keys), key=len, reverse=True)
+
+
 def _record_failure(reason, detail="", api_key=None):
     global LAST_FAILURE
     text = str(detail or "")[:500]
-    if api_key and api_key in text:
-        # Ключ — секрет. Причина уходит в файл статуса и в журнал, поэтому
-        # ключ вырезаем даже из текста чужого исключения.
-        text = text.replace(api_key, "***")
+    # Ключ — секрет. Причина уходит в файл статуса и в журнал, поэтому ключ
+    # вырезаем даже из текста чужого исключения.
+    #
+    # Вырезать ТОЛЬКО переданный ключ недостаточно: провайдер присылает
+    # «401 invalid api key <ключ> rejected», где ключ может быть любым из
+    # настроенных — например тем, которым ходил предыдущий запрос каскада, или
+    # тем, что попал в текст из чужого заголовка. Замер на подставном каскаде:
+    # ключ утекал в файл статуса при совпадении по любому НЕ переданному ключу.
+    # Поэтому чистим по всему набору.
+    for secret in _all_known_keys(api_key):
+        if secret and secret in text:
+            text = text.replace(secret, "***")
     LAST_FAILURE = {"reason": reason, "detail": text, "ts": time.time()}
 
 
@@ -600,8 +624,15 @@ def generate_text(prompt, status_context=None, timeout=None):
         failure_reason=failure["reason"], error=failure["detail"]
     )
     # Провал тоже завершает работу: оставлять флаг взведённым после исчерпания
-    # каскада — значит держать заряженным сторожевой os._exit.
-    _release_generation_status(status_context)
+    # каскада — значит держать заряженным сторожевой os._exit. Но гасить флаг
+    # и одновременно СТИРАТЬ разбор нельзя: оператор, открывший файл статуса
+    # после того как бот не ответил, не находил там ни причины, ни ошибки —
+    # только «stage: pm_chat_done». Разбор переносим вместе со снятием.
+    _release_generation_status(
+        status_context,
+        reason="all_exhausted",
+        extra={"failure_reason": failure["reason"], "error": failure["detail"]},
+    )
     return None
 
 

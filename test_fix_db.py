@@ -409,14 +409,18 @@ async def section_bookmarks():
     page3 = await database.get_clinical_bookmarks(USER, limit=10, offset=20)
     check("страница отдаёт ровно 10 строк", len(page1) == 10 and len(page2) == 10, f"{len(page1)}/{len(page2)}")
     check("последняя страница — остаток", len(page3) == 7, f"got {len(page3)}")
-    seen = [r[0] for r in page1 + page2 + page3]
+    # Сравнивать по одному msg_id нельзя: ключ закладки — пара (msg_id, chat_id),
+    # и двумя проверками выше этот же тест утверждает, что пост #4821 основного
+    # чата и #4821 тестового — две РАЗНЫЕ закладки. По одному номеру они
+    # выглядели дублем, и проверка падала на верном коде.
+    seen = [(r[0], r[1]) for r in page1 + page2 + page3]
     check("страницы не повторяют и не пропускают закладки",
           len(set(seen)) == 27 == len(seen), f"got {len(seen)} строк, уникальных {len(set(seen))}")
 
     everything = await database.get_clinical_bookmarks(USER)
     check("без limit поведение прежнее — весь архив", len(everything) == 27, f"got {len(everything)}")
     check("порядок постраничного вывода совпадает с полным списком",
-          [r[0] for r in everything] == seen, "страницы разошлись с полным списком")
+          [(r[0], r[1]) for r in everything] == seen, "страницы разошлись с полным списком")
 
     found = await database.get_clinical_bookmarks(USER, query="Автор7")
     check("поиск по автору работает и с новым ORDER BY", len(found) == 1, f"got {found}")
@@ -435,8 +439,11 @@ async def section_bookmarks():
         id INTEGER PRIMARY KEY AUTOINCREMENT, saved_by_user_id INTEGER, msg_id INTEGER,
         chat_id INTEGER, sender_name TEXT, text TEXT, has_media BOOLEAN,
         media_description TEXT, date TEXT)""")
-    db.execute("CREATE UNIQUE INDEX idx_bookmark_unique "
-               "ON clinical_bookmarks(saved_by_user_id, msg_id)")
+    # Уникального индекса здесь НЕ создаём: смысл проверки — база из времён,
+    # когда уникальности не было вовсе и дубли накапливались свободно.
+    # Прежняя версия установки создавала индекс (saved_by_user_id, msg_id) и
+    # тут же пыталась вставить три одинаковых дубля — то есть падала на своём
+    # же ограничении, ещё не дойдя до проверки миграции.
     db.execute("INSERT INTO clinical_bookmarks (saved_by_user_id, msg_id, chat_id, text, date) "
                "VALUES (?, ?, ?, 'старая закладка', '2026-05-01 10:00:00')",
                (USER, 4821, MAIN_CHAT))

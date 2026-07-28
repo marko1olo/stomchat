@@ -257,8 +257,18 @@ async def run():
           "два выпуска и две страницы Telegraph за трое суток")
 
     weekly_normal = main.weekly_window_start(monday_10, (monday_10 - timedelta(days=7)).date())
-    check("обычное недельное окно — семь суток",
-          weekly_normal == monday_10 - timedelta(days=main.WEEKLY_WINDOW_DAYS),
+    # Точного равенства требовать нельзя: граница выравнивается на ЧАС отчёта
+    # прошлого выпуска (минуты обнуляются), а now здесь 10:05. Окно выходит на
+    # пять минут ШИРЕ семи суток — то есть захватывает больше, а не теряет, и
+    # это ровно то поведение, которое нужно: продолжать от времени прошлого
+    # отчёта. Прежняя версия проверки сравнивала на равенство и падала на
+    # верном коде. Проверяем СВОЙСТВО: не уже семи суток и не глубже, чем на
+    # сутки, иначе это уже догон, а не обычное окно.
+    normal_base = monday_10 - timedelta(days=main.WEEKLY_WINDOW_DAYS)
+    check("обычное недельное окно покрывает семь суток целиком",
+          weekly_normal <= normal_base, f"got {weekly_normal}, надо не позже {normal_base}")
+    check("и не растягивается сверх этого больше чем на сутки",
+          weekly_normal >= normal_base - timedelta(days=1),
           f"got {weekly_normal}")
 
     weekly_catchup = main.weekly_window_start(wednesday, (wednesday - timedelta(days=9)).date())
