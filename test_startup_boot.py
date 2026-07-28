@@ -293,6 +293,15 @@ async def run_media_checks():
         message.document = None
         message.grouped_id = None
         message.date = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        # Отбор медиа (media_tools.clinical_media_kind) отсекает гифки, кружки,
+        # стикеры и превью ссылок. MagicMock создаёт ЛЮБОЙ атрибут на лету,
+        # поэтому у подставного сообщения gif/video_note/sticker/web_preview
+        # оказывались не None, и снимок отбраковывался как посторонний. У
+        # настоящего сообщения telethon там None — задаём это явно.
+        message.gif = None
+        message.video_note = None
+        message.sticker = None
+        message.web_preview = None
 
         async def get_sender():
             sender = MagicMock()

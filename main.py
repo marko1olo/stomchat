@@ -34,7 +34,8 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import summarizer
-from media_tools import extract_first_frame_async, image_document
+from media_tools import (MEDIA_TEMP_DIR as media_temp_dir, clinical_media_kind,
+                         extract_first_frame_async, image_document)
 try:
     import psutil
 except Exception:
@@ -134,7 +135,9 @@ MEDIA_ANALYSIS_TIMEOUT_SECONDS = max(
 MEDIA_FRAME_TIMEOUT_SECONDS = 60
 MEDIA_WORKER_COUNT = max(1, _env_int("STOMCHAT_MEDIA_WORKERS", 1))
 MEDIA_QUEUE_MAX_SIZE = max(MEDIA_WORKER_COUNT, _env_int("STOMCHAT_MEDIA_QUEUE_MAX", 128))
-MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
+# Каталог общий на проект, объявлен в media_tools: его же используют
+# уборщик, голосовой путь и медиа в личных сообщениях.
+MEDIA_TEMP_DIR = media_temp_dir
 MEDIA_RECOVERY_LIMIT = max(0, _env_int("STOMCHAT_MEDIA_RECOVERY_LIMIT", 5))
 # Отметка «файл до Vision не дошёл». Пустое media_description означает «ещё не
 # разбирали», и строка с ним возвращается из get_pending_media_message_ids на
@@ -376,11 +379,15 @@ def cleanup_temp_media(max_age_seconds=TEMP_MEDIA_MAX_AGE_SECONDS):
     removed = 0
     freed = 0
     try:
-        if not os.path.isdir("temp_media"):
+        # Каталог берём из MEDIA_TEMP_DIR, а не из литерала. Переменная
+        # STOMCHAT_MEDIA_TEMP_DIR соблюдалась ТОЛЬКО на скачивании: уборщик
+        # подметал пустой "temp_media", а файлы копились в настроенном каталоге
+        # вечно — вместе с обрывками скачиваний и голосовыми.
+        if not os.path.isdir(MEDIA_TEMP_DIR):
             return 0
         cutoff = time.time() - max_age_seconds
-        for name in os.listdir("temp_media"):
-            path = os.path.join("temp_media", name)
+        for name in os.listdir(MEDIA_TEMP_DIR):
+            path = os.path.join(MEDIA_TEMP_DIR, name)
             try:
                 if not os.path.isfile(path) or os.path.getmtime(path) > cutoff:
                     continue
@@ -945,16 +952,26 @@ async def recover_pending_media_analysis():
             continue
         msg_id = message.id
         media_type_hint = id_to_media_type.get(msg_id)
-        if not (message.photo or message.video or media_type_hint):
+        # Подсказка из базы (media_type строкой) остаётся в силе: строка попала в
+        # выборку именно потому, что медиа у неё было. Но если Telegram отдал
+        # сообщение, судим по нему тем же единым правилом, что и живой путь.
+        if not (clinical_media_kind(message) or media_type_hint):
             logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
             continue
-        await enqueue_media_analysis(
+        # bulk=True: для догона переполнение очереди ШТАТНО — строка остаётся в
+        # базе с пустым описанием, и её подберёт следующий запуск. Без флага
+        # каждое непоставленное писало logger.error на пути, где ничего не
+        # потеряно. И считаем поставленным только то, что действительно
+        # поставилось: queued += 1 стоял безусловно, поэтому сводная строка
+        # врала при полной очереди.
+        if await enqueue_media_analysis(
             [message],
             msg_id,
             id_to_text.get(msg_id) or message.message or "",
             media_type_hint=media_type_hint,
-        )
-        queued += 1
+            bulk=True,
+        ):
+            queued += 1
 
     logger.info("pending media recovery queued=%s scanned=%s", queued, len(pending))
 
@@ -1049,7 +1066,9 @@ async def transcribe_group_voice(message):
     temp_path = None
     msg_id = getattr(message, "id", None)
     try:
-        os.makedirs("temp_media", exist_ok=True)
+        # Тот же каталог, что у остального медиа: иначе голосовые ложатся туда,
+        # куда уборщик не заходит.
+        os.makedirs(MEDIA_TEMP_DIR, exist_ok=True)
         temp_path = await asyncio.wait_for(
             message.download_media(file="temp_media/"),
             timeout=VOICE_DOWNLOAD_TIMEOUT_SECONDS,
@@ -1303,20 +1322,14 @@ async def handle_new_message(event):
         if event.message.reply_to:
             reply_to_msg_id = event.message.reply_to.reply_to_msg_id
 
-        # Проверка медиа. Снимок-документ (несжатый рентген/КТ) считается фото:
-        # для базы, дайджеста и vision разницы между ним и photo нет.
+        # Проверка медиа через единое правило clinical_media_kind: снимок-документ
+        # (несжатый рентген/КТ) считается фото, а превью ссылок, гифки, кружки и
+        # видеостикеры отсекаются. Раньше здесь стояло
+        # `photo or video or image_document`, и все четыре вида постороннего
+        # медиа уезжали в платный Vision как клинический снимок.
         snapshot_document = image_document(event.message)
-        has_media = (
-            event.message.photo is not None
-            or event.message.video is not None
-            or snapshot_document is not None
-        )
-        if event.message.photo or snapshot_document is not None:
-            media_type = "photo"
-        elif event.message.video:
-            media_type = "video"
-        else:
-            media_type = None
+        media_type = clinical_media_kind(event.message)
+        has_media = media_type is not None
         media_description = None
 
         # Строка в базе появляется НЕМЕДЛЕННО, до любой тяжёлой обработки.
@@ -1453,7 +1466,19 @@ async def handle_new_message(event):
                                 
                             msgs = _pending_albums.pop(g_id, [])
                             if msgs:
-                                combined_text = "\n".join([m.text for m in msgs if m.text]).strip()
+                                # .message, а не .text: Message.text отдаёт текст С
+                                # РАЗМЕТКОЙ клиентского parse_mode (у telethon по
+                                # умолчанию markdown). Прогон разведки: .text даёт
+                                # "**Кейс**: перфорация", .message — "Кейс:
+                                # перфорация". Остальной код (handle_new_message,
+                                # sync_history, догон) берёт .message, и подпись
+                                # альбома выбивалась из общего правила: разметка
+                                # уходила в промпт зрения как «контекст от автора»
+                                # и участвовала в решении is_passive по вхождению
+                                # «бот»/«@». Отдельно: у сообщения без привязанного
+                                # клиента .text возвращает None, и подпись альбома
+                                # терялась целиком.
+                                combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
                                 await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
                                 
                         runtime_guard.create_task(_process_album_after_delay(event.grouped_id, bot_client), name=f"album_{event.grouped_id}")
@@ -1906,18 +1931,11 @@ async def sync_history():
 
             reply_to_id = message.reply_to.reply_to_msg_id if message.reply_to else None
             
+            # То же единое правило, что и в живом обработчике: догон не должен
+            # тащить в платный Vision превью ссылок, гифки, кружки и стикеры.
             synced_snapshot = image_document(message)
-            has_media = (
-                message.photo is not None
-                or message.video is not None
-                or synced_snapshot is not None
-            )
-            if message.photo or synced_snapshot is not None:
-                media_type = "photo"
-            elif message.video:
-                media_type = "video"
-            else:
-                media_type = None
+            media_type = clinical_media_kind(message)
+            has_media = media_type is not None
             
             synced_ok = await asyncio.wait_for(
                 database.save_message(

@@ -2367,7 +2367,7 @@ async def handle_private_message(bot_client, event):
         is_audio = is_voice or is_audio_file
         transcribed_text = None
         if is_audio:
-            os.makedirs("temp_media", exist_ok=True)
+            os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
             temp_path = None
             try:
@@ -3018,7 +3018,7 @@ async def handle_private_message(bot_client, event):
             return
         
         if has_media:
-            os.makedirs("temp_media", exist_ok=True)
+            os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             try:
                 # Отправляем статус ожидания
                 status_msg = await bot_client.send_message(entity=chat_id, message="📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>", parse_mode='html')

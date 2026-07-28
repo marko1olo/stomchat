@@ -8,6 +8,18 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+# Каталог для временных файлов медиа — ОДИН на весь проект.
+#
+# Он жил в трёх местах разными способами: main.py читал переменную окружения,
+# уборщик временных файлов и голосовой путь ходили по литералу "temp_media", и
+# путь медиа в личных сообщениях (assistant.py) тоже по литералу. При заданной
+# STOMCHAT_MEDIA_TEMP_DIR уборщик подметал пустой каталог, а файлы копились в
+# настроенном — вечно, вместе с обрывками скачиваний.
+#
+# Место выбрано здесь, а не в main.py: media_tools импортируют и main, и
+# assistant, а обратный импорт был бы круговым.
+MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
+
 
 def _json_exit(payload, code=0):
     sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="replace"))
@@ -161,6 +173,53 @@ def image_document(message):
         return None
     mime = (getattr(document, "mime_type", "") or "").lower()
     return document if mime.startswith("image/") else None
+
+
+def clinical_media_kind(message):
+    """
+    Что из сообщения имеет смысл вести в разбор: "photo", "video" или None.
+
+    Правило одно на все три места пути (живой обработчик, догоняющая
+    синхронизация, постановка в очередь): раньше каждое решало само через
+    `message.photo or message.video`, и это пускало в ПЛАТНЫЙ Vision то, что
+    клиническим снимком не является.
+
+    Почему так выходило — свойства telethon шире, чем кажутся:
+      * Message.photo при отсутствии MessageMediaPhoto лезет в
+        web_preview.photo, то есть КАРТИНКА ПРЕВЬЮ любой ссылки становилась
+        «снимком коллеги»;
+      * Message.video — это «документ с DocumentAttributeVideo», под которое
+        подходят и гифка (DocumentAttributeAnimated), и кружок-видеозаметка
+        (round_message), и видеостикер (DocumentAttributeSticker).
+
+    Замер разведки на подставных сообщениях: превью ссылки, гифка,
+    видеозаметка и видеостикер — все четыре принимались как медиа для разбора,
+    скачивались, для видео извлекался кадр, и всё уезжало в Vision.
+
+    Рентген и КТ присылают ДОКУМЕНТОМ с mime image/*, и этот путь обязан
+    остаться рабочим: он и есть норма для клинического чата (см.
+    image_document). Поэтому отсев построен на типе медиа и атрибутах
+    документа, а не на mime.
+    """
+    if message is None:
+        return None
+    # Стикеры, кружки и гифки — не клинический материал ни в каком случае.
+    # Видеостикер попадает и под sticker, и под video, поэтому проверяем раньше.
+    for junk in ("sticker", "video_note", "gif"):
+        if getattr(message, junk, None) is not None:
+            return None
+
+    # Превью ссылки: photo есть, но принадлежит веб-странице, а не сообщению.
+    if getattr(message, "web_preview", None) is not None:
+        return None
+
+    if getattr(message, "photo", None) is not None:
+        return "photo"
+    if image_document(message) is not None:
+        return "photo"
+    if getattr(message, "video", None) is not None:
+        return "video"
+    return None
 
 
 def _main():
