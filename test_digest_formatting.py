@@ -138,6 +138,79 @@ check("после обрезки тоже валидна",
       markup_problem(S._safe_truncate_html(result, max_len=200)) is None,
       f"got {markup_problem(S._safe_truncate_html(result, max_len=200))}")
 
+print("\n[12] Бонусные блоки берутся только под материал дня")
+# Блоки выбирались случайной выборкой из всех восемнадцати, а промпт требовал
+# «ты ОБЯЗАН внедрить». Замер на 140 реальных днях чата: 81 из 333 выбранных
+# блоков (24%) не имели в переписке никакого материала. У «Фармакологического
+# надзора» материал есть лишь в 34% дней. Модель, получив приказ, писала
+# раздел с дозировками по дню, где об анестезии не было ни слова.
+import io as _io      # noqa: E402
+import random as _rnd  # noqa: E402
+
+check("блоков ровно 18", len(S.BONUS_VARIANTS) == 18, f"got {len(S.BONUS_VARIANTS)}")
+unknown = [b.strip()[:40] for b in S.BONUS_VARIANTS if S.bonus_block_triggers(b) == ()]
+check("у каждого блока есть слова-признаки или он безусловный", not unknown,
+      f"блок без признаков попадёт в дайджест наугад: {unknown}")
+
+pharma_day = "Ставил артикаин, карпула ушла целиком, дозировка на 70 кг какая?"
+xray_day = "Прислал КЛКТ, на снимке тень у верхушки, ОПТГ тоже есть"
+neutral_day = "Коллеги, всем доброго утра, как настроение сегодня"
+
+
+def titles(blocks):
+    return [b.strip().split('"')[1] if '"' in b else b.strip()[:24] for b in blocks]
+
+
+def applicable(day_text):
+    """Какие блоки ДОСТУПНЫ — важна доступность, а не попадание в выборку."""
+    low = (day_text or "").lower()
+    out = []
+    for block in S.BONUS_VARIANTS:
+        triggers = S.bonus_block_triggers(block)
+        if triggers is None or any(t in low for t in triggers):
+            out.append(block)
+    return titles(out)
+
+
+check("в фармакологический день блок про фармаконадзор доступен",
+      any("ФАРМАКОЛОГИЧЕСКИЙ" in t for t in applicable(pharma_day)))
+check("в нём же блок про рентген недоступен",
+      not any("РЕНТГЕНОЛОГИЧЕСКИЙ" in t for t in applicable(pharma_day)),
+      "модели велят разобрать снимки, которых не показывали")
+check("в рентгенологический день доступен блок про снимки",
+      any("РЕНТГЕНОЛОГИЧЕСКИЙ" in t for t in applicable(xray_day)))
+check("в нём же фармаконадзор недоступен",
+      not any("ФАРМАКОЛОГИЧЕСКИЙ" in t for t in applicable(xray_day)),
+      "выдуманные дозировки в статье для практикующих врачей")
+check("в день без клиники остаются только безусловные блоки",
+      set(applicable(neutral_day)) == set(titles(
+          [b for b in S.BONUS_VARIANTS if S.bonus_block_triggers(b) is None])),
+      f"got {applicable(neutral_day)}")
+
+rng = _rnd.Random(1)
+too_many = dupes = 0
+for day in (pharma_day, xray_day, neutral_day, "", None):
+    for _ in range(40):
+        chosen = S.select_bonus_blocks(S.BONUS_VARIANTS, day, rng=rng)
+        if len(chosen) > S.BONUS_MAX_BLOCKS:
+            too_many += 1
+        if len(chosen) != len(set(chosen)):
+            dupes += 1
+check("блоков никогда не больше заявленного максимума", too_many == 0, f"got {too_many}")
+check("один блок не выпадает дважды", dupes == 0, f"got {dupes}")
+check("пустой день всё же даёт разбор",
+      len(S.select_bonus_blocks(S.BONUS_VARIANTS, "")) >= 1,
+      "статья выродится в перечень реплик")
+check("пустой список блоков не роняет", S.select_bonus_blocks([], "текст") == [])
+
+print("\n[13] Промпт не приказывает выдумывать")
+source = _io.open("summarizer.py", encoding="utf-8").read()
+instruction = source.split("ДОПОЛНИТЕЛЬНЫЕ ЭКСПЕРТНЫЕ БЛОКИ", 1)[1][:1200]
+check("нет требования «ОБЯЗАН внедрить»", "ОБЯЗАН внедрить" not in instruction,
+      "приказ при отсутствии материала заставляет модель сочинять")
+check("сказано пропускать блок без материала", "пропусти этот блок" in instruction)
+check("запрещена выдуманная конкретика", "которых нет в логе" in instruction)
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
