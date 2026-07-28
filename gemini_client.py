@@ -226,23 +226,94 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
     cooldowns = get_key_cooldowns()
     cooldowns[_key_fingerprint(provider, api_key)] = time.time() + seconds
     _save_expiry_map(KEY_COOLDOWN_FILE, cooldowns)
+
+
+# Маршрутизация по ВИДУ работы. Список видов собран по фактическим вызовам:
+# assistant.py (21 вызов), summarizer.py (daily/weekly), blocking_tools.py
+# (transcription_corrector). Прежняя таблица перечисляла имена, которых не
+# передаёт НИКТО — term_explainer, quiz, direct_ask, assistant_media_pm, — а
+# десять настоящих видов в неё не попадали и сваливались в else, то есть в
+# тяжёлый «сводочный» каскад: bot_mention_reply, group_ask, group_quiz_gen,
+# group_explainer, group_referee, pm_ping, transcription_corrector и три
+# классификатора. Цена ошибки: короткий ответ в группе начинал с большой
+# config.GEMINI_MODEL при бюджете 60 с, вместо lite-модели.
+#
+# Короткие классификаторы: у всех вызывающих thinking_level LOW и ответ в одну
+# строку. Первой идёт groq-llama — на такой задаче она быстрее lite-моделей.
+TRIAGE_KINDS = frozenset({
+    "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
+})
+# Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
+CHAT_KINDS = frozenset({
+    "assistant", "assistant_media", "pm_chat", "pm_ping", "bot_mention_reply",
+    "group_ask", "group_quiz_gen", "group_explainer", "group_referee",
+    "transcription_corrector",
+})
+# Всё остальное — daily, weekly, group_summary и любой незнакомый вид — идёт в
+# тяжёлый каскад: там качество важнее задержки, и бюджет там 2100 с.
+
+# Ниже этого одна попытка бессмысленна: запрос рвётся на генерации. Значение
+# унаследовано от прежнего max(7.0, ...) — нижнюю границу автор уже выбрал.
+MIN_REQUEST_SECONDS = 7.0
+# Дробить долю модели на несколько попыток по разным ключам стоит только если
+# каждой достанется хотя бы столько: иначе ротация ключей превращается в серию
+# запросов, убитых по таймауту на середине ответа.
+COMFORT_REQUEST_SECONDS = 20.0
+# 15% бюджета не раздаём запросам: это сны между попытками (2-12 с,
+# _retry_sleep_seconds), старт подпроцесса с импортом openai (~1-2 с) и запас,
+# чтобы успеть записать причину провала ДО того, как родитель убьёт процесс.
+BUDGET_RESERVE_SHARE = 0.85
+
+# Причина последнего провала каскада.
+#
+# generate_text возвращает None одинаково и на «все ключи остывают», и на
+# «промпт длиннее контекста», и на «модель забанена». Вызывающий различить их не
+# мог, в журнале стояло одно и то же «All AI attempts exhausted», и врачу шло
+# одинаковое «не смог ответить». Причина теперь остаётся здесь — для вызова в
+# том же процессе (vision) — и уходит в файл статуса, который переживает смерть
+# подпроцесса и потому доступен родителю.
+LAST_FAILURE = None
+
+
+def get_last_failure():
+    """Причина последнего провала каскада: {'reason', 'detail', 'ts'} или None."""
+    return LAST_FAILURE
+
+
+def _reset_failure():
+    global LAST_FAILURE
+    LAST_FAILURE = None
+
+
+def _record_failure(reason, detail="", api_key=None):
+    global LAST_FAILURE
+    text = str(detail or "")[:500]
+    if api_key and api_key in text:
+        # Ключ — секрет. Причина уходит в файл статуса и в журнал, поэтому
+        # ключ вырезаем даже из текста чужого исключения.
+        text = text.replace(api_key, "***")
+    LAST_FAILURE = {"reason": reason, "detail": text, "ts": time.time()}
+
+
 def generate_text(prompt, status_context=None, timeout=None):
     """Generate summary text through Gemini with Groq fallback."""
+    _reset_failure()
     kind = status_context.get("kind") if status_context else None
     is_pm = kind in ("pm_chat", "assistant_media_pm")
-    is_triage = kind == "llama_triage"
+    is_triage = kind in TRIAGE_KINDS
     thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
-    
+
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
-    
-    # Calculate per-request timeout dynamically
+
+    # Таймаут одного запроса считается ниже, когда известен каскад: он зависит от
+    # числа попыток, а число попыток — от числа моделей и живых ключей. Здесь
+    # стояло req_timeout = timeout/3, и это была ошибка арифметики, а не оценки;
+    # разбор — у расчёта бюджета после сборки каскада.
     req_timeout = 30.0
-    if timeout:
-        req_timeout = max(7.0, float(timeout) / 3.0)
-    
-    # ROUTING BY TASKS:
-    is_chatbot = kind in ("assistant", "assistant_media", "assistant_media_pm", "pm_chat", "llama_triage", "term_explainer", "quiz", "direct_ask")
-    
+
+    # ROUTING BY TASKS: списки видов — TRIAGE_KINDS / CHAT_KINDS выше.
+    is_chatbot = kind in CHAT_KINDS
+
     if is_triage:
         models_cascade = [
             ("llama-3.3-70b-versatile", "groq"),
@@ -281,8 +352,53 @@ def generate_text(prompt, status_context=None, timeout=None):
         logger.warning("All models in cascade are banned. Forcing fallback to the last model.")
         active_cascade = [models_cascade[-1]]
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
-    
-    for model_name, provider in active_cascade:
+
+    # АРИФМЕТИКА БЮДЖЕТА: попытки x таймаут попытки обязаны влезать в timeout.
+    #
+    # Родитель (blocking_tools.generate_gemini_text_async) держит подпроцесс под
+    # asyncio.wait_for ровно на этот же timeout и убивает его по истечении.
+    # Прежнее timeout/3 исходило из трёх запросов, а каскад делает моделей x
+    # попыток = 4 x 3 = 12. Замер по коду на боевых бюджетах: assistant 90 с ->
+    # 12 x 30 с = 360 с (перерасход x4), llama_triage 20 с -> 9 x 7 с = 63 с
+    # (x3.1), response_validator 15 с -> 12 x 7 с = 84 с (x5.6), daily 2100 с ->
+    # 12 x 700 с = 8400 с (x4). Процесс умирал на третьей попытке ПЕРВОЙ модели,
+    # то есть резервный провайдер groq в конце каскада не пробовался ни разу —
+    # ради него каскад и написан.
+    #
+    # Делим иначе: сначала бюджет режется между моделями (шанс должна получить
+    # каждая, в этом смысл каскада), и только если доля модели вмещает несколько
+    # запросов по COMFORT_REQUEST_SECONDS, доля дробится на попытки по ключам.
+    # При бюджете 90 с и 4 моделях выходит 4 запроса по 19 с вместо 12 по 30 с;
+    # при 2100 с — 12 по 148 с, ротация ключей сохраняется полностью.
+    deadline = None
+    if timeout:
+        budget = float(timeout)
+        # На резерв не жертвуем последней попыткой: при совсем малом бюджете
+        # (меньше 8 с такие вызывающие сейчас не передают) лучше один запрос на
+        # весь бюджет, чем ноль запросов и гарантированный None.
+        usable = max(min(budget, MIN_REQUEST_SECONDS), budget * BUDGET_RESERVE_SHARE)
+        models_fit = max(1, min(len(active_cascade), int(usable // MIN_REQUEST_SECONDS)))
+        if models_fit < len(active_cascade):
+            logger.info(
+                "Budget %.0fs fits %s of %s cascade models; dropping the tail (it was never reached anyway).",
+                budget, models_fit, len(active_cascade)
+            )
+            active_cascade = active_cascade[:models_fit]
+        model_share = usable / len(active_cascade)
+        max_attempts = max(1, min(max_attempts, int(model_share // COMFORT_REQUEST_SECONDS)))
+        req_timeout = model_share / max_attempts
+        # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
+        # убийства родителем, иначе причину провала записать будет некому.
+        deadline = time.monotonic() + usable
+        logger.info(
+            "Budget %.0fs: %s models x %s attempts x %.1fs = %.0fs planned.",
+            budget, len(active_cascade), max_attempts, req_timeout,
+            len(active_cascade) * max_attempts * req_timeout
+        )
+
+    out_of_budget = False
+    requests_made = 0
+    for model_index, (model_name, provider) in enumerate(active_cascade):
         if provider == "gemini":
             keys = list(config.GOOGLE_KEYS)
             client_maker = lambda k: get_openai_client(k, "https://generativelanguage.googleapis.com/v1beta/openai/", timeout=req_timeout)
@@ -292,6 +408,7 @@ def generate_text(prompt, status_context=None, timeout=None):
             
         if not keys:
             logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
+            _record_failure("no_keys_configured", f"{provider}: ключи не настроены")
             continue
 
         random.shuffle(keys)
@@ -314,6 +431,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                 "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
                 provider, max(0, int(soonest - now_ts)), model_name
             )
+            _record_failure(
+                "all_keys_on_cooldown",
+                f"{provider}: все {len(keys)} ключей остывают, ближайший через "
+                f"{max(0, int(soonest - now_ts))}с"
+            )
             continue
         if len(available) < len(keys):
             logger.info(
@@ -322,9 +444,32 @@ def generate_text(prompt, status_context=None, timeout=None):
             )
 
         # Бюджет попыток — это число РЕАЛЬНЫХ запросов, каждый на своём ключе.
-        for attempt in range(min(max_attempts, len(available))):
+        attempts_planned = min(max_attempts, len(available))
+        is_last_model = model_index == len(active_cascade) - 1
+        for attempt in range(attempts_planned):
             api_key = available[attempt]
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
+
+            # Первый запрос делаем всегда: бюджет уже нарезан так, чтобы он в
+            # него влез, а ноль запросов — это гарантированное молчание бота.
+            if deadline is not None and requests_made:
+                remaining = deadline - time.monotonic()
+                if remaining < MIN_REQUEST_SECONDS:
+                    # Запрос, который не успеет закончиться до убийства процесса,
+                    # начинать нечего: его ответ никто не прочитает.
+                    logger.warning(
+                        "Budget spent (%.1fs left) before %s; stopping cascade.",
+                        max(0.0, remaining), model_name
+                    )
+                    _record_failure(
+                        "budget_exhausted",
+                        f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
+                    )
+                    out_of_budget = True
+                    break
+                # Последнему запросу отдаём ровно остаток бюджета, а не полную
+                # долю: сумма таймаутов запросов не должна вылезать за timeout.
+                req_timeout = min(req_timeout, remaining)
 
             try:
                 client = client_maker(api_key)
@@ -335,6 +480,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                 )
                 logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
+                requests_made += 1
                 # Using OpenAI SDK for BOTH Groq and Gemini now
                 response = client.chat.completions.create(
                     model=model_name,
@@ -356,6 +502,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                         key=key_id, result_chars=len(text_result)
                     )
                     _release_generation_status(status_context)
+                    _reset_failure()
                     return DummyResponse(text_result)
 
                 logger.warning(f"{provider.capitalize()} returned empty response attempt={attempt + 1}/{max_attempts} key={key_id}")
@@ -363,6 +510,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     status_context, stage=f"{provider}_empty_response",
                     attempt=attempt + 1, max_attempts=max_attempts, key=key_id
                 )
+                _record_failure("empty_response", f"{model_name}: модель вернула пустой текст")
 
             except Exception as exc:
                 err_msg = str(exc).lower()
@@ -378,31 +526,79 @@ def generate_text(prompt, status_context=None, timeout=None):
                     key=key_id, error=str(exc)[:500]
                 )
                 
-                if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
-                    ban_duration = 1200  # 20 минут в секундах
-                    ban_model(model_name, ban_duration)
-                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 20 minutes. Skipping in cascade.")
-                    break
-
+                # «Ключ исчерпан» проверяется ПЕРВЫМ и никогда не приводит к бану
+                # модели. Раньше первым стоял бан: в теле 429 от Gemini и Groq
+                # регулярно стоит лимит квоты числом 500-класса — например
+                # "429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day", — и
+                # _SERVER_ERROR_RE находил там 500 отдельным словом. Итог был
+                # ровно обратный нужному: РАБОЧАЯ модель улетала в бан на 20
+                # минут для всех ключей и всех подпроцессов (файл общий), а
+                # исчерпанный ключ кулдауна не получал вовсе, потому что break
+                # уходил из цикла раньше строки с set_key_cooldown. Один
+                # выдохшийся ключ выносил модель из каскада на треть часа.
                 if _RATE_LIMIT_RE.search(err_msg):
                     logger.info(
                         f"{provider.capitalize()} rate limited (429/quota). Placing key {key_id} "
                         f"on {KEY_COOLDOWN_SECONDS}s cooldown."
                     )
                     set_key_cooldown(provider, api_key)
+                    _record_failure("key_rate_limited", str(exc), api_key)
                     # Do not sleep, immediately skip to the next key or model
                     continue
-                    
+
+                if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
+                    ban_duration = 1200  # 20 минут в секундах
+                    ban_model(model_name, ban_duration)
+                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 20 minutes. Skipping in cascade.")
+                    _record_failure("model_overloaded", str(exc), api_key)
+                    break
+
                 if "403" in err_msg or "permission" in err_msg:
                     logger.info(f"{provider.capitalize()} key denied (403), switching key without sleeping.")
+                    _record_failure("key_denied", str(exc), api_key)
                     continue
-                    
-                logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
-                _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
+
+                _record_failure("request_failed", str(exc), api_key)
+                # Сон нужен только тому, кто ещё будет повторять. На последней
+                # попытке последней модели дальше стоит return None — 8-10 с сна
+                # перед ним врач ждал впустую. Остаток бюджета тоже режем: спать
+                # дольше, чем осталось на сам запрос, бессмысленно.
+                if is_last_model and attempt + 1 >= attempts_planned:
+                    logger.info(
+                        f"{provider.capitalize()} last chance in cascade failed; "
+                        f"skipping the {sleep_time:.1f}s backoff before giving up."
+                    )
+                    continue
+                if deadline is not None:
+                    sleep_time = min(
+                        sleep_time,
+                        max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS)
+                    )
+                if sleep_time > 0:
+                    logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
+                    _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
                 continue
 
-    logger.error("All AI attempts exhausted. Summary was not generated.")
-    _write_generation_status(status_context, stage="all_exhausted", max_attempts=max_attempts)
+        if out_of_budget:
+            break
+
+    # Причина провала уходит и в журнал, и в файл статуса. Раньше здесь была
+    # одна строка «All AI attempts exhausted» на все случаи: по журналу нельзя
+    # было отличить «все ключи остывают» (само пройдёт через 5 минут) от
+    # «промпт длиннее контекста» (не пройдёт никогда и лечится обрезкой), а
+    # вызывающему возвращался просто None.
+    failure = LAST_FAILURE or {
+        "reason": "no_attempts_made",
+        "detail": "каскад не сделал ни одного запроса",
+    }
+    logger.error(
+        "All AI attempts exhausted: reason=%s detail=%s",
+        failure["reason"], failure["detail"]
+    )
+    _write_generation_status(
+        status_context, stage="all_exhausted", max_attempts=max_attempts,
+        failure_reason=failure["reason"], error=failure["detail"]
+    )
     # Провал тоже завершает работу: оставлять флаг взведённым после исчерпания
     # каскада — значит держать заряженным сторожевой os._exit.
     _release_generation_status(status_context)

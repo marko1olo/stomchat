@@ -53,6 +53,57 @@ async def _run_db(operation):
     return await loop.run_in_executor(_DB_EXECUTOR, operation)
 
 
+def _bot_sent_messages_is_legacy(db):
+    """
+    True, если учёт исходящих ещё ключуется ОДНИМ msg_id.
+
+    Смотрим фактические уникальные индексы, а не текст CREATE TABLE: боевая база
+    создавалась кодом, где msg_id объявлен UNIQUE на уровне колонки, а такой
+    индекс (sqlite_autoindex_*) нельзя ни удалить, ни переопределить — таблицу
+    приходится пересобирать. Проверка по индексам ещё и идемпотентна: после
+    пересборки уникальный индекс покрывает пару (msg_id, chat_id), и миграция
+    больше не срабатывает.
+    """
+    for row in db.execute("PRAGMA index_list('bot_sent_messages')"):
+        index_name, is_unique = row[1], row[2]
+        if not is_unique:
+            continue
+        columns = [info[2] for info in db.execute(f"PRAGMA index_info('{index_name}')")]
+        if columns == ["msg_id"]:
+            return True
+    return False
+
+
+def _rebuild_bot_sent_messages(db):
+    """
+    Переключает учёт исходящих на ключ (msg_id, chat_id) с переносом данных.
+
+    id переносится как есть, потому что /wipe берёт последние сообщения бота
+    через ORDER BY id DESC: пересборка со сквозной перенумерацией перемешала бы
+    порядок отправки и удаляла бы не то, что админ ожидает увидеть удалённым.
+    Конфликтов при переносе быть не может — старый ключ строже нового.
+    DROP ... IF EXISTS на промежуточной таблице оставлен ради самолечения:
+    если процесс упал между CREATE и RENAME, следующий старт начинает заново.
+    """
+    db.execute("DROP TABLE IF EXISTS bot_sent_messages_rebuild")
+    db.execute(
+        """
+        CREATE TABLE bot_sent_messages_rebuild (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            msg_id INTEGER,
+            chat_id INTEGER,
+            UNIQUE(msg_id, chat_id)
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO bot_sent_messages_rebuild (id, msg_id, chat_id) "
+        "SELECT id, msg_id, chat_id FROM bot_sent_messages"
+    )
+    db.execute("DROP TABLE bot_sent_messages")
+    db.execute("ALTER TABLE bot_sent_messages_rebuild RENAME TO bot_sent_messages")
+
+
 async def init_db():
     def operation():
         with _connection() as db:
@@ -77,6 +128,19 @@ async def init_db():
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_date ON messages(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sender ON messages(sender_id)")
+            # Ответы в чате читаются по родителю, а не по себе: на КАЖДОЕ
+            # сообщение-ответ под медиа-постом assistant.py делает
+            # COUNT(*) WHERE reply_to_msg_id = ?, а затем выборку всей ветки
+            # WHERE msg_id = ? OR reply_to_msg_id = ?. Замер EXPLAIN на копии
+            # боевой базы (32 883 строки, 20 499 из них ответы):
+            #   до  — SCAN messages / SCAN messages USING INDEX idx_date,
+            #         5.7 мс на COUNT и 6.9 мс на ветку;
+            #   после — SEARCH ... USING COVERING INDEX idx_reply_to и
+            #         MULTI-INDEX OR, 0.006 мс и 0.063 мс (в 950 и 109 раз).
+            # OR-план по двум индексам вообще недостижим, пока проиндексирована
+            # только одна из двух колонок, поэтому одна вторая половина условия
+            # обесценивала уникальный индекс на msg_id.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_reply_to ON messages(reply_to_msg_id)")
 
             db.execute(
                 """
@@ -99,19 +163,34 @@ async def init_db():
             # же пост давал дубль в списке. Сначала схлопываем уже накопленные
             # дубли (оставляя самую раннюю запись), затем ставим индекс —
             # иначе CREATE UNIQUE INDEX упадёт на существующих данных.
+            #
+            # В ключ входит и chat_id: id сообщений уникальны только внутри
+            # чата, поэтому пост #4821 основного чата и #4821 тестового — два
+            # разных поста, а ключ (saved_by_user_id, msg_id) объявлял их одной
+            # закладкой. Последствия были обоюдные: второй /save молча не
+            # сохранялся (INSERT OR IGNORE), а дедупликация ниже удаляла уже
+            # сохранённое. То же касается закладок на статьи энциклопедии — у
+            # них синтетический отрицательный msg_id и chat_id личного чата.
+            # IFNULL нужен, потому что в NULL-значениях SQLite считает строки
+            # различными: старые закладки без chat_id перестали бы
+            # дедуплицироваться вообще.
+            # DROP перед CREATE обязателен: индекс с этим именем в боевой базе
+            # уже стоит, а CREATE ... IF NOT EXISTS сверяет только имя и молча
+            # оставил бы прежнее двухколоночное определение.
             try:
+                db.execute("DROP INDEX IF EXISTS idx_bookmark_unique")
                 db.execute(
                     """
                     DELETE FROM clinical_bookmarks
                     WHERE id NOT IN (
                         SELECT MIN(id) FROM clinical_bookmarks
-                        GROUP BY saved_by_user_id, msg_id
+                        GROUP BY saved_by_user_id, msg_id, IFNULL(chat_id, 0)
                     )
                     """
                 )
                 db.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookmark_unique "
-                    "ON clinical_bookmarks(saved_by_user_id, msg_id)"
+                    "ON clinical_bookmarks(saved_by_user_id, msg_id, IFNULL(chat_id, 0))"
                 )
             except Exception as e:
                 logger.warning(f"Could not enforce bookmark uniqueness: {e}")
@@ -128,15 +207,40 @@ async def init_db():
                 """
             )
 
+            # Ключ — ПАРА (msg_id, chat_id). Бот работает минимум в двух чатах
+            # (основной и тестовый) плюс личные переписки, а id сообщений
+            # уникальны лишь внутри чата. При UNIQUE на одном msg_id
+            # save_bot_sent_message (INSERT OR REPLACE) на совпадении номера
+            # молча УДАЛЯЛ учётную строку другого чата: /wipe там переставал
+            # видеть собственное сообщение и не мог его убрать — навсегда, потому
+            # что заново оно уже не регистрируется.
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bot_sent_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    msg_id INTEGER UNIQUE,
-                    chat_id INTEGER
+                    msg_id INTEGER,
+                    chat_id INTEGER,
+                    UNIQUE(msg_id, chat_id)
                 )
                 """
             )
+            # Боевая таблица создана старым определением, где UNIQUE висит на
+            # колонке msg_id; CREATE TABLE IF NOT EXISTS её не меняет, поэтому
+            # ключ переносится пересборкой. Ошибку глушим намеренно: учёт
+            # исходящих нужен только /wipe, и неудачная миграция не должна
+            # ронять старт бота целиком.
+            try:
+                if _bot_sent_messages_is_legacy(db):
+                    _rebuild_bot_sent_messages(db)
+                    logger.info("database schema migrated: bot_sent_messages keyed by (msg_id, chat_id)")
+            except Exception as e:
+                logger.warning(f"Could not migrate bot_sent_messages key: {e}")
+            # /wipe выбирает WHERE chat_id = ? ORDER BY id DESC LIMIT ?. Замер на
+            # синтетической таблице боевой формы (20 000 строк, 300 личных чатов):
+            # до — SCAN bot_sent_messages, 0.104 мс; после — SEARCH ... USING
+            # INDEX idx_bot_sent_chat, 0.031 мс. Уникальный индекс пары здесь не
+            # помогает: chat_id в нём второй колонкой.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_bot_sent_chat ON bot_sent_messages(chat_id, id)")
 
             db.execute(
                 """
@@ -203,13 +307,18 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
                 # Флаг для того и заведён, см. mark_messages_as_summarized:
                 # «сообщение, уже ушедшее в сводку, не должно всплыть в
                 # следующей ещё раз» — здесь это правило и нарушалось.
+                #
+                # Добор по msg_id в ORDER BY — по той же причине, что в
+                # get_last_n_messages: граница LIMIT падает внутрь одной секунды
+                # в 5.5% случаев, и без второго ключа непонятно, какую из реплик
+                # секунды взяли, а какую оставили следующему разу.
                 needed = min_count - len(total_msgs)
                 old_messages = db.execute(
                     """
                     SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
                     FROM messages
                     WHERE date < ? AND is_summarized = 0
-                    ORDER BY date DESC
+                    ORDER BY date DESC, msg_id DESC
                     LIMIT ?
                     """,
                     (_date_text(start_time), needed),
@@ -262,13 +371,30 @@ async def get_messages_from(start_msg_id, limit=60):
 
 
 async def get_last_n_messages(limit=300):
+    """
+    Последние `limit` сообщений в хронологическом порядке.
+
+    Добор по msg_id в ORDER BY — не косметика. Колонка date хранит секунды, и в
+    живом чате секунда содержит по несколько реплик: на копии боевой базы
+    2 727 сообщений из 32 883 (8.3%) делят секунду с другим, в самой плотной
+    группе их 14. Без второго ключа порядок внутри секунды не определён, а
+    граница LIMIT попадает внутрь такой группы в 1 779 окнах из 32 583 (5.5%):
+    окно брало более позднюю реплику и отбрасывало более раннюю — ту, на
+    которую позднее отвечает. После разворота rows[::-1] порядок внутри секунды
+    тоже был произвольным, то есть ответ мог оказаться в контексте ВЫШЕ реплики,
+    которой отвечает.
+
+    Стоимости у добора нет: SQLite идёт по idx_date в обратную сторону и
+    досортировывает только внутри равных дат («USE TEMP B-TREE FOR LAST TERM OF
+    ORDER BY»), замер на той же копии 0.99 мс до и 0.90 мс после.
+    """
     def operation():
         with _connection() as db:
             rows = db.execute(
                 """
                 SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
                 FROM messages
-                ORDER BY date DESC
+                ORDER BY date DESC, msg_id DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -523,6 +649,28 @@ async def update_media_description(msg_id, description):
 
 
 async def get_pending_media_message_ids(limit=5):
+    """
+    Снимки без описания — очередь на разбор для recover_pending_media_analysis.
+
+    Окна «за последние 3 дня» здесь больше нет, и это исправление, а не
+    ослабление фильтра. enqueue_media_analysis обещает: непоставленное в очередь
+    не пропадает, у него пустое media_description, и его подберёт восстановление
+    при следующих запусках. С окном обещание было ложным — снимок, переживший
+    трёхдневную паузу (очередь на 128 переполнилась при массовом догоне,
+    процесс лежал, ключи Vision кончились), выпадал из выборки НАВСЕГДА.
+    Замер на копии боевой базы: 745 снимков без описания, самый старый от
+    2026-01-29, самый свежий от 2026-06-17 — в окно попадает 0, то есть функция
+    отдавала пустой список при 745 неразобранных.
+
+    Порядок msg_id DESC сохранён намеренно: свежий снимок ещё обсуждают, и он
+    важнее архивного. Постоянно недоступные строки очередь не закупоривают —
+    воркер помечает провал анализа текстом «[медиа — ошибка анализа]», и
+    непустое описание выводит такую строку из выборки.
+
+    Плата за снятие окна: 0.060 мс, пока неразобранное есть, и полный проход по
+    индексу msg_id, когда очередь пуста, — 33.6 мс на той же копии. Функция
+    вызывается один раз за старт процесса, так что это разовые 33 мс.
+    """
     def operation():
         with _connection() as db:
             rows = db.execute(
@@ -531,7 +679,6 @@ async def get_pending_media_message_ids(limit=5):
                 FROM messages
                 WHERE has_media = 1
                   AND (media_description IS NULL OR media_description = '')
-                  AND date >= datetime('now', '-3 days')
                 ORDER BY msg_id DESC
                 LIMIT ?
                 """,
@@ -580,9 +727,29 @@ async def save_clinical_bookmark(saved_by_user_id, msg_id, chat_id, sender_name,
     return await _run_db(operation)
 
 
-async def get_clinical_bookmarks(saved_by_user_id, query=None):
+async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offset=0):
+    """
+    Закладки врача, свежие сверху.
+
+    ORDER BY получил добор по id. Дата закладки — секунды, а сохраняют пачкой,
+    отвечая на серию постов: реплики одной секунды выстраивались произвольно, и
+    при постраничном выводе (/bookmarks листает по 10) одна и та же закладка
+    могла показаться на двух страницах подряд, а соседняя — ни на одной. Порядок
+    внутри секунды по id совпадает с порядком сохранения.
+
+    limit/offset добавлены для постраничного вывода: сейчас вызывающая сторона
+    забирает ВСЕ закладки пользователя и режет их в Python, то есть на каждый
+    /bookmarks поднимает из базы весь личный архив ради 10 строк. По умолчанию
+    limit=None — поведение прежнее, чтобы правка не требовала одновременного
+    изменения вызова.
+    """
     def operation():
         with _connection() as db:
+            # LIMIT -1 — способ SQLite сказать «без ограничения», он же
+            # обязателен, если нужен OFFSET: голый OFFSET синтаксис не
+            # принимает.
+            window = "LIMIT ? OFFSET ?"
+            bounds = (-1 if limit is None else int(limit), int(offset or 0))
             if query:
                 # Поиск идёт и по автору. Раньше искали только в тексте и в
                 # описании снимка, поэтому «тот пост Иванова» найти было нельзя
@@ -590,25 +757,57 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None):
                 # чем по словам.
                 like = f"%{query}%"
                 return db.execute(
-                    """
+                    f"""
                     SELECT msg_id, chat_id, sender_name, text, media_description, date
                     FROM clinical_bookmarks
                     WHERE saved_by_user_id = ?
                       AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
-                    ORDER BY date DESC
+                    ORDER BY date DESC, id DESC
+                    {window}
                     """,
-                    (saved_by_user_id, like, like, like),
+                    (saved_by_user_id, like, like, like) + bounds,
                 ).fetchall()
             else:
                 return db.execute(
-                    """
+                    f"""
                     SELECT msg_id, chat_id, sender_name, text, media_description, date
                     FROM clinical_bookmarks
                     WHERE saved_by_user_id = ?
-                    ORDER BY date DESC
+                    ORDER BY date DESC, id DESC
+                    {window}
                     """,
-                    (saved_by_user_id,),
+                    (saved_by_user_id,) + bounds,
                 ).fetchall()
+    return await _run_db(operation)
+
+
+async def count_clinical_bookmarks(saved_by_user_id, query=None):
+    """
+    Сколько всего закладок подходит под условие.
+
+    Нужно вместе с limit/offset: /bookmarks печатает «страница X из Y» и без
+    общего числа страниц вызывающая сторона снова вынуждена тянуть все строки.
+    Условие ОБЯЗАНО повторять get_clinical_bookmarks — иначе счётчик страниц
+    разойдётся с содержимым.
+    """
+    def operation():
+        with _connection() as db:
+            if query:
+                like = f"%{query}%"
+                row = db.execute(
+                    """
+                    SELECT COUNT(*) FROM clinical_bookmarks
+                    WHERE saved_by_user_id = ?
+                      AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
+                    """,
+                    (saved_by_user_id, like, like, like),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT COUNT(*) FROM clinical_bookmarks WHERE saved_by_user_id = ?",
+                    (saved_by_user_id,),
+                ).fetchone()
+            return row[0] if row else 0
     return await _run_db(operation)
 
 
@@ -686,10 +885,24 @@ async def get_last_bot_sent_messages(count=10, chat_id=None):
     return await _run_db(operation)
 
 
-async def remove_bot_sent_message(msg_id):
+async def remove_bot_sent_message(msg_id, chat_id=None):
+    """
+    Снимает сообщение бота с учёта после удаления в Telegram.
+
+    chat_id стоит передавать всегда: с ключом (msg_id, chat_id) строки разных
+    чатов сосуществуют, и удаление «по номеру» снимает с учёта чужую — то же
+    сообщение основного чата, которое /wipe после этого не увидит.
+    chat_id=None оставлен ради совместимости с вызовами, которые чат не знают.
+    """
     def operation():
         with _connection() as db:
-            db.execute("DELETE FROM bot_sent_messages WHERE msg_id = ?", (msg_id,))
+            if chat_id is None:
+                db.execute("DELETE FROM bot_sent_messages WHERE msg_id = ?", (msg_id,))
+            else:
+                db.execute(
+                    "DELETE FROM bot_sent_messages WHERE msg_id = ? AND chat_id = ?",
+                    (msg_id, chat_id),
+                )
     return await _run_db(operation)
 
 
@@ -771,9 +984,9 @@ async def get_user_recent_group_messages(user_id, limit=20):
         with _connection() as db:
             rows = db.execute(
                 """
-                SELECT text FROM messages 
+                SELECT text FROM messages
                 WHERE sender_id = ? AND text IS NOT NULL AND text != ''
-                ORDER BY date DESC LIMIT ?
+                ORDER BY date DESC, msg_id DESC LIMIT ?
                 """,
                 (user_id, limit)
             ).fetchall()

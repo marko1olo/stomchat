@@ -114,9 +114,39 @@ MEDIA_WORKER_COUNT = max(1, _env_int("STOMCHAT_MEDIA_WORKERS", 1))
 MEDIA_QUEUE_MAX_SIZE = max(MEDIA_WORKER_COUNT, _env_int("STOMCHAT_MEDIA_QUEUE_MAX", 128))
 MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
 MEDIA_RECOVERY_LIMIT = max(0, _env_int("STOMCHAT_MEDIA_RECOVERY_LIMIT", 5))
+# Отметка «файл до Vision не дошёл». Пустое media_description означает «ещё не
+# разбирали», и строка с ним возвращается из get_pending_media_message_ids на
+# каждом запуске. Любое непустое значение снимает её с догона; отдельный текст
+# (а не общее "-") нужен, чтобы отказ скачивания отличался в базе от отказа
+# самого разбора.
+MEDIA_UNAVAILABLE_MARK = "[медиа — файл не получен]"
 _media_queue = None
 _media_worker_tasks = []
 _pending_albums = {}
+
+# Что уже поставлено в очередь разбора В ЭТОМ процессе.
+#
+# Догон при старте (recover_pending_media_analysis) ищет в базе медиа с пустым
+# media_description, а описание пишется только ПОСЛЕ разбора. Поэтому пять
+# свежих снимков, которые sync_history поставил в очередь секунду назад, для
+# догона выглядят необработанными — и он ставил ТЕ ЖЕ САМЫЕ ещё раз. Разбор
+# идёт через платный Vision: на каждом рестарте до MEDIA_RECOVERY_LIMIT (5)
+# снимков оплачивались дважды.
+#
+# Ограничение по длине как у HANDLED_CALLBACK_IDS: без него набор растёт на
+# каждое медиа за всё время жизни процесса.
+_QUEUED_MEDIA_IDS = set()
+_QUEUED_MEDIA_ORDER = deque(maxlen=512)
+
+
+def _remember_queued_media(msg_ids):
+    for queued_id in msg_ids:
+        if queued_id is None or queued_id in _QUEUED_MEDIA_IDS:
+            continue
+        if len(_QUEUED_MEDIA_ORDER) == _QUEUED_MEDIA_ORDER.maxlen:
+            _QUEUED_MEDIA_IDS.discard(_QUEUED_MEDIA_ORDER[0])
+        _QUEUED_MEDIA_ORDER.append(queued_id)
+        _QUEUED_MEDIA_IDS.add(queued_id)
 
 async def get_my_id():
     global MY_ID
@@ -391,6 +421,103 @@ async def summary_watchdog_task():
         except Exception:
             logger.exception("summary watchdog failed")
 
+# Час, с которого начинается дневное окно. Он НЕ независим от
+# config.REPORT_HOUR: пока это были две несвязанные константы, стык окон
+# держался на совпадении чисел. При REPORT_HOUR=22 (текущий бой) окна
+# перекрываются на 2 часа — по локальному снимку это 15.8% трафика, то есть
+# вечер уходит в дайджест ДВАЖДЫ, но не теряется. А при REPORT_HOUR меньше 20
+# (в config.example.py стоит 0) между выпусками возникает дыра: окно кончается в
+# REPORT_HOUR, а следующее начинается только в 20:00 того же дня — до 20 часов
+# переписки в сутки не попадают ни в один выпуск. daily_window_start() связывает
+# их через last_sent_date, поэтому дыра закрывается при любом REPORT_HOUR.
+DIGEST_WINDOW_START_HOUR = 20
+
+# Насколько глубоко догоняем пропущенные выпуски. Без ограничения месяц простоя
+# уехал бы одним запросом в промпт: по локальному снимку это порядка 8000
+# сообщений против 228 в обычные сутки (худшая измеренная тройка дней — 1458).
+# Ограничение делает потерю видимой в журнале вместо того, чтобы отдать
+# генерации заведомо неподъёмный лог; за пределами трёх суток период всё равно
+# покрывает недельный отчёт.
+DIGEST_CATCHUP_MAX_DAYS = 3
+
+WEEKLY_REPORT_HOUR = 10
+WEEKLY_WINDOW_DAYS = 7
+# Догон недельного отчёта тоже ограничен: 10 суток вместо 7 — это запас на
+# пропущенный понедельник, а не бесконечное окно.
+WEEKLY_CATCHUP_MAX_DAYS = 10
+# Двух выпусков за трое суток быть не должно. Без этой границы догон, отработав
+# в воскресенье, выпускал бы вторую газету в понедельник — на почти том же
+# материале и с отдельной страницей Telegraph.
+WEEKLY_MIN_GAP_DAYS = 3
+
+
+def daily_window_start(now, last_sent_date):
+    """
+    Нижняя граница окна дневного дайджеста.
+
+    Раньше она считалась только от now: «(now - 1 день) в 20:00». Пока выпуски
+    идут каждый день, этого хватает, но last_sent_date хранится ровно для
+    другого случая — пропущенного дня. Если вчерашний дайджест не ушёл (бот
+    лежал, цель отвалилась, сообщений было меньше порога), то сегодняшнее окно
+    всё равно начиналось с 20:00 вчера, и промежуток от конца последнего выпуска
+    (позавчера, REPORT_HOUR) до вчерашних 20:00 — порядка 22 часов — не попадал
+    НИ В ОДИН выпуск. Добор по is_summarized этого не спасает: он включается
+    только когда в окне меньше min_count сообщений, и берёт лишь недостачу.
+
+    Границы остаются наивными локальными: в UTC их переводит database._date_text,
+    и подменять эту трактовку здесь нельзя.
+    """
+    base_start = (now - timedelta(days=1)).replace(
+        hour=DIGEST_WINDOW_START_HOUR, minute=0, second=0, microsecond=0
+    )
+    if not last_sent_date:
+        return base_start
+    # Прошлый выпуск закончился не раньше REPORT_HOUR своего дня — оттуда и
+    # продолжаем. Небольшое перекрытие лучше пропуска: повтор врачи увидят,
+    # потерянные сутки — нет.
+    resume_from = datetime.combine(last_sent_date, datetime.min.time()).replace(
+        hour=int(config.REPORT_HOUR) % 24
+    )
+    floor_start = now - timedelta(days=DIGEST_CATCHUP_MAX_DAYS)
+    return max(floor_start, min(base_start, resume_from))
+
+
+def weekly_report_due(now, last_weekly_date):
+    """
+    Пора ли выпускать недельный отчёт.
+
+    Условие было только «понедельник, 10:00, сегодня ещё не отправляли».
+    Пропущенный понедельник — упавший бот, недоставленная цель — терял выпуск
+    НАВСЕГДА: следующий понедельник берёт окно в 7 дней и до пропущенной недели
+    не достаёт. last_weekly_date хранится в том же файле состояния, что и
+    дневная дата, и здесь он и нужен.
+    """
+    if now.hour < WEEKLY_REPORT_HOUR:
+        return False
+    if last_weekly_date == now.date():
+        return False
+    if last_weekly_date is not None and (now.date() - last_weekly_date).days < WEEKLY_MIN_GAP_DAYS:
+        return False
+    if now.weekday() == 0:
+        return True
+    # Догон: неделя с последнего выпуска прошла, а понедельника мы не увидели.
+    if last_weekly_date is None:
+        return False
+    return (now.date() - last_weekly_date).days >= WEEKLY_WINDOW_DAYS
+
+
+def weekly_window_start(now, last_weekly_date):
+    """Нижняя граница недельного окна — с догоном по last_weekly_date."""
+    base_start = now - timedelta(days=WEEKLY_WINDOW_DAYS)
+    if not last_weekly_date:
+        return base_start
+    resume_from = datetime.combine(last_weekly_date, datetime.min.time()).replace(
+        hour=WEEKLY_REPORT_HOUR
+    )
+    floor_start = now - timedelta(days=WEEKLY_CATCHUP_MAX_DAYS)
+    return max(floor_start, min(base_start, resume_from))
+
+
 async def scheduler_task(bot_client):
     """Рассылка по всем целям из конфига."""
     # Загружаем цели из конфига (они должны быть в формате JSON списка в .env)
@@ -404,19 +531,27 @@ async def scheduler_task(bot_client):
 
     logger.info(f"📅 Планировщик активен. Целей: {len(targets)}")
     last_sent_date, last_weekly_date = load_scheduler_state()
+    # Кэш сгенерированного дайджеста живёт МЕЖДУ кругами цикла, а не внутри
+    # одного: см. комментарий на присваивании generated_cache ниже.
+    daily_cache_date = None
+    daily_cache_text = None
 
     while True:
         try:
             now = datetime.now()
-            
+
             # 1. ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ (Daily)
             # Проверка времени (REPORT_HOUR) и того, что сегодня еще не отправляли
             if now.hour >= config.REPORT_HOUR and last_sent_date != now.date():
-                
-                # Окно 26 часов
+
+                # Окно: от конца прошлого выпуска (либо 20:00 вчера) до сейчас.
                 end_time = now
-                start_time = (now - timedelta(days=1)).replace(hour=20, minute=0, second=0)
-                
+                start_time = daily_window_start(now, last_sent_date)
+                logger.info(
+                    "Daily окно: %s -> %s (last_sent=%s)",
+                    start_time, end_time, last_sent_date,
+                )
+
                 messages = await asyncio.wait_for(
                     database.get_messages_for_daily_summary(start_time, end_time, min_count=100),
                     timeout=30,
@@ -425,8 +560,18 @@ async def scheduler_task(bot_client):
                 if messages:
                     logger.info(f"🔥 Daily контент готов ({len(messages)} шт). Рассылка...")
                     
-                    # Кэш для текста (чтобы генерировать 1 раз на все чаты)
-                    generated_cache = None
+                    # Кэш для текста (чтобы генерировать 1 раз на все чаты).
+                    #
+                    # Он обязан переживать круг цикла. Пока generated_cache
+                    # создавался здесь заново, сломанная цель означала ПОЛНУЮ
+                    # повторную генерацию каждые 10 минут: last_sent_date не
+                    # продвигается, пока не доставлено во все цели, поэтому
+                    # следующий заход снова шёл в генерацию — платный вызов LLM
+                    # и новая страница Telegraph на каждый круг, до полуночи.
+                    if daily_cache_date != now.date():
+                        daily_cache_date = now.date()
+                        daily_cache_text = None
+                    generated_cache = daily_cache_text
                     sent_targets = load_sent_targets("daily", now.date())
                     target_keys = [
                         target_delivery_key(target.get('chat_id'), target.get('topic_id'))
@@ -477,7 +622,8 @@ async def scheduler_task(bot_client):
                                     mark_target_delivered("daily", now.date(), tgt_key, last_sent_date, last_weekly_date)
                                 if not generated_cache:
                                     generated_cache = result_text
-                                
+                                    daily_cache_text = result_text
+
                         except Exception:
                             logger.exception(f"Daily send failed chat={tgt_chat}")
                     
@@ -494,14 +640,18 @@ async def scheduler_task(bot_client):
                         logger.error("Daily was not delivered to all targets; missing=%s messages remain unsummarized.", missing_targets)
 
             # 2. ЕЖЕНЕДЕЛЬНАЯ ГАЗЕТА (Weekly)
-            # Запуск: Понедельник (weekday == 0), 10:00 утра
-            if now.weekday() == 0 and now.hour >= 10 and last_weekly_date != now.date():
-                logger.info("🗞 Наступило время Weekly отчета (Понедельник, 10:00)...")
-                
-                # Период: последние 7 полных дней
+            # Запуск: Понедельник (weekday == 0), 10:00 утра — либо догон, если
+            # понедельник был пропущен (см. weekly_report_due).
+            if weekly_report_due(now, last_weekly_date):
+                logger.info(
+                    "🗞 Наступило время Weekly отчета (weekday=%s, last_weekly=%s)...",
+                    now.weekday(), last_weekly_date,
+                )
+
+                # Период: последние 7 полных дней, с догоном по last_weekly_date
                 end_weekly = now
-                start_weekly = now - timedelta(days=7)
-                
+                start_weekly = weekly_window_start(now, last_weekly_date)
+
                 # Получаем сообщения за диапазон
                 weekly_messages = await asyncio.wait_for(
                     database.get_messages_for_range(start_weekly, end_weekly),
@@ -568,17 +718,46 @@ async def scheduler_task(bot_client):
             logger.error(f"Ошибка планировщика: {e}")
             await asyncio.sleep(60)
 
+# Потолок на один проход пингов. Своих таймаутов у этих двух вызовов не было ни
+# одного: зависший send_message (Telethon держит request_retries=10 и спит на
+# FloodWait) останавливал ВЕСЬ цикл пингов навсегда и совершенно молча — таск
+# жив, sleep(3600) не наступает, в журнале ни строки.
+#
+# Значение выведено из бюджета законной работы, а не выбрано отдельно:
+# MAX_PINGS_PER_CYCLE = 5 пингов, на каждый до 60 с генерации (timeout=60 в
+# assistant) плюс отправка с ретраями и сном на FloodWait — порядка 600 с.
+# Двойной запас даёт 1200 с. Даже если оба прохода выберут потолок целиком,
+# 2400 с меньше часового сна, то есть почасовая частота пингов сохраняется.
+PING_PHASE_TIMEOUT_SECONDS = 1200
+
+
 async def pm_ping_scheduler_task(bot_client):
     """Задача периодической проверки неактивности пользователей в ЛС и отправки им пинга."""
     logger.info("📅 Планировщик пингов в ЛС активен.")
     while True:
         try:
-            await assistant.check_and_send_pm_pings(bot_client)
+            await asyncio.wait_for(
+                assistant.check_and_send_pm_pings(bot_client),
+                timeout=PING_PHASE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "PM pings timed out after %ss — проход прерван, цикл продолжается",
+                PING_PHASE_TIMEOUT_SECONDS,
+            )
         except Exception as e:
             logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
 
         try:
-            await assistant.check_and_send_group_activity_pings(bot_client)
+            await asyncio.wait_for(
+                assistant.check_and_send_group_activity_pings(bot_client),
+                timeout=PING_PHASE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Group pings timed out after %ss — проход прерван, цикл продолжается",
+                PING_PHASE_TIMEOUT_SECONDS,
+            )
         except Exception as e:
             logger.error(f"Error in pm_ping_scheduler_task (Group pings): {e}")
 
@@ -673,6 +852,11 @@ async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, b
 
     try:
         _media_queue.put_nowait((messages, msg_id, text, media_type_hint))
+        # Запоминаем ВСЕ сообщения пачки, а не только msg_id: у альбома в базе
+        # своя строка на каждый снимок, и догон нашёл бы остальные по пустому
+        # описанию. Отмечаем только после успешной постановки — непоставленные
+        # (QueueFull) догон обязан подобрать.
+        _remember_queued_media([getattr(m, "id", None) for m in messages] + [msg_id])
         logger.info("media analysis queued msg_id=%s queue_size=%s", msg_id, _media_queue.qsize())
         return True
     except asyncio.QueueFull:
@@ -706,6 +890,16 @@ async def recover_pending_media_analysis():
         return
 
     if not pending:
+        return
+
+    # Отбрасываем то, что уже стоит в очереди этого запуска. sync_history шёл
+    # прямо перед догоном и поставил свежие снимки сам, а описание в базе
+    # появится только ПОСЛЕ разбора — по базе они всё ещё «ожидающие». Без этого
+    # отсева пять самых свежих снимков уезжали в платный Vision дважды на каждом
+    # рестарте. Фильтруем до запроса в Telegram: заодно не тянем те же файлы.
+    pending = [row for row in pending if row[0] not in _QUEUED_MEDIA_IDS]
+    if not pending:
+        logger.info("pending media recovery: всё уже в очереди этого запуска, догон не нужен")
         return
 
     id_to_text = {msg_id: text for msg_id, text, _media_type in pending}
@@ -873,6 +1067,9 @@ async def transcribe_group_voice(message):
 
 async def process_media_message(messages, msg_id, text, media_type_hint=None):
     files_to_analyze = []
+    # Чьи именно снимки дошли до Vision. Нужно потому, что описание одно на
+    # вызов, а строк в базе столько же, сколько сообщений в альбоме.
+    analyzed_msg_ids = set()
     media_description = None
     temp_paths = []
 
@@ -886,9 +1083,10 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                 )
                 if temp_path:
                     temp_paths.append(temp_path)
-                    
+
                     if message.photo or image_document(message) is not None or media_type_hint == "photo":
                         files_to_analyze.append(temp_path)
+                        analyzed_msg_ids.add(message.id)
                     elif message.video or media_type_hint == "video":
                         logger.info(f"🎞️ Извлечение первого кадра из видео {message.id}...")
                         frame_path = await extract_first_frame_async(
@@ -898,6 +1096,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                         if frame_path:
                             files_to_analyze.append(frame_path)
                             temp_paths.append(frame_path)
+                            analyzed_msg_ids.add(message.id)
             except Exception as e:
                 logger.warning(f"Failed to process a media item in album {msg_id}: {type(e).__name__}: {e}")
 
@@ -916,9 +1115,23 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
             )
             if media_description:
                 for message in messages:
+                    # Описание относится ровно к тем файлам, которые попали в
+                    # Vision. При частичном провале альбома (скачался один
+                    # снимок из пяти) оно записывалось во ВСЕ строки: в дайджест
+                    # и в контекст ассистента уходило «на снимке перфорация» под
+                    # четырьмя чужими снимками, которых никто не видел.
+                    row_description = (
+                        media_description if message.id in analyzed_msg_ids else MEDIA_UNAVAILABLE_MARK
+                    )
                     await asyncio.wait_for(
-                        database.update_media_description(message.id, media_description),
+                        database.update_media_description(message.id, row_description),
                         timeout=30,
+                    )
+                if len(analyzed_msg_ids) < len(messages):
+                    logger.warning(
+                        "media album partially prepared msg_id=%s analyzed=%s of %s — "
+                        "остальным строкам поставлена отметка недоступности",
+                        msg_id, len(analyzed_msg_ids), len(messages),
                     )
                 logger.info(f"📝 Описание готово: {media_description}")
                 logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
@@ -939,6 +1152,23 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                         database.update_media_description(message.id, "-"),
                         timeout=30,
                     )
+        else:
+            # Ни один файл не скачался и не подготовился. В базу при этом не
+            # писалось НИЧЕГО: строка оставалась с пустым media_description, то
+            # есть «ещё не разбирали» — и recover_pending_media_analysis тянул её
+            # из Telegram и качал заново на КАЖДОМ рестарте, вечно. Все прочие
+            # тупики (пустое описание, таймаут, исключение) отметку ставят;
+            # именно эта ветка её не ставила.
+            logger.warning(
+                "media unavailable msg_id=%s: ни один из %s файлов не подготовлен, "
+                "ставлю отметку, иначе строка вечно в догоне",
+                msg_id, len(messages),
+            )
+            for message in messages:
+                await asyncio.wait_for(
+                    database.update_media_description(message.id, MEDIA_UNAVAILABLE_MARK),
+                    timeout=30,
+                )
 
     except asyncio.TimeoutError:
         logger.warning("media processing timeout msg_id=%s, marking as processed to avoid loop", msg_id)

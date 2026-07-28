@@ -1,6 +1,7 @@
 import base64
 import logging
 import random
+import re
 import asyncio
 import time
 import os
@@ -57,6 +58,17 @@ VISION_MIN_CALL_INTERVAL_SECONDS = 3.0
 # с собственным корневым сертификатом и зрение начнёт падать с SSL-ошибкой —
 # STOMCHAT_VISION_TLS_VERIFY=0 возвращает прежнее поведение осознанно.
 VISION_TLS_VERIFY = _env_flag("STOMCHAT_VISION_TLS_VERIFY", True)
+
+
+# «Снимок больше лимита провайдера» — по границе слова, как _SERVER_ERROR_RE в
+# gemini_client. Здесь стоял подстрочный поиск "413", а он находит эти цифры в
+# любом посторонним числе: "max_tokens 4130", "413000 tokens", "req_8413ac".
+# Цена ошибки тут выше, чем у остальных классификаторов: ветка 413 не переходит
+# к следующему ключу и не к следующей модели, а делает return из describe_image
+# — то есть один посторонний отказ рвал весь каскад из трёх моделей и выбрасывал
+# описание, уже полученное от предыдущей. Текстовая формулировка нужна отдельно:
+# Groq и прокси отвечают "Request Entity Too Large" вообще без кода.
+_PAYLOAD_TOO_LARGE_RE = re.compile(r"\b413\b|payload too large|request entity too large")
 
 
 # Какая доля букв должна быть кириллицей, чтобы считать описание русским.
@@ -173,7 +185,18 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 ("gemini-3.1-flash-lite", "gemini"),
                 ("qwen/qwen3.6-27b", "groq")
             ]
-            start_idx = random.randint(0, 2)
+            # Случайный старт размазывает квоту по пулу, и это правильная цена
+            # для фоновых загрузок — их большинство. Но снимок, присланный боту
+            # адресно (is_passive=False: в main.py это подпись со словом «бот»
+            # или «@», в assistant.py — прямой вызов), кто-то ждёт, и там
+            # случайность стоит дорого: старт с qwen даёт ответ с блоком <think>
+            # и чаще не по-русски, а каждая лишняя попытка каскада — это ещё
+            # минимум 3 с троттлинга (VISION_MIN_CALL_INTERVAL_SECONDS) плюс
+            # запрос. Поэтому адресный вызов начинаем со старшей модели пула.
+            # Разделение active/passive задумывалось изначально (отдельные
+            # каскады, коммит 41d108c), но при переходе на пул параметр остался
+            # не использован вовсе, хотя оба вызывающих его вычисляют.
+            start_idx = random.randint(0, len(models_pool) - 1) if is_passive else 0
             models_cascade = models_pool[start_idx:] + models_pool[:start_idx]
 
             timeout = httpx.Timeout(
@@ -273,12 +296,18 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
 
                         except Exception as e:
                             err_str = str(e).lower()
-                            if "413" in err_str:
+                            if _PAYLOAD_TOO_LARGE_RE.search(err_str):
                                 logger.warning(
                                     "Vision payload too large (413) for %s images; giving up.",
                                     len(image_urls),
                                 )
-                                return None
+                                # Снимок меньше не станет ни от другого ключа, ни
+                                # от другой модели — попытки прекращаем. Но
+                                # описание, уже полученное от предыдущей модели
+                                # каскада, возвращаем: раньше здесь стоял
+                                # return None, и годный английский вариант
+                                # выбрасывался вместе с отказом.
+                                return english_fallback
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель
