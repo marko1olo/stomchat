@@ -406,6 +406,39 @@ def _parse_state_dt(value, default=datetime(2000, 1, 1)):
         return default
 
 
+def is_silenced(state, where=""):
+    """
+    Просил ли кто-то бота замолчать и не истёк ли срок.
+
+    Проверка была СКОПИРОВАНА в трёх местах, и четвёртый путь — триггер
+    упоминания — её потерял. Замер по живому архиву, последовательность
+    2025-06-05: врач написал «Бот очень назойливый мне не нравится», бот
+    извинился и выставил тишину на 4 часа, а через 4 минуты 38 секунд реплика
+    «Какой бот советуете использовать?» (про ЧУЖОГО бота) прошла регулярку
+    упоминания — и заговорил снова. В четырёхчасовом окне тишины лежит 138
+    сообщений, 14 из них задевают регулярку: тринадцать попыток нарушить только
+    что данное обещание.
+
+    Хуже всего, что путь упоминания вызывается ровно тогда, когда основной
+    ассистент промолчал, — а при активной тишине он молчит именно из-за неё. То
+    есть флаг тишины сам передавал управление пути, который его не проверяет.
+
+    Одно правило на четыре вызывающих: копия неизбежно снова разъедется.
+    """
+    silenced_until_str = state.get("silenced_until")
+    if not silenced_until_str:
+        return False
+    try:
+        if datetime.now() < datetime.fromisoformat(silenced_until_str):
+            logger.info("Bot is silenced until %s. Skipping %s.",
+                        silenced_until_str, where or "trigger check")
+            return True
+    except Exception as parse_err:
+        # Битая метка не должна глушить бота навсегда: считаем, что тишины нет.
+        logger.error("Error parsing silenced_until (%r): %s", silenced_until_str, parse_err)
+    return False
+
+
 def passive_gate_block_reason(state):
     """
     Причина, по которой пассивный текстовый триггер сейчас запрещён, иначе None.
@@ -1255,15 +1288,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     state = load_state()
     
     # Check if the bot is temporarily silenced
-    silenced_until_str = state.get("silenced_until")
-    if silenced_until_str:
-        try:
-            silenced_until = datetime.fromisoformat(silenced_until_str)
-            if datetime.now() < silenced_until:
-                logger.info(f"Bot is currently silenced until {silenced_until_str}. Skipping trigger check.")
-                return False
-        except Exception as e:
-            logger.error(f"Error parsing silenced_until: {e}")
+    if is_silenced(state):
+        return False
     
     # Calculate context length guidelines
     try:
@@ -1743,15 +1769,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     state = load_state()
     
     # Check if the bot is temporarily silenced
-    silenced_until_str = state.get("silenced_until")
-    if silenced_until_str:
-        try:
-            silenced_until = datetime.fromisoformat(silenced_until_str)
-            if datetime.now() < silenced_until:
-                logger.info(f"Bot is currently silenced until {silenced_until_str}. Skipping media trigger check.")
-                return False
-        except Exception as e:
-            logger.error(f"Error parsing silenced_until: {e}")
+    if is_silenced(state, "media trigger check"):
+        return False
     
     # Calculate context length guidelines
     try:
@@ -2418,7 +2437,25 @@ async def handle_private_message(bot_client, event):
             status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
             temp_path = None
             try:
-                temp_path = await event.message.download_media(file=f"temp_media/{event.message.id}_")
+                # download_media собственного таймаута НЕ имеет. Это было
+                # единственное скачивание в проекте без бюджета: в группе его
+                # ограничили (VOICE_DOWNLOAD_TIMEOUT_SECONDS), фото в ЛС тоже
+                # (PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS), а голосовое в ЛС осталось.
+                #
+                # Последствия складывались втройне. Обработчик личных сообщений
+                # держит замок на пользователя всё время работы, поэтому ВСЕ
+                # следующие сообщения этого врача встают в очередь за зависшим и
+                # не получают ответа до перезапуска процесса. Блок finally не
+                # выполняется — статус «Распознаю аудиосообщение… Подождите»
+                # висит в диалоге навсегда, а скачанный кусок файла остаётся на
+                # диске. Сторож не спасает: он следит за живостью цикла событий,
+                # а цикл жив.
+                temp_path = await asyncio.wait_for(
+                    event.message.download_media(
+                        file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"{event.message.id}_")
+                    ),
+                    timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                )
                 if temp_path and os.path.exists(temp_path):
                     import blocking_tools
                     transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
@@ -3398,6 +3435,19 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     # 1. Проверяем глобальную критику / требование выключить бота
     if await check_and_apply_silence(event, text, getattr(event.message, 'reply_to_msg_id', None)):
         return True
+
+    # Тишина проверяется и ЗДЕСЬ. Этот путь был четвёртым и единственным без
+    # проверки, и вызывается он ровно тогда, когда основной ассистент промолчал,
+    # — а при активной тишине тот молчит именно из-за неё. То есть флаг тишины
+    # сам передавал управление пути, который его не смотрел.
+    #
+    # Замер по живому архиву, последовательность 2025-06-05: врач написал «Бот
+    # очень назойливый мне не нравится», бот извинился и умолк на 4 часа, а через
+    # 4 минуты 38 секунд реплика про ЧУЖОГО бота прошла регулярку упоминания. В
+    # окне тишины 138 сообщений, 14 задевают регулярку — тринадцать попыток
+    # нарушить только что данное обещание.
+    if is_silenced(load_state(), "bot mention trigger"):
+        return False
 
     BOT_MENTION_SHADOW_MODE = False  # Выкачено в боевой
 
@@ -4653,15 +4703,8 @@ async def check_and_trigger_referee(bot_client, event, text):
     
     # 1. Проверяем тишину
     state = load_state()
-    silenced_until_str = state.get("silenced_until")
-    if silenced_until_str:
-        try:
-            silenced_until = datetime.fromisoformat(silenced_until_str)
-            if datetime.now() < silenced_until:
-                logger.info(f"Bot is currently silenced. Skipping referee trigger.")
-                return
-        except Exception as e:
-            logger.error(f"Error parsing silenced_until in referee: {e}")
+    if is_silenced(state, "referee trigger"):
+        return
 
     text_lower = text.lower()
     
