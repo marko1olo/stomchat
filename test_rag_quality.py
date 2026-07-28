@@ -188,6 +188,62 @@ async def run():
           all(l.startswith("[") for l in wiki.split("\n") if l.strip()),
           "дедуп потерял префикс рубрики")
 
+    print("\n[8] Справка ограничена по символам, а не только по числу записей")
+    # Предел стоял лишь на количестве записей, а длина записи не ограничена: самый
+    # длинный факт вики 5477 символов при медиане 236. Замер на 400 реальных
+    # вопросах из архива: медиана справки 10241 символ, но максимум 52816
+    # (~17600 токенов), и 30 вопросов из 400 давали больше 20000. Самые тяжёлые —
+    # не клиника, а трёп: «Давно так работаете? У кого учились?» тянуло 37 тысяч
+    # символов вики. Вопрос врача тонет под массивом слабо связанных фактов, а
+    # рецензент видит лишь первые 3000 символов основания.
+    import sqlite3 as _sq3
+
+    archive = _sq3.connect("stomat_archive.db")
+    probes = [r[0] for r in archive.execute(
+        "SELECT text FROM archive_messages WHERE text LIKE '%?' "
+        "AND LENGTH(text) BETWEEN 25 AND 200 LIMIT 120")]
+    totals = []
+    for probe in probes:
+        keys = assistant.select_search_keywords(assistant.extract_keywords(probe))
+        if not keys:
+            continue
+        wiki_part, archive_part = await assistant.search_knowledge_corpus(keys)
+        totals.append((len(wiki_part), len(archive_part)))
+    check("выборка вопросов набралась", len(totals) >= 50, f"got {len(totals)}")
+    if totals:
+        worst_wiki = max(t[0] for t in totals)
+        worst_arch = max(t[1] for t in totals)
+        worst_sum = max(t[0] + t[1] for t in totals)
+        check(f"вики не превышает бюджет ({worst_wiki} <= {assistant._CORPUS_MAX_CHARS})",
+              worst_wiki <= assistant._CORPUS_MAX_CHARS)
+        check(f"архив не превышает бюджет ({worst_arch} <= {assistant._CORPUS_MAX_CHARS})",
+              worst_arch <= assistant._CORPUS_MAX_CHARS)
+        check(f"суммарная справка не раздувается ({worst_sum} символов)",
+              worst_sum <= 2 * assistant._CORPUS_MAX_CHARS)
+        median = sorted(t[0] + t[1] for t in totals)[len(totals) // 2]
+        # Бюджет обязан подрезать хвост, а не типичный случай: до правки медиана
+        # была 10241 символ, и ответы на такой справке строятся нормально.
+        check(f"типичная справка осталась содержательной (медиана {median})",
+              median >= 4000, "бюджет срезал и обычные запросы")
+
+    print("\n[9] Обрезка длинной записи не рвёт утверждение на полуслове")
+    long_fact = ("Гипохлорит натрия применяют в концентрации от 3 до 5 процентов. "
+                 "Экспозиция составляет не менее тридцати минут на канал. ") * 20
+    clipped = assistant._clip_at_sentence(long_fact, 300)
+    check("обрезка не длиннее предела", len(clipped) <= 300, f"got {len(clipped)}")
+    check("обрезка кончается границей предложения или многоточием",
+          clipped.rstrip().endswith((".", "!", "?", ";", "…")), repr(clipped[-30:]))
+    check("число внутри утверждения не потеряно вместе с концом",
+          "3 до 5 процентов" in clipped, clipped[:80])
+    # Запись без точек тоже не должна обрываться посреди слова.
+    no_stops = "слово " * 200
+    clipped = assistant._clip_at_sentence(no_stops, 100)
+    check("без границ предложения режем по слову", not clipped.rstrip("…").endswith("слов"),
+          repr(clipped[-20:]))
+    check("одна запись не съедает бюджет целиком",
+          assistant._CORPUS_ENTRY_MAX_CHARS < assistant._CORPUS_MAX_CHARS,
+          f"{assistant._CORPUS_ENTRY_MAX_CHARS} против {assistant._CORPUS_MAX_CHARS}")
+
 
 asyncio.run(run())
 
