@@ -2528,11 +2528,12 @@ async def handle_private_message(bot_client, event):
                 "👇 <i>Выберите раздел для детального просмотра:</i>"
             )
             from telethon import Button
-            buttons = [
-                [Button.inline("🦷 Препарирование и Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия и Лечение", data="wiki_cat:endo")],
-                [Button.inline("🩹 Пародонтология и Десна", data="wiki_cat:perio"), Button.inline("🔩 Имплантация и Хирургия", data="wiki_cat:surg")],
-                [Button.inline("🔍 Инструкция по поиску", data="wiki_cat:help")]
-            ]
+            # Разделы берём из дерева, а не перечисляем заново. Здесь висели
+            # четыре кнопки из одиннадцати разделов: «Гнатология»,
+            # «Реставрация», «Съёмное», «Ортодонтия», «Цифра», «Оборудование» и
+            # «Менеджмент» с этого входа были недоступны вообще.
+            buttons = wiki_topic_buttons()[:-1]
+            buttons.append([Button.inline("🔍 Инструкция по поиску", data="wiki_cat:help")])
             await bot_client.send_message(entity=chat_id, message=wiki_text, buttons=buttons, parse_mode='html')
             return
 
@@ -3543,25 +3544,138 @@ async def handle_group_quiz(bot_client, event):
 # теперь листает базу постранично и в этот предел не упирается.
 WIKI_FALLBACK_ROWS_PER_CODE = 15
 
-WIKI_SUBTOPIC_CODES = {
-    "ortho_bopt": ["2.2.1"],
-    "ortho_vin": ["2.1.1", "2.1.4"],
-    "ortho_crown": ["2.1.2", "2.1.3"],
-    "endo_irr": ["1.1.3"],
-    "endo_obt": ["1.1.4"],
-    "endo_files": ["1.1.2", "1.1.1"],
-    "perio_dis": ["1.3.2"],
-    "perio_clean": ["1.3.1"],
-    "perio_plast": ["3.3.1"],
-    "surg_impl": ["3.2.1", "3.2.2", "3.2.3"],
-    "surg_rem": ["3.1.1"],
-    "surg_bone": ["3.3.2"],
-    # Раньше здесь было ["2.3.1", "2.3.2"] против ["2.3.2"] у сплинтов, то есть
-    # «Окклюзия» была надмножеством «Сплинтов»: из 505 статей по сплинтам 461
-    # показывалась и в соседней кнопке. Каждый код закреплён за своей подтемой.
-    "gnat_joint": ["2.3.1"],
-    "gnat_splint": ["2.3.2"],
+# Энциклопедия: единственный источник истины. Раздел -> (заголовок, подтемы),
+# подтема -> (id, заголовок, коды рубрик).
+#
+# Зачем структура вместо трёх словарей. Раньше карта кодов лежала в файле
+# дважды, карта названий подтем — тоже дважды, а списки кнопок были расписаны
+# руками по разделам. Копии уже разъезжались: в одной осталось
+# "gnat_joint": ["2.3.1", "2.3.2"], то есть «Окклюзия» была надмножеством
+# «Сплинтов» — из 505 статей по сплинтам 461 показывалась в соседней кнопке.
+#
+# Коды и названия взяты из «дерева 5.0» — CAT_MAP в savdel.py, той самой
+# таксономии, по которой дистиллятор раскладывал факты. Ничего не придумано:
+# машинные имена вида «Орто_Фиксация_Цементы» переведены в читаемые.
+#
+# Что это закрывает по существу: в меню было 19 кодов из 52, и 3569 фактов
+# (27.9% базы) не открывались НИ ОДНОЙ кнопкой. Целые темы с тысячами статей —
+# фиксация и цементы, техника уступа, адгезия и IDS, фотопротокол, оптика,
+# фармакология — существовали только для поиска, пролистать их было нельзя.
+#
+# Идентификатор подтемы ОБЯЗАН начинаться с идентификатора раздела: кнопка
+# «Назад к подтемам» вычисляет раздел как subtopic_id.split("_")[0].
+WIKI_TREE = {
+    "endo": ("💧 Эндодонтия", [
+        ("endo_access", "🔎 Доступ и поиск каналов", ["1.1.1"]),
+        ("endo_files", "🔬 Инструментация и файлы", ["1.1.2"]),
+        ("endo_irr", "💧 Ирригация каналов", ["1.1.3"]),
+        ("endo_obt", "🩸 Обтурация каналов", ["1.1.4"]),
+        ("endo_retreat", "🔁 Перелечивание каналов", ["1.1.5"]),
+        ("endo_diag", "🩺 Диагностика в эндодонтии", ["1.1.6"]),
+    ]),
+    "rest": ("🧱 Реставрация", [
+        ("rest_adh", "🧪 Адгезия и IDS", ["1.2.1"]),
+        ("rest_alcohol", "💧 Спиртовой протокол", ["1.2.2"]),
+        ("rest_morph", "🎨 Морфология и анатомия", ["1.2.3"]),
+        ("rest_matrix", "📎 Матрицы и контактный пункт", ["1.2.4"]),
+        ("rest_buildup", "🧷 Билдап и штифты", ["1.2.5"]),
+        ("rest_polish", "✨ Полировка", ["1.2.6"]),
+    ]),
+    "perio": ("🩹 Пародонтология и гигиена", [
+        ("perio_clean", "🪥 Профгигиена и GBT", ["1.3.1"]),
+        ("perio_dis", "🩹 Болезни пародонта и SRP", ["1.3.2"]),
+        ("perio_white", "🦷 Отбеливание", ["1.3.3"]),
+        ("perio_plast", "🥩 Пластика десны и ССТ", ["3.3.1"]),
+    ]),
+    "ortho": ("👑 Ортопедия", [
+        ("ortho_vin", "💎 Виниры", ["2.1.1"]),
+        ("ortho_crown", "👑 Коронки", ["2.1.2"]),
+        ("ortho_bridge", "🌉 Мосты", ["2.1.3"]),
+        ("ortho_micro", "🔹 Микропротезирование", ["2.1.4"]),
+        ("ortho_bopt", "🦷 BOPT и вертипреп", ["2.2.1"]),
+        ("ortho_shoulder", "📐 Техника уступа", ["2.2.2"]),
+        ("ortho_impr", "🥄 Оттиски", ["2.2.3"]),
+        ("ortho_retr", "🧵 Ретракция десны", ["2.2.4"]),
+        ("ortho_temp", "⏳ Временные конструкции", ["2.2.5"]),
+        ("ortho_cement", "🧴 Фиксация и цементы", ["2.2.6"]),
+    ]),
+    "gnat": ("📐 Гнатология", [
+        ("gnat_joint", "📐 Окклюзия", ["2.3.1"]),
+        ("gnat_splint", "🦷 ВНЧС, сплинты и шины", ["2.3.2"]),
+        ("gnat_artic", "⚙️ Артикуляторы", ["2.3.3"]),
+    ]),
+    "remov": ("🦷 Съёмное протезирование", [
+        ("remov_full", "🦷 Полные протезы", ["2.4.1"]),
+        ("remov_clasp", "🔗 Бюгельные протезы", ["2.4.2"]),
+        ("remov_reline", "🔧 Перебазировка", ["2.4.3"]),
+    ]),
+    "surg": ("🔩 Хирургия и имплантация", [
+        ("surg_rem", "🩸 Удаление зубов", ["3.1.1"]),
+        ("surg_apic", "🔺 Апикальная хирургия", ["3.1.2"]),
+        ("surg_save", "🛡 Зубосохраняющие операции", ["3.1.3"]),
+        ("surg_impl", "🔩 Имплантация: планирование и системы", ["3.2.1", "3.2.2", "3.2.3"]),
+        ("surg_compl", "⚠️ Осложнения имплантации", ["3.2.4"]),
+        ("surg_bone", "🦴 Костная пластика и синус-лифтинг", ["3.3.2"]),
+    ]),
+    "odont": ("😬 Ортодонтия", [
+        ("odont_brack", "🪢 Брекеты", ["4.1.1"]),
+        ("odont_align", "🦷 Элайнеры", ["4.1.2"]),
+        ("odont_diag", "🩺 Ортодонтическая диагностика", ["4.1.3"]),
+    ]),
+    "dig": ("🖥 Цифровая стоматология", [
+        ("dig_scan", "📷 Сканеры", ["5.1.1"]),
+        ("dig_exocad", "🖥 Exocad и моделирование", ["5.2.1"]),
+        ("dig_print", "🖨 3D-печать", ["5.3.1"]),
+    ]),
+    "com": ("🔬 Оборудование и фармакология", [
+        ("com_optic", "🔬 Оптика и оборудование", ["6.1.1", "6.1.2"]),
+        ("com_pharm", "💊 Фармакология", ["6.2.1"]),
+        ("com_photo", "📸 Фотопротокол", ["6.3.1"]),
+    ]),
+    "man": ("💼 Менеджмент клиники", [
+        ("man_econ", "💰 Экономика и цены", ["7.1.1"]),
+        ("man_legal", "⚖️ Юридические вопросы", ["7.2.1"]),
+        ("man_psy", "🗣 Психология и общение с пациентом", ["7.3.1"]),
+    ]),
 }
+
+# Ниже — производные представления. Руками их не заполнять: любое расхождение
+# с WIKI_TREE и есть тот дефект, из-за которого статьи двоились в кнопках.
+WIKI_SUBTOPIC_CODES = {
+    sub_id: codes
+    for _title, subs in WIKI_TREE.values()
+    for sub_id, _sub_title, codes in subs
+}
+
+WIKI_SUBTOPIC_NAMES = {
+    sub_id: sub_title
+    for _title, subs in WIKI_TREE.values()
+    for sub_id, sub_title, _codes in subs
+}
+
+WIKI_CATEGORY_NAMES = {cat_id: title for cat_id, (title, _subs) in WIKI_TREE.items()}
+
+
+def wiki_category_buttons(cat_id):
+    """Кнопки подтем раздела. Собираются из дерева, а не расписаны руками."""
+    from telethon import Button
+    entry = WIKI_TREE.get(cat_id)
+    if not entry:
+        return [[Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]]
+    buttons = [[Button.inline(sub_title, data=f"wiki_page:{sub_id}:0")]
+               for sub_id, sub_title, _codes in entry[1]]
+    buttons.append([Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")])
+    return buttons
+
+
+def wiki_topic_buttons():
+    """Кнопки разделов рубрикатора, по два в ряд."""
+    from telethon import Button
+    items = [Button.inline(title, data=f"wiki_cat:{cat_id}")
+             for cat_id, (title, _subs) in WIKI_TREE.items()]
+    rows = [items[i:i + 2] for i in range(0, len(items), 2)]
+    rows.append([Button.inline("⬅️ Назад в меню", data="wiki_cat:back")])
+    return rows
 
 
 def _wiki_code_filter(subtopic_id):
@@ -3812,13 +3926,10 @@ async def handle_quiz_callback(bot_client, event):
     # WIKI TOPICS SELECTOR
     if data_str == "wiki_cat:topics":
         wiki_text = "📚 <b>Рубрикатор Энциклопедии (основные разделы):</b>"
-        from telethon import Button
-        buttons = [
-            [Button.inline("🦷 Ортопедия", data="wiki_cat:ortho"), Button.inline("💧 Эндодонтия", data="wiki_cat:endo")],
-            [Button.inline("🩹 Пародонтология", data="wiki_cat:perio"), Button.inline("🔩 Хирургия", data="wiki_cat:surg")],
-            [Button.inline("📐 Гнатология", data="wiki_cat:gnat")],
-            [Button.inline("⬅️ Назад в меню", data="wiki_cat:back")]
-        ]
+        # Кнопки собираются из WIKI_TREE: раздел, добавленный в дерево,
+        # появляется здесь сам. Раньше список был отдельным, и разделы
+        # без кнопки существовали только в обработчике.
+        buttons = wiki_topic_buttons()
         await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
         await event.answer()
         return
@@ -3859,53 +3970,12 @@ async def handle_quiz_callback(bot_client, event):
     # WIKI CATEGORY SUBTOPICS
     if data_str.startswith("wiki_cat:"):
         cat_id = data_str.split(":")[1]
-        cat_titles = {
-            "ortho": "🦷 Препарирование и Ортопедия",
-            "endo": "💧 Эндодонтия и Лечение",
-            "perio": "🩹 Пародонтология и Десна",
-            "surg": "🔩 Имплантация и Хирургия",
-            "gnat": "📐 Гнатология и Окклюзия"
-        }
-        title = cat_titles.get(cat_id, "📚 Раздел Энциклопедии")
-        
-        from telethon import Button
-        if cat_id == "ortho":
-            buttons = [
-                [Button.inline("🦷 BOPT / Преп без уступа", data="wiki_page:ortho_bopt:0")],
-                [Button.inline("💎 Виниры и накладки", data="wiki_page:ortho_vin:0")],
-                [Button.inline("👑 Коронки и мосты", data="wiki_page:ortho_crown:0")],
-                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
-            ]
-        elif cat_id == "endo":
-            buttons = [
-                [Button.inline("💧 Ирригация каналов", data="wiki_page:endo_irr:0")],
-                [Button.inline("🩸 Обтурация каналов", data="wiki_page:endo_obt:0")],
-                [Button.inline("🔬 Инструменты / Файлы", data="wiki_page:endo_files:0")],
-                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
-            ]
-        elif cat_id == "perio":
-            buttons = [
-                [Button.inline("🩹 Болезни пародонта", data="wiki_page:perio_dis:0")],
-                [Button.inline("🪥 Кюретаж и чистка", data="wiki_page:perio_clean:0")],
-                [Button.inline("🥩 Пластика десны / ССТ", data="wiki_page:perio_plast:0")],
-                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
-            ]
-        elif cat_id == "surg":
-            buttons = [
-                [Button.inline("🔩 Имплантация", data="wiki_page:surg_impl:0")],
-                [Button.inline("🩸 Удаление зубов", data="wiki_page:surg_rem:0")],
-                [Button.inline("🦴 Синус-лифтинг / Кость", data="wiki_page:surg_bone:0")],
-                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
-            ]
-        elif cat_id == "gnat":
-            buttons = [
-                [Button.inline("📐 Окклюзия и сустав", data="wiki_page:gnat_joint:0")],
-                [Button.inline("🦷 Сплинты и шины", data="wiki_page:gnat_splint:0")],
-                [Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]
-            ]
-        else:
-            buttons = [[Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]]
-            
+        # Заголовок и кнопки подтем берутся из WIKI_TREE. Раньше здесь были
+        # словарь заголовков и цепочка elif со списками кнопок на каждый
+        # раздел — третья и четвёртая копии одних и тех же данных.
+        title = WIKI_CATEGORY_NAMES.get(cat_id, "📚 Раздел Энциклопедии")
+        buttons = wiki_category_buttons(cat_id)
+
         wiki_text = f"📚 <b>Раздел: {title}</b>\n\nвыберите интересующую клиническую подтему для просмотра статей:"
         await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
         await event.answer()
@@ -3921,22 +3991,7 @@ async def handle_quiz_callback(bot_client, event):
         # каждое нажатие кнопки листания.
         fact_content, total = await query_wiki_fact_page(subtopic_id, page_idx)
 
-        subtopic_names = {
-            "ortho_bopt": "🦷 BOPT / Преп без уступа",
-            "ortho_vin": "💎 Виниры и накладки",
-            "ortho_crown": "👑 Коронки и мосты",
-            "endo_irr": "💧 Ирригация каналов",
-            "endo_obt": "🩸 Обтурация каналов",
-            "endo_files": "🔬 Инструменты / Файлы",
-            "perio_dis": "🩹 Болезни пародонта",
-            "perio_clean": "🪥 Кюретаж и чистка",
-            "perio_plast": "🥩 Пластика десны / ССТ",
-            "surg_impl": "🔩 Имплантация",
-            "surg_rem": "🩸 Удаление зубов",
-            "surg_bone": "🦴 Синус-лифтинг / Кость",
-            "gnat_joint": "📐 Окклюзия и сустав",
-            "gnat_splint": "🦷 Сплинты и шины"
-        }
+        subtopic_names = WIKI_SUBTOPIC_NAMES
         subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
         
         if not total:
@@ -3991,22 +4046,7 @@ async def handle_quiz_callback(bot_client, event):
         # страницы означал бы уже другую статью — в закладки сохранялось бы не
         # то, что врач видит на экране.
         fact_content, total = await query_wiki_fact_page(subtopic_id, page_idx)
-        subtopic_names = {
-            "ortho_bopt": "🦷 BOPT / Преп без уступа",
-            "ortho_vin": "💎 Виниры и накладки",
-            "ortho_crown": "👑 Коронки и мосты",
-            "endo_irr": "💧 Ирригация каналов",
-            "endo_obt": "🩸 Обтурация каналов",
-            "endo_files": "🔬 Инструменты / Файлы",
-            "perio_dis": "🩹 Болезни пародонта",
-            "perio_clean": "🪥 Кюретаж и чистка",
-            "perio_plast": "🥩 Пластика десны / ССТ",
-            "surg_impl": "🔩 Имплантация",
-            "surg_rem": "🩸 Удаление зубов",
-            "surg_bone": "🦴 Синус-лифтинг / Кость",
-            "gnat_joint": "📐 Окклюзия и сустав",
-            "gnat_splint": "🦷 Сплинты и шины"
-        }
+        subtopic_names = WIKI_SUBTOPIC_NAMES
         subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
 
         if fact_content:

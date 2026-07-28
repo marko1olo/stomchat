@@ -146,7 +146,7 @@ finally:
     shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 
-print("\n[N] Карта кодов рубрик существует в одном экземпляре")
+print("\n[9] Дерево рубрик — единственный источник истины")
 # Копий было ДВЕ: модульный WIKI_SUBTOPIC_CODES и локальный codes_map внутри
 # query_wiki_subtopic. Они уже разъехались — в локальной осталось
 # "gnat_joint": ["2.3.1", "2.3.2"], то есть значение, которое модульный словарь
@@ -160,24 +160,49 @@ import re as _re2
 _SRC = _io2.open(os.path.join(_ORIGINAL_CWD, "assistant.py"), encoding="utf-8").read()
 _CODE = "\n".join(l for l in _SRC.split("\n") if not l.lstrip().startswith("#"))
 
-# Литеральных словарей с КОДАМИ рубрик быть не должно больше одного. Отличаем
-# их от карты слов для запасного поиска (там у ortho_bopt значения "bopt",
-# "уступ", "преп") по тому, что код начинается с цифры: "2.2.1".
+# Коды, названия подтем и кнопки — всё выводится из WIKI_TREE. Литеральных
+# карт кодов в файле быть не должно вообще: их было четыре штуки (две карты
+# кодов, две карты названий) плюс цепочка elif со списками кнопок.
 _literal_maps = _re2.findall(r'\{[^{}]*"ortho_bopt"\s*:\s*\[\s*"\d[^{}]*\}', _CODE, _re2.S)
-check("литеральная карта кодов ровно одна", len(_literal_maps) == 1,
+check("литеральных карт кодов не осталось", len(_literal_maps) == 0,
       f"найдено {len(_literal_maps)} — копии разъедутся")
 check("запасной путь использует общий словарь",
       "codes_map = WIKI_SUBTOPIC_CODES" in _CODE,
       "внутри query_wiki_subtopic снова своя карта")
+check("коды выводятся из дерева", "for sub_id, _sub_title, codes in subs" in _CODE,
+      "WIKI_SUBTOPIC_CODES снова заполняется руками")
+check("названия подтем выводятся из дерева",
+      _CODE.count("subtopic_names = WIKI_SUBTOPIC_NAMES") == 2,
+      "где-то осталась своя карта названий")
 
 # Подтемы не должны перекрываться: иначе одна статья живёт в двух кнопках.
-_pairs = [(a, b) for a in assistant.WIKI_SUBTOPIC_CODES for b in assistant.WIKI_SUBTOPIC_CODES if a < b]
-_overlap = [(a, b, sorted(set(assistant.WIKI_SUBTOPIC_CODES[a]) & set(assistant.WIKI_SUBTOPIC_CODES[b])))
-            for a, b in _pairs
-            if set(assistant.WIKI_SUBTOPIC_CODES[a]) & set(assistant.WIKI_SUBTOPIC_CODES[b])]
+_codes = assistant.WIKI_SUBTOPIC_CODES
+_pairs = [(a, b) for a in _codes for b in _codes if a < b]
+_overlap = [(a, b, sorted(set(_codes[a]) & set(_codes[b]))) for a, b in _pairs
+            if set(_codes[a]) & set(_codes[b])]
 check("ни одна пара подтем не делит код", not _overlap, f"пересечения: {_overlap}")
-check("подтем столько же, сколько кнопок в меню",
-      len(assistant.WIKI_SUBTOPIC_CODES) == 14, f"got {len(assistant.WIKI_SUBTOPIC_CODES)}")
+
+# Каждая подтема обязана быть достижима: имя, раздел и кнопка.
+check("у каждой подтемы есть название",
+      all(s in assistant.WIKI_SUBTOPIC_NAMES for s in _codes),
+      f"без названия: {[s for s in _codes if s not in assistant.WIKI_SUBTOPIC_NAMES]}")
+check("префикс подтемы совпадает с разделом — иначе «Назад» ведёт в пустоту",
+      all(s.split("_")[0] in assistant.WIKI_TREE for s in _codes),
+      f"осиротевшие: {[s for s in _codes if s.split('_')[0] not in assistant.WIKI_TREE]}")
+_menu_ids = {b.data.decode().split(":")[1]
+             for cid in assistant.WIKI_TREE
+             for row in assistant.wiki_category_buttons(cid) for b in row
+             if b.data and b.data.decode().startswith("wiki_page:")}
+check("каждая подтема имеет кнопку в своём разделе", _menu_ids == set(_codes),
+      f"без кнопки: {sorted(set(_codes) - _menu_ids)}")
+_topic_ids = {b.data.decode().split(":")[1]
+              for row in assistant.wiki_topic_buttons() for b in row
+              if b.data and b.data.decode().startswith("wiki_cat:")}
+check("каждый раздел есть в рубрикаторе",
+      set(assistant.WIKI_TREE) <= _topic_ids,
+      f"нет кнопки у разделов: {sorted(set(assistant.WIKI_TREE) - _topic_ids)}")
+check("неизвестный раздел не роняет сборку кнопок",
+      len(assistant.wiki_category_buttons("нет_такого")) == 1)
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
