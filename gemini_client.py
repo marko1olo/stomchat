@@ -61,6 +61,31 @@ def _write_generation_status(context, **updates):
     payload["active"] = True
     runtime_guard.write_summary_status(payload)
 
+
+def _release_generation_status(context):
+    """
+    Снимает флаг «идёт работа» после обычного вызова ассистента.
+
+    Любой вызов — ответ в ЛС, триаж, рецензент — пишет в файл статуса
+    active: True. Сторож саммари убивает процесс (os._exit 79), если active
+    стоит, а метка старше 30 минут.
+
+    Почему в боевых журналах этого сторожа не видно (ни кода 79, ни дампов):
+    флаг снимает finally в blocking_tools.generate_gemini_text_async — то есть
+    родительский процесс, переживший ребёнка в любом случае. Вчера я записал,
+    что объяснить молчание сторожа не могу; объяснение нашлось, и оно здесь.
+
+    Сброс здесь остаётся страховкой на случай вызова gemini_client напрямую,
+    в обход обёртки: этим путём ходит vision. Оба пути ведут в одну охрану в
+    runtime_guard, чтобы правило не разъехалось по двум копиям.
+    """
+    if not context:
+        return
+    try:
+        runtime_guard.release_generation_status(context.get("kind"))
+    except Exception as status_err:
+        logger.warning("Failed to release generation status: %s", status_err)
+
 def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
     end_time = time.monotonic() + seconds
     while True:
@@ -289,6 +314,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                         attempt=attempt + 1, max_attempts=max_attempts,
                         key=key_id, result_chars=len(text_result)
                     )
+                    _release_generation_status(status_context)
                     return DummyResponse(text_result)
 
                 logger.warning(f"{provider.capitalize()} returned empty response attempt={attempt + 1}/{max_attempts} key={key_id}")
@@ -336,6 +362,9 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     logger.error("All AI attempts exhausted. Summary was not generated.")
     _write_generation_status(status_context, stage="all_exhausted", max_attempts=max_attempts)
+    # Провал тоже завершает работу: оставлять флаг взведённым после исчерпания
+    # каскада — значит держать заряженным сторожевой os._exit.
+    _release_generation_status(status_context)
     return None
 
 

@@ -209,9 +209,16 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             return None, "gemini-text returned empty text"
         return TextResponse(text), None
     finally:
+        # Флаг взводит дочерний процесс, снимать его обязан родитель: ребёнок
+        # мог не дожить до конца. Раньше здесь стоял безусловный active: False,
+        # который гасил отметку дайджеста, если ответ ассистента завершался
+        # посреди его генерации, — и зависший дайджест переставал быть виден
+        # сторожу. Снимаем только свой флаг.
         try:
             import runtime_guard
-            runtime_guard.write_summary_status({"active": False})
+            runtime_guard.release_generation_status(
+                context.get("kind") if isinstance(context, dict) else None
+            )
         except Exception:
             pass
 

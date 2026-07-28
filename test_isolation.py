@@ -117,6 +117,44 @@ for name in TESTS:
     check(f"{name} не открывает боевой файл на запись", bad_write is None,
           f"найдено: {bad_write.group(0) if bad_write else ''}")
 
+print("\n[5] Тесты, доходящие до генерации, уводят файл статуса")
+# generate_gemini_text_async снимает флаг «идёт генерация» в finally, то есть
+# пишет в bot_summary_status.json даже когда сам вызов LLM заглушен. На этом
+# попались test_gemini_pacing и test_snapshot_document: боевой файл менялся.
+STATUS_WRITERS = (
+    r"generate_gemini_text_async\s*\(",
+    r"\.generate_text\s*\(",
+    r"\.write_summary_status\s*\(",
+    r"\.clear_summary_status\s*\(",
+    r"\.release_generation_status\s*\(",
+)
+status_offenders = []
+for name in TESTS:
+    if name == os.path.basename(__file__):
+        continue
+    code = strip_comments(io.open(name, encoding="utf-8").read())
+    hits = [p for p in STATUS_WRITERS if re.search(p, code)]
+    if not hits:
+        continue
+    isolated = "SUMMARY_STATUS_PATH" in code
+    if not isolated:
+        status_offenders.append(name)
+    check(f"{name} изолирует файл статуса", isolated,
+          "доходит до записи флага, но пишет в боевой bot_summary_status.json")
+check("нарушителей по файлу статуса нет", not status_offenders, f"got {status_offenders}")
+
+print("\n[6] Сброс флага идёт через общую охрану, а не мимо неё")
+# Правило «обычная генерация не гасит флаг идущей сводки» должно жить в одном
+# месте. Прямой write_summary_status({"active": False}) в рабочем коде обходит
+# его — и зависший дайджест перестаёт быть виден сторожу.
+for module in ("blocking_tools.py", "gemini_client.py", "assistant.py", "summarizer.py"):
+    if not os.path.exists(module):
+        continue
+    body = strip_comments(io.open(module, encoding="utf-8").read())
+    raw = re.search(r'write_summary_status\(\s*\{\s*["\']active["\']\s*:\s*False', body)
+    check(f"{module} не гасит флаг напрямую", raw is None,
+          "безусловный сброс в обход release_generation_status")
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))

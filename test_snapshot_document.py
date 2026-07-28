@@ -24,9 +24,13 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 import config
+import runtime_guard
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_snapshot_")
 config.DB_PATH = os.path.join(_TMPDIR, "test_messages.db")
+# Путь обработчика ведёт в генерацию, а та в finally пишет флаг статуса.
+# Боевой bot_summary_status.json трогать нельзя.
+runtime_guard.SUMMARY_STATUS_PATH = os.path.join(_TMPDIR, "bot_summary_status.json")
 
 TEST_CHAT_ID = -1001234567890
 config.SOURCE_CHAT_ID = TEST_CHAT_ID

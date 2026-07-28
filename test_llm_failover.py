@@ -214,6 +214,63 @@ check("«1500 tokens» не считается серверной ошибкой
 check("«500 internal server error» считается",
       gc._SERVER_ERROR_RE.search("500 internal server error") is not None)
 
+print("\n[13] Флаг «идёт работа» снимается за обычными вызовами")
+# Любой вызов ассистента писал в файл статуса active: True, а снять его было
+# некому: clear_summary_status зовёт только summarizer. Сторож саммари убивает
+# процесс (os._exit 79), если флаг стоит, а метка старше 30 минут.
+# В боевых журналах он не срабатывал ни разу — почему, объяснить не удалось,
+# но взведённый os._exit убран независимо от этого.
+# Выше по файлу runtime_guard.write_summary_status подменён заглушкой, чтобы
+# прогон каскада не писал на диск, и восстановить оригинал из модуля уже нельзя.
+# Берём свежий экземпляр модуля и уводим его путь во временный каталог.
+import importlib.util as _ilu
+
+_status_dir = tempfile.mkdtemp(prefix="stomchat_status_")
+_spec = _ilu.spec_from_file_location(
+    "runtime_guard_for_status", os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_guard.py"))
+_rg = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_rg)
+_rg.SUMMARY_STATUS_PATH = os.path.join(_status_dir, "bot_summary_status.json")
+gc.runtime_guard = _rg
+
+
+def _status():
+    import json as _json
+    try:
+        return _json.load(open(_rg.SUMMARY_STATUS_PATH, encoding="utf-8"))
+    except Exception:
+        return {}
+
+gc._write_generation_status({"kind": "pm_chat"}, stage="gemini_request")
+check("во время генерации флаг взведён", _status().get("active") is True)
+gc._release_generation_status({"kind": "pm_chat"})
+check("после ответа в ЛС флаг снят", _status().get("active") is False,
+      f"got {_status()}")
+check("причина снятия записана", _status().get("stage") == "pm_chat_done",
+      f"got {_status().get('stage')}")
+
+for kind in ("llama_triage", "response_validator", "group_ask", "assistant_media"):
+    gc._write_generation_status({"kind": kind}, stage="req")
+    gc._release_generation_status({"kind": kind})
+    check(f"«{kind}» снимает за собой", _status().get("active") is False)
+
+gc._write_generation_status({"kind": "daily"}, stage="gemini_generation_start")
+gc._release_generation_status({"kind": "daily"})
+check("дневной отчёт флаг НЕ снимает — его конвейер ещё идёт",
+      _status().get("active") is True, f"got {_status()}")
+gc._write_generation_status({"kind": "weekly"}, stage="gemini_generation_start")
+gc._release_generation_status({"kind": "weekly"})
+check("недельный отчёт флаг НЕ снимает", _status().get("active") is True)
+
+gc._write_generation_status({"kind": "daily"}, stage="telegraph")
+gc._release_generation_status({"kind": "llama_triage"})
+check("ответ ассистента не снимает защиту с идущего отчёта",
+      _status().get("active") is True and _status().get("kind") == "daily",
+      f"got {_status()}")
+
+check("пустой контекст не роняет", gc._release_generation_status(None) is None)
+shutil.rmtree(_status_dir, ignore_errors=True)
+
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:

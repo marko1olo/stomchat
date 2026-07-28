@@ -3,10 +3,29 @@
 Запуск: python test_gemini_pacing.py
 """
 import asyncio
+import io
+import os
+import shutil
 import sys
+import tempfile
 import time
 
-import blocking_tools as B
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import runtime_guard  # noqa: E402
+
+# generate_gemini_text_async в finally снимает флаг «идёт генерация», то есть
+# пишет в файл статуса. Без этой подмены прогон затирал боевой
+# bot_summary_status.json — ровно то нарушение изоляции, что уже ловили на
+# assistant_state.json.
+_TMPDIR = tempfile.mkdtemp(prefix="stomchat_pace_")
+runtime_guard.SUMMARY_STATUS_PATH = os.path.join(_TMPDIR, "bot_summary_status.json")
+
+import blocking_tools as B  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -133,6 +152,61 @@ B._LAST_GEMINI_CALL_START = 0.0
 B._run_json_tool = capture_tool
 asyncio.run(B.generate_gemini_text_async("after-cancel", {}, timeout=5))
 check("после отмены гейт продолжает работать", seen["outer"] == 5.0, f"got {seen['outer']}")
+
+print("\n[6] Флаг «идёт генерация» снимается родителем и не гасит чужую сводку")
+# Флаг взводит дочерний процесс, а снимает finally здесь: родитель переживает
+# ребёнка в любом случае. Раньше finally писал active: False безусловно — и
+# короткий ответ ассистента гасил отметку дайджеста, который в этот момент ещё
+# считался. Зависший дайджест переставал быть виден сторожу, а он существует
+# ровно ради этого: отчёт уходит всему чату врачей.
+import json  # noqa: E402
+
+
+def status():
+    try:
+        return json.load(io.open(runtime_guard.SUMMARY_STATUS_PATH, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+B._run_json_tool = fake_tool
+B._LAST_GEMINI_CALL_START = 0.0
+
+runtime_guard.write_summary_status({"active": True, "kind": "pm_chat"})
+asyncio.run(B.generate_gemini_text_async("p", {"kind": "pm_chat"}, timeout=5))
+check("обычный ответ снимает свой флаг", status().get("active") is False, f"got {status()}")
+
+runtime_guard.write_summary_status({"active": True, "kind": "daily", "stage": "telegraph"})
+asyncio.run(B.generate_gemini_text_async("p", {"kind": "llama_triage"}, timeout=5))
+check("ответ ассистента НЕ гасит идущий дайджест",
+      status().get("active") is True and status().get("kind") == "daily", f"got {status()}")
+
+runtime_guard.write_summary_status({"active": True, "kind": "daily"})
+asyncio.run(B.generate_gemini_text_async("p", {"kind": "daily"}, timeout=5))
+check("сам дайджест тоже не снимает — конвейер ещё идёт",
+      status().get("active") is True, f"got {status()}")
+
+
+async def failing_tool(action, payload, timeout=None):
+    raise RuntimeError("подпроцесс умер")
+
+
+B._run_json_tool = failing_tool
+runtime_guard.write_summary_status({"active": True, "kind": "pm_chat"})
+try:
+    asyncio.run(B.generate_gemini_text_async("p", {"kind": "pm_chat"}, timeout=5))
+except RuntimeError:
+    pass
+check("флаг снят и при падении вызова", status().get("active") is False, f"got {status()}")
+
+runtime_guard.write_summary_status({"active": True, "kind": "pm_chat"})
+B._run_json_tool = fake_tool
+asyncio.run(B.generate_gemini_text_async("p", None, timeout=5))
+check("контекст None не роняет finally", status().get("active") is False, f"got {status()}")
+
+check("боевой путь статуса подменён", "stomchat_pace_" in runtime_guard.SUMMARY_STATUS_PATH,
+      runtime_guard.SUMMARY_STATUS_PATH)
+shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 print(f"\n{'='*60}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
