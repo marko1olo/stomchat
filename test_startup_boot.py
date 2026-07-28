@@ -359,11 +359,54 @@ async def run_media_checks():
           "тихий отказ распространился на обычную работу")
 
 
+def run_watchdog_budget_checks():
+    print("\n[13] Сторож сводки терпеливее самого конвейера")
+    # Сторож убивает процесс (os._exit 79), если флаг «идёт сводка» взведён, а
+    # метка статуса старше SUMMARY_STALE_SECONDS. Значит его терпение обязано
+    # превышать самый долгий ЗАКОННЫЙ шаг, иначе он стреляет в живую работу.
+    #
+    # Было: терпение 1800 с против разрешённых генерации 2100 с. На одну попытку
+    # к провайдеру уходит timeout/3 = 700 с, и статус пишется перед каждой
+    # попыткой, поэтому при живом ребёнке разрыв не больше 700 с. Но если
+    # ребёнок жив и молчит до первой попытки (завис на импорте или на DNS),
+    # записей нет вовсе: на 1800 с сторож убивал процесс, хотя родитель отпустил
+    # бы вызов на 2100 с и обработал отказ штатно. Терялся дайджест И
+    # происходил перезапуск.
+    import summarizer as S
+
+    generation = S.GEMINI_GENERATION_TIMEOUT_SECONDS
+    patience = main.SUMMARY_STALE_SECONDS
+    check("терпение сторожа больше бюджета генерации",
+          patience > generation,
+          f"терпение {patience} с против генерации {generation} с")
+    check("запас покрывает публикацию, отправку и закрепление",
+          patience - generation >= S.TELEGRAPH_TIMEOUT_SECONDS
+          + S.TELEGRAM_SEND_TIMEOUT_SECONDS + S.PIN_TIMEOUT_SECONDS,
+          f"запас {patience - generation} с")
+    # Разрыв между записями статуса внутри генерации ограничен таймаутом одной
+    # попытки: gemini_client берёт timeout/3.
+    check("разрыв записей статуса внутри генерации меньше терпения",
+          generation / 3 < patience,
+          f"попытка {generation / 3:.0f} с против терпения {patience} с")
+    check("сторож проверяет статус заметно чаще, чем теряет терпение",
+          main.SUMMARY_STATUS_CHECK_SECONDS * 5 <= patience,
+          f"опрос {main.SUMMARY_STATUS_CHECK_SECONDS} с, терпение {patience} с")
+    # Значение обязано быть ВЫВЕДЕНО из бюджета генерации, а не совпадать с ним
+    # случайно: иначе правка одного числа тихо вернёт противоречие.
+    source = io.open("main.py", encoding="utf-8").read()
+    code = "\n".join(l for l in source.split("\n") if not l.lstrip().startswith("#"))
+    assignment = next((l for l in code.split("\n") if "SUMMARY_STALE_SECONDS =" in l), "")
+    check("терпение выведено из бюджета генерации, а не задано числом",
+          "GEMINI_GENERATION_TIMEOUT_SECONDS" in assignment,
+          f"строка: {assignment.strip()[:70]}")
+
+
 import io  # noqa: E402
 
 asyncio.run(run())
 asyncio.run(run_sync_checks())
 asyncio.run(run_media_checks())
+run_watchdog_budget_checks()
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
