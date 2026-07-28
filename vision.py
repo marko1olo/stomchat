@@ -248,18 +248,11 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             )
                             content = resp.choices[0].message.content
                             if content:
-                                import re
-                                if "<think>" in content:
-                                    if "</think>" in content:
-                                        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                                    else:
-                                        parts = content.split("</think>", 1)
-                                        if len(parts) > 1 and parts[1].strip():
-                                            content = parts[1].strip()
-                                        else:
-                                            parts2 = content.split("<think>", 1)
-                                            content = parts2[0].strip() or parts2[1].strip()
-                                text = content.strip()
+                                # Общий помощник вместо местной копии срезки. В
+                                # прежней ветке незакрытого тега при пустом начале
+                                # выбиралось parts2[1] — то есть САМИ размышления
+                                # модели уходили как клиническое описание снимка.
+                                text = gemini_client.strip_reasoning(content)
                                 if text:
                                     # Инструкции «отвечай строго по-русски» мало:
                                     # замер по живой базе показал 1285 английских

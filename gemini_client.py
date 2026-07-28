@@ -28,6 +28,44 @@ def _env_int(name, default):
     except ValueError:
         return default
 
+def strip_reasoning(text):
+    """
+    Убирает из ответа модели поток размышлений и возвращает то, что осталось.
+
+    Рассуждающие модели (qwen и подобные) заворачивают черновик в <think>…</think>.
+    Обработка этого была в двух местах и в обоих неверна по-разному:
+
+      * gemini_client проверял НЕПУСТОТУ ДО срезки: `if text_result:` стоял до
+        re.sub. Модель, вернувшая только размышления, давала после срезки пустую
+        строку — и она уходила наружу как УСПЕХ. Каскад останавливался на первой
+        же такой попытке, вызывающий получал пустой ответ, резервный провайдер не
+        пробовался вообще;
+
+      * незакрытый <think> (ответ оборвался по лимиту токенов) шаблон
+        <think>.*?</think> не срезает совсем — черновик модели уходил врачу как
+        ответ бота дословно;
+
+      * vision срезку делал аккуратнее, но в ветке незакрытого тега при пустом
+        начале брал `parts2[1]`, то есть отдавал САМИ РАЗМЫШЛЕНИЯ как клиническое
+        описание снимка.
+
+    Правило здесь одно: наружу идёт только текст ВНЕ размышлений. Если такого
+    текста нет — возвращается пустая строка, и вызывающий обязан считать это
+    неудачей попытки, а не ответом. Пустой ответ дешевле, чем черновик модели,
+    поданный врачу как заключение по снимку.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "<think>" in cleaned:
+        # Тег открыт и не закрыт: всё от него до конца — незавершённый черновик.
+        cleaned = cleaned.split("<think>", 1)[0]
+    if "</think>" in cleaned:
+        # Закрывающий без открывающего: начало ответа срезано, годен только хвост.
+        cleaned = cleaned.split("</think>", 1)[1]
+    return cleaned.strip()
+
+
 def _retry_sleep_seconds(attempt):
     base = _env_int("STOMCHAT_GEMINI_RETRY_BASE_SECONDS", 2)
     cap = _env_int("STOMCHAT_GEMINI_RETRY_MAX_SECONDS", 60)
@@ -305,9 +343,12 @@ def generate_text(prompt, status_context=None, timeout=None):
                 )
                 text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
 
+                # Срезаем размышления ДО проверки на непустоту: раньше проверка
+                # стояла до срезки, и ответ из одних размышлений уходил наружу
+                # пустым, но с признаком успеха — каскад обрывался.
+                text_result = strip_reasoning(text_result)
+
                 if text_result:
-                    import re
-                    text_result = re.sub(r"<think>.*?</think>", "", text_result, flags=re.DOTALL).strip()
                     logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
                     _write_generation_status(
                         status_context, stage=f"{provider}_success",
