@@ -41,6 +41,36 @@ STYLE_PROMPTS = {
     "humor_cynic": "Твой стиль общения — ироничный стоматолог-циник с черным юмором. Ты слегка устал от пациентов, любишь профессиональный медицинский цинизм, иронию и шутки про деньги, сломанные файлы или пульпу, но остаешься в рамках приличия и врачебного этикета."
 }
 
+# Стиль по умолчанию: для него отдельная вставка в промпт не нужна — тон
+# «коллега-эксперт» и так задан основными правилами.
+DEFAULT_STYLE = "colleague_friendly"
+
+
+def style_instruction_block(selected_style):
+    """
+    Вставка про стиль общения для промпта в общем чате.
+
+    Здесь стоял if ровно на один стиль: clinical_dry. Врач, выбравший в /style
+    «Ироничный циник», в общем чате не получал ничего — настройка молча не
+    работала, хотя кнопка есть и в меню, и в /help. В ЛС тот же выбор
+    учитывался через STYLE_PROMPTS, то есть бот вёл себя по-разному в двух
+    местах при одной и той же настройке.
+
+    Строгий текст для clinical_dry сохранён как был: он жёстче словарного и
+    держит запрет на смайлы, который модель иначе нарушает.
+    """
+    if selected_style == "clinical_dry":
+        return (
+            "\n[КРИТИЧЕСКИЙ СТИЛЬ: Твой собеседник предпочитает строгие клинические факты. "
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать шутки, каламбуры, сарказм, иронию, смайлики и воду. "
+            "Отвечай максимально сухо, строго научно и профессионально, оперируя только доказанными фактами. "
+            "Не пиши никаких смайликов вообще!]\n"
+        )
+    if selected_style and selected_style != DEFAULT_STYLE and selected_style in STYLE_PROMPTS:
+        return f"\n[СТИЛЬ ОБЩЕНИЯ: {STYLE_PROMPTS[selected_style]}]\n"
+    return ""
+
+
 AD_HINTS = [
     "\\n\\n<i>💡 Кстати, вы можете прислать мне рентген-снимок или задать клинический вопрос в ЛС — там я помню историю сообщений и общаюсь тет-а-тет.</i>",
     "\\n\\n<i>💡 Напоминаю, что в личных сообщениях я умею разбирать рентген-снимки, проводить викторины (/quiz) и интерактивные кейсы (/case).</i>",
@@ -488,18 +518,6 @@ def extract_keywords(text):
     dental_matches = [kw for kw in keywords if is_dental_keyword(kw)]
     other_matches = [kw for kw in keywords if not is_dental_keyword(kw)]
     return dental_matches + other_matches
-
-    w = word.lower()
-    for term in DENTAL_KEYWORDS:
-        if len(term) < 4:
-            # Короткие термины ("зуб", "бор", "кт") — только как начало слова,
-            # иначе они матчатся на случайный мусор.
-            if w.startswith(term):
-                return True
-            continue
-        if w.startswith(term) or term.startswith(w):
-            return True
-    return False
 
 
 _MAX_SEARCH_KEYWORDS = 12
@@ -1321,16 +1339,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
     # Получаем стиль отправителя для применения его предпочтений в группе
     user_profile = await database.get_user_profile(event.sender_id)
-    selected_style = user_profile.get("selected_style", "colleague_friendly")
-    
-    style_instruction = ""
-    if selected_style == "clinical_dry":
-        style_instruction = (
-            "\n[КРИТИЧЕСКИЙ СТИЛЬ: Твой собеседник предпочитает строгие клинические факты. "
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать шутки, каламбуры, сарказм, иронию, смайлики и воду. "
-            "Отвечай максимально сухо, строго научно и профессионально, оперируя только доказанными фактами. "
-            "Не пиши никаких смайликов вообще!]\n"
-        )
+    selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
+    style_instruction = style_instruction_block(selected_style)
 
     # BUILD PROMPT
     ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
@@ -3264,16 +3274,8 @@ async def handle_group_direct_ask(bot_client, event, question):
         
     # Получаем стиль отправителя для применения его предпочтений в группе
     user_profile = await database.get_user_profile(event.sender_id)
-    selected_style = user_profile.get("selected_style", "colleague_friendly")
-    
-    style_instruction = ""
-    if selected_style == "clinical_dry":
-        style_instruction = (
-            "\n[КРИТИЧЕСКИЙ СТИЛЬ: Твой собеседник предпочитает строгие клинические факты. "
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать шутки, каламбуры, сарказм, иронию, смайлики и воду. "
-            "Отвечай максимально сухо, строго научно и профессионально, оперируя только доказанными фактами. "
-            "Не пиши никаких смайликов вообще!]\n"
-        )
+    selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
+    style_instruction = style_instruction_block(selected_style)
 
     async with bot_client.action(chat_id, 'typing'):
         keywords = extract_keywords(question)
@@ -3633,15 +3635,22 @@ async def handle_quiz_callback(bot_client, event):
             "clinical_dry": "Сухие факты 📝",
             "humor_cynic": "Ироничный циник 💀"
         }
+        # Данные кнопки приходят от клиента, а не из нашего сообщения: прислать
+        # можно что угодно. Неизвестное значение легло бы в базу как стиль и
+        # осталось там навсегда — сохраняем только то, для чего есть промпт.
+        if style not in STYLE_PROMPTS:
+            logger.warning("Unknown style in callback from %s: %r", event.sender_id, style)
+            await event.answer("Неизвестный стиль", alert=True)
+            return
         style_name = style_names.get(style, "Неизвестный")
-        
+
         # Сохраняем в БД
         await database.set_user_style(event.sender_id, style)
-        
+
         confirm_text = (
             "✅ <b>Стиль общения успешно изменен!</b>\n\n"
             f"Новый стиль: <b>{style_name}</b>\n\n"
-            "Все последующие ответы в ЛС будут генерироваться в соответствии с выбранной тональностью. Вы можете изменить его в любой момент с помощью команды /style."
+            "Он применяется и в личных сообщениях, и в ответах в общем чате. Изменить можно в любой момент командой /style."
         )
         await bot_client.edit_message(event.chat_id, event.message_id, confirm_text, parse_mode='html')
         await event.answer()
