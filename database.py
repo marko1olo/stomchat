@@ -14,10 +14,29 @@ _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stomchat-db
 SAVE_RETRY_ATTEMPTS = 3
 SAVE_RETRY_DELAY_SECONDS = 0.25
 
+# Пути баз, для которых режим журнала уже выставлен в этом процессе.
+#
+# journal_mode = WAL — свойство ФАЙЛА, а не соединения: он записан в заголовок
+# базы и переживает и закрытие соединения, и перезапуск процесса. Установка его
+# на каждом открытии брала блокировку и писала в файл впустую. Замер на копии
+# боевой базы, 40 открытий: 1.936 мс с установкой против 0.735 мс без неё —
+# накладные 1.2 мс, в 2.6 раза, и платятся они на КАЖДОМ обращении к базе,
+# включая save_message на каждом входящем сообщении. Все обращения к базе
+# сериализованы через _DB_EXECUTOR с одним потоком, так что это прямая задержка
+# всей работы с базой, а не параллельная.
+#
+# Ключ — путь, а не флаг: тесты подменяют config.DB_PATH на временные файлы, и
+# каждая новая база должна получить WAL один раз. Полагаться на init_db нельзя:
+# не всякий путь кода её зовёт.
+_WAL_READY = set()
+
+
 def _connect():
     db = sqlite3.connect(config.DB_PATH, timeout=30)
     db.execute("PRAGMA busy_timeout = 30000")
-    db.execute("PRAGMA journal_mode = WAL")
+    if config.DB_PATH not in _WAL_READY:
+        db.execute("PRAGMA journal_mode = WAL")
+        _WAL_READY.add(config.DB_PATH)
     return db
 @contextmanager
 def _connection():

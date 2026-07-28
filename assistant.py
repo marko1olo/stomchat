@@ -3335,8 +3335,43 @@ async def handle_private_message(bot_client, event):
                 return
                 
             reply_text = reply_text.strip()
+
+            # Рецензент стоял ТОЛЬКО на двух путях из двенадцати, которые
+            # генерируют ответ модели и отправляют его врачу. Разбор по AST всех
+            # функций assistant.py: ответ в ЛС — главный клинический путь
+            # продукта, врач спрашивает про свой случай и действует по ответу —
+            # уходил без проверки вовсе.
+            #
+            # invited=True здесь не смягчение, а точное описание ситуации: врач
+            # спросил напрямую и ждёт ответа. Политика при НЕДОСТУПНОМ рецензенте
+            # для этого случая — пропускать с предупреждением в журнал: молча
+            # проигнорировать вопрос хуже, чем отдать текст, уже прошедший
+            # EBM-правила основного промпта. Явный отказ (ok:false) глушит
+            # черновик всегда, на любом пути.
+            #
+            # Справку отдаём ту же, на которой строился ответ: без неё рецензент
+            # не отличает число из базы знаний от выдуманного.
+            pm_ok, pm_reason = await check_response_quality(
+                context_msgs, reply_text, invited=True, reference=wiki_corpus
+            )
+            if not pm_ok:
+                logger.warning(
+                    "PM response validator REJECTED draft chat_id=%s: %s", chat_id, pm_reason
+                )
+                # Молчание тут хуже отказа: врач не поймёт, дошёл ли вопрос.
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=("🤔 <i>Ответ собрался, но не прошёл мою же проверку на "
+                             "клиническую обоснованность — отдавать его не стану. "
+                             "Переформулируйте вопрос или добавьте деталей: снимок, "
+                             "возраст, данные осмотра.</i>"),
+                    parse_mode='html',
+                )
+                return
+            logger.info("PM response validator approved chat_id=%s: %s", chat_id, pm_reason)
+
             reply_text = clean_html_formatting(reply_text)
-            
+
             # Отправка развернутого ответа
             await send_message_chunks_async(
                 bot_client,
@@ -3454,9 +3489,27 @@ NO — если это случайное упоминание, обсужден
             return False
 
         reply_text = (getattr(reply_resp, "text", "") or "").strip()
-        reply_text = clean_html_formatting(reply_text)
         if not reply_text:
             return False
+
+        # Прямое обращение к боту в ОБЩЕМ чате: ответ читают все 749 коллег, и
+        # рецензента здесь не было. invited=True — врач позвал сам и ждёт
+        # ответа, поэтому при недоступном рецензенте пропускаем с
+        # предупреждением; явный отказ глушит черновик.
+        # Контекст здесь собран строкой (context_str), списка реплик в этой
+        # функции нет — отдаём строку одним элементом.
+        mention_ok, mention_reason = await check_response_quality(
+            [context_str] if context_str else [],
+            reply_text, invited=True, reference=mention_wiki,
+        )
+        if not mention_ok:
+            logger.warning(
+                "Bot mention validator REJECTED draft msg_id=%s: %s", msg_id, mention_reason
+            )
+            return False
+        logger.info("Bot mention validator approved msg_id=%s: %s", msg_id, mention_reason)
+
+        reply_text = clean_html_formatting(reply_text)
 
         if BOT_MENTION_SHADOW_MODE:
             write_to_shadow_log(
@@ -3629,8 +3682,29 @@ async def handle_group_direct_ask(bot_client, event, question):
             return
             
         reply_text = response.text.strip()
+
+        # Публичный клинический ответ в общем чате: рецензента здесь не было.
+        # invited=True — вопрос задан боту прямо.
+        # Своего контекста у этой функции нет: рецензенту отдаём сам вопрос
+        # врача — по нему и проверяется, относится ли ответ к делу.
+        ask_ok, ask_reason = await check_response_quality(
+            [f"Врач: {question}"] if question else [], reply_text,
+            invited=True, reference=wiki_corpus
+        )
+        if not ask_ok:
+            logger.warning("Group ask validator REJECTED draft msg_id=%s: %s", msg_id, ask_reason)
+            await bot_client.send_message(
+                entity=chat_id,
+                message=("🤔 <i>Ответ собрался, но не прошёл мою же проверку на клиническую "
+                         "обоснованность. Уточните вопрос или добавьте деталей.</i>"),
+                reply_to=msg_id,
+                parse_mode='html',
+            )
+            return
+        logger.info("Group ask validator approved msg_id=%s: %s", msg_id, ask_reason)
+
         reply_text = clean_html_formatting(reply_text)
-        
+
         # Добавляем ненавязчивую рекламу ЛС в группе с вероятностью 15%
         import random
         if random.random() < 0.15:
