@@ -190,12 +190,20 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
 
             total_msgs = list(period_messages)
             if len(total_msgs) < min_count:
+                # Добор из прошлого — только то, что ещё НЕ уходило в сводку.
+                # Без этого условия в тихий день дайджест пересказывал
+                # сообществу вчерашний. Замер на 144 днях живой базы: добор
+                # срабатывает на 15 днях и поднимает 611 сообщений, из которых
+                # 502 (82%) уже публиковались; 13 июня повторами были все 90.
+                # Флаг для того и заведён, см. mark_messages_as_summarized:
+                # «сообщение, уже ушедшее в сводку, не должно всплыть в
+                # следующей ещё раз» — здесь это правило и нарушалось.
                 needed = min_count - len(total_msgs)
                 old_messages = db.execute(
                     """
                     SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
                     FROM messages
-                    WHERE date < ?
+                    WHERE date < ? AND is_summarized = 0
                     ORDER BY date DESC
                     LIMIT ?
                     """,

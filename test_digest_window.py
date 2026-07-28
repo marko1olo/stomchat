@@ -159,6 +159,47 @@ async def run():
           database._date_text(naive_probe) == expected,
           f"got {database._date_text(naive_probe)}")
 
+    print("\n[7] Добор в тихий день не пересказывает уже отправленное")
+    # Когда в окне меньше min_count сообщений, недостающие берутся из прошлого.
+    # Условия is_summarized = 0 там не было, и в тихий день дайджест уходил
+    # сообществу с вчерашним содержимым. Замер на 144 днях живой базы: добор
+    # срабатывает на 15 днях и поднимает 495 сообщений, из которых 442 (89%)
+    # уже публиковались; 14 июня повторами были все 66 из 100.
+    base = datetime(2026, 3, 10, 12, 0, 0)
+    for i in range(40):
+        await seed(9000 + i, base - timedelta(days=5, minutes=i),
+                   f"Старое клиническое сообщение про эндодонтию номер {i}")
+    # Половину помечаем как уже ушедшую в сводку.
+    old_sent = [9000 + i for i in range(0, 40, 2)]
+    await database.mark_messages_as_summarized(old_sent)
+
+    for i in range(5):
+        await seed(9500 + i, base - timedelta(minutes=i),
+                   f"Свежая реплика про ирригацию канала номер {i}")
+
+    quiet_start = base - timedelta(hours=2)
+    quiet_end = base + timedelta(hours=2)
+    picked = await database.get_messages_for_daily_summary(quiet_start, quiet_end, min_count=30)
+    ids = [m[0] for m in picked]
+    check("добор действительно сработал", len(ids) > 5, f"got {len(ids)}")
+    check("ни одно уже отправленное не вернулось",
+          not (set(ids) & set(old_sent)),
+          f"повторы: {sorted(set(ids) & set(old_sent))[:6]}")
+    check("свежие сообщения на месте",
+          all(9500 + i in ids for i in range(5)))
+    check("добор берёт именно непомеченные",
+          all(m in ids for m in [9001, 9003, 9005]),
+          "непомеченные старые сообщения не подтянулись")
+
+    # Если непомеченных не осталось, дайджест обязан выйти коротким, а не
+    # повторным: пустой отчёт лучше пересказа.
+    await database.mark_messages_as_summarized([9000 + i for i in range(40)])
+    short = await database.get_messages_for_daily_summary(quiet_start, quiet_end, min_count=30)
+    check("когда непомеченных нет — отдаётся только окно",
+          len(short) == 5, f"got {len(short)}")
+    check("и это ровно свежие сообщения",
+          {m[0] for m in short} == {9500 + i for i in range(5)})
+
 
 try:
     asyncio.run(run())
