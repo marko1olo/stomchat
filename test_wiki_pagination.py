@@ -204,6 +204,44 @@ check("каждый раздел есть в рубрикаторе",
 check("неизвестный раздел не роняет сборку кнопок",
       len(assistant.wiki_category_buttons("нет_такого")) == 1)
 
+print("\n[10] Что видно на кнопке и что попадает в длинную статью")
+# Разброс по объёму огромный: «Отбеливание» 18 статей, «Коронки» 3734. Без числа
+# на кнопке врач не понимает, куда попадает — в подборку из двух десятков
+# заметок или в раздел, который за вечер не пролистать.
+_counts = {"ortho_vin": 1426, "ortho_crown": 3734}
+_labels = [b.text for row in assistant.wiki_category_buttons("ortho", _counts) for b in row]
+check("число статей вынесено на кнопку",
+      any("· 3734" in l for l in _labels), f"got {_labels[:3]}")
+check("подтема без счётчика остаётся без числа, а не с нулём",
+      not any("· 0" in l or l.endswith("· ") for l in _labels), f"got {_labels}")
+_plain = [b.text for row in assistant.wiki_category_buttons("ortho") for b in row]
+check("без счётчиков кнопки собираются как раньше",
+      all("·" not in l for l in _plain), f"got {_plain[:3]}")
+
+# Обрезка длинной статьи: рвала ровно на 3900-м символе, посреди слова. На живой
+# вике это 30 статей из 12 784, и врач читал «...переход от корня к кон».
+_long = ("Гипохлорит натрия применяют в концентрации от 3 до 5 процентов. "
+         "Экспозиция составляет не менее тридцати минут на канал. ") * 60
+_out = assistant.clean_html_formatting(_long)
+_body = _out.split("\n\n[Показано")[0]
+check("длинная статья обрезана", len(_out) < len(_long))
+check("влезает в лимит Telegram", len(_out) <= 4096, f"got {len(_out)}")
+check("обрыв на границе предложения, а не посреди слова",
+      _body.rstrip().endswith((".", "!", "?", ";", "…")), repr(_body[-40:]))
+check("сказано сколько показано и сколько осталось",
+      "Показано" in _out and "не поместились" in _out, _out[-90:])
+check("число потерянного посчитано верно",
+      f"из {len(_long)}" in _out, _out[-90:])
+_short = "Короткая статья про ирригацию канала."
+check("короткая статья не трогается",
+      "Показано" not in assistant.clean_html_formatting(_short))
+
+# Висящий номер следующего пункта списка не должен оставаться на конце.
+_numbered = ("Первый абзац с длинным текстом про препарирование зуба. " * 70) + "\n\n5. Следующий пункт"
+_body2 = assistant.clean_html_formatting(_numbered).split("\n\n[Показано")[0]
+check("номер следующего пункта не остаётся сиротой",
+      not _re2.search(r"\d+\.\s*$", _body2), repr(_body2[-30:]))
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))

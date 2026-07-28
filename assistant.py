@@ -655,10 +655,15 @@ def _clip_at_sentence(text, limit):
     отсутствие записи. Если границы нет — режем по слову.
     """
     head = text[:limit]
+    best = -1
     for mark in (". ", "! ", "? ", "; "):
         cut = head.rfind(mark)
-        if cut >= limit // 2:
-            return head[:cut + 1]
+        if cut > best:
+            best = cut
+    if best >= limit // 2:
+        # Номер следующего пункта списка не должен остаться сиротой: обрезка по
+        # ". " после «...в пустоту.\n\n5.» давала висящее «5.» без текста.
+        return re.sub(r"\s*\n?\s*\d+\.\s*$", "", head[:best + 1]).rstrip()
     cut = head.rfind(" ")
     return (head[:cut] if cut >= limit // 2 else head) + "…"
 
@@ -796,9 +801,19 @@ def clean_html_formatting(text):
     text = re.sub(r'\s*\[\d+(?:\.\d+)+\]', '', text)
     
     if len(text) > 4000:
-        text = re.sub(r'<[^>]+>', '', text)
-        text = text[:3900] + "\n\n[Текст обрезан из-за превышения длины сообщения]"
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Обрезка шла ровно по 3900-му символу, то есть посреди слова. На живой
+        # вике это видно на 30 статьях из 12 784: врач читал «...получить
+        # плавный переход от корня к кон», «...вместо ста», «...а не эт».
+        # Режем по границе предложения и говорим, сколько текста осталось за
+        # кадром: «обрезан» без числа не даёт понять, потерян абзац или треть
+        # статьи.
+        plain = re.sub(r'<[^>]+>', '', text)
+        shown = _clip_at_sentence(plain, 3900)
+        hidden = len(plain) - len(shown)
+        notice = (f"\n\n[Показано {len(shown)} символов из {len(plain)}; "
+                  f"ещё {hidden} не поместились в одно сообщение]")
+        body = shown.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return body + notice
 
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
@@ -3656,16 +3671,82 @@ WIKI_SUBTOPIC_NAMES = {
 WIKI_CATEGORY_NAMES = {cat_id: title for cat_id, (title, _subs) in WIKI_TREE.items()}
 
 
-def wiki_category_buttons(cat_id):
-    """Кнопки подтем раздела. Собираются из дерева, а не расписаны руками."""
+def wiki_category_buttons(cat_id, counts=None):
+    """
+    Кнопки подтем раздела. Собираются из дерева, а не расписаны руками.
+
+    counts — сколько статей в каждой подтеме. Число выносится на кнопку, потому
+    что разброс огромный: «Отбеливание» это 18 статей, «Коронки» — 3734. Без
+    числа врач выбирает наугад и не понимает, куда он попал: в подборку из двух
+    десятков заметок или в раздел, который за вечер не пролистать.
+    """
     from telethon import Button
     entry = WIKI_TREE.get(cat_id)
     if not entry:
         return [[Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")]]
-    buttons = [[Button.inline(sub_title, data=f"wiki_page:{sub_id}:0")]
-               for sub_id, sub_title, _codes in entry[1]]
+    buttons = []
+    for sub_id, sub_title, _codes in entry[1]:
+        label = sub_title
+        if counts:
+            total = counts.get(sub_id)
+            if total:
+                label = f"{sub_title} · {total}"
+        buttons.append([Button.inline(label, data=f"wiki_page:{sub_id}:0")])
     buttons.append([Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")])
     return buttons
+
+
+_WIKI_COUNT_CACHE = {}
+
+
+async def wiki_subtopic_counts(cat_id):
+    """
+    Число статей по подтемам раздела — одним запросом на подтему.
+
+    Считает SQL, в память ничего не тянется. Если базы нет или запрос упал,
+    возвращаем пустой словарь: кнопки просто останутся без чисел, раздел
+    открыться должен всё равно.
+
+    Результат кэшируется на время жизни процесса: вики статична, её пересобирает
+    отдельный дистиллятор в офлайне. Без кэша каждое нажатие кнопки раздела
+    стоило 170-350 мс на пересчёт одних и тех же чисел.
+    """
+    if cat_id in _WIKI_COUNT_CACHE:
+        return _WIKI_COUNT_CACHE[cat_id]
+
+    entry = WIKI_TREE.get(cat_id)
+    if not entry or not os.path.exists("stomat_wiki.db"):
+        return {}
+
+    def sync_count():
+        result = {}
+        conn = sqlite3.connect("stomat_wiki.db", timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout = 10000")
+            for sub_id, _title, _codes in entry[1]:
+                where, params = _wiki_code_filter(sub_id)
+                if not where:
+                    continue
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM distilled_facts WHERE {where} "
+                    "AND content IS NOT NULL AND TRIM(content) <> ''",
+                    params,
+                ).fetchone()
+                result[sub_id] = row[0] if row else 0
+        finally:
+            conn.close()
+        return result
+
+    try:
+        counts = await asyncio.get_running_loop().run_in_executor(None, sync_count)
+    except Exception as exc:
+        logger.warning("wiki counts failed cat=%s: %s", cat_id, exc)
+        return {}
+    # Пустой результат не кэшируем: значит база была недоступна, и при следующем
+    # нажатии стоит попробовать снова.
+    if counts:
+        _WIKI_COUNT_CACHE[cat_id] = counts
+    return counts
 
 
 def wiki_topic_buttons():
@@ -3974,7 +4055,7 @@ async def handle_quiz_callback(bot_client, event):
         # словарь заголовков и цепочка elif со списками кнопок на каждый
         # раздел — третья и четвёртая копии одних и тех же данных.
         title = WIKI_CATEGORY_NAMES.get(cat_id, "📚 Раздел Энциклопедии")
-        buttons = wiki_category_buttons(cat_id)
+        buttons = wiki_category_buttons(cat_id, await wiki_subtopic_counts(cat_id))
 
         wiki_text = f"📚 <b>Раздел: {title}</b>\n\nвыберите интересующую клиническую подтему для просмотра статей:"
         await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
