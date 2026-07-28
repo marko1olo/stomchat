@@ -137,8 +137,10 @@ async def run():
     check("подъём завершился", err is None, f"{type(err).__name__ if err else ''}: {err}")
 
     print("\n[4] Все фоновые задачи запущены")
+    # media_recovery добавлена потому, что догон снимков был ОДНОКРАТНЫМ: 745
+    # накопленных при пяти за запуск разбирались бы порядка 372 суток.
     for task in ("heartbeat", "scheduler", "pm_ping_scheduler", "runtime_telemetry",
-                 "summary_watchdog", "health_watchdog"):
+                 "summary_watchdog", "health_watchdog", "media_recovery"):
         check(f"задача {task}", task in started, f"запущены: {started}")
     check("воркер разбора медиа поднят",
           any(t.startswith("media_analysis") for t in started), f"got {started}")

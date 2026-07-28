@@ -139,6 +139,13 @@ MEDIA_QUEUE_MAX_SIZE = max(MEDIA_WORKER_COUNT, _env_int("STOMCHAT_MEDIA_QUEUE_MA
 # уборщик, голосовой путь и медиа в личных сообщениях.
 MEDIA_TEMP_DIR = media_temp_dir
 MEDIA_RECOVERY_LIMIT = max(0, _env_int("STOMCHAT_MEDIA_RECOVERY_LIMIT", 5))
+# Как часто доливать неразобранные снимки в очередь. Догон был однократным — при
+# 745 накопленных и пяти за запуск это порядка 372 суток (14 перезапусков за 35
+# суток по журналу), то есть практически никогда. Пятнадцать минут выбраны по
+# пропускной способности: воркер один, разбор снимка десятки секунд, за такт
+# уходит не больше MEDIA_RECOVERY_LIMIT — накопленное сходится за сутки-двое, а
+# не за год, и очередь при этом не забивается.
+MEDIA_RECOVERY_INTERVAL_SECONDS = max(60, _env_int("STOMCHAT_MEDIA_RECOVERY_INTERVAL", 900))
 # Отметка «файл до Vision не дошёл». Пустое media_description означает «ещё не
 # разбирали», и строка с ним возвращается из get_pending_media_message_ids на
 # каждом запуске. Любое непустое значение снимает её с догона; отдельный текст
@@ -974,6 +981,49 @@ async def recover_pending_media_analysis():
             queued += 1
 
     logger.info("pending media recovery queued=%s scanned=%s", queued, len(pending))
+    return queued
+
+
+async def media_recovery_task():
+    """
+    Периодический догон неразобранных снимков.
+
+    Догон вызывался РОВНО ОДИН раз за запуск и брал MEDIA_RECOVERY_LIMIT строк.
+    Замер по копии боевой базы: 745 снимков без описания, самый старый от
+    2026-01-29. При пяти за запуск это 149 перезапусков, а перезапусков по
+    журналу выходит 14 за 35 суток — то есть порядка 372 суток, чтобы разобрать
+    накопленное. Практически это «никогда»: врач присылает рентген, бот молчит,
+    и никто не знает, что снимок стоит в очереди длиной в год.
+
+    Очередь разбора живёт в памяти и умирает вместе с процессом, поэтому
+    восстановление обязано быть повторяющимся, а не однократным.
+
+    Темп ограничен не числом, а пропускной способностью воркера: за такт
+    доливаем не больше MEDIA_RECOVERY_LIMIT и только если в очереди есть место.
+    Воркер один, разбор снимка — десятки секунд, так что очередь сама держит
+    темп. Каждый разбор идёт через платный Vision, и это осознанная цена: снимок
+    без описания выпадает и из дайджеста, и из справки, то есть клинический
+    материал теряется целиком.
+
+    Когда неразобранного не остаётся, задача молчит: в журнал пишем только такты,
+    на которых что-то реально поставлено.
+    """
+    if MEDIA_RECOVERY_LIMIT <= 0:
+        logger.info("media recovery disabled (MEDIA_RECOVERY_LIMIT=0)")
+        return
+
+    while True:
+        await asyncio.sleep(MEDIA_RECOVERY_INTERVAL_SECONDS)
+        try:
+            if _media_queue is not None and _media_queue.full():
+                continue
+            queued = await recover_pending_media_analysis()
+            if queued:
+                logger.info("media recovery tick queued=%s", queued)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("media recovery tick failed")
 
 
 async def media_analysis_worker(worker_id):
@@ -2134,6 +2184,7 @@ async def start_bot():
     runtime_guard.create_task(runtime_telemetry_task(), "runtime_telemetry")
     runtime_guard.create_task(summary_watchdog_task(), "summary_watchdog")
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")
+    runtime_guard.create_task(media_recovery_task(), "media_recovery")
     logger.info("bot started, history synchronized, chat listener active")
     try:
         await client.run_until_disconnected()
