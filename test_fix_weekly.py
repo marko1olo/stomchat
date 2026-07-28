@@ -245,12 +245,26 @@ def scenario_prompt():
     prompt = GEN_CALLS[0]["prompt"]
     check("промпт помечен как weekly", GEN_CALLS[0]["kind"] == "weekly")
 
-    ranges = set(re.findall(r"(\d{4})\s*[–-]\s*(\d{4})\s*символ", prompt))
-    ceilings = {int(high) for _, high in ranges}
-    check("промпт называет ОДИН диапазон объёма", len(ranges) == 1, f"got {sorted(ranges)}")
-    check(f"верхняя граница не выше предела обрезки {S.WEEKLY_HTML_LIMIT}",
-          ceilings and max(ceilings) <= S.WEEKLY_HTML_LIMIT, f"got {sorted(ceilings)}")
-    check("прежние 8000–10000 из промпта убраны", not any(h == 10000 for h in ceilings),
+    # Диапазон в промпте заменён ОДНОЙ цифрой, выведенной из порога обрезки:
+    # WEEKLY_CHAR_BUDGET = WEEKLY_HTML_LIMIT - 1200. Зашитая руками цифра в трёх
+    # местах промпта — ровно та конструкция, из которой в ДНЕВНОЙ ветке выросло
+    # расхождение «4000-5000» против «7000-9000», и 43% дайджестов уходили
+    # сообществу обрубленными. Поэтому проверяем не литеральный диапазон, а то,
+    # что цифра в промпте РАВНА константе и что константа ниже порога.
+    numbers = {int(n) for n in re.findall(r"(\d{4,5})\s*символ", prompt)}
+    check("в промпте есть цифра объёма", numbers, f"got {numbers}")
+    check("объём в промпте — одна и та же цифра во всех упоминаниях",
+          len(numbers) == 1, f"got {sorted(numbers)} — промпт спорит сам с собой")
+    check("цифра взята из константы, а не зашита",
+          numbers == {S.WEEKLY_CHAR_BUDGET},
+          f"в промпте {sorted(numbers)}, константа {S.WEEKLY_CHAR_BUDGET}")
+    check(f"константа ниже предела обрезки {S.WEEKLY_HTML_LIMIT}",
+          S.WEEKLY_CHAR_BUDGET < S.WEEKLY_HTML_LIMIT,
+          "верхняя часть статьи уедет в отрез вместе с последними разделами")
+    check("запас под разметку и подвал не меньше тысячи символов",
+          S.WEEKLY_HTML_LIMIT - S.WEEKLY_CHAR_BUDGET >= 1000,
+          f"запас {S.WEEKLY_HTML_LIMIT - S.WEEKLY_CHAR_BUDGET}")
+    check("прежние 8000–10000 из промпта убраны", 10000 not in numbers,
           "конвейер режет на 9500, верхняя половина диапазона уезжала в отрез")
     check("нет второго, противоречащего лимита 4000-5000",
           "4000-5000" not in prompt and "4000–5000" not in prompt)
