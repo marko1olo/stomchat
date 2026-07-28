@@ -1,5 +1,12 @@
 ﻿# -*- coding: utf-8 -*-
 import sys
+
+if __name__ != "__main__":
+    # Ves zamer idet na urovne modulya, poetomu obychnyy `import benchmark`
+    # otpravlyaet realnye platnye zaprosy v Groq. Tak i sluchilos pri obkhode
+    # importov 28.07.2026. Pryamoy zapusk `python benchmark.py` rabotaet.
+    raise ImportError("benchmark.py - instrument, ne modul: zapuskat napryamuyu")
+
 import codecs
 sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
 

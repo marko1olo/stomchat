@@ -1,3 +1,8 @@
+if __name__ != "__main__":
+    # Perechen modeley zaprashivaetsya na urovne modulya, to est prostoy import
+    # bet po realnomu API Google. Pryamoy zapusk `python delist.py` rabotaet.
+    raise ImportError("delist.py - instrument, ne modul: zapuskat napryamuyu")
+
 import config
 from google import genai
 
