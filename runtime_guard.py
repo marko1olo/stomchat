@@ -9,7 +9,38 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
 
-LOG_PATH = "bot.log"
+def _default_log_path():
+    """
+    Куда писать журнал. Боевой bot.log тесты трогать не должны.
+
+    configure_logging() вызывается на уровне модуля в main.py, поэтому ЛЮБОЙ
+    тест, импортирующий main, начинал писать в боевой журнал. Замер на 28 июля
+    2026: в bot.log лежало 1629 строк настоящей июньской работы и 1005 строк
+    тестовой выдумки — несуществующие чаты, выдуманные врачи и строки ERROR,
+    которых в бою не было. Оператор, разбирающийся, почему бот встал 22 июня,
+    читает именно этот файл.
+
+    Хуже того, журнал ротируется по 5 МБ. Один прогон набора добавляет около
+    0.2 МБ, то есть полтора десятка прогонов вытеснили бы единственную запись
+    о последнем дне работы бота.
+
+    Имя точки входа — надёжный признак: тесты запускаются как test_*.py.
+    Переменная окружения оставлена для случаев, когда нужно указать путь явно.
+    """
+    override = os.getenv("STOMCHAT_LOG_PATH")
+    if override:
+        return override
+    try:
+        import sys
+        entry = os.path.basename(sys.argv[0] or "")
+    except Exception:
+        entry = ""
+    if entry.startswith("test_") and entry.endswith(".py"):
+        return "bot_test.log"
+    return "bot.log"
+
+
+LOG_PATH = _default_log_path()
 HEARTBEAT_PATH = "bot_heartbeat.json"
 SUMMARY_STATUS_PATH = "bot_summary_status.json"
 WATCHDOG_DUMP_PATH = "bot_watchdog_dump.txt"

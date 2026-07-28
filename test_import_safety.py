@@ -175,6 +175,52 @@ for path in SOURCES:
     bad = sorted(imported & {d[:-3] for d in DANGEROUS})
     check(f"{path} не тянет опасный инструмент", not bad, f"импортирует {bad}")
 
+print("\n[6] Прогон теста не пишет в боевой журнал")
+# configure_logging() вызывается на уровне модуля в main.py, поэтому любой
+# тест, импортирующий main, писал в боевой bot.log. Замер на 28 июля 2026:
+# 1629 строк настоящей июньской работы против 1005 строк тестовой выдумки —
+# несуществующие чаты, выдуманные врачи, строки ERROR, которых в бою не было.
+# Журнал ротируется по 5 МБ, один прогон набора добавляет ~0.2 МБ: полтора
+# десятка прогонов вытеснили бы единственную запись о последнем дне работы.
+import runtime_guard  # noqa: E402
+
+check("этот прогон пишет не в боевой журнал", runtime_guard.LOG_PATH != "bot.log",
+      f"журнал теста уходит в {runtime_guard.LOG_PATH}")
+check("путь журнала определяется по точке входа",
+      "_default_log_path" in io.open("runtime_guard.py", encoding="utf-8").read(),
+      "правило потеряно, тесты снова затрут боевой журнал")
+check("проверка действительно запущена как тест",
+      os.path.basename(sys.argv[0]).startswith("test_"),
+      "иначе правило проверить нечем")
+
+# Правило проверяем на самой функции: подменяем точку входа и переменную,
+# а не полагаемся на то, как запущен этот файл.
+_argv, _env = sys.argv[0], os.environ.pop("STOMCHAT_LOG_PATH", None)
+try:
+    sys.argv[0] = "main.py"
+    check("боту достаётся именно bot.log", runtime_guard._default_log_path() == "bot.log",
+          runtime_guard._default_log_path())
+    sys.argv[0] = "test_something.py"
+    check("тесту достаётся отдельный журнал",
+          runtime_guard._default_log_path() != "bot.log",
+          runtime_guard._default_log_path())
+    os.environ["STOMCHAT_LOG_PATH"] = "явно_заданный.log"
+    sys.argv[0] = "main.py"
+    check("переменная окружения перекрывает оба случая",
+          runtime_guard._default_log_path() == "явно_заданный.log",
+          runtime_guard._default_log_path())
+finally:
+    sys.argv[0] = _argv
+    os.environ.pop("STOMCHAT_LOG_PATH", None)
+    if _env is not None:
+        os.environ["STOMCHAT_LOG_PATH"] = _env
+
+# Журнал ограничен по размеру: бот работает месяцами.
+guard_source = io.open("runtime_guard.py", encoding="utf-8").read()
+check("журнал ротируется, а не растёт бесконечно", "RotatingFileHandler" in guard_source)
+check("у ротации задан предел размера", "maxBytes" in guard_source)
+check("хранится несколько поколений", "backupCount" in guard_source)
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
