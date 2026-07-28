@@ -35,16 +35,36 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
+# Теги, которые Telegram принимает в parse_mode=html. Всё остальное он
+# отвергает вместе с сообщением целиком, поэтому неизвестный тег — такой же
+# отказ, как незакрытый.
+TELEGRAM_ALLOWED_TAGS = frozenset({
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "a", "code", "pre", "blockquote", "tg-spoiler", "span", "br",
+})
+
+
 def markup_problem(text):
-    """Нашёл бы ли Telegram причину отклонить эту часть."""
+    """
+    Нашёл бы ли Telegram причину отклонить эту часть.
+
+    Проверка на НЕИЗВЕСТНЫЙ тег добавлена не из осторожности: без неё детектор
+    считал валидным «<script>alert(1)</script>» — парность соблюдена, а
+    сообщение Telegram отвергнет. Обнаружилось это встроенной проверкой самого
+    детектора на заведомо битых образцах: прогон по корпусу давал ноль
+    замечаний, и ноль одинаково выглядит у здорового корпуса и у слепого
+    детектора.
+    """
     for match in re.finditer("<", text):
         if text.find(">", match.start()) == -1:
             return "обрыв тега"
     if re.search(r"&[a-zA-Z#][a-zA-Z0-9]{0,8}$", text):
         return "обрыв HTML-сущности"
     stack = []
-    for closing, name in re.findall(r"<(/?)([a-zA-Z]+)", text):
+    for closing, name in re.findall(r"<(/?)([a-zA-Z-]+)", text):
         name = name.lower()
+        if name not in TELEGRAM_ALLOWED_TAGS:
+            return f"неизвестный тег <{name}>"
         if name in ("br", "img", "hr"):
             continue
         if closing:
@@ -159,6 +179,68 @@ check("каждое отправленное валидно",
       f"got {[markup_problem(m) for m in SENT if markup_problem(m)][:2]}")
 check("каждое в пределах лимита", all(len(m) <= LIMIT for m in SENT),
       f"got {[len(m) for m in SENT]}")
+
+print("\n[9] Весь корпус вики проходит путь отображения без битой разметки")
+# Telegram отклоняет сообщение ЦЕЛИКОМ при одном незакрытом теге, поэтому
+# синтетических примеров недостаточно: проверяем на всех 12784 настоящих
+# статьях, которые бот показывает врачу через /wiki. Путь тот же, что в бою:
+# clean_html_formatting, затем разбивка. Один прогон около 20 секунд — это
+# дешевле, чем отчёт «бот молчит на некоторых статьях».
+import os as _os
+import sqlite3 as _sq
+
+if not _os.path.exists("stomat_wiki.db"):
+    check("вики рядом нет — проверка на корпусе пропущена", True)
+else:
+    import assistant as _assistant
+
+    _facts = [r[0] for r in _sq.connect("stomat_wiki.db").execute(
+        "SELECT content FROM distilled_facts WHERE content IS NOT NULL")]
+    check("корпус прочитан", len(_facts) > 10000, f"got {len(_facts)}")
+
+    # Проверка, что ПРОВЕРКА работает. Прогон по корпусу даёт ноль замечаний, и
+    # ноль замечаний одинаково выглядит у здорового корпуса и у сломанного
+    # детектора. Первая попытка подтвердить эту секцию диверсией провалилась
+    # именно так: я убрал экранирование амперсанда в ветке обрезки, а она
+    # срабатывает лишь на 30 самых длинных статьях, ни в одной из которых
+    # амперсанда нет — тест «прошёл» на сломанном коде. Поэтому детектор
+    # проверяется на заведомо битых образцах ЗДЕСЬ, а не разово руками.
+    check("детектор видит незакрытый тег",
+          markup_problem("<b>текст без закрытия") is not None)
+    check("детектор видит чужой тег",
+          markup_problem("<script>alert(1)</script>") is not None)
+    check("детектор видит перекрёстное закрытие",
+          markup_problem("<b><i>текст</b></i>") is not None)
+    check("детектор пропускает валидное",
+          markup_problem("<b>жирный</b> и <i>курсив</i>, <code>код</code>") is None)
+    _amp_probe = re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "цемент & адгезив")
+    check("проверка амперсанда видит неэкранированный", _amp_probe is not None)
+    check("проверка амперсанда пропускает сущность",
+          re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "цемент &amp; адгезив") is None)
+
+    _bad_clean, _bad_chunk, _oversize, _unescaped = [], [], [], []
+    for _fact in _facts:
+        _out = _assistant.clean_html_formatting(_fact)
+        _problem = markup_problem(_out)
+        if _problem:
+            _bad_clean.append((_problem, _out[:60]))
+        # Амперсанд, не начинающий сущность, Telegram тоже не принимает.
+        if re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", _out):
+            _unescaped.append(_out[:60])
+        for _chunk in html_safe.split_html(_out, limit=LIMIT):
+            if len(_chunk) > 4096:
+                _oversize.append(len(_chunk))
+            if markup_problem(_chunk):
+                _bad_chunk.append(markup_problem(_chunk))
+
+    check("после подготовки текста разметка валидна у всех статей",
+          not _bad_clean, f"битых {len(_bad_clean)}: {_bad_clean[:2]}")
+    check("после разбивки разметка валидна у всех частей",
+          not _bad_chunk, f"битых {len(_bad_chunk)}: {_bad_chunk[:2]}")
+    check("ни одна часть не превышает жёсткий лимит Telegram 4096",
+          not _oversize, f"превышений {len(_oversize)}: {_oversize[:3]}")
+    check("неэкранированных амперсандов нет",
+          not _unescaped, f"найдено {len(_unescaped)}: {_unescaped[:2]}")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
