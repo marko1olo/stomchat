@@ -5,6 +5,7 @@
 import asyncio
 import importlib.util
 import os
+import re
 import sys
 import types
 
@@ -138,6 +139,35 @@ check("длинная справка обрезана по пределу",
       len(block) <= A.VALIDATOR_REFERENCE_MAX_CHARS + 80,
       f"длина блока {len(block)} при пределе {A.VALIDATOR_REFERENCE_MAX_CHARS}")
 check("начало справки не потеряно при обрезке", marker in block)
+
+# Окно рецензента обязано покрывать ВЕСЬ бюджет корпуса вики. Пока оно было
+# вдвое меньше (3000 против 6000), рецензент видел медиану 53% справки: от него
+# было скрыто 39% фактов и 18% чисел на 294 запросах. А правило 3.1 его промпта
+# отклоняет ответ за цифры, которых нет в показанной справке, и явный отказ
+# глушит черновик ВСЕГДА — даже когда врач спросил напрямую. То есть каждая
+# пятая законная цифра из базы знаний выглядела для него выдуманной.
+check("рецензенту видна вся справка, а не половина",
+      A.VALIDATOR_REFERENCE_MAX_CHARS >= A._CORPUS_MAX_CHARS,
+      f"окно {A.VALIDATOR_REFERENCE_MAX_CHARS} меньше бюджета корпуса {A._CORPUS_MAX_CHARS}")
+
+# Проверяем на НАСТОЯЩЕЙ справке из вики, а не на синтетической строке.
+CAPTURED.clear()
+spy_stub()
+_keys = A.select_search_keywords(A.extract_keywords("протокол ирригации канала гипохлорит"))
+_wiki, _ = asyncio.run(A.search_knowledge_corpus(_keys))
+if _wiki.strip():
+    asyncio.run(A.check_response_quality(CTX, DRAFT, invited=True, reference=_wiki))
+    shown = CAPTURED["prompt"].split("Справка из Базы Знаний", 1)[1].split("[Справка НЕ", 1)[0]
+    _all_numbers = set(re.findall(r"\d+[.,]?\d*", _wiki))
+    _shown_numbers = set(re.findall(r"\d+[.,]?\d*", shown))
+    check("ни одно число живой справки от рецензента не скрыто",
+          not (_all_numbers - _shown_numbers),
+          f"скрыто {len(_all_numbers - _shown_numbers)} из {len(_all_numbers)}")
+    check("живая справка дошла целиком",
+          len(_wiki.strip()) <= len(shown) + 80,
+          f"справка {len(_wiki)}, показано {len(shown)}")
+else:
+    check("живая справка недоступна — проверка пропущена", True)
 
 CAPTURED.clear()
 spy_stub('{"ok": false, "reason": "цифра не подтверждается справкой"}')
