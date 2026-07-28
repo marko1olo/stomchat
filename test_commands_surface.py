@@ -113,21 +113,61 @@ check("сказано сверять с инструкцией препарат�
       "инструкцией" in calc_block, "нет отсылки к инструкции")
 
 print("\n[7] Арифметика справочника сходится")
-# 1 карпула = концентрация (мг/мл) x объём (мл); потолок в карпулах округляем ВНИЗ.
-for name, mg_per_ml, ml, per_kg, cap, stated_carts, stated_weight in [
-    ("артикаин 4%", 40, 1.7, 7.0, 500, 7, 71),
-    ("мепивакаин 3%", 30, 1.8, 4.4, 400, 7, 91),
-    ("лидокаин 2%", 20, 1.8, 7.0, 500, 13, 71),
-]:
-    per_cartridge = mg_per_ml * ml
-    check(f"{name}: {per_cartridge:.0f} мг в карпуле указано верно",
-          f"{per_cartridge:.0f} мг" in calc_block, f"ожидалось {per_cartridge:.0f} мг")
-    check(f"{name}: потолок в карпулах округлён вниз",
-          int(cap / per_cartridge) == stated_carts,
-          f"расчёт {cap / per_cartridge:.2f} -> {int(cap / per_cartridge)}, в тексте {stated_carts}")
-    check(f"{name}: вес, на котором включается потолок, посчитан верно",
-          round(cap / per_kg) == stated_weight,
-          f"расчёт {cap / per_kg:.1f}, в тексте {stated_weight}")
+# Числа берём ИЗ ТЕКСТА справочника и сверяем с расчётом. Прежняя версия этой
+# секции сравнивала расчёт с константой, записанной в самом тесте: появись в
+# справочнике «потолок ≈ 10 карпул», проверка всё равно прошла бы. Для
+# калькулятора доз, по которому врач может действовать, так нельзя.
+import re as _re  # noqa: E402
+
+for name, percent, reference_per_kg in [("артикаин", 4, 7.0),
+                                        ("мепивакаин", 3, 4.4),
+                                        ("лидокаин", 2, 7.0)]:
+    # Привязываемся к маркеру списка, а не к первому вхождению слова: название
+    # препарата раньше встречается в примере «артикаин 4%, ребёнок 20 кг».
+    start = calc_block.lower().find("• <b>" + name)
+    check(f"{name}: блок найден в справочнике", start != -1)
+    if start == -1:
+        continue
+    tail = calc_block[start + 5:]
+    stops = [p for p in (tail.find("• <b>"), tail.find("⚠️")) if p > 0]
+    block = tail[:min(stops)] if stops else tail
+
+    ml_match = _re.search(r"карпула\s+([\d.]+)\s*мл\s*=\s*(\d+)\s*мг", block)
+    cap_match = _re.search(r"не более\s+(\d+)\s*мг", block)
+    carts_match = _re.search(r"потолок\s*≈\s*(\d+)\s*карпул", block)
+    weight_match = _re.search(r"весе?\s*≈\s*(\d+)\s*кг", block)
+    kg_match = _re.search(r"([\d.]+)\s*мг/кг", block)
+
+    parsed = all((ml_match, cap_match, carts_match, weight_match, kg_match))
+    check(f"{name}: все числа блока читаются из текста", parsed,
+          f"не разобрано: {block[:100]!r}")
+    if not parsed:
+        continue
+
+    ml = float(ml_match.group(1))
+    stated_mg = int(ml_match.group(2))
+    cap = int(cap_match.group(1))
+    stated_carts = int(carts_match.group(1))
+    stated_weight = int(weight_match.group(1))
+    stated_per_kg = float(kg_match.group(1))
+
+    # Раствор N% = N x 10 мг/мл: 4% артикаина это 40 мг/мл.
+    computed_mg = percent * 10 * ml
+    check(f"{name}: {stated_mg} мг в карпуле = {percent}% x {ml} мл",
+          abs(computed_mg - stated_mg) < 0.5,
+          f"расчёт {computed_mg:.0f} мг, в тексте {stated_mg} мг")
+    check(f"{name}: норма на килограмм не выше эталонной",
+          stated_per_kg <= reference_per_kg,
+          f"в тексте {stated_per_kg} мг/кг, эталон {reference_per_kg}")
+    check(f"{name}: потолок в карпулах округлён ВНИЗ",
+          int(cap / stated_mg) == stated_carts,
+          f"расчёт {cap / stated_mg:.2f} -> {int(cap / stated_mg)}, в тексте {stated_carts}")
+    check(f"{name}: {stated_carts} карпул не превышают {cap} мг",
+          stated_carts * stated_mg <= cap,
+          f"{stated_carts} x {stated_mg} = {stated_carts * stated_mg} мг > {cap} мг")
+    check(f"{name}: вес включения потолка = {cap} / {stated_per_kg}",
+          abs(round(cap / stated_per_kg) - stated_weight) <= 1,
+          f"расчёт {cap / stated_per_kg:.1f} кг, в тексте {stated_weight} кг")
 
 print("\n[8] Ограничитель дозировок есть и в промпте, а не только в справке")
 # Считает именно модель, поэтому текст справки её не связывает.
