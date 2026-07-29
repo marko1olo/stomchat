@@ -299,6 +299,13 @@ async def init_assistant(bot_client):
                 types.BotCommand(command='stats', description='Показать популярные темы обсуждений в чате'),
                 types.BotCommand(command='bookmarks', description='Показать сохраненные вами клинические закладки'),
                 types.BotCommand(command='search', description='Прямой поиск по базе знаний стоматологии'),
+                # /web добавлен в меню вместе с самой командой. Без этой строки он
+                # был только в тексте /help, и test_commands_surface поймал это
+                # сразу: меню — единственная поверхность, где врач видит команду,
+                # ничего не читая, и ровно так уже терялись рабочие /wiki и /style.
+                # Корпус кончается февралём 2026, поэтому именно этой командой врач
+                # достаёт то, чего в базе нет и не появится.
+                types.BotCommand(command='web', description='Найти в интернете с ссылками на источники'),
                 types.BotCommand(command='case', description='Запустить интерактивный клинический симулятор'),
                 types.BotCommand(command='abort', description='Сбросить активный клинический симулятор'),
                 types.BotCommand(command='style', description='Настроить стиль общения ассистента'),
