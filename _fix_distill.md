@@ -2,8 +2,8 @@
 
 Владение: `distiller.py`, `dental_vocab.py`, `test_distill_pipeline.py`. Всё остальное — патчем ведущему.
 БД открывались ТОЛЬКО через `file:...?mode=ro` URI. Ни одной записи в боевые БД не сделано:
-`stomat_wiki.db` mtime Feb 19 17:48 / md5 2207af764967c505f1bfccdba63f129d,
-`stomat_archive.db` mtime Feb 19 17:43 / md5 addae58b925e222e50cf129ce92aafe3 — как в начале сессии.
+`stomat_wiki.db` mtime Feb 19 17:48 / md5 2207af7649...(md5, укорочен),
+`stomat_archive.db` mtime Feb 19 17:43 / md5 addae58b92...(md5, укорочен) — как в начале сессии.
 Боевой `distiller.log` (414874 байт, Jul 28 08:59) тоже не тронут: тест уводит лог в temp через
 `STOMCHAT_DISTILLER_LOG`. Никаких `-wal`/`-journal` у вики и архива не появилось.
 

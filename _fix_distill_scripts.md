@@ -288,8 +288,8 @@ N]</b>` с тегами `<b>`, а защита от повтора в `videosi.p
 
 ## Контрольные суммы боевых баз (после всей работы)
 
-    stomat_wiki.db     2207af764967c505f1bfccdba63f129d   9 158 656 байт
-    stomat_archive.db  addae58b925e222e50cf129ce92aafe3  47 587 328 байт
+    stomat_wiki.db     2207af7649...(md5, укорочен)   9 158 656 байт
+    stomat_archive.db  addae58b92...(md5, укорочен)  47 587 328 байт
 
 Совпадают со снятыми ДО работы. Ни одного INSERT/UPDATE/DELETE/VACUUM/ATTACH в боевые базы не было;
 открывались только через `file:...?mode=ro`.

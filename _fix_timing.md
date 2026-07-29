@@ -9,9 +9,9 @@ Git не трогаю. Продакшн-код (`assistant.py`) НЕ ТРОГА�
 md5 ДО любых правок:
 
 ```
-5a2f5a71efc8bf0db5d5372f242c9b6a  test_search_case.py
-169a0d759e154b0116bdc9e050e0c0f4  test_case_simulator.py
-16042cc80625599ea1fdf86d97f571d5  assistant.py   (НЕ мой, только контроль неизменности)
+5a2f5a71ef...(md5, укорочен)  test_search_case.py
+169a0d759e...(md5, укорочен)  test_case_simulator.py
+16042cc806...(md5, укорочен)  assistant.py   (НЕ мой, только контроль неизменности)
 ```
 
 Одиночный прогон `test_search_case.py` на тихой машине: PASSED 33 / FAILED 0.
@@ -154,7 +154,7 @@ E402 встречается 128 раз.
 md5 ПОСЛЕ правок:
 
 ```
-c53c1d248181116e713615c69e9435b2  test_search_case.py
-3a59c94052663a19df7279811fe2ab84  test_case_simulator.py
-16042cc80625599ea1fdf86d97f571d5  assistant.py   (НЕ изменился, совпадает с исходным)
+c53c1d2481...(md5, укорочен)  test_search_case.py
+3a59c94052...(md5, укорочен)  test_case_simulator.py
+16042cc806...(md5, укорочен)  assistant.py   (НЕ изменился, совпадает с исходным)
 ```

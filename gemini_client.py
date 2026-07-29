@@ -230,6 +230,213 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
     _save_expiry_map(KEY_COOLDOWN_FILE, cooldowns)
 
 
+# Перегруженную модель убираем из каскада на это время. Значение было вписано
+# числом прямо в обработчик ошибки; вынесено, потому что решение о бане теперь
+# принимает note_key_failure, и величина не должна разъехаться по копиям.
+MODEL_BAN_SECONDS = 1200  # 20 минут
+
+
+# ==========================================================================
+# ЕДИНЫЙ УЧЁТ ЗДОРОВЬЯ КЛЮЧЕЙ И МОДЕЛЕЙ. Публичные функции ниже — то, чем
+# обязаны пользоваться ВСЕ пути, создающие клиента к модели.
+#
+# Замер по дереву (_measure_key_health.py, разбор ast): клиента создают семь
+# модулей, а про кулдауны и баны знали два — этот и наполовину vision. Пул
+# ключей у всех один (config.GOOGLE_KEYS — 10, config.GROQ_KEYS — 7), то есть
+# квота у них тоже общая.
+#
+# Последствие для врача, когда путь ходит мимо учёта: ключ, уже упёршийся в
+# квоту, пробуется снова и снова, а живой ключ простаивает. Врач ждёт ответа,
+# который приходит после лишних попыток — или не приходит вовсе, потому что
+# родительский дедлайн истёк на мёртвых ключах.
+# ==========================================================================
+
+# Адрес провайдера жил двумя строковыми литералами внутри generate_text. Любой
+# другой путь, которому нужен клиент, копировал литерал себе — так и появились
+# шесть независимых создателей клиента.
+PROVIDER_BASE_URLS = {
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "groq": "https://api.groq.com/openai/v1",
+}
+
+
+PROVIDER_KEY_ATTRS = {"gemini": "GOOGLE_KEYS", "groq": "GROQ_KEYS"}
+
+
+def provider_pool(provider):
+    """Все настроенные ключи провайдера. Нужен, чтобы считать остаток живых."""
+    value = getattr(config, PROVIDER_KEY_ATTRS.get(provider, ""), None)
+    if isinstance(value, (list, tuple)):
+        return [k for k in value if k]
+    return []
+
+
+def get_provider_client(provider, api_key, timeout=30.0):
+    """Клиент к провайдеру по его имени. Единственная точка создания клиента."""
+    base_url = PROVIDER_BASE_URLS.get(provider)
+    if not base_url:
+        raise ValueError(f"Неизвестный провайдер модели: {provider!r}")
+    # Через глобальное имя намеренно: тесты подменяют get_openai_client целиком.
+    return get_openai_client(api_key, base_url, timeout=timeout)
+
+
+def available_keys(provider, keys):
+    """
+    Делит ключи провайдера на живые и остывающие. Отбор для ВСЕХ путей — здесь.
+
+    Возвращает (живые, остывающие, секунд_до_ближайшего_освобождения). Порядок
+    внутри списков сохраняется — вызывающий уже перемешал пул, и перемешивать
+    заново нельзя: это ломает размазывание квоты.
+
+    Отдаём обе половины, а не только живую, потому что правильное поведение при
+    «все остывают» у путей разное: текстовый каскад уходит к следующему
+    провайдеру, а у расшифровки голосового следующего провайдера нет вовсе, и
+    для неё остывающий ключ в конце очереди лучше, чем тишина врачу.
+    """
+    cooldowns = get_key_cooldowns()
+    now_ts = time.time()
+    fresh, cooling = [], []
+    for key in keys:
+        if cooldowns.get(_key_fingerprint(provider, key), 0) <= now_ts:
+            fresh.append(key)
+        else:
+            cooling.append(key)
+    wait_seconds = 0
+    if cooling and not fresh:
+        soonest = min(cooldowns.get(_key_fingerprint(provider, k), 0) for k in cooling)
+        wait_seconds = max(0, int(soonest - now_ts))
+    return fresh, cooling, wait_seconds
+
+
+def active_models(cascade):
+    """
+    Убирает из каскада модели, забаненные за 5xx. Проверка бана — тоже здесь.
+
+    Если забанены все — возвращаем последнюю: попытка по забаненной модели
+    дешевле, чем гарантированное молчание бота.
+    """
+    now = time.time()
+    banned = get_banned_models()
+    active = []
+    for entry in cascade:
+        model_name = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ban_until = banned.get(model_name, 0)
+        if ban_until > now:
+            logger.info(
+                f"Model {model_name} is temporarily banned due to 503/504 for "
+                f"another {int(ban_until - now)}s. Skipping."
+            )
+            continue
+        active.append(entry)
+    if not active and cascade:
+        logger.warning("All models in cascade are banned. Forcing fallback to the last model.")
+        active = [cascade[-1]]
+    return active
+
+
+def _clear_expiry_entry(path, entry_key):
+    """Снимает одну пометку. Файл не переписывается, если пометки там и не было."""
+    current = _load_expiry_map(path)
+    if entry_key not in current:
+        return False
+    current.pop(entry_key, None)
+    _save_expiry_map(path, current)
+    return True
+
+
+def note_success(provider, api_key, model_name=None):
+    """
+    Удачный ответ СНИМАЕТ пометку с ключа и с модели. Вторая половина учёта.
+
+    Пометки ставились, но не снимались никогда: и кулдаун ключа (300 с), и бан
+    модели (1200 с) держались до истечения срока, даже когда та же пара только
+    что успешно ответила. Пометка — предположение о здоровье, а удачный ответ —
+    прямое доказательство обратного, и доказательство должно быть сильнее.
+
+    Где это меняло поведение:
+      * расшифровка голосового пробует остывающие ключи последними (у неё нет
+        второй модели), и если такой ключ ответил, он обязан немедленно
+        вернуться и в текстовый каскад — иначе ответ врачу в группе ещё
+        четыре минуты будет обходить ключ, про который уже известно, что он жив;
+      * active_models при «забанены все» принудительно берёт последнюю модель.
+        Она отвечает — и остаётся забаненной, так что следующий вызов снова
+        отсеет весь каскад и снова упрётся в ту же принудительную ветку.
+    """
+    cleared_key = _clear_expiry_entry(KEY_COOLDOWN_FILE, _key_fingerprint(provider, api_key))
+    if cleared_key:
+        logger.info("%s key answered while on cooldown; cooldown lifted.", provider.capitalize())
+    if model_name and _clear_expiry_entry(BANNED_MODELS_FILE, model_name):
+        logger.info("Model %s answered while banned; ban lifted.", model_name)
+
+
+def note_key_failure(provider, api_key, error_text, model_name=None):
+    """
+    Разбирает отказ провайдера и ЗАПИСЫВАЕТ вывод в учёт. Классификатор один.
+
+    Возвращает причину: key_rate_limited | model_overloaded | key_denied |
+    request_failed. Что делать дальше, решает вызывающий: текстовый каскад на
+    model_overloaded уходит к следующей модели, расшифровка — к следующему ключу.
+
+    Порядок проверок оплачен дефектом и менять его нельзя: «ключ исчерпан»
+    идёт ПЕРВЫМ. В теле 429 и Gemini, и Groq пишут сам лимит квоты, а он часто
+    500-класса («quota_limit_value: 500 per day»), и проверка серверной ошибки
+    находит там 500 отдельным словом. Когда бан стоял первым, один выдохшийся
+    ключ выносил РАБОЧУЮ модель из каскада на 20 минут для всех подпроцессов
+    сразу, а сам кулдауна не получал.
+
+    model_name=None означает «замены этой модели в каскаде нет»: тогда бан не
+    ставится. Так ходит расшифровка голосового — whisper-large-v3 там
+    единственный, и бан на 20 минут лишил бы врача расшифровок целиком вместо
+    того, чтобы просто сменить ключ.
+    """
+    err_msg = str(error_text or "").lower()
+    if _RATE_LIMIT_RE.search(err_msg):
+        set_key_cooldown(provider, api_key)
+        # В журнале называем ПОСЛЕДСТВИЕ, а не только механику: строка
+        # «placing key on 300s cooldown» не отвечала на единственный вопрос,
+        # который стоит задавать по такой записи, — осталось ли чем отвечать
+        # врачу. Остаток считаем после записи кулдауна, то есть уже с ним.
+        pool = provider_pool(provider)
+        alive = len(available_keys(provider, pool)[0]) if pool else 0
+        if alive:
+            logger.info(
+                "%s rate limited (429/quota). Placing key on %ss cooldown. "
+                "Последствие: живых ключей осталось %s из %s, ответ врачу идёт через них.",
+                provider.capitalize(), KEY_COOLDOWN_SECONDS, alive, len(pool),
+            )
+        else:
+            logger.warning(
+                "%s rate limited (429/quota). Placing key on %ss cooldown. "
+                "Последствие: живых ключей %s НЕ ОСТАЛОСЬ (всего %s) — до истечения "
+                "кулдауна врач получит «не смог ответить» вместо ответа.",
+                provider.capitalize(), KEY_COOLDOWN_SECONDS, provider, len(pool),
+            )
+        _record_failure("key_rate_limited", error_text, api_key)
+        return "key_rate_limited"
+
+    if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
+        if model_name:
+            ban_model(model_name, MODEL_BAN_SECONDS)
+            logger.info(
+                f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). "
+                f"Banning model {model_name} for {MODEL_BAN_SECONDS // 60} minutes. Skipping in cascade."
+            )
+        else:
+            logger.info(
+                f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). "
+                f"Модель не банится: замены у этого пути нет, бан = отказ врачу целиком."
+            )
+        _record_failure("model_overloaded", error_text, api_key)
+        return "model_overloaded"
+
+    if "403" in err_msg or "permission" in err_msg:
+        _record_failure("key_denied", error_text, api_key)
+        return "key_denied"
+
+    _record_failure("request_failed", error_text, api_key)
+    return "request_failed"
+
+
 # Маршрутизация по ВИДУ работы. Список видов собран по фактическим вызовам:
 # assistant.py (21 вызов), summarizer.py (daily/weekly), blocking_tools.py
 # (transcription_corrector). Прежняя таблица перечисляла имена, которых не
@@ -373,21 +580,9 @@ def generate_text(prompt, status_context=None, timeout=None):
             (groq_fallback, "groq")
         ]
 
-    # Filter out models that are currently banned due to 503/504
-    now = time.time()
-    banned_models = get_banned_models()
-    active_cascade = []
-    for m_name, prov in models_cascade:
-        ban_until = banned_models.get(m_name, 0)
-        if ban_until > now:
-            logger.info(f"Model {m_name} is temporarily banned due to 503/504 for another {int(ban_until - now)}s. Skipping.")
-            continue
-        active_cascade.append((m_name, prov))
-        
-    # If all models in the cascade are banned, fall back to the last one
-    if not active_cascade:
-        logger.warning("All models in cascade are banned. Forcing fallback to the last model.")
-        active_cascade = [models_cascade[-1]]
+    # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
+    # копией цикла: вторая копия проверки бана уже начинала расходиться с первой.
+    active_cascade = active_models(models_cascade)
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
 
     # АРИФМЕТИКА БЮДЖЕТА: попытки x таймаут попытки обязаны влезать в timeout.
@@ -436,13 +631,11 @@ def generate_text(prompt, status_context=None, timeout=None):
     out_of_budget = False
     requests_made = 0
     for model_index, (model_name, provider) in enumerate(active_cascade):
-        if provider == "gemini":
-            keys = list(config.GOOGLE_KEYS)
-            client_maker = lambda k: get_openai_client(k, "https://generativelanguage.googleapis.com/v1beta/openai/", timeout=req_timeout)
-        else:
-            keys = list(config.GROQ_KEYS)
-            client_maker = lambda k: get_openai_client(k, "https://api.groq.com/openai/v1", timeout=req_timeout)
-            
+        keys = list(config.GOOGLE_KEYS if provider == "gemini" else config.GROQ_KEYS)
+        # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
+        # здесь были источником, с которого их скопировали остальные пути.
+        client_maker = lambda k: get_provider_client(provider, k, timeout=req_timeout)
+
         if not keys:
             logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
             _record_failure("no_keys_configured", f"{provider}: ключи не настроены")
@@ -459,19 +652,17 @@ def generate_text(prompt, status_context=None, timeout=None):
         # полностью здоровых. Когда так же осыпался весь каскад, бот писал
         # «All AI attempts exhausted» и молча не отвечал врачу, имея на руках
         # больше десятка рабочих ключей.
-        cooldowns = get_key_cooldowns()
-        now_ts = time.time()
-        available = [k for k in keys if cooldowns.get(_key_fingerprint(provider, k), 0) <= now_ts]
+        # Отбор — через общий учёт (available_keys), а не своей копией фильтра.
+        available, _cooling, cooldown_wait = available_keys(provider, keys)
         if not available:
-            soonest = min(cooldowns.get(_key_fingerprint(provider, k), 0) for k in keys)
             logger.info(
                 "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
-                provider, max(0, int(soonest - now_ts)), model_name
+                provider, cooldown_wait, model_name
             )
             _record_failure(
                 "all_keys_on_cooldown",
                 f"{provider}: все {len(keys)} ключей остывают, ближайший через "
-                f"{max(0, int(soonest - now_ts))}с"
+                f"{cooldown_wait}с"
             )
             continue
         if len(available) < len(keys):
@@ -532,6 +723,8 @@ def generate_text(prompt, status_context=None, timeout=None):
                 text_result = strip_reasoning(text_result)
 
                 if text_result:
+                    # Удача тоже событие учёта, не только отказ: см. note_success.
+                    note_success(provider, api_key, model_name=model_name)
                     logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
                     _write_generation_status(
                         status_context, stage=f"{provider}_success",
@@ -563,39 +756,25 @@ def generate_text(prompt, status_context=None, timeout=None):
                     key=key_id, error=str(exc)[:500]
                 )
                 
-                # «Ключ исчерпан» проверяется ПЕРВЫМ и никогда не приводит к бану
-                # модели. Раньше первым стоял бан: в теле 429 от Gemini и Groq
-                # регулярно стоит лимит квоты числом 500-класса — например
-                # "429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day", — и
-                # _SERVER_ERROR_RE находил там 500 отдельным словом. Итог был
-                # ровно обратный нужному: РАБОЧАЯ модель улетала в бан на 20
-                # минут для всех ключей и всех подпроцессов (файл общий), а
-                # исчерпанный ключ кулдауна не получал вовсе, потому что break
-                # уходил из цикла раньше строки с set_key_cooldown. Один
-                # выдохшийся ключ выносил модель из каскада на треть часа.
-                if _RATE_LIMIT_RE.search(err_msg):
-                    logger.info(
-                        f"{provider.capitalize()} rate limited (429/quota). Placing key {key_id} "
-                        f"on {KEY_COOLDOWN_SECONDS}s cooldown."
-                    )
-                    set_key_cooldown(provider, api_key)
-                    _record_failure("key_rate_limited", str(exc), api_key)
-                    # Do not sleep, immediately skip to the next key or model
+                # Разбор отказа и запись в учёт — в note_key_failure, здесь только
+                # решение, куда идти дальше. Порядок проверок («ключ исчерпан»
+                # ПЕРВЫМ, бан модели вторым) оплачен дефектом и описан там же:
+                # держать его в одном месте — весь смысл выноса, потому что
+                # копия в vision этот порядок уже воспроизводит вручную.
+                failure_reason = note_key_failure(
+                    provider, api_key, str(exc), model_name=model_name
+                )
+                if failure_reason == "key_rate_limited":
+                    # Не спим: следующий ключ свежий, врач ждёт.
                     continue
 
-                if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
-                    ban_duration = 1200  # 20 минут в секундах
-                    ban_model(model_name, ban_duration)
-                    logger.info(f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). Banning model {model_name} for 20 minutes. Skipping in cascade.")
-                    _record_failure("model_overloaded", str(exc), api_key)
+                if failure_reason == "model_overloaded":
                     break
 
-                if "403" in err_msg or "permission" in err_msg:
+                if failure_reason == "key_denied":
                     logger.info(f"{provider.capitalize()} key denied (403), switching key without sleeping.")
-                    _record_failure("key_denied", str(exc), api_key)
                     continue
 
-                _record_failure("request_failed", str(exc), api_key)
                 # Сон нужен только тому, кто ещё будет повторять. На последней
                 # попытке последней модели дальше стоит return None — 8-10 с сна
                 # перед ним врач ждал впустую. Остаток бюджета тоже режем: спать
@@ -824,6 +1003,25 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
     Теперь: на попытку отводится доля общего бюджета, и перебор прекращается по
     ИСТЕЧЕНИЮ остатка, а не по числу ключей. Так до последнего ключа доходит
     любой залп, а не только идеальный.
+
+    ВТОРОЕ: этот путь ходил мимо учёта здоровья ключей, хотя живёт в модуле,
+    которому этот учёт принадлежит. Замер: get_key_cooldowns здесь не вызывался,
+    set_key_cooldown тоже. Пул ключей общий с текстовым каскадом
+    (config.GROQ_KEYS, 7 ключей), то есть общая и квота.
+
+    Обе половины стоили врачу ответа. Не читал: ключ, выбитый в 429 ответом в
+    группе минуту назад, пробовался снова и съедал полную долю попытки —
+    при трёх остывающих из семи это 21 с из 48 (44% бюджета 60 с) и 3 живые
+    попытки вместо 7; при шести — 88% бюджета и НОЛЬ живых попыток. Не писал:
+    429, найденный расшифровкой, выбрасывался, и следующий текстовый ответ
+    начинал с того же мёртвого ключа.
+
+    Остывающие ключи здесь СДВИГАЮТСЯ В КОНЕЦ ОЧЕРЕДИ, а не выбрасываются, — в
+    отличие от текстового каскада, который такую модель пропускает. Причина:
+    у whisper нет ни второй модели, ни второго провайдера, а лимиты Groq
+    выставлены на модель, поэтому ключ, упёршийся в квоту llama, может ещё иметь
+    квоту whisper. Проверить это без сети нельзя, и цена ошибки несимметрична:
+    лишняя попытка стоит секунд, а отказ от попытки — расшифровки целиком.
     """
     keys = list(config.GROQ_KEYS)
     if not keys:
@@ -840,6 +1038,16 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
     actual_file_path = convert_to_wav(file_path)
 
     random.shuffle(keys)
+    # Живые ключи вперёд, остывающие в хвост (порядок внутри половин уже случаен).
+    # Так бюджет тратится на ключи, у которых есть шанс, и при истечении бюджета
+    # непробованными остаются именно остывающие, а не свежие.
+    fresh, cooling, cooldown_wait = available_keys("groq", keys)
+    if cooling:
+        logger.info(
+            "Whisper: %s из %s ключей остывают (ближайший через %s с) — пробуем их последними",
+            len(cooling), len(keys), cooldown_wait,
+        )
+    keys = fresh + cooling
     max_attempts = len(keys)
     # Доля на попытку: минимум 7 с, иначе запрос не успеет даже соединиться.
     per_attempt = max(7.0, usable / max_attempts) if usable else 30.0
@@ -855,8 +1063,7 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
         key_id = f"groq_whisper...{api_key[-5:]}" if api_key else "groq_none"
         try:
             logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
-            client = get_openai_client(api_key, "https://api.groq.com/openai/v1",
-                                       timeout=per_attempt)
+            client = get_provider_client("groq", api_key, timeout=per_attempt)
             with open(actual_file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model="whisper-large-v3",
@@ -865,6 +1072,8 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 )
             if transcription:
                 result_text = transcription.strip()
+                # Ключ ответил — снимаем с него пометку и для текстового каскада.
+                note_success("groq", api_key)
                 logger.info(f"Transcription success chars={len(result_text)}")
                 
                 if actual_file_path != file_path and os.path.exists(actual_file_path):
@@ -874,7 +1083,13 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 return result_text
         except Exception as e:
             logger.warning(f"Whisper transcription failed key={key_id}: {e}")
-            if "429" in str(e).lower() or "rate limit" in str(e).lower():
+            # Отказ уходит в ОБЩИЙ учёт: 429, найденный расшифровкой, снимает
+            # этот ключ и с текстового каскада — иначе следующий ответ врачу в
+            # группе начнёт с ключа, про который здесь уже известно, что он мёртв.
+            # model_name не передаём: whisper-large-v3 в этом пути единственный,
+            # и бан модели на 20 минут оставил бы врача вообще без расшифровок.
+            failure_reason = note_key_failure("groq", api_key, str(e))
+            if failure_reason == "key_rate_limited":
                 # Пауза не длиннее остатка бюджета: иначе она съедает время,
                 # которого хватило бы на следующий, свежий ключ.
                 left = (usable - (time.monotonic() - started)) if usable else 2.0

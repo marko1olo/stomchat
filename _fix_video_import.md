@@ -39,8 +39,8 @@
 (167 `.py`), не junction: `stat` даёт разные inode (`...108643` против `...407866`), `LinkType`
 пустой, `stomchat/stomchat` не существует. `md5` совпадает побайтово с корневыми:
 
-    import_videos.py  4e2bb4e2f7ed8bd6fc6191bc1849f811  (корень и копия)
-    videosi.py        66392c7cf878cdb5c0fef4c7b47ea65a  (корень и копия)
+    import_videos.py  4e2bb4e2f7...(md5, укорочен)  (корень и копия)
+    videosi.py        66392c7cf8...(md5, укорочен)  (корень и копия)
 
 То есть «запустят тот, что под рукой» — это выбор из четырёх файлов, а не из двух. Копию я НЕ
 правил: это не мои файлы и не мой лан (там же лежат копии чужих). Для лида — см. ниже.
@@ -192,10 +192,10 @@
 
 ## Продакшн восстановлен и это доказано
 
-    md5 до саботажа:    videosi.py 230f8b5e1c3a2702c8ead2804de02f07
-                        import_videos.py d4433a372ac7c79c93fc421daf1e1cb9
-    md5 после саботажа: videosi.py 230f8b5e1c3a2702c8ead2804de02f07
-                        import_videos.py d4433a372ac7c79c93fc421daf1e1cb9
+    md5 до саботажа:    videosi.py 230f8b5e1c...(md5, укорочен)
+                        import_videos.py d4433a372a...(md5, укорочен)
+    md5 после саботажа: videosi.py 230f8b5e1c...(md5, укорочен)
+                        import_videos.py d4433a372a...(md5, укорочен)
 
 **Продакшн восстановлен, тест снова зелёный: 61/0.** Соседние: `test_distill_scripts_safety.py`
 **95/0**, `test_import_safety.py` **368/0**. Своих `.bak` не создавал — драйвер держит оригинал в
@@ -285,8 +285,8 @@ junction (`stat` даёт разные inode, `LinkType` пустой). `md5` с
 
 ## Контрольные суммы боевых баз (после всей работы)
 
-    stomat_wiki.db     2207af764967c505f1bfccdba63f129d   9 158 656 байт
-    stomat_archive.db  addae58b925e222e50cf129ce92aafe3  47 587 328 байт
+    stomat_wiki.db     2207af7649...(md5, укорочен)   9 158 656 байт
+    stomat_archive.db  addae58b92...(md5, укорочен)  47 587 328 байт
 
 Совпадают со снятыми ДО работы. Ни одного INSERT/UPDATE/DELETE/VACUUM/ATTACH в боевые базы;
 открывались только через `file:...?mode=ro`.

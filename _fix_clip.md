@@ -5,10 +5,10 @@
 
 md5 ДО работы:
 
-    2d0931cc389f2838d00f54dffff6136a  html_safe.py
-    16042cc80625599ea1fdf86d97f571d5  assistant.py
-    9b1f1d4d69f37eeed12f5973726d217c  web_lookup.py
-    e6af576b330be51d81fac0f38eaa5749  distiller.py
+    2d0931cc38...(md5, укорочен)  html_safe.py
+    16042cc806...(md5, укорочен)  assistant.py
+    9b1f1d4d69...(md5, укорочен)  web_lookup.py
+    e6af576b33...(md5, укорочен)  distiller.py
 
 Скрипты замера: `_measure_clip.py`, `_measure_clip2.py`, `_measure_clip3.py`
 (боевые базы только `mode=ro`).

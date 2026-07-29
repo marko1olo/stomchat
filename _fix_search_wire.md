@@ -202,8 +202,8 @@ op="edit_message:pm_media_failed", logger=logger)`, где
 одного). Хеши до саботажа и после совпадают **побайтово**:
 
 ```
-9b1f1d4d69f37eeed12f5973726d217c *web_lookup.py   (до саботажа = после)
-d1ac68f6899e91c916020ae569e95370 *assistant.py    (до саботажа = после)
+9b1f1d4d69...(md5, укорочен) *web_lookup.py   (до саботажа = после)
+d1ac68f689...(md5, укорочен) *assistant.py    (до саботажа = после)
 ```
 
 `rg 'ДИВЕРСИЯ|SABOTAGE'` по `assistant.py`, `web_lookup.py`,

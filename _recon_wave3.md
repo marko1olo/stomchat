@@ -237,8 +237,8 @@ main.py:2131        # Bot-mention trigger (always shadow mode until promoted)
 
 ```
 C:\...\08_Projects\stomchat\stomchat\     981 МБ, 108 .py, СВОЙ .git на том же HEAD a0376c3
-md5 assistant.py    = 5724549d85de6e95e4039d8ea9c79b5a  (совпадает с корневым)
-md5 main.py         = 39a2dd0d20dde2f5561592ec1741129b  (совпадает)
+md5 assistant.py    = 5724549d85...(md5, укорочен)  (совпадает с корневым)
+md5 main.py         = 39a2dd0d20...(md5, укорочен)  (совпадает)
 не junction/symlink (`dir /AL` пусто) — настоящий каталог, mtime 11:27-11:28
 `git status` в корне видит его как `?? stomchat/`
 ```
