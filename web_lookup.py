@@ -1,0 +1,457 @@
+"""
+Слой качества над веб-поиском: ранжирование источников и заземление ответа.
+
+Зачем он вообще. Механизм поиска в проекте построен и рабочий: подпроцесс
+(blocking_tools.web_search_async), обёртка (search_engine_safe.perform_search),
+свой набор проверок в test_fix_subprocess.py. Не вызывает его НИКТО — grep по
+всем .py даёт только определения и тесты. То есть код есть, а функции у бота нет.
+
+Зачем он нужен ВРАЧУ — измерено по stomat_wiki.db и stomat_archive.db, только
+чтение. Не «закрыть пробелы корпуса»: проверка по двадцати клиническим терминам
+(биодентин, MTA, артикаин, бисфосфонаты, варфарин, синус-лифтинг, бруксизм,
+элайнеры) не нашла НИ ОДНОГО термина, о котором в чате спрашивали, а в корпусе не
+было ни факта. Корпус тему покрывает. Дело в другом:
+
+  * Из 12 784 фактов ссылку содержат 4 (0.03%), DOI — ноль, PubMed упомянут в
+    двух. То есть бот физически не может дать врачу источник, который тот
+    откроет и проверит сам. Всё, что бот знает, — это мнение коллег по чату,
+    пересказанное без атрибуции.
+  * Архив кончается 2026-02-19, самый свежий факт — того же дня. На сегодня это
+    160 дней слепоты: ничего о новом материале, отозванном препарате или
+    изменившейся рекомендации в корпусе нет и не появится.
+
+Поэтому веб-поиск здесь — не замена корпусу, а другой инструмент: он даёт
+ПРОВЕРЯЕМУЮ ссылку и свежесть там, где чат-мнение не годится.
+
+Почему нельзя просто вызвать perform_search и отдать врачу что вернулось.
+Аудитория — практикующие стоматологи, а выдача общего поиска по стоматологическим
+запросам на первых местах держит рекламу клиник: цены на имплантацию, акции,
+рассрочка, «запишитесь на бесплатную консультацию». Для профессионала такой ответ
+хуже молчания: он не только бесполезен, он выдаёт бота за источник, которому
+доверять нельзя. Плюс выдача уходит в валидатор как справочный материал, то есть
+мусор попадает не только в текст ответа, но и в критерий его проверки.
+
+Поэтому здесь три вещи, которых в поиске не было:
+  1. Разбор результата обратно в (текст, ссылка, хост). Провайдеры отдают строки
+     ДВУХ разных форм: tavily — "текст (url)", ddgs — "текст\\n(Source: url)".
+     Ни та, ни другая не годится для ранжирования, пока ссылку не выделить.
+  2. Ранжирование по уровню источника и отсев рекламы клиник.
+  3. Заземлённый промпт: отвечать ТОЛЬКО по выдержкам, помечать утверждения
+     номером источника, при нехватке данных говорить об этом прямо.
+
+Модуль намеренно без внешних зависимостей и без побочных эффектов при импорте:
+ни сети, ни чтения конфига, ни настройки логирования.
+"""
+import logging
+import re
+from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Разбор результата провайдера
+# ---------------------------------------------------------------------------
+
+# Маркер ссылки в конце строки. "Source" пишет подпроцесс (blocking_tools),
+# "Источник" — старая обёртка search_engine.py; поддерживаем оба, потому что
+# формат в проекте уже разошёлся, и молча потерять ссылку хуже, чем принять две
+# формы.
+_SOURCE_MARKER_RE = re.compile(
+    r"[\(\[]\s*(?:source|источник)\s*:\s*(https?://[^\s\)\]]+)\s*[\)\]]",
+    re.IGNORECASE,
+)
+# tavily клеит ссылку без слова-маркера: "текст (https://...)".
+_TRAILING_URL_RE = re.compile(r"[\(\[]\s*(https?://[^\s\)\]]+)\s*[\)\]]\s*$")
+_ANY_URL_RE = re.compile(r"https?://[^\s\)\]]+")
+
+
+def _host_of(url):
+    """Хост в нижнем регистре без www. Пустая строка, если ссылка не разобралась."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except Exception:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def parse_result(raw):
+    """
+    Строка провайдера -> {"text", "url", "host"}. None, если разбирать нечего.
+
+    Ссылку ищем в три приёма, от самого надёжного к самому общему: маркер
+    "(Source: ...)", затем ссылка в скобках на конце строки, затем любая ссылка в
+    тексте. Найденный хвост из текста убираем — иначе он уедет в промпт как часть
+    выдержки и модель начнёт цитировать url'ы вперемешку с фактами.
+    """
+    if isinstance(raw, dict):
+        # Задел на структурированный ответ подпроцесса: если он появится, слой
+        # уже готов и разбор строк останется только для старых полезных нагрузок.
+        text = (raw.get("text") or raw.get("content") or raw.get("body") or "").strip()
+        url = (raw.get("url") or raw.get("href") or "").strip()
+        return {"text": text, "url": url, "host": _host_of(url)} if text else None
+
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+
+    url = ""
+    match = _SOURCE_MARKER_RE.search(text)
+    if match:
+        url = match.group(1)
+        text = (text[:match.start()] + text[match.end():]).strip()
+    else:
+        match = _TRAILING_URL_RE.search(text)
+        if match:
+            url = match.group(1)
+            text = text[:match.start()].strip()
+        else:
+            found = _ANY_URL_RE.search(text)
+            if found:
+                url = found.group(0)
+                # Ссылку из середины текста тоже вырезаем: иначе она уедет в
+                # промпт внутри выдержки, и модель начнёт цитировать url'ы
+                # вперемешку с фактами.
+                text = (text[:found.start()] + text[found.end():]).strip()
+
+    text = text.strip().strip("•▪\U0001f539-– \n\t")
+    if not text:
+        return None
+    return {"text": text, "url": url, "host": _host_of(url)}
+
+
+# ---------------------------------------------------------------------------
+# Уровень источника
+# ---------------------------------------------------------------------------
+
+# Уровни по убыванию доверия. Сравнение идёт по ХОСТУ и по суффиксу, а не
+# подстрокой по всей ссылке: "ada.org" подстрокой находится в "canada.org", а
+# "who.int" — в "pwho.int". Совпадение подстрокой на доменах и на русском тексте
+# в этом проекте ловилось уже восемь раз, так что здесь только суффиксное
+# сравнение с точкой.
+SOURCE_TIERS = (
+    # 1. Исследования и систематические обзоры.
+    (1, (
+        "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "cochrane.org",
+        "cochranelibrary.com", "jada.ada.org", "nature.com", "thelancet.com",
+        "sciencedirect.com", "link.springer.com", "onlinelibrary.wiley.com",
+        "bmj.com", "jclinmed.com", "frontiersin.org", "mdpi.com",
+    )),
+    # 2. Профессиональные организации и регуляторы: клинические рекомендации,
+    # инструкции к препаратам, официальные позиции.
+    (2, (
+        "ada.org", "efp.org", "aae.org", "aaoms.org", "who.int", "fdiworlddental.org",
+        "grls.rosminzdrav.ru", "rlsnet.ru", "drugs.com", "dailymed.nlm.nih.gov",
+        "e-lactancia.org", "medscape.com", "minzdrav.gov.ru", "cr.minzdrav.gov.ru",
+        "e-stomatology.ru", "straumann.com", "dentsplysirona.com",
+    )),
+    # 3. Русскоязычная профессиональная периодика и научные архивы.
+    (3, (
+        "cyberleninka.ru", "elibrary.ru", "mediasphera.ru", "dentalmagazine.ru",
+        "stomatologiya.info", "dental-press.com", "rusdent.com", "dentalclub.ru",
+        "endoexperience.com",
+    )),
+    # 4. Энциклопедии: годятся как определение термина, не как основание решения.
+    (4, ("wikipedia.org", "who.int.wikipedia.org", "britannica.com")),
+)
+
+# Уровень для всего остального. Не «мусор» — просто без известной репутации:
+# такой источник берём, но последним и с пометкой.
+UNKNOWN_TIER = 5
+
+# Признаки рекламы клиники в ХОСТЕ. Здесь допустима проверка вхождением: это
+# именно поиск слова внутри имени домена ("implant-moscow.ru"), а не сравнение
+# доменов между собой.
+JUNK_HOST_MARKERS = (
+    "stomatolog-", "-stomatolog", "implant", "implanty", "zubi", "zuby", "clinic",
+    "klinika", "dental-clinic", "prices", "price", "zapis", "vsevrachi", "doctor-",
+    "zoon", "prodoctorov", "napopravku", "docdoc", "sberhealth", "yandex",
+    "avito", "otzovik", "irecommend", "stom-", "-stom",
+)
+
+# Признаки рекламы в ТЕКСТЕ выдержки. Профессиональный материал не зовёт
+# записаться и не называет цену со скидкой.
+AD_TEXT_MARKERS = (
+    "запишитесь", "записаться на приём", "записаться на прием", "бесплатная консультация",
+    "акция", "скидка", "рассрочка", "от 1990", "цены на", "стоимость лечения",
+    "наши специалисты", "наша клиника", "лучшая клиника", "звоните", "оставьте заявку",
+    "лицензия №", "работаем без выходных",
+)
+
+
+def _host_matches(host, domain):
+    """Точное совпадение хоста или его поддомена. 'ada.org' не матчит 'canada.org'."""
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def tier_of(host):
+    """Уровень доверия к хосту: 1 — лучший, UNKNOWN_TIER — неизвестный."""
+    for tier, domains in SOURCE_TIERS:
+        for domain in domains:
+            if _host_matches(host, domain):
+                return tier
+    return UNKNOWN_TIER
+
+
+def is_advertising(entry):
+    """
+    True, если выдержка похожа на рекламу клиники. Причина — вторым значением.
+
+    Известный профессиональный источник рекламой не объявляется никогда: у
+    журнала может быть в тексте слово «акция» (акция препарата, акционный потенциал),
+    и терять из-за этого систематический обзор нельзя.
+    """
+    host = entry.get("host") or ""
+    if tier_of(host) < UNKNOWN_TIER:
+        return False, ""
+    for marker in JUNK_HOST_MARKERS:
+        if marker in host:
+            return True, f"домен рекламный ({marker})"
+    low = (entry.get("text") or "").lower()
+    hits = [marker for marker in AD_TEXT_MARKERS if marker in low]
+    if len(hits) >= 2:
+        # Один маркер — совпадение; два и больше в одной выдержке это уже реклама.
+        return True, "текст рекламный (" + ", ".join(hits[:3]) + ")"
+    return False, ""
+
+
+# ---------------------------------------------------------------------------
+# Бюджет текста
+# ---------------------------------------------------------------------------
+
+# Потолок на весь блок выдержек. Тот же порядок, что у корпуса знаний в
+# assistant.py (_CORPUS_MAX_CHARS = 6000): выдержки идут в тот же промпт и в тот
+# же справочный материал валидатора, а окно у них общее.
+WEB_MAX_CHARS = 4000
+# Потолок на одну выдержку. Провайдер иногда отдаёт полстраницы, и одна такая
+# выдержка съедала бы весь блок, оставив остальные источники за бортом.
+WEB_ENTRY_MAX_CHARS = 900
+# Сколько источников максимум показываем врачу. Больше пяти ссылок в сообщении
+# Telegram — это стена, которую никто не открывает.
+WEB_MAX_SOURCES = 5
+
+
+def clip_at_sentence(text, limit):
+    """
+    Обрезать по границе предложения, а не по счётчику символов.
+
+    Обрыв на полуслове в клиническом тексте опаснее короткого текста: «не более
+    3 мг/кг в су…» читается как другое число. Правило и поведение те же, что у
+    _clip_at_sentence в assistant.py, — при следующей правке ядра эти два места
+    надо свести в одно, пока ядро занято другим исполнителем.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    best = -1
+    for mark in (". ", "! ", "? ", "; "):
+        cut = head.rfind(mark)
+        if cut > best:
+            best = cut
+    if best >= limit // 2:
+        return re.sub(r"\s*\n?\s*\d+\.\s*$", "", head[:best + 1]).rstrip()
+    cut = head.rfind(" ")
+    if cut >= limit // 2:
+        return head[:cut] + "…"
+    # Ни точки, ни пробела во второй половине бюджета. Возвращать head как есть
+    # нельзя: разрез приходится на середину слова, и «не более 3 мг/кг в су…»
+    # читается как другая доза. Убираем оборванный токен целиком.
+    trimmed = re.sub(r"\S+$", "", head).rstrip()
+    return (trimmed or head) + "…"
+
+
+# ---------------------------------------------------------------------------
+# Пайплайн
+# ---------------------------------------------------------------------------
+
+def _normalize(text):
+    """Текст для сравнения выдержек: регистр и пробелы не должны мешать."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def rank_sources(raw_results, max_sources=WEB_MAX_SOURCES):
+    """
+    Разобрать, отсеять рекламу, схлопнуть дубли, отсортировать по уровню.
+
+    Возвращает (kept, report). report — что и почему выброшено; он обязателен:
+    молча урезать выдачу значит показать врачу два источника из семи и выдать это
+    за всё, что есть в открытых источниках.
+    """
+    parsed = []
+    report = {"total": 0, "unparsed": 0, "ads": [], "duplicates": 0, "over_limit": 0}
+
+    for raw in raw_results or []:
+        report["total"] += 1
+        entry = parse_result(raw)
+        if not entry:
+            report["unparsed"] += 1
+            continue
+        is_ad, why = is_advertising(entry)
+        if is_ad:
+            report["ads"].append(f"{entry['host'] or '?'}: {why}")
+            continue
+        entry["tier"] = tier_of(entry["host"])
+        parsed.append(entry)
+
+    # Дубли: один и тот же хост часто отдаёт несколько почти одинаковых выдержек,
+    # и они РАЗНОЙ длины — вторая обычно та же фраза плюс хвост. Сравнение по
+    # фиксированному префиксу такие пары не ловит (первые 80 символов уже
+    # расходятся), поэтому сравниваем нормализованные тексты на вложенность.
+    unique = []
+    for entry in sorted(parsed, key=lambda e: (e["tier"], -len(e["text"]))):
+        norm = _normalize(entry["text"])
+        twin = None
+        for kept in unique:
+            if kept["host"] != entry["host"]:
+                continue
+            other = _normalize(kept["text"])
+            shorter, longer = sorted((norm, other), key=len)
+            if not shorter:
+                continue
+            # ТОЛЬКО вложенность. Похожесть по общему префиксу проверять нельзя:
+            # «доза для взрослых 7 мг/кг» и «доза для взрослых 5 мг/кг» совпадают
+            # на 88% начала, и порог 80% молча выбросил бы одну из двух ДОЗ.
+            # Проверено: на девяти разных обзорах с общим началом «Обзор номер»
+            # префиксный порог схлопывал все девять в один.
+            if shorter in longer:
+                twin = kept
+                break
+        if twin is None:
+            unique.append(entry)
+        else:
+            report["duplicates"] += 1
+
+    ordered = sorted(unique, key=lambda e: (e["tier"], -len(e["text"])))
+    if len(ordered) > max_sources:
+        report["over_limit"] = len(ordered) - max_sources
+        ordered = ordered[:max_sources]
+
+    if report["ads"] or report["unparsed"] or report["over_limit"]:
+        logger.info(
+            "web lookup filtered: всего=%s принято=%s реклама=%s без_ссылки=%s "
+            "дубли=%s сверх_лимита=%s (%s)",
+            report["total"], len(ordered), len(report["ads"]), report["unparsed"],
+            report["duplicates"], report["over_limit"], "; ".join(report["ads"][:3]),
+        )
+    return ordered, report
+
+
+def fit_budget(sources, max_chars=WEB_MAX_CHARS, entry_max=WEB_ENTRY_MAX_CHARS):
+    """Уложить выдержки в бюджет, обрезая по предложению, и сказать, что выпало."""
+    out = []
+    used = 0
+    dropped = 0
+    for entry in sources:
+        text = clip_at_sentence(entry["text"], entry_max)
+        cost = len(text) + 2
+        if used + cost > max_chars:
+            dropped += 1
+            continue
+        used += cost
+        trimmed = dict(entry)
+        trimmed["text"] = text
+        out.append(trimmed)
+    if dropped:
+        logger.info("web lookup budget: %s выдержек не влезло в %s символов",
+                    dropped, max_chars)
+    return out, dropped
+
+
+_TIER_LABEL = {
+    1: "исследование",
+    2: "профессиональная организация или регулятор",
+    3: "профессиональная периодика",
+    4: "энциклопедия",
+    UNKNOWN_TIER: "источник без известной репутации",
+}
+
+
+def build_lookup_prompt(question, sources):
+    """
+    Промпт, заземлённый на выдержки. Пустой список источников -> None.
+
+    Никакой свободы «дополнить по памяти»: у бота есть отдельный путь для ответов
+    из корпуса знаний, а этот путь существует ровно затем, чтобы ответ опирался на
+    показанные врачу ссылки. Модель, дополнившая веб-ответ собственной памятью,
+    делает ссылки декорацией.
+    """
+    if not sources:
+        return None
+    blocks = []
+    for number, entry in enumerate(sources, 1):
+        label = _TIER_LABEL.get(entry.get("tier", UNKNOWN_TIER), _TIER_LABEL[UNKNOWN_TIER])
+        blocks.append(f"[{number}] {entry['host'] or 'без домена'} — {label}\n{entry['text']}")
+    excerpts = "\n\n".join(blocks)
+    return (
+        "Ты отвечаешь практикующему стоматологу. Ниже выдержки из открытых "
+        "источников, найденные по его вопросу.\n\n"
+        f"ВОПРОС: {question}\n\n"
+        f"ВЫДЕРЖКИ:\n{excerpts}\n\n"
+        "ПРАВИЛА ОТВЕТА:\n"
+        "1. Опирайся ТОЛЬКО на выдержки выше. Ничего не добавляй по памяти.\n"
+        "2. После каждого утверждения ставь номер источника в квадратных скобках.\n"
+        "3. Если выдержки на вопрос не отвечают — скажи это прямо и не выдумывай. "
+        "Ответ «в найденных источниках этого нет» — правильный ответ.\n"
+        "4. Дозировки, концентрации, сроки и противопоказания переноси дословно. "
+        "Если в выдержке числа нет — не называй его.\n"
+        "5. Если источники противоречат друг другу, покажи расхождение, а не "
+        "выбирай одну сторону молча.\n"
+        "6. Пиши как коллега коллеге: по делу, без вводных и без рекламы."
+    )
+
+
+def format_sources_footer(sources):
+    """Нумерованный список ссылок под ответом. Пусто -> пустая строка."""
+    if not sources:
+        return ""
+    lines = ["Источники:"]
+    for number, entry in enumerate(sources, 1):
+        url = entry.get("url") or ""
+        lines.append(f"{number}. {entry.get('host') or 'источник'} — {url}" if url
+                     else f"{number}. {entry.get('host') or 'источник'}")
+    return "\n".join(lines)
+
+
+# Что сказать врачу, когда поиск сработал, но профессиональных источников не
+# осталось. Это НЕ то же самое, что отказ поиска: врач должен различать «в
+# открытых источниках нет» и «поиск не сработал».
+NOTHING_USABLE = (
+    "В открытых источниках по этому вопросу нашлась только реклама клиник — "
+    "профессиональных материалов нет. Спрошу иначе или ответь по своему опыту."
+)
+SEARCH_FAILED = (
+    "Поиск не отработал (внешний сервис недоступен). Это сбой инструмента, а не "
+    "отсутствие информации."
+)
+
+
+def prepare(question, raw_results, error=None):
+    """
+    Полный проход: разбор -> отсев -> бюджет -> промпт и подпись.
+
+    Возвращает словарь с ключами prompt, footer, sources, report, message.
+    message заполнен только когда отвечать не из чего, и тогда prompt равен None:
+    вызывающему остаётся отправить message как есть.
+    """
+    if error and not raw_results:
+        logger.warning("web lookup failed: %s", str(error)[:200])
+        return {"prompt": None, "footer": "", "sources": [], "report": {},
+                "message": SEARCH_FAILED}
+
+    ranked, report = rank_sources(raw_results)
+    sources, dropped = fit_budget(ranked)
+    report["budget_dropped"] = dropped
+    if not sources:
+        return {"prompt": None, "footer": "", "sources": [], "report": report,
+                "message": NOTHING_USABLE}
+    return {
+        "prompt": build_lookup_prompt(question, sources),
+        "footer": format_sources_footer(sources),
+        "sources": sources,
+        "report": report,
+        "message": "",
+    }
