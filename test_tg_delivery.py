@@ -202,6 +202,23 @@ async def fastest(coro_factory, runs=3, limit=HANG_LIMIT):
     return any_finished, best
 
 
+async def survives(coro):
+    """
+    Прогнать и вернуть (не упало, текст исключения).
+
+    Обработчик, свалившийся с исключением, роняет ВЕСЬ набор и прячет все
+    следующие проверки — так уже было в этом наборе с f"{None:.3f}". Диверсия
+    скептика S4 (снят `and BOT_USERNAME`) показала то же на продакшн-коде:
+    re.escape(None) даёт TypeError, и вместо честного FAIL набор просто
+    обрывался. Здесь падение становится обычным провалом одной проверки.
+    """
+    try:
+        await coro
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 # --- Заглушки окружения ------------------------------------------------------
 ROWS = [(1000 + i, f"Врач{i}", None, f"обсуждаем уступ и границу препарирования {i}")
         for i in range(12)]
@@ -250,6 +267,26 @@ async def run():
               "tg_safety не сообщил причину")
         check("сообщение о потере называет причину машинно-читаемо",
               CAP.has("timeout"), "причина отказа не названа")
+        # Строка «tg give up ... timeout» — это запись tg_safety, а не наша:
+        # вырезать диагностику из WARNING ассистента можно было незаметно
+        # (диверсия скептика S5 прошла зелёной). По журналу врач и лид должны
+        # понять, СКОЛЬКО реплик разбора потеряно, иначе потерю сводки не
+        # отличить от сводки, которой не было.
+        check("в записи о потере назван объём потерянного разбора",
+              CAP.has("НЕ доставлена", f"{len(ROWS)} реплик")
+              and CAP.has("НЕ доставлена", "символов"),
+              "WARNING о потере не называет ни числа реплик, ни длины текста")
+        check("в записи о потере назван отказ Telegram, а не только факт",
+              CAP.has("НЕ доставлена", "timeout"),
+              "причина отказа осталась только в записи tg_safety")
+        # Главный инвариант журнала для Д1: потерянная сводка НЕ ИМЕЕТ ПРАВА
+        # значиться доставленной. Снять `return` после WARNING удавалось
+        # незаметно (диверсия скептика S2 прошла зелёной) — и тогда журнал
+        # утверждает «Successfully posted» о сводке, которой врач не видел, то
+        # есть врёт ровно там, где Д1 обещал перестать молчать.
+        check("потерянная сводка НЕ записана как успешно доставленная",
+              not CAP.has("Successfully posted group summary"),
+              "журнал сообщает об успехе доставки, которой не было")
 
         print("\n[2] Д1: в обычный день сводка по-прежнему доходит")
         good = WorkingBot()
@@ -396,12 +433,16 @@ async def run():
         CAP.clear()
         searched["n"] = 0
         assistant.REPLIED_MSG_IDS.clear()
-        await assistant.check_and_trigger_assistant_media(
-            deaf, Msg(reply_to=555), 780, "Что тут с уступом?", "снимок зуба")
+        # Раньше здесь стояло check(..., True) — условие, которое не может быть
+        # ложным. Падение обработчика роняло весь набор, и проверка про «не
+        # упал» ничего не проверяла: она либо не выполнялась вовсе, либо
+        # проходила всегда.
+        alive, why = await survives(assistant.check_and_trigger_assistant_media(
+            deaf, Msg(reply_to=555), 780, "Что тут с уступом?", "снимок зуба"))
         check("отказ запроса родителя записан в журнал",
               CAP.has("родитель"),
               "снимок ушёл под кулдаун молча — ровно исходный дефект")
-        check("обработчик не упал на отказе сети", True)
+        check("обработчик не упал на отказе сети", alive, why)
     finally:
         assistant.load_state, assistant.save_state = real_load, real_save
         assistant.search_knowledge_corpus = real_search
@@ -622,6 +663,99 @@ async def run():
               f"answer() вызван {cb3.answered} раз у уже снятой задачи")
     finally:
         assistant.CALLBACK_EDIT_TIMEOUT_SECONDS = real_cb
+
+    print("\n[13] Д2: пока личность бота не опознана, снимок всё равно разбирают")
+    # Блоки [4]-[6] всегда задавали BOT_ID/BOT_USERNAME заранее, поэтому
+    # догоняющий резолв — то самое, чем Д2 заменил get_me на горячем пути, — не
+    # прогонялся ни разу: убрать его целиком удавалось незаметно (диверсия
+    # скептика S1 прошла зелёной). А без резолва при пустом BOT_ID оба флага
+    # остаются False, обращение врача считается пассивным и снимок молча уходит
+    # под 2-часовой кулдаун — ровно то наказание, которое Д2 обещал снять.
+    blocked = {"last_passive_media_run": datetime.now().isoformat()}
+    real_load2, real_save2 = assistant.load_state, assistant.save_state
+    real_search2 = assistant.search_knowledge_corpus
+    real_id2, real_name2 = assistant.BOT_ID, assistant.BOT_USERNAME
+    seen2 = {"n": 0}
+
+    async def fake_search2(keywords):
+        seen2["n"] += 1
+        return "", ""
+
+    class Msg2:
+        def __init__(self, reply_to=None):
+            self.reply_to_msg_id = reply_to
+            self.chat_id = -1001234567890
+            self.client = None
+            self.id = 777
+
+    class FreshBot(WorkingBot):
+        """Личность ещё не опознана, но сеть жива: get_me обязан сработать РАЗ."""
+
+        def __init__(self):
+            super().__init__()
+            self.get_me_calls = 0
+
+        async def get_me(self):
+            self.get_me_calls += 1
+            return type("Me", (), {"id": 4242, "username": "StomChat_Bot"})()
+
+        async def get_messages(self, chat_id, ids=None, **kw):
+            return type("P", (), {"sender_id": 4242})()
+
+    assistant.load_state = lambda: dict(blocked)
+    assistant.save_state = lambda state: None
+    assistant.search_knowledge_corpus = fake_search2
+    assistant.generate_gemini_text_async = fake_llm_fails
+    try:
+        assistant.BOT_ID, assistant.BOT_USERNAME = None, None
+        fresh = FreshBot()
+        seen2["n"] = 0
+        assistant.REPLIED_MSG_IDS.clear()
+        await assistant.check_and_trigger_assistant_media(
+            fresh, Msg2(reply_to=555), 791, "@StomChat_Bot что с уступом?",
+            "снимок зуба")
+        check("при пустом BOT_ID личность догоняется, а снимок идёт в разбор",
+              seen2["n"] == 1,
+              "снимок ушёл под 2-часовой кулдаун — врач наказан за вопрос")
+        check("догоняющий резолв стоил РОВНО одного запроса к Telegram",
+              fresh.get_me_calls == 1, f"get_me вызван {fresh.get_me_calls} раз")
+        check("резолв записал имя бота, а не только id",
+              assistant.BOT_USERNAME == "stomchat_bot",
+              f"BOT_USERNAME={assistant.BOT_USERNAME!r}")
+
+        # Второй снимок: личность уже известна, сеть трогать больше НЕ за что.
+        seen2["n"] = 0
+        assistant.REPLIED_MSG_IDS.clear()
+        await assistant.check_and_trigger_assistant_media(
+            fresh, Msg2(reply_to=555), 792, "и тут посмотри", "снимок зуба")
+        check("на втором снимке get_me уже не зовут — резолв одноразовый",
+              fresh.get_me_calls == 1,
+              f"get_me вернулся на горячий путь: {fresh.get_me_calls} вызовов")
+        check("второй снимок тоже разобран", seen2["n"] == 1,
+              "повторное обращение врача потерялось")
+
+        # Личность не опознать (сеть мертва) — снимок под кулдауном отбрасываем,
+        # но отказ резолва обязан быть слышен, иначе тишина как в исходном дефекте.
+        assistant.BOT_ID, assistant.BOT_USERNAME = None, None
+        dead = ReplyBot(parent_sender=4242)  # get_me у него бросает ConnectionError
+        seen2["n"] = 0
+        CAP.clear()
+        assistant.REPLIED_MSG_IDS.clear()
+        alive2, why2 = await survives(assistant.check_and_trigger_assistant_media(
+            dead, Msg2(reply_to=555), 793, "@stomchat_bot что с уступом?",
+            "снимок зуба"))
+        check("неудачный резолв личности ЗАПИСАН в журнал, а не съеден",
+              CAP.has("Failed to resolve bot identity"),
+              "личность не опознана и об этом ни строки — врач наказан молча")
+        check("на неопознанной личности обработчик не падает", alive2, why2)
+        check("снимок с неизвестной личностью не разбирают вслепую",
+              seen2["n"] == 0,
+              "разобрали снимок, не зная, к кому обращались — платная генерация зря")
+    finally:
+        assistant.load_state, assistant.save_state = real_load2, real_save2
+        assistant.search_knowledge_corpus = real_search2
+        assistant.generate_gemini_text_async = fake_llm
+        assistant.BOT_ID, assistant.BOT_USERNAME = real_id2, real_name2
 
 
 try:
