@@ -105,12 +105,40 @@ def loop_choices(tree):
     return out
 
 
+def literal_dict_values(tree):
+    """ИМЯ = {"a": "A", "b": "B"} -> {'ИМЯ': ['A', 'B']}.
+
+    Нужно для обращений вида getattr(config, КАРТА.get(ключ, ""), None): имя
+    приходит не литералом, но САМА карта литеральная, значит набор имён известен
+    статически и контракт обязан их проверить, а не расписаться в бессилии.
+
+    Живой случай, на котором это понадобилось: gemini_client.PROVIDER_KEY_ATTRS
+    = {"gemini": "GOOGLE_KEYS", "groq": "GROQ_KEYS"} — появился, когда создание
+    клиента свели в одну точку. Без этого разбора контракт видел «имя не литерал»
+    и НЕ проверял, что GOOGLE_KEYS и GROQ_KEYS объявлены в шаблоне, то есть на
+    двух самых горячих именах ключей охрана молча выключалась.
+    """
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        literals = [v.value for v in node.value.values
+                    if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+        if not literals:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                out.setdefault(target.id, []).extend(literals)
+    return out
+
+
 def classify_tree(tree, fname, required, optional, dynamic):
     """Разложить обращения ОДНОГО разобранного файла по трём корзинам."""
     aliases = config_aliases(tree)
     if not aliases:
         return
     choices = loop_choices(tree)
+    dict_values = literal_dict_values(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
                 and node.value.id in aliases:
@@ -129,6 +157,13 @@ def classify_tree(tree, fname, required, optional, dynamic):
         elif isinstance(arg, ast.Name) and arg.id in choices:
             # getattr(config, attr, None) в цикле по кортежу имён.
             found = choices[arg.id]
+            dynamic.append(f"{fname}:{node.lineno} -> {found}")
+        elif isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute) \
+                and arg.func.attr == "get" and isinstance(arg.func.value, ast.Name) \
+                and arg.func.value.id in dict_values:
+            # getattr(config, КАРТА.get(ключ, ""), None): карта литеральная,
+            # значит имена известны статически — проверяем их все.
+            found = dict_values[arg.func.value.id]
             dynamic.append(f"{fname}:{node.lineno} -> {found}")
         else:
             dynamic.append(f"{fname}:{node.lineno} -> имя не литерал")
