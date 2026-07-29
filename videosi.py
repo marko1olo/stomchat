@@ -2,9 +2,13 @@ import asyncio
 import aiosqlite
 import re
 import os
-import json
 import sqlite3
 import config
+# Разбор ответа модели — ОДИН на оба скрипта дистилляции: своя копия здесь уже
+# была и ломалась ровно так же, как в reclass, а расхождение копий означает, что
+# один и тот же ответ модели в одном скрипте разбирается, а в другом теряется.
+# Импорт безопасен: reclass на уровне модуля только объявляет константы и функции.
+from reclass import ModelJsonError, extract_codes
 from google import genai
 from google.genai import types
 from datetime import datetime
@@ -59,10 +63,6 @@ KNOWLEDGE_TREE = """
 6. ОБЩЕЕ: 6.1.1 Оборудование, 6.2.1 Фармакология, 6.3.1 Фотопротокол.
 7. МЕНЕДЖМЕНТ: 7.1.1 Экономика, 7.2.1 Юридическое, 7.3.1 Психология.
 """
-
-def clean_json_raw(text):
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    return match.group(0) if match else text
 
 def clean_codes(raw_codes):
     """Оставить в category_code только цифровые коды.
@@ -143,8 +143,16 @@ async def classify_video(body):
         ])
             )
             if response and response.text:
-                data = json.loads(clean_json_raw(response.text))
-                return clean_codes(data.get("codes", [FALLBACK_CODE]))
+                return clean_codes(extract_codes(response.text))
+        except ModelJsonError as exc:
+            # Модель ОТВЕТИЛА, но объекта с кодами в ответе нет (обрыв, отказ
+            # словами). Другой ключ этого не лечит: прежний код перебирал молча
+            # все 10 ключей — замер 10 вызовов на один протокол и ни одной строки
+            # в журнале, а протокол всё равно не записывался. Теперь причина
+            # названа сразу и вызов один: протокол остаётся в videos.txt, и
+            # повторный прогон разметит его нормально.
+            print(f"\n   [ОТКАЗ РАЗБОРА] {exc}")
+            break
         except Exception:
             continue # Пробуем следующий ключ молча
 

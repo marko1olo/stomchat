@@ -5,6 +5,10 @@ import os
 import re
 import sqlite3
 import config
+# Сканер сбалансированных объектов берём из distiller, а не пишем третью копию:
+# разбор ответа модели уже трижды жил в дереве по-разному, и расхождение копий —
+# это расхождение того, найдёт врач факт или нет.
+from distiller import _iter_json_objects
 from datetime import datetime
 from google import genai
 from google.genai import types
@@ -96,9 +100,61 @@ KNOWLEDGE_TREE = """
    7.3.1 Психология общения и управление конфликтами.
 """
 
-def clean_json_raw(text):
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    return match.group(0) if match else text
+class ModelJsonError(Exception):
+    """В ответе модели нет ни одного целого объекта с кодами категорий."""
+
+
+def extract_codes(text):
+    """Собрать коды из ответа модели, чем бы модель объект ни обложила.
+
+    Прежний разбор искал объект жадно: от первой открывающей скобки до
+    ПОСЛЕДНЕЙ закрывающей во всём ответе. Замер на 9 реалистичных ответах: 6 не
+    разбирались вообще. Хватало одной закрывающей скобы в болтовне после объекта
+    («надеюсь, помогло }»), второго объекта, вложенного "meta": {...} или
+    повтора образца формата из промпта. Для врача это значит, что факт остаётся
+    под ЧУЖОЙ категорией и он его не найдёт, а видео-протокол не записывается
+    вовсе — при том, что модель ответила правильно.
+
+    Коды собираются из ВСЕХ целых объектов ответа, по порядку и без дублей:
+    ответ из двух объектов — это два набора кодов, а не мусор. Образец формата
+    из промпта безопасен: он написан как X.X.X, и цифровой фильтр вызывающего
+    его выбрасывает.
+
+    Пусто не возвращается никогда: либо коды, либо ModelJsonError с причиной.
+    Молчаливая пустота здесь означала бы код-заглушку в базе, а факт с ней врачу
+    недостижим навсегда.
+    """
+    objects = []
+    for chunk in _iter_json_objects(text or ""):
+        try:
+            obj = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+
+    codes = []
+    for obj in objects:
+        value = obj.get("codes")
+        if isinstance(value, list):
+            for item in value:
+                if item not in codes:
+                    codes.append(item)
+        elif isinstance(value, (str, int, float)):
+            # Модель периодически отдаёт один код строкой, а не массивом.
+            if value not in codes:
+                codes.append(value)
+    if codes:
+        return codes
+
+    raw = (text or "").strip()
+    if not objects:
+        raise ModelJsonError(
+            f"целого объекта в ответе нет (ответ обрезан?): {len(raw)} симв., "
+            f"конец ответа: {raw[-80:]!r}")
+    raise ModelJsonError(
+        f"объект в ответе есть, но кодов в нём нет (ключа codes нет либо массив "
+        f"пуст): ключи {[sorted(o)[:5] for o in objects[:3]]}")
 
 async def classify_fact(client, content, f_id):
     prompt = f"""
@@ -130,25 +186,45 @@ async def classify_fact(client, content, f_id):
             types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
         ])
         )
-        if response and response.text:
-            data = json.loads(clean_json_raw(response.text))
-            raw_codes = data.get("codes", ["10.1"])
-            
-            clean_codes = []
-            for c in raw_codes:
-                # Регулярка вырезает только паттерны типа 1.1 или 1.1.1
-                match = re.search(r'(\d+\.\d+(?:\.\d+)?)', str(c))
-                if match:
-                    clean_codes.append(match.group(1))
-            
-            return ", ".join(list(set(clean_codes))) if clean_codes else "10.1"
+        if not response or not response.text:
+            # Пустой ответ раньше уезжал в базу кодом 10.1 с is_reclassified = 1.
+            # Этого кода нет ни в одной подтеме рубрикатора, а прежний код уже
+            # затёрт: факт становился недостижим для врача НАВСЕГДА, потому что
+            # следующий прогон помеченный факт не берёт. Лучше не перезаписывать.
+            print(f"   [ОТКАЗ] ID {f_id}: модель вернула пустой ответ, "
+                  f"код НЕ перезаписан.")
+            return None
+
+        raw_codes = extract_codes(response.text)
+        clean_codes = []
+        for c in raw_codes:
+            # Регулярка вырезает только паттерны типа 1.1 или 1.1.1
+            match = re.search(r'(\d+\.\d+(?:\.\d+)?)', str(c))
+            if match:
+                clean_codes.append(match.group(1))
+        if not clean_codes:
+            print(f"   [ОТКАЗ] ID {f_id}: в ответе нет ни одного цифрового кода "
+                  f"({raw_codes[:5]}), код НЕ перезаписан.")
+            return None
+        # dict.fromkeys, а не set: порядок кодов не должен меняться от прогона к
+        # прогону, иначе один и тот же ответ модели даёт разную строку в базе.
+        return ", ".join(dict.fromkeys(clean_codes))
+    except ModelJsonError as exc:
+        # Отдельно и ПЕРВЫМ, до общей ветки: сообщение json.loads про обрезанный
+        # ответ — "Expecting ',' delimiter", и подстрока "limit" сидит внутри
+        # слова delimiter. Общая ветка читала это как лимит квоты и возвращала
+        # RETRY: замер — 13 вызовов модели, 26 с сна и обрыв ВСЕГО прогона на
+        # первом же обрезанном ответе с ложным «Все ключи в лимите».
+        print(f"   [ОТКАЗ РАЗБОРА] ID {f_id}: {exc}")
+        return None
     except Exception as e:
         err = str(e).lower()
-        if "429" in err or "limit" in err or "exhausted" in err:
+        # \b обязателен: без границ слова «limit» находится внутри «delimiter»,
+        # и ошибка разбора выдавала себя за лимит квоты.
+        if "429" in err or "exhausted" in err or re.search(r"\b(limit|quota)\b", err):
             return "RETRY"
         print(f"   [!] Error on ID {f_id}: {err[:100]}")
         return None
-    return "10.1"
 
 def backup_path_for(db_path, now=None):
     """Имя копии рядом с базой: wiki_backup_<дата>_<время>.db.
@@ -302,6 +378,7 @@ async def main():
         fails = 0
         rotations = 0
         skipped = 0
+        aborted = False
         while idx < len(facts):
             f_id, content = facts[idx]
             current_key = config.GOOGLE_KEYS[key_idx % len(config.GOOGLE_KEYS)]
@@ -315,6 +392,7 @@ async def main():
                     print(f"   [СТОП] Все ключи в лимите на ID {f_id} после {rotations} ротаций. "
                           f"Переклассифицировано {idx} из {total_remaining}, остальные ждут "
                           f"следующего прогона со старыми кодами.")
+                    aborted = True
                     break
                 print(f"   [!] Key {key_idx % len(config.GOOGLE_KEYS) + 1} TPM limit. Rotating...")
                 key_idx += 1
@@ -347,7 +425,13 @@ async def main():
             # Safe interval to respect 15k TPM limit per key
             await asyncio.sleep(SLEEP_BETWEEN_FACTS)
 
-    if skipped:
+    if aborted:
+        # Прогон, оборванный на первом же факте, раньше заканчивался строкой
+        # BASE RECLASSIFIED SUCCESSFULLY: оператор читал успех там, где не
+        # переклассифицировано НИ ОДНОГО факта, и повторного прогона не делал.
+        print(f"\n--- ПРОГОН ОБОРВАН на {idx} из {total_remaining}: остальные факты "
+              f"остались со СТАРЫМИ кодами, нужен повторный прогон (см. [СТОП] выше) ---")
+    elif skipped:
         print(f"\n--- ГОТОВО, но {skipped} фактов пропущено (см. [ПРОПУСК] выше) ---")
     else:
         print("\n--- BASE RECLASSIFIED SUCCESSFULLY ---")
