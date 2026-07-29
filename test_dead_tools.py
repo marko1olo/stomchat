@@ -160,6 +160,9 @@ STANDALONE = {
     "filemake": "сборка файлов выгрузки, запуск руками",
     "visionproc": "пакетная обработка изображений, запуск руками",
     "search_engine_safe": "готовая замена search_engine.py, к живому пути врача ещё не подключена",
+    "apply_content_hash_migration": "разовая миграция таблицы distilled_facts на UNIQUE(content_hash)",
+    "dump_recent_bot_disasters": "диагностический дампер последних аварийных сообщений бота",
+    "fix_corrupted_source_ids": "разовая вычистка MSG_ префиксов из source_ids в stomat_wiki.db",
 }
 
 
