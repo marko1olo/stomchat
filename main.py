@@ -2158,7 +2158,13 @@ async def handle_new_message(event):
                     sender_first_name=sender_first_name
                 )
                 if not replied:
-                    # Bot-mention trigger (always shadow mode until promoted)
+                    # Обращение по имени. Комментарий здесь говорил «always shadow
+                    # mode until promoted», и это УЖЕ НЕВЕРНО: в assistant.py стоит
+                    # BOT_MENTION_SHADOW_MODE = False с пометкой «выкачено в
+                    # боевой», то есть ответ уходит врачу, а не в теневой журнал.
+                    # Цена расхождения не в поведении, а в следующем читателе: он
+                    # либо пойдёт искать непромотированный режим, которого нет,
+                    # либо поверит комментарию и решит, что врач ответа не видит.
                     replied_mention = await assistant.check_bot_mention_trigger(
                         bot_client, event, msg_id, text, sender_first_name=sender_first_name
                     )
