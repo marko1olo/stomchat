@@ -5,34 +5,37 @@ INPUT_DIR = "wiki_final_review"     # Папка с файлами от exporter
 OUTPUT_DIR = "TITAN_PROMPTS_v7"     # Папка, куда упадут готовые ТЗ для Гемини
 
 def build_titan_prompts():
-    print(f"🚀 Запуск генератора ТИТАН-ПРОМПТОВ...")
+    print("Запуск генератора ТИТАН-ПРОМПТОВ...")
 
     # 1. Проверки
     if not os.path.exists(INPUT_DIR):
-        print(f"❌ Ошибка: Папка {INPUT_DIR} не найдена. Сначала запусти exporter_v7.py!")
+        print(f"Ошибка: Папка {INPUT_DIR} не найдена. Сначала запусти exporter_v7.py!")
         return
 
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
-        print(f"📁 Создана папка для промптов: {OUTPUT_DIR}")
+        print(f"Создана папка для промптов: {OUTPUT_DIR}")
 
     files = [f for f in os.listdir(INPUT_DIR) if f.endswith(".txt")]
     if not files:
-        print("⚠️ В папке пусто.")
+        print("В папке пусто.")
         return
 
     count = 0
     
     # 2. Обработка файлов
     for filename in files:
-        # Парсим имя файла: "2.2.1_Орто_Техника_BOPT.txt" -> Код: 2.2.1, Тема: Орто Техника BOPT
-        try:
-            parts = filename.replace(".txt", "").split("_", 1)
-            cat_code = parts[0]
-            cat_name = parts[1].replace("_", " ") if len(parts) > 1 else "Общая тема"
-        except:
-            cat_code = "X.X.X"
-            cat_name = filename.replace(".txt", "")
+        # Парсим имя файла: "2.2.1_Орто_Техника_BOPT.txt" -> Тема: Орто Техника BOPT
+        #
+        # Здесь стоял голый `except:` с запасными значениями, и он был ПОСЛЕДНИМ
+        # голым except во всём дереве. Сработать он не мог: str.replace и
+        # str.split не бросают, а обращение к parts[1] и так прикрыто проверкой
+        # длины. Зато `Ctrl-C` посреди прогона по 52 файлам он бы проглотил —
+        # KeyboardInterrupt голый except ловит, и остановить генератор с
+        # клавиатуры не получалось. Код категории (parts[0]) при этом разбирался
+        # и НИКУДА не шёл: в промпт уходит только имя темы, см. cat_name ниже.
+        parts = filename.replace(".txt", "").split("_", 1)
+        cat_name = parts[1].replace("_", " ") if len(parts) > 1 else "Общая тема"
 
         # Читаем исходник
         with open(os.path.join(INPUT_DIR, filename), "r", encoding="utf-8") as f:
@@ -86,12 +89,12 @@ def build_titan_prompts():
             f_out.write(titan_prompt)
         
         count += 1
-        print(f"✅ Промпт готов: {out_filename}")
+        print(f"Промпт готов: {out_filename}")
 
     print("-" * 40)
-    print(f"🏁 УСПЕХ! Сгенерировано {count} титанических промптов.")
-    print(f"📂 Папка: {os.path.abspath(OUTPUT_DIR)}")
-    print("👉 ИНСТРУКЦИЯ: Открывай файл -> Копируй всё (Ctrl+A, Ctrl+C) -> Вставляй в Gemini 3 Pro.")
+    print(f"УСПЕХ! Сгенерировано {count} титанических промптов.")
+    print(f"Папка: {os.path.abspath(OUTPUT_DIR)}")
+    print("ИНСТРУКЦИЯ: Открывай файл -> Копируй всё (Ctrl+A, Ctrl+C) -> Вставляй в Gemini 3 Pro.")
 
 if __name__ == "__main__":
     build_titan_prompts()
