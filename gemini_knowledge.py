@@ -199,7 +199,7 @@ def generate_fact_json(prompt):
         # всегда остаётся окно, иначе она не получает ни одной попытки.
         # Вложенность соблюдена: мягкий дедлайн строго меньше общего.
         is_last = position == len(models) - 1
-        model_deadline = deadline - _LAST_RESORT_RESERVE_SECONDS
+        model_deadline = deadline if is_last else deadline - _LAST_RESORT_RESERVE_SECONDS
         for api_key in keys:
             if time.monotonic() > model_deadline:
                 logger.error(
