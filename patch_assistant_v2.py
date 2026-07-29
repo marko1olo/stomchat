@@ -1,4 +1,12 @@
 # -*- coding: utf-8 -*-
+raise SystemExit(
+    "patch_assistant_v2.py - odnorazovyy migrator, USTAREL i LOMAET bota.\n"
+    "To zhe samoe, chto i patch_assistant.py: perepisyvaet assistant.py pryamo\n"
+    "na urovne modulya, sledovatelno srabatyvaet ot prostogo importa. Obraztsy\n"
+    "dlya replace v tekushchem kode ne sovpadayut, i zamena popadaet ne tuda.\n"
+    "Te pravki uzhe v istorii git. Udalenie fayla - reshenie vladeltsa repozitoriya."
+)
+
 import re
 
 with open('assistant.py', 'r', encoding='utf-8') as f:

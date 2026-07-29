@@ -1,127 +1,46 @@
-import asyncio
-import aiosqlite
-import re
-import config
-from google import genai
-from google.genai import types
-from datetime import datetime
+"""import_videos.py снят с вооружения. Импорт видео-протоколов делает videosi.py.
 
-# Файл, куда ты скопировал текст
-INPUT_FILE = "videos.txt"
-DB_PATH = "stomat_wiki.db"
+Два скрипта читали ОДИН И ТОТ ЖЕ videos.txt и писали в ОДНУ боевую вику, но
+по-разному, и запускался тот, что попался под руку. Чем это кончалось для врача:
 
-# Дерево для классификации (нейронка сама решит, куда положить кейс)
-KNOWLEDGE_TREE = """
-1. ТЕРАПИЯ (1.1 Эндо, 1.2 Реставрация/Пломбы, 1.3 Изоляция/Коффердам, 1.4 Адгезия)
-2. ОРТОПЕДИЯ (2.1 Виниры, 2.2 Коронки/Преп, 2.3 Временные, 2.4 Оттиски/Скан)
-3. ХИРУРГИЯ (3.1 Удаление, 3.2 Имплантация, 3.3 Мягкие ткани)
-5. ЦИФРА (5.1 Сканеры, 5.2 Exocad)
-6. ОБЩЕЕ (6.1 Эргономика, 6.2 Фото протокол, 6.3 Материаловедение)
+1. РАЗНАЯ РАЗМЕТКА. Этот скрипт вставлял строку БЕЗ колонки is_reclassified,
+   а в боевой схеме у неё DEFAULT 0. Запрос выборочной проверки
+   (checker.py:71, "WHERE is_reclassified = 1") такие строки не видит вообще:
+   замер на копии живой схемы — 2 строки из 3, невидимой оказалась ровно та,
+   что вставлена этим скриптом. Врач получает разбор, которого нет ни в одной
+   сводке контроля качества, и никто никогда не узнает, что он лежит криво.
+2. УДВОЕНИЕ ПРОТОКОЛОВ. Шапку он писал с тегами <b> внутри маркера, а защита
+   от повтора в videosi.py сравнивает начало строки БЕЗ <b>. Его записи для
+   этой защиты невидимы, поэтому следующий прогон вставил бы все протоколы
+   заново. UNIQUE-индексов в distilled_facts нет ни одного (замер: PRAGMA
+   index_list -> только idx_cat, unique=0), базой это не отсекается.
+3. ЛОЖНЫЙ ПРОВЕНАНС. source_ids он писал номером из текстового файла как есть.
+   Диапазон msg_id архива 5..139701, номера в videos.txt четырёхзначные, поэтому
+   совпадения неизбежны: 35 из 53 номеров нашлись в архиве, но медиа есть лишь у
+   6, а тип video ровно у 1. Врач открывал «источник» видео-разбора и читал
+   чужую реплику про контактные пункты, после чего справедливо решал, что бот
+   врёт — и переставал верить остальным 12 784 фактам.
+
+Плюс он падал UnicodeEncodeError на своей же первой строке: print с эмодзи
+U+1F4D6 в cp1251-консоли боевой машины не кодируется (проверено живым прогоном,
+returncode 1 на строке 65). То есть «рабочим» он не был и без этих трёх дефектов.
+
+Отказ стоит на уровне модуля НАМЕРЕННО: чтобы скрипт нельзя было ни запустить,
+ни импортировать, ни выполнить по частям. Работающего кода здесь нет — есть
+только этот отказ, поэтому «половина импорта прошла» тоже невозможно.
+Всё, что он делал, videosi.py делает строже: одна разметка, защита от повтора,
+проверяемый провенанс, ротация 10 ключей и дерево категорий на 53 кода вместо 17.
 """
+# Эмодзи в тексте отказа нет: на боевой машине консоль cp1251, и отказ, который
+# сам падает UnicodeEncodeError, оператор прочитает как «скрипт сломан», а не как
+# «запусти другой скрипт».
+_STOP = (
+    "import_videos.py снят с вооружения и ничего не импортирует.\n"
+    "Запусти videosi.py — это единственный вход для импорта видео-протоколов.\n"
+    "Причина отказа: этот скрипт писал строки с другой разметкой (без "
+    "is_reclassified), с другим маркером (с тегами <b>) и с непроверенным "
+    "провенансом, из-за чего протоколы дублировались, выпадали из выборочной "
+    "проверки и вели врача на чужие реплики. Подробности — в docstring файла."
+)
 
-async def get_category(text):
-    """Определяет категорию кейса через Gemma 3."""
-    if not config.GOOGLE_KEYS: return "10.1"
-    
-    # Используем Gemma 3, так как она у тебя работает
-    model_id = "models/gemma-3-27b-it"
-    
-    # Берем первый ключ (нагрузка маленькая, всего 20 запросов)
-    client = genai.Client(api_key=config.GOOGLE_KEYS[0])
-    
-    try:
-        prompt = f"""
-        Определи код категории для этого стоматологического кейса.
-        Дерево категорий:
-        {KNOWLEDGE_TREE}
-        
-        Текст кейса:
-        {text[:1000]}...
-        
-        Твоя задача: Вернуть ТОЛЬКО цифры кода (например: 2.2). Никаких слов.
-        """
-        
-        response = client.models.generate_content(
-            model=model_id,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.0, safety_settings=[
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-        ])
-        )
-        
-        if response.text:
-            # Ищем цифры (на всякий случай чистим ответ)
-            match = re.search(r'\d+\.\d+(\.\d+)?', response.text)
-            return match.group(0) if match else "10.1"
-    except Exception as e:
-        print(f"⚠️ Ошибка классификации: {e}")
-    
-    return "10.1"
-
-async def main():
-    print(f"📖 Читаю {INPUT_FILE}...")
-    try:
-        with open(INPUT_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-    except FileNotFoundError:
-        print(f"❌ Файл {INPUT_FILE} не найден! Создай его и вставь туда текст.")
-        return
-
-    # 1. Разбиваем текст по номерам сообщений.
-    # Ищем строки, где есть только цифры (это ID), и используем их как разделитель.
-    # Регулярка ищет: Перенос строки -> Число (ID) -> Перенос строки
-    # parts будет списком: [пусто, ID_1, Текст_1, ID_2, Текст_2...]
-    parts = re.split(r'\n(\d{3,})\n', "\n" + content)
-    
-    count = 0
-    # timeout=30 заставляет скрипт ждать (а не падать), если база занята Дистиллятором
-    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
-        print("🚀 Начинаю импорт в Базу Знаний...")
-        
-        # Проходим по списку с шагом 2 (ID, Текст)
-        for i in range(1, len(parts), 2):
-            msg_id = parts[i].strip()
-            body = parts[i+1].strip()
-            
-            if not body: continue
-
-            # Формируем красивый заголовок из первой строки текста
-            first_line = body.split('\n')[0]
-            # Убираем лишние слова типа "Это детальный разбор..." если они в начале
-            title_candidate = body.split('\n')[1] if len(body.split('\n')) > 1 else first_line
-            
-            print(f"🔄 Обработка MSG_{msg_id}...", end=" ")
-            
-            # Определяем категорию
-            cat_code = await get_category(body)
-            
-            # Добавляем красивую шапку, чтобы в боте это выделялось
-            final_content = f"🎥 <b>[ВИДЕО-ПРОТОКОЛ | MSG {msg_id}]</b>\n\n{body}"
-            
-            # Вставляем в базу
-            await db.execute('''
-                INSERT INTO distilled_facts 
-                (category_code, content, source_ids, is_case, confidence, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                cat_code, 
-                final_content, 
-                msg_id, 
-                1,   # Это кейс (True)
-                100, # Максимальное доверие (100%)
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            ))
-            print(f"✅ ОК -> Категория {cat_code}")
-            count += 1
-        
-        await db.commit()
-    
-    print("-" * 40)
-    print(f"🏁 Импорт завершен! Добавлено {count} экспертных протоколов.")
-    print("Теперь они доступны в Базе Знаний с высшим приоритетом.")
-
-if __name__ == '__main__':
-    asyncio.run(main())
+raise SystemExit(_STOP)

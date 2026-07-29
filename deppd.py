@@ -6,6 +6,17 @@ import re
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 import config
+import sys
+
+# Потоки в utf-8: в print ниже есть эмодзи, а cp1251-консоль Windows роняет на
+# них сам print — инструмент умирал на первой строке, не сделав ничего. Та же
+# идиома стоит в main.py; errors=replace гарантирует, что печать не бросит.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 # Настройка логгера
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -53,8 +64,43 @@ def is_garbage(message):
     # 4. Если текст слишком короткий (флуд типа 'ок', 'спс', '+')
     if message.message and len(message.message.strip()) < 4 and not message.photo:
         return True
-        
+
     return False
+
+
+def media_kind(message):
+    """Тип медиа для архива. Голосовое и аудио больше не сваливаются в 'file'.
+
+    Прежде здесь стояло три ветки: photo, video, document -> 'file'. В Telethon
+    ГОЛОСОВОЕ — это document с атрибутом audio(voice=True), и аудиофайл тоже
+    document. То есть mime не сохранялся, и в архиве оба становились безликим
+    'file'.
+
+    Цена этого измерена по живой базе: media_type принимает ровно три значения —
+    photo 14 754, video 804, file 444, а типов voice и audio НЕТ ВООБЩЕ. Значит
+    среди 444 'file' лежат и документы (рентген присылают файлом — это норма для
+    клинического чата), и голосовые, и аудио, и отличить их пост-фактум НЕЛЬЗЯ.
+    Любая оценка потерянных диктовок по архиву поэтому ограничена сверху числом
+    444, а точное число не восстановить.
+
+    Порядок ветвей от частного к общему, как в media_tools.clinical_media_kind:
+    голосовое проверяется РАНЬШЕ аудио и раньше document, иначе снова 'file'.
+    Стикеры, гифки и кружки сюда не доходят — их отсекает is_garbage выше, и
+    заводить им ветки значило бы делать вид, что они возможны.
+    """
+    if message is None:
+        return None
+    if getattr(message, "voice", None) is not None:
+        return 'voice'
+    if getattr(message, "audio", None) is not None:
+        return 'audio'
+    if getattr(message, "photo", None) is not None:
+        return 'photo'
+    if getattr(message, "video", None) is not None:
+        return 'video'
+    if getattr(message, "document", None) is not None:
+        return 'file'
+    return None
 
 async def main():
     await init_db()
@@ -103,11 +149,10 @@ async def main():
             
             reply_to = message.reply_to.reply_to_msg_id if message.reply_to else None
             
-            # Определяем тип медиа
-            m_type = None
-            if message.photo: m_type = 'photo'
-            elif message.video: m_type = 'video'
-            elif message.document: m_type = 'file'
+            # Определяем тип медиа. Разбор вынесен в media_kind, чтобы его можно
+            # было проверить тестом: прежде три ветки стояли здесь, внутри цикла
+            # по Telegram, и проверить их было нечем.
+            m_type = media_kind(message)
 
             msg_data = (
                 message.id,

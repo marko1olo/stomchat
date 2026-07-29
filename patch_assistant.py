@@ -1,3 +1,18 @@
+raise SystemExit(
+    "patch_assistant.py - odnorazovyy migrator, USTAREL i segodnya LOMAET bota.\n"
+    "\n"
+    "Perepisyvaet assistant.py na urovne modulya, to est srabatyvaet ot prostogo\n"
+    "`import patch_assistant`. Tak i proizoshlo pri obkhode importov 28.07.2026:\n"
+    "  * instruktsiya triazha zamenena na literal {ignore_instruction} v DVUKH\n"
+    "    mestakh - bot perestal by ponimat, kogda molchat na offtop;\n"
+    "  * blok istorii dialoga produblirovan po dva lishnikh raza v dvukh promptakh.\n"
+    "Pravki otkacheny cherez git checkout.\n"
+    "\n"
+    "Obraztsy, kotorye on ishchet, v fayle davno izmenilis, poetomu replace\n"
+    "popadaet ne tuda. Te pravki uzhe v istorii git. Udalenie fayla - reshenie\n"
+    "vladeltsa repozitoriya, poetomu skript prosto obezvrezhen."
+)
+
 import re
 
 with open('assistant.py', 'r', encoding='utf-8') as f:
