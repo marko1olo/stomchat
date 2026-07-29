@@ -400,10 +400,36 @@ def _parse_state_dt(value, default=datetime(2000, 1, 1)):
     if not value:
         return default
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         logger.warning(f"Malformed timestamp in assistant state: {value!r}. Treating as never.")
         return default
+
+    # Значение С ЧАСОВЫМ ПОЯСОМ считаем негодным. Все писатели этих ключей
+    # используют наивный datetime.now(), поэтому tz-aware значение может попасть
+    # в файл только правкой руками или сменой кода. Но цена его появления
+    # непомерная: вычитание наивного и tz-aware поднимает TypeError, а он в
+    # passive_gate_block_reason не перехвачен, пробивает check_and_trigger_assistant
+    # и гасится только общим except в main — то есть ассистент падал бы на КАЖДОМ
+    # входящем сообщении, навсегда, до ручной правки файла.
+    if parsed.tzinfo is not None:
+        logger.warning("Timestamp with timezone in assistant state: %r. Treating as never.", value)
+        return default
+
+    # Метка ИЗ БУДУЩЕГО тоже негодна. record_passive_success пишет
+    # datetime.now().isoformat() без сверки: если часы машины ушли вперёд (VM
+    # после длинного suspend, старт до синхронизации NTP), в состояние ложится
+    # будущая дата, и пассивный триггер закрыт, пока реальное время её не
+    # догонит. Проба через настоящий passive_gate_block_reason: метка на год
+    # вперёд даёт «passive cooldown, 525720 min left», а "9999-12-31" — почти
+    # восемь тысяч лет молчания. Само это не лечится.
+    if parsed > datetime.now():
+        logger.warning(
+            "Timestamp from the future in assistant state: %r (now %s). Treating as never.",
+            value, datetime.now().isoformat(timespec="seconds"),
+        )
+        return default
+    return parsed
 
 
 def is_silenced(state, where=""):
@@ -1415,7 +1441,17 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if not is_dialogue:
         block_reason = passive_gate_block_reason(state)
         if block_reason:
-            logger.debug(f"Passive text trigger suppressed: {block_reason}")
+            # info, а не debug: корневой уровень журнала — INFO, поэтому debug не
+            # эмитится НИКОГДА. Замер по всем журналам на диске (126 340 строк):
+            # строка «Passive text trigger suppressed» встречается 0 раз. При этом
+            # кулдаун закрыт большую часть суток и отбрасывает почти все
+            # сообщения — то есть это статистически главная причина, по которой
+            # бот в чате молчит, и она была ненаблюдаема вообще. Все соседние
+            # ветки того же решения (тишина, устаревший диалог, отказ триажа,
+            # пустой корпус, IGNORE, отказ рецензента) пишутся на INFO — выпадал
+            # ровно кулдаун. Отличить штатный кулдаун от застрявшего состояния
+            # было нельзя без чтения assistant_state.json руками.
+            logger.info("Passive text trigger suppressed: %s", block_reason)
             return False
 
     # 2. Check Reply Thread Reaction
@@ -1500,8 +1536,34 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         logger.warning(f"Failed to fetch reply thread for passive context: {thread_err}")
 
 
-    # Run LLM Triage on passive triggers — the AI decides whether to reply, not regexes
-    if triggered and not is_dialogue and not (reply_to_msg_id and "discussion thread" in trigger_reason):
+    # Триаж проходят ВСЕ незваные срабатывания, включая ветку клинического поста.
+    #
+    # Здесь стояло исключение: `and not (reply_to_msg_id and "discussion thread"
+    # in trigger_reason)`. Посылка была такая — если под постом со снимком уже
+    # три ответа, обсуждение заведомо клиническое, и платить за триаж незачем.
+    # Замер по архиву эту посылку опровергает.
+    #
+    # Точный повтор логики ветки на 117 847 репликах, с оба кулдауна и
+    # processed_threads: условию удовлетворяют 4075 реплик, после подавления
+    # обработанных тредов остаётся 891 РЕАЛЬНОЕ вторжение (0.88 в сутки), и из
+    # них 472 — 53% — не содержат ни одного стоматологического слова. Вот на что
+    # бот отвечал бы клинической лекцией, не спросив себя, уместно ли это:
+    #   «Спасибо вам большое! 🔥🤩», «Я щас уточню», «Смекаю)»,
+    #   «Техник рукастый», «Бинго) Или как там?! Фулхаус))», «Вивисекция».
+    #
+    # Условие ветки — «у родителя есть медиа И под ним 3 ответа» — ничего не
+    # говорит о содержании этих ответов. Коллеги хвалят чей-то снимок, третье
+    # «Спасибо» выполняет счётчик, и бот вешает лекцию в чужую ветку. Ни
+    # check_llm_triage, чей промпт целиком про «пользователи НЕ любят, когда бот
+    # лезет в их разговор», ни даже дешёвый отсев очевидного мусора на этот путь
+    # не распространялись. Поздний предохранитель почти не работает: гард пустого
+    # корпуса снимает 8 случаев из 891, потому что на 117 847 реплик хоть что-то
+    # находится почти на любое русское слово.
+    #
+    # Цена правки: 0.88 дополнительного триажа в сутки. Цена бездействия: бот
+    # влезает в разговор коллег примерно раз в сутки, и в половине случаев
+    # разговор даже не про стоматологию.
+    if triggered and not is_dialogue:
         # Backoff ставим ДО триажа: сам триаж — это отдельный LLM-вызов на 25 с
         # с thinking_level=HIGH. Раньше отказ триажа не записывал ничего, и в
         # активном чате бот платил за него на каждом входящем сообщении.
