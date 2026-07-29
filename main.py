@@ -2516,7 +2516,11 @@ async def sync_history():
             
             # То же единое правило, что и в живом обработчике: догон не должен
             # тащить в платный Vision превью ссылок, гифки, кружки и стикеры.
-            synced_snapshot = image_document(message)
+            # Отсев целиком внутри clinical_media_kind: она сама вызывает
+            # image_document (media_tools.py:385) и до него отбрасывает стикер,
+            # кружок, гифку и web_preview. Отдельный вызов image_document здесь
+            # стоял, но результат никуда не шёл — читалось как «фильтр забыли
+            # применить», хотя он применён.
             media_type = clinical_media_kind(message)
             has_media = media_type is not None
             

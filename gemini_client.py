@@ -323,7 +323,12 @@ def generate_text(prompt, status_context=None, timeout=None):
     """Generate summary text through Gemini with Groq fallback."""
     _reset_failure()
     kind = status_context.get("kind") if status_context else None
-    is_pm = kind in ("pm_chat", "assistant_media_pm")
+    # is_pm здесь больше нет намеренно: он остался от ПРЕЖНЕЙ таблицы
+    # маршрутизации и уже ни на что не влиял. `pm_chat` входит в CHAT_KINDS, то
+    # есть разбирается как живой диалог ниже, а `assistant_media_pm` не передаёт
+    # НИКТО — это прямо сказано в комментарии к таблице и закреплено проверкой
+    # test_fix_cascade.py:264. Живой флаг, вычисляемый из мёртвого условия, читается
+    # как «здесь есть ветка для личных сообщений», которой нет.
     is_triage = kind in TRIAGE_KINDS
     thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
 
