@@ -800,6 +800,151 @@ check("на живом Telegram дубля отказа нет",
       "врач получает два отказа подряд на один файл")
 check("живой путь быстрый", _elapsed_ok < 10.0, f"{_elapsed_ok:.2f} с")
 
+print("\n[15] Нашедшая попытка прекращает поиск, а не отдаёт ход второй")
+# Найдено ДИВЕРСИЕЙ ПРОВЕРЯЮЩЕГО: блоки [1]-[8] считают вызовы поиска через
+# `>= 1`, поэтому снятие выхода из цикла по найденной выдаче (break -> pass) не
+# уронило НИ ОДНОЙ проверки. Свойство при этом несущее: `results` в цикле
+# переприсваивается каждой попыткой, так что вторая попытка ЗАТИРАЕТ находки
+# первой. Живой ddgs на втором залпе подряд отдаёт RatelimitException (об этом
+# предупреждает сам транспорт), и тогда врач получает «Поиск не отработал» при
+# найденных и уже оплаченных источниках. Плюс 55 с бюджета из 215 на попытку,
+# которая не нужна.
+_probe_calls = []
+
+
+async def _good_then_dead(query, max_results, timeout=None):
+    _probe_calls.append(query)
+    if len(_probe_calls) == 1:
+        return list(GOOD_RESULTS), None
+    raise ConnectionError("ddgs RatelimitException на втором запросе подряд")
+
+
+bot = fresh()
+_real_search, _real_gen = blocking_tools.web_search_async, assistant.generate_gemini_text_async
+blocking_tools.web_search_async = _good_then_dead
+assistant.generate_gemini_text_async = generator(ANSWER_WITH_CITATION)
+try:
+    # Запрос ДЛИННЕЕ SEARCH_SHORT_WORDS: на четырёх словах укороченный вариант
+    # совпадает с полным, query_variants отдаёт один запрос, и цикл делает одну
+    # попытку независимо от выхода из него. Первая версия этой проверки была
+    # именно такой и диверсию не поймала — проверка была слепа, а не код цел.
+    run(assistant.handle_private_message(
+        bot, Event("/web биодентин перфорация дна полости зуба верхней челюсти")))
+finally:
+    blocking_tools.web_search_async = _real_search
+    assistant.generate_gemini_text_async = _real_gen
+check("вариантов запроса действительно два, иначе проверка ниже слепа",
+      len(W.query_variants(W.clean_query("биодентин перфорация дна полости зуба верхней челюсти"))) == 2,
+      "на коротком запросе вторая попытка не создаётся и цикл нечем проверять")
+check("найденная выдача прекращает попытки", len(_probe_calls) == 1,
+      f"попыток {len(_probe_calls)}: вторая тратит 55 с из {W.LOOKUP_TOTAL_COST_SECONDS:.0f} "
+      f"и затирает уже найденное")
+check("отказ второй попытки не отменяет находки первой",
+      PUBMED_URL in doctor_saw(bot),
+      "врач получил отказ поиска при найденных источниках — то, за что заплатили, выброшено")
+check("на найденной выдаче обработчик не свалился", not CAP.crashed())
+
+print("\n[16] Бюджет прохода приходит из команды, а не из умолчания модуля")
+# Найдено ДИВЕРСИЕЙ ПРОВЕРЯЮЩЕГО: блок [9] сравнивает КОНСТАНТЫ, а не то, что
+# обработчик реально передаёт в run_lookup. Подмена budget на стоимость самого
+# поиска (110 вместо 215) не уронила ни одной проверки — дочерний срок стал равен
+# родительскому, и при живом медленном поиске (45 + 45 с) на генерацию не осталось
+# бы места: врач получил бы ссылки без разбора, а числа в [9] по-прежнему сходятся.
+# «Константа объявлена» в этом проекте уже пропускала снятый потолок.
+_budget_seen = []
+_real_run_lookup = W.run_lookup
+
+
+async def _spy_run_lookup(question, search_call, generate_call, budget=None, log=None):
+    _budget_seen.append(budget)
+    return await _real_run_lookup(question, search_call, generate_call,
+                                  budget=budget, log=log)
+
+
+W.run_lookup = _spy_run_lookup
+try:
+    bot, search_calls, gen_calls = drive("/web биодентин перфорация")
+finally:
+    W.run_lookup = _real_run_lookup
+check("проход вызван с бюджетом, а не с умолчанием", len(_budget_seen) == 1
+      and _budget_seen[0] is not None, f"передано {_budget_seen}")
+check("передан именно бюджет команды",
+      _budget_seen == [assistant.WEB_LOOKUP_BUDGET_SECONDS],
+      f"передано {_budget_seen} при {assistant.WEB_LOOKUP_BUDGET_SECONDS}")
+check("переданного бюджета хватает не только на поиск",
+      _budget_seen[0] - W.SEARCH_TOTAL_COST_SECONDS >= W.ANSWER_COST_SECONDS,
+      f"{_budget_seen[0]} минус поиск {W.SEARCH_TOTAL_COST_SECONDS} — генерации "
+      f"нужно {W.ANSWER_COST_SECONDS}")
+
+print("\n[17] Недоставленный ответ не выглядит доставленным")
+# Найдено ДИВЕРСИЕЙ ПРОВЕРЯЮЩЕГО: ветку «ответ НЕ доставлен» не гонял никто, и
+# замена её условия на всегда-ложное прошла молча. Последствие — худший вид
+# молчания: врач не получил ничего, а в журнале INFO «Веб-поиск
+# доставлен» и запись в историю ЛС. Дальше по этой записи модель отвечает про
+# источники, которых врач не видел, а разобрать жалобу «бот не ответил» нельзя:
+# журнал говорит, что ответил.
+
+
+class MessageTooLongError(Exception):
+    """Имя класса значимо: tg_safety классифицирует отказы Telegram по имени."""
+
+
+class RefusingBot(Bot):
+    """Статус проходит, ответ Telegram отвергает терминально — повторов не будет."""
+
+    async def send_message(self, entity=None, message=None, **kw):
+        if message and "открытым источникам" in message:
+            raise MessageTooLongError("ответ отклонён целиком")
+        return await super().send_message(entity=entity, message=message, **kw)
+
+
+_refusing = RefusingBot()
+CAP.clear()
+del SAVED_PM[:]
+assistant.USER_COOLDOWNS.clear()
+tg_safety.reset_cooldowns()
+bot, search_calls, gen_calls = drive("/web биодентин перфорация", bot=_refusing)
+check("недоставленный ответ записан WARNING с причиной",
+      CAP.warned("ответ НЕ доставлен"), f"WARNING: {CAP.warnings()[:4]}")
+check("в записи назван исход поиска, а не только факт отказа",
+      CAP.warned("исход=ok"), f"WARNING: {CAP.warnings()[:4]}")
+check("недоставленный ответ НЕ записан как доставленный",
+      not any("Веб-поиск доставлен" in msg for _level, msg in CAP.records),
+      "журнал утверждает, что врач получил ответ, которого он не видел")
+check("в историю ЛС не попал ответ, которого врач не видел", len(SAVED_PM) == 0,
+      "следующий ход модели ссылается на источники, которых врач не получал")
+check("на отказе доставки обработчик не свалился", not CAP.crashed())
+
+print("\n[18] Генерации достаётся ОСТАТОК бюджета, а не её желаемое число")
+# Найдено ДИВЕРСИЕЙ ПРОВЕРЯЮЩЕГО: проверка в блоке [2] допускает `<=` до полного
+# ANSWER_TIMEOUT_SECONDS, поэтому замена остатка на желаемые 90 с прошла молча.
+# Свойство несущее: при бюджете меньше 105 с генерация с полными 90 с плюс запас
+# вылезает за срок прохода, а наверху её никто не подрежет — команда переживёт
+# свой собственный бюджет, держа замок на враче.
+_budget_gen = []
+
+
+async def _record_gen(prompt, timeout):
+    _budget_gen.append(timeout)
+    return "ответ [1]", None
+
+
+async def _instant_two(query, timeout):
+    return list(GOOD_RESULTS), None
+
+
+_tight = run(W.run_lookup("биодентин перфорация", _instant_two, _record_gen,
+                          budget=100.0, log=W.logger))
+check("генерация запущена на тесном бюджете", len(_budget_gen) == 1,
+      f"вызовов {len(_budget_gen)}")
+check("генерации выдан ОСТАТОК, а не полные 90 с",
+      _budget_gen[0] < W.ANSWER_TIMEOUT_SECONDS,
+      f"выдано {_budget_gen[0]} при бюджете прохода 100 — вместе с запасом это "
+      f"выход за срок команды")
+check("остатка всё же хватило на генерацию",
+      _budget_gen[0] >= W.ANSWER_MIN_TIMEOUT_SECONDS and _tight["outcome"] == W.OUTCOME_OK,
+      f"выдано {_budget_gen[0]}, исход {_tight['outcome']}")
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
