@@ -38,18 +38,69 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-# Замыкание импортов от main.py: ровно эти модули поднимают бота.
-PRODUCTION = {
-    "assistant", "blocking_tools", "config", "database", "dental_vocab",
-    "gemini_client", "html_safe", "main", "media_tools", "runtime_guard",
-    "summarizer", "vision",
-}
-
 SOURCES = sorted(f for f in os.listdir(".") if f.endswith(".py"))
 
 
 def parse(path):
     return ast.parse(io.open(path, encoding="utf-8-sig").read())
+
+
+def local_modules():
+    """Имена модулей, которые лежат рядом. Импорт чего-то ещё — внешняя зависимость."""
+    return {name[:-3] for name in SOURCES}
+
+
+def imports_of(module, known):
+    """
+    Локальные модули, которые импортирует данный, включая импорты внутри функций.
+
+    Ленивый импорт внутри функции — тоже импорт: tg_safety именно так и тянет
+    telethon, а assistant так тянет часть инструментов. Для замыкания «что
+    поднимает бота» важен факт зависимости, а не место строки.
+    """
+    found = set()
+    for node in ast.walk(parse(module + ".py")):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue  # относительный импорт: пакетов здесь нет
+            if node.module:
+                found.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Call):
+            # main.py достаёт media_tools через __import__("media_tools").
+            # Без этой ветки динамическая зависимость выпала бы из замыкания.
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "__import__" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    found.add(first.value.split(".")[0])
+    return found & known
+
+
+def production_closure(entry="main"):
+    """
+    Модули, которые реально поднимают бота — обход графа от main.py.
+
+    Прежде этот список был перечислен РУКАМИ и разошёлся с деревом: в нём было 12
+    модулей, а в замыкании 13 — не хватало tg_safety (603 строки, импортируется из
+    assistant). То есть проверка [3] «боевой модуль не ходит в сеть при импорте» на
+    нём не выполнялась ВООБЩЕ, и новый боевой модуль так же тихо оставался бы вне
+    охраны. Теперь список вычисляется, поэтому разойтись не может.
+    """
+    known = local_modules()
+    seen, queue = set(), [entry]
+    while queue:
+        current = queue.pop()
+        if current in seen or current not in known:
+            continue
+        seen.add(current)
+        queue.extend(dep for dep in imports_of(current, known) if dep not in seen)
+    return seen
+
+
+PRODUCTION = production_closure()
 
 
 def top_level_body(tree):
@@ -141,6 +192,40 @@ for path, why in DANGEROUS.items():
           "модуль выполнит свою работу от простого import")
 
 print("\n[3] Боевые модули импортируются без внешних вызовов")
+# Сначала — что охраняемый список вообще не пуст. Если обход графа сломается и
+# вернёт пустое множество, все проверки ниже станут пустыми, а набор — зелёным:
+# ровно тот вид молчаливой лжи, против которого этот файл и написан.
+check("замыкание импортов main.py непустое", len(PRODUCTION) >= 12,
+      f"вычислено {len(PRODUCTION)}: {sorted(PRODUCTION)}")
+for _anchor in ("main", "assistant", "database", "config", "tg_safety"):
+    check(f"в охраняемом замыкании есть {_anchor}", _anchor in PRODUCTION,
+          f"замыкание: {sorted(PRODUCTION)}")
+check("в замыкание не попали тестовые модули",
+      not {m for m in PRODUCTION if m.startswith("test_")},
+      f"лишнее: {sorted(m for m in PRODUCTION if m.startswith('test_'))}")
+check("в замыкание не попали обезвреженные инструменты",
+      not (PRODUCTION & {"patch_assistant", "patch_assistant_v2", "benchmark", "delist"}),
+      "боевой путь тянет одноразовый инструмент")
+
+# Перекрёстная проверка ДРУГИМ методом: замыкание считается через ast, а здесь
+# импорты вылавливаются регуляркой по тексту. Смысл именно в независимости: если
+# обход графа ослабят (например перестанут учитывать ленивые импорты внутри
+# функций — а blocking_tools тянет web_lookup именно так), ast-версия молча
+# потеряет модуль, регулярка его увидит, и проверка упадёт.
+_IMPORT_RE = __import__("re").compile(
+    r"^\s*(?:import\s+([A-Za-z_][\w]*)|from\s+([A-Za-z_][\w]*)\s+import)", __import__("re").M)
+_local = local_modules()
+_missed = set()
+for _module in sorted(PRODUCTION):
+    _text = io.open(_module + ".py", encoding="utf-8-sig").read()
+    for _m in _IMPORT_RE.finditer(_text):
+        _dep = _m.group(1) or _m.group(2)
+        if _dep in _local and _dep not in PRODUCTION:
+            _missed.add(f"{_module} -> {_dep}")
+check("ни один импорт боевого модуля не выпал из охраняемого замыкания",
+      not _missed,
+      f"вне охраны: {sorted(_missed)} — на этих модулях проверки ниже не выполняются")
+
 # Подъём бота не должен зависеть от сети до того, как start_bot возьмёт
 # управление: иначе падение при импорте не поймает ни один обработчик.
 NETWORK = {"post", "get", "request", "urlopen", "create", "generate_content",
