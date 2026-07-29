@@ -577,16 +577,59 @@ def weekly_window_start(now, last_weekly_date):
     return max(floor_start, min(base_start, resume_from))
 
 
+def resolve_report_targets():
+    """Цели рассылки из конфига — с громким отказом вместо молчаливого нуля.
+
+    Прежде здесь стоял голый `except: targets = []`. Любая ошибка — и планировщик
+    поднимался с нулём целей: в журнале бодрое «Планировщик активен. Целей: 0»,
+    а ни один врач не получал ни дайджеста, ни недельной сводки, и узнать об этом
+    было неоткуда. Ошибку формы конфиг вообще не ловит: `json.loads` на
+    `REPORT_TARGETS={"chat_id": -100}` отдаёт валидный dict, а не список.
+    """
+    # Формат в .env: REPORT_TARGETS=[{"chat_id": -100123, "topic_id": null}, {"chat_id": -100456, "topic_id": 390}]
+    try:
+        raw = config.REPORT_TARGETS
+    except Exception as exc:
+        logger.error(
+            "REPORT_TARGETS не прочитан (%s: %s) — ни дайджест, ни недельная "
+            "сводка не уйдут НИКОМУ",
+            type(exc).__name__, exc, exc_info=True,
+        )
+        return []
+
+    if not isinstance(raw, list):
+        logger.error(
+            "REPORT_TARGETS не список, а %s — рассылка не уйдёт НИКОМУ. "
+            'Ожидается [{"chat_id": -100123, "topic_id": null}]',
+            type(raw).__name__,
+        )
+        return []
+
+    targets = []
+    for position, target in enumerate(raw):
+        # Битая цель уносила ВСЮ рассылку: в `.test` обработчике элемент-строка
+        # падал на `target.get` с AttributeError. Пропускаем ровно её, остальные
+        # чаты сводку получают.
+        if not isinstance(target, dict) or "chat_id" not in target:
+            logger.error(
+                "REPORT_TARGETS[%d] пропущен (%r): нет chat_id — этот чат "
+                "сводок не получит",
+                position, target,
+            )
+            continue
+        targets.append(target)
+
+    if raw and not targets:
+        logger.error(
+            "REPORT_TARGETS: все %d целей битые — рассылка не уйдёт НИКОМУ",
+            len(raw),
+        )
+    return targets
+
+
 async def scheduler_task(bot_client):
     """Рассылка по всем целям из конфига."""
-    # Загружаем цели из конфига (они должны быть в формате JSON списка в .env)
-    # Пример в .env: REPORT_TARGETS=[{"chat_id": -100123, "topic_id": null}, {"chat_id": -100456, "topic_id": 390}]
-    try:
-        targets = config.REPORT_TARGETS
-        if not isinstance(targets, list):
-            targets = []
-    except:
-        targets = []
+    targets = resolve_report_targets()
 
     logger.info(f"📅 Планировщик активен. Целей: {len(targets)}")
     last_sent_date, last_weekly_date = load_scheduler_state()
@@ -822,6 +865,23 @@ async def pm_ping_scheduler_task(bot_client):
 
         await asyncio.sleep(3600)  # Проверка каждый час
 
+# Порог, после которого telethon перестаёт спать на FloodWait и поднимает
+# исключение. По умолчанию он равен 60 с и НЕ задавался, а при request_retries=10
+# это до 600 секунд сна ВНУТРИ одного await send_message — молча, потому что
+# строка про сон идёт уровнем INFO у логгера telethon.client.users, а
+# runtime_guard приглушает telethon до ERROR. Десять минут внутри одного вызова
+# означают десять минут под удерживаемым замком диалога: следующее сообщение
+# того же врача встаёт в очередь за ним.
+#
+# Ноль здесь был бы хуже, а не лучше: FloodWait стал бы прилетать во все ~120
+# вызовов assistant.py, где стоит голый except, и короткая задержка в пять секунд
+# из «медленно, но доставлено» превратилась бы в «молча не доставлено». Поэтому
+# порог небольшой, но не нулевой: короткое ожидание пересиживаем, длинное отдаём
+# вызывающему. Полную границу по времени даёт только бюджет на вызове —
+# tg_safety.guard; пока он подключён не везде, это ограничение сверху, а не
+# гарантия.
+TELETHON_FLOOD_SLEEP_THRESHOLD = max(0, _env_int("STOMCHAT_FLOOD_SLEEP_THRESHOLD", 20))
+
 # 1. Клиент Юзербота (Твой аккаунт) - только слушает
 client = TelegramClient(
     config.SESSION_NAME,
@@ -833,6 +893,7 @@ client = TelegramClient(
     retry_delay=5,
     auto_reconnect=True,
     catch_up=True,
+    flood_sleep_threshold=TELETHON_FLOOD_SLEEP_THRESHOLD,
 )
 
 # 2. Клиент Бота - только пишет и крепит
@@ -845,6 +906,7 @@ bot_client = TelegramClient(
     connection_retries=1000,
     retry_delay=5,
     auto_reconnect=True,
+    flood_sleep_threshold=TELETHON_FLOOD_SLEEP_THRESHOLD,
 )
 
 # Wrapper to track bot's own outgoing message IDs for safety wipe commands
@@ -2119,7 +2181,13 @@ async def handle_edited_message(event):
                 "message edited msg_id=%s new_len=%s", msg_id, len(new_text)
             )
         else:
-            logger.debug("edit for unknown msg_id=%s ignored", msg_id)
+            # info, а не debug: корневой уровень INFO, и на 131 219 строк всех
+            # журналов на диске записей DEBUG ровно НОЛЬ — то есть эта строка не
+            # появлялась ни разу. А она отвечает на живой вопрос: «врач
+            # поправил свой пост, почему бот цитирует старый текст».
+            logger.info("edit for unknown msg_id=%s ignored (строки в базе нет: "
+                        "пост старше бота, чужой чат или save_message не доехал)",
+                        msg_id)
     except Exception:
         logger.exception("edited message handler failed")
 
@@ -2262,9 +2330,11 @@ async def get_chat_id(event):
 async def manual_test_handler(event):
     current_chat_id = event.chat_id
     
-    # Ищем, какой топик назначен для этого чата в REPORT_TARGETS
+    # Ищем, какой топик назначен для этого чата в REPORT_TARGETS.
+    # Через resolve_report_targets, иначе элемент-не-словарь ронял обработчик
+    # на AttributeError вместо ответа врачу.
     target_topic = None
-    for target in config.REPORT_TARGETS:
+    for target in resolve_report_targets():
         if target.get('chat_id') == current_chat_id:
             target_topic = target.get('topic_id')
             break
@@ -2575,11 +2645,19 @@ async def health_watchdog_task():
             failure_count = 0
         except Exception as exc:
             failure_count += 1
+            # Тип обязателен: у asyncio.TimeoutError пустой str(), и в журнале
+            # оставалось «health_check failed 1/3: » — четыре записи из четырёх
+            # без единого слова о причине, притом что это путь к принудительному
+            # перезапуску процесса. exc_info даёт стек: этот блок накрывает и
+            # обращения к Telegram, и синхронизацию истории, и разбор ответа, а
+            # различить их по тексту исключения нельзя.
             logger.error(
-                "health_check failed %s/%s: %s",
+                "health_check failed %s/%s: %s: %s",
                 failure_count,
                 HEALTH_FAILURE_LIMIT,
+                type(exc).__name__,
                 exc,
+                exc_info=True,
             )
 
             if failure_count >= HEALTH_FAILURE_LIMIT:
