@@ -45,6 +45,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 from contextlib import redirect_stdout
 
@@ -354,6 +355,36 @@ try:
           R.verify_copy(planted, 2) == (os.path.getsize(planted), 2),
           f"got {R.verify_copy(planted, 2)}")
 
+    # Шов, появившийся из-за выноса verify_copy: сама функция теперь проверяется
+    # напрямую, а её ВЫЗОВ из backup_before_write мог бы пропасть, и ни одна
+    # проверка выше этого не заметит — копию снова никто не смотрит, а в журнале
+    # стоит «Копия базы снята». Замер: подмена строки вызова на getsize() роняла
+    # НОЛЬ проверок из 89.
+    seen = []
+
+    def spy_verify(target_path, expected_facts):
+        seen.append((target_path, expected_facts))
+        return os.path.getsize(target_path), expected_facts
+
+    with patched(R, verify_copy=spy_verify):
+        spied = asyncio.run(R.backup_before_write(db, datetime(2026, 7, 29, 13, 0, 0)))
+    check("backup_before_write отдаёт копию на проверку verify_copy",
+          len(seen) == 1 and seen[0][0] == spied, f"got {seen}")
+    check("verify_copy получает число фактов из ИСТОЧНИКА, а не из копии",
+          bool(seen) and seen[0][1] == len(FACTS), f"got {seen}")
+
+    def refusing_verify(target_path, expected_facts):
+        raise RuntimeError("копия забракована")
+
+    with patched(R, verify_copy=refusing_verify):
+        raised = None
+        try:
+            asyncio.run(R.backup_before_write(db, datetime(2026, 7, 29, 14, 0, 0)))
+        except Exception as exc:
+            raised = exc
+    check("брак, найденный verify_copy, останавливает снятие копии",
+          isinstance(raised, RuntimeError), f"got {raised!r}")
+
     # VACUUM не смог: каталога нет. Обязана быть громкая ошибка.
     with patched(R, backup_path_for=lambda p, now=None: os.path.join(tmp, "нет-каталога", "b.db")):
         raised = None
@@ -551,6 +582,28 @@ try:
     check("save_to_db_safe ОТКАЗАЛА во второй раз (последняя линия защиты)",
           second_insert is False, f"got {second_insert!r}")
     check("после двух вызовов в базе одна строка, а не две", total == 1, f"got {total}")
+
+    # Цикл ожидания обязан отличать «база занята» от «нет такой таблицы»: и то и
+    # другое — OperationalError. Пока не отличал, импорт высиживал все попытки и
+    # заканчивался ничем, а в журнале стояло только «База занята, жду» — врач не
+    # получал ни одного протокола и не понимал, почему. Замер: со снятой
+    # проверкой причины падало НОЛЬ проверок из 89, поэтому она здесь.
+    db5 = os.path.join(tmp, "wiki5.db")
+    sqlite3.connect(db5).execute("CREATE TABLE other (x INTEGER)")
+    raised, elapsed = None, None
+    with patched(V, DB_PATH=db5, DB_BUSY_ATTEMPTS=5):
+        started = time.perf_counter()
+        try:
+            asyncio.run(V.save_to_db_safe(payload, "4242"))
+        except Exception as exc:
+            raised = exc
+        elapsed = time.perf_counter() - started
+    check("нет таблицы distilled_facts -> save_to_db_safe падает громко",
+          isinstance(raised, sqlite3.OperationalError), f"got {raised!r}")
+    check("причина названа, а не спрятана за «база занята»",
+          "no such table" in str(raised).lower(), f"got {raised!r}")
+    check("отказ приходит сразу, а не после высиживания всех попыток", elapsed < 3,
+          f"{elapsed:.2f} c при 5 попытках по секунде")
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
