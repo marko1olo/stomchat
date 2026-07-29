@@ -36,6 +36,14 @@ for _stream in (sys.stdout, sys.stderr):
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_medialoop_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
 
+import config  # noqa: E402
+
+# База уводится в temp ДО импорта database. Запись сюда и так подменяется
+# заглушкой, но полагаться на это нельзя: уберут заглушку в одной проверке — и
+# набор начнёт писать в боевую stomat_bot.db, а заметит это только
+# test_isolation.py, и то по статическому признаку. Дешевле увести путь.
+config.DB_PATH = os.path.join(_TMPDIR, "isolated.db")
+
 import database  # noqa: E402
 import main  # noqa: E402
 
