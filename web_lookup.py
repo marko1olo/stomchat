@@ -45,8 +45,10 @@
 Модуль намеренно без внешних зависимостей и без побочных эффектов при импорте:
 ни сети, ни чтения конфига, ни настройки логирования.
 """
+import asyncio
 import logging
 import re
+import time
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -529,4 +531,298 @@ def prepare(question, raw_results, error=None):
         "sources": sources,
         "report": report,
         "message": "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Живой проход команды врача: поиск -> отсев -> заземлённый ответ
+# ---------------------------------------------------------------------------
+#
+# Всё выше — чистые функции, и до этой правки на них НИКТО не звонил: слой
+# качества, транспорт (blocking_tools.web_search_async) и обёртка
+# (search_engine_safe.perform_search) существовали, а команды у врача не было.
+# Замер по assistant.py, main.py и summarizer.py: слов web_search_async,
+# perform_search, search_engine_safe, web_lookup, DDGS, tavily — ноль во всех
+# трёх файлах. То есть на вопрос про материал, появившийся после 2026-02-19
+# (последняя дата в архиве, на сегодня 160 дней назад), бот отвечал по памяти
+# чата, а ссылку в корпусе содержат 4 факта из 12 784.
+#
+# Проход здесь, а не в assistant.py, по двум причинам. Первая: сеть и генерация
+# приходят ПАРАМЕТРАМИ, поэтому модуль по-прежнему не тянет ни blocking_tools,
+# ни config — это сторожит test_web_lookup.py разбором дерева импортов, и
+# нарушение уронило бы бота на старте. Вторая: проверить поведение (ссылка в
+# ответе, честный отказ, WARNING в журнале) можно подставным провайдером, без
+# единого живого запроса в сеть.
+
+# --- Бюджеты. Один набор, каждое следующее число считается из предыдущих ------
+#
+# Вложенность бюджетов в этом проекте ловилась ЧЕТЫРЕ раза, поэтому ни одного
+# независимого литерала: всё, что можно вывести, выведено.
+#
+# Ключевой замер, из-за которого числа не такие, как кажется: родитель
+# подпроцесса ждёт НЕ свой бюджет, а бюджет ребёнка плюс запас на его подъём
+# (blocking_tools._run_json_tool: `deadline = timeout + _SUBPROCESS_STARTUP_SLACK_SECONDS`,
+# запас 10 с). Значит search_engine_safe.perform_search со своими «45 с и до двух
+# попыток» стоит вызывающему не 90 с, а 110 с. Прежний вызывающий, посчитавший
+# 90, вылетел бы по своему таймауту на 20 с раньше, чем поиск успел бы честно
+# отказаться, — и врач не получил бы даже причины.
+SUBPROCESS_SLACK_SECONDS = 10.0
+
+# Бюджет РЕБЁНКА на одну попытку поиска. Число из search_engine_safe.perform_search:
+# второе число рядом разъедется, а поведение провайдера от места вызова не зависит.
+SEARCH_ATTEMPT_TIMEOUT_SECONDS = 45.0
+
+# Две попытки: полный запрос, затем укороченный. Так делает perform_search, и это
+# не украшение — общий поиск по длинной клинической фразе часто отдаёт пусто, а по
+# четырём словам находит.
+SEARCH_ATTEMPTS = 2
+SEARCH_SHORT_WORDS = 4
+
+# Сколько находок просим у провайдера. Показываем максимум WEB_MAX_SOURCES = 5, но
+# просить ровно пять нельзя: отсев рекламы клиник съедает часть выдачи, и тогда
+# врач получит «ничего пригодного» при живых источниках на второй странице.
+SEARCH_MAX_RESULTS = 8
+
+# Что одна попытка и весь поиск стоят ВЫЗЫВАЮЩЕМУ.
+SEARCH_ATTEMPT_COST_SECONDS = SEARCH_ATTEMPT_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
+SEARCH_TOTAL_COST_SECONDS = SEARCH_ATTEMPT_COST_SECONDS * SEARCH_ATTEMPTS
+
+# Бюджет РЕБЁНКА на генерацию ответа. 90 с — то же, что на всех остальных путях
+# ассистента (generate_gemini_text_async(..., timeout=90)).
+ANSWER_TIMEOUT_SECONDS = 90.0
+ANSWER_COST_SECONDS = ANSWER_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
+
+# Меньше этого генерацию не начинаем. Запрос, которому не хватит времени даже
+# соединиться, только сожжёт остаток бюджета: лучше отдать врачу найденные ссылки.
+ANSWER_MIN_TIMEOUT_SECONDS = 20.0
+
+# Троттлинг LLM-шлюза разносит СТАРТЫ запросов на 3 с
+# (blocking_tools._GEMINI_MIN_INTERVAL_SECONDS). Ждать под этой блокировкой —
+# время из нашего бюджета, и не учтённое оно съедало бы конец генерации.
+LLM_PACE_SLACK_SECONDS = 5.0
+
+# Полная цена прохода для вызывающего: 110 + 100 + 5 = 215 с.
+LOOKUP_TOTAL_COST_SECONDS = (
+    SEARCH_TOTAL_COST_SECONDS + ANSWER_COST_SECONDS + LLM_PACE_SLACK_SECONDS
+)
+
+# Потолок готового сообщения ДО экранирования. Жёсткий предел Telegram 4096, и
+# битая или переросшая разметка отклоняет сообщение ЦЕЛИКОМ — врач не увидит ни
+# ответа, ни ссылок. Запас нужен под clean_html_formatting: он превращает «&» в
+# «&amp;» (+4 символа на каждый, а «&» в адресах обычное дело) и при длине больше
+# 4000 срывается в аварийный режим — снимает ВСЮ разметку и дописывает служебную
+# приписку. 3400 = 4000 минус 600 на экранирование и приписку.
+MESSAGE_MAX_CHARS = 3400
+
+OUTCOME_OK = "ok"
+OUTCOME_SEARCH_FAILED = "search_failed"
+OUTCOME_NOTHING_FOUND = "nothing_found"
+OUTCOME_NOTHING_USABLE = "nothing_usable"
+OUTCOME_ANSWER_FAILED = "answer_failed"
+OUTCOME_NO_BUDGET = "no_budget"
+OUTCOME_EMPTY_QUERY = "empty_query"
+
+# Пустая выдача БЕЗ отказа провайдера — это честное «не нашлось», и путать её с
+# отсевом рекламы нельзя: prepare() на пустом списке отдаёт NOTHING_USABLE, то
+# есть говорит врачу про рекламу клиник там, где провайдер вернул ноль строк.
+# Врач по такому тексту решит, что тема утонула в рекламе, и переспросит иначе —
+# вместо того чтобы понять, что искать надо другими словами.
+NOTHING_FOUND = (
+    "В открытых источниках по этому запросу ничего не нашлось. Попробуйте другие "
+    "слова: поиск идёт по всему интернету, а не по нашей базе."
+)
+# Источники есть, а ответа по ним нет. Ссылки всё равно отдаём: для клинического
+# вопроса проверяемый источник без пересказа полезнее пересказа без источника.
+ANSWER_FAILED_PREFIX = (
+    "Источники нашлись, но связный ответ по ним собрать не удалось (сбой "
+    "генерации). Вот сами источники — они по вашему запросу:"
+)
+NO_BUDGET_PREFIX = (
+    "Источники нашлись, но времени на разбор не осталось: поиск занял почти весь "
+    "срок команды. Вот сами источники:"
+)
+EMPTY_QUERY = (
+    "После очистки от знаков в запросе не осталось слов для поиска. Напишите "
+    "запрос словами — например «биодентин перфорация дна полости»."
+)
+
+# Из запроса убираем только пунктуацию. Точка, дробь, процент и дефис остаются:
+# «0.5%», «мг/кг» и «синус-лифтинг» без них превращаются в другие слова, а доза,
+# потерявшая дробь, — это уже другая доза.
+_QUERY_JUNK_RE = re.compile(r"[^\w\s./%+-]", re.UNICODE)
+
+
+def clean_query(question):
+    """Запрос провайдеру: без пунктуации, без сдвоенных пробелов."""
+    return re.sub(r"\s+", " ", _QUERY_JUNK_RE.sub(" ", question or "")).strip()
+
+
+def query_variants(query):
+    """Полный запрос, затем укороченный. Дубль не возвращается."""
+    variants = []
+    for candidate in (query, " ".join(query.split()[:SEARCH_SHORT_WORDS])):
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants[:SEARCH_ATTEMPTS]
+
+
+def compose_answer(answer, footer, max_chars=MESSAGE_MAX_CHARS):
+    """
+    Ответ плюс подпись со ссылками, уложенные в предел одного сообщения.
+
+    Режется ОТВЕТ, а не подпись. Для медицинского содержания утверждение без
+    источника хуже отсутствия ответа, поэтому ссылки в сообщении остаются всегда,
+    а обрезку видит текст пересказа — и обрезается он по границе предложения, а
+    не по счётчику символов: «не более 3 мг/кг в су…» читается как другая доза.
+    """
+    answer = (answer or "").strip()
+    footer = (footer or "").strip()
+    if not footer:
+        return clip_at_sentence(answer, max_chars)
+    room = max_chars - len(footer) - 2
+    if room < 200:
+        # Подпись такая длинная, что на пересказ места нет. Отдаём ссылки: они и
+        # есть то, чего у бота не было.
+        return footer
+    return clip_at_sentence(answer, room) + "\n\n" + footer
+
+
+def _refusal(text, outcome, report=None, sources=None, attempts=0, elapsed=0.0):
+    return {"text": text, "outcome": outcome, "sources": sources or [],
+            "report": report or {}, "attempts": attempts, "elapsed": elapsed}
+
+
+async def run_lookup(question, search_call, generate_call,
+                     budget=LOOKUP_TOTAL_COST_SECONDS, log=None):
+    """
+    Полный живой проход. Возвращает словарь; ключ text НИКОГДА не пустой.
+
+    `search_call(query, timeout)` -> (results, error), `generate_call(prompt,
+    timeout)` -> (text, error). Обе передаются параметром, поэтому модуль не
+    знает ни про подпроцесс, ни про конфиг, а проверка гоняет проход подставным
+    провайдером без единого запроса в сеть.
+
+    Молчания здесь нет НИ НА ОДНОЙ ветке. Тишина в этом файле уже стоила
+    двухчасовых кулдаунов за вопросы, которые бот просто не разобрал: врач ждёт
+    ответа, которого не будет, и в журнале об этом ни строки. Поэтому каждый
+    отказ — это и текст врачу, и WARNING с причиной.
+
+    Бюджет `budget` — ПОЛНЫЙ срок на поиск и генерацию. Из него вычитается всё:
+    каждая попытка поиска считается по своей цене для вызывающего (бюджет ребёнка
+    плюс запас на подъём), и попытка, которой не хватает места, не начинается.
+    Генерация получает остаток, а не своё желаемое число.
+    """
+    log = log or logger
+    started = time.monotonic()
+
+    def left():
+        return budget - (time.monotonic() - started)
+
+    query = clean_query(question)
+    if not query:
+        log.warning("web lookup: пустой запрос после очистки (было %d символов)",
+                    len(question or ""))
+        return _refusal(EMPTY_QUERY, OUTCOME_EMPTY_QUERY)
+
+    results, error, attempts = [], None, 0
+    for variant in query_variants(query):
+        # Попытка, которой не хватает времени, НЕ начинается: иначе она отберёт
+        # бюджет у генерации и врач получит ссылки без разбора вместо ответа.
+        need = SEARCH_ATTEMPT_COST_SECONDS + ANSWER_MIN_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
+        if left() < need:
+            log.warning(
+                "web lookup: попытка поиска пропущена, осталось %.1f с из %.0f "
+                "(нужно %.0f) — врач получит ответ по уже найденному",
+                left(), budget, need,
+            )
+            break
+        attempts += 1
+        try:
+            # Жёсткий потолок поверх бюджета ребёнка. Он срабатывает только если
+            # транспорт нарушил собственный срок; без него один зависший вызов
+            # съедал бы весь бюджет команды, и врач не получил бы даже отказа.
+            results, error = await asyncio.wait_for(
+                search_call(variant, SEARCH_ATTEMPT_TIMEOUT_SECONDS),
+                timeout=SEARCH_ATTEMPT_COST_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Отказ провайдера не имеет права уронить обработчик: обработчик
+            # ЛС держит замок на пользователя, и все следующие вопросы этого
+            # врача встали бы в очередь за упавшим.
+            results, error = [], "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            log.warning("web lookup: поиск отказал (попытка %d, запрос %d символов): %s",
+                        attempts, len(variant), error)
+        if results:
+            break
+
+    if not results and error:
+        # prepare() напишет свой WARNING с причиной и вернёт SEARCH_FAILED.
+        ready = prepare(question, [], error=error)
+        return _refusal(ready["message"], OUTCOME_SEARCH_FAILED,
+                        attempts=attempts, elapsed=time.monotonic() - started)
+    if not results:
+        log.warning(
+            "web lookup: выдача пуста без отказа провайдера, попыток %d, запрос "
+            "%d символов — врачу уходит «ничего не нашлось»", attempts, len(query),
+        )
+        return _refusal(NOTHING_FOUND, OUTCOME_NOTHING_FOUND,
+                        attempts=attempts, elapsed=time.monotonic() - started)
+
+    ready = prepare(question, results)
+    if not ready["sources"]:
+        # Вся выдача отсеяна как реклама клиник. Это честный отказ, и он обязан
+        # звучать: молча отдать пустоту значит выдать бота за источник, который
+        # «ничего не знает», хотя он просто не пустил рекламу к врачу.
+        report = ready.get("report") or {}
+        log.warning(
+            "web lookup: пригодных источников нет — всего %s, реклама %s, без "
+            "ссылки %s (%s); врачу уходит честный отказ",
+            report.get("total"), len(report.get("ads") or []),
+            report.get("unparsed"), "; ".join((report.get("ads") or [])[:3]),
+        )
+        return _refusal(ready["message"], OUTCOME_NOTHING_USABLE, report=report,
+                        attempts=attempts, elapsed=time.monotonic() - started)
+
+    footer = ready["footer"]
+    # Генерация получает ОСТАТОК, а не своё желаемое число.
+    answer_budget = min(ANSWER_TIMEOUT_SECONDS,
+                        left() - LLM_PACE_SLACK_SECONDS - SUBPROCESS_SLACK_SECONDS)
+    if answer_budget < ANSWER_MIN_TIMEOUT_SECONDS:
+        log.warning(
+            "web lookup: на генерацию осталось %.1f с при минимуме %.0f — врач "
+            "получит %d ссылок без разбора вместо ничего",
+            answer_budget, ANSWER_MIN_TIMEOUT_SECONDS, len(ready["sources"]),
+        )
+        return _refusal(NO_BUDGET_PREFIX + "\n\n" + footer, OUTCOME_NO_BUDGET,
+                        report=ready.get("report"), sources=ready["sources"],
+                        attempts=attempts, elapsed=time.monotonic() - started)
+
+    try:
+        answer, gen_error = await asyncio.wait_for(
+            generate_call(ready["prompt"], answer_budget),
+            timeout=answer_budget + SUBPROCESS_SLACK_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        answer, gen_error = None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+    if not answer:
+        log.warning(
+            "web lookup: ответ по %d источникам не собран (%s) — врачу уходят "
+            "ссылки без разбора", len(ready["sources"]), str(gen_error)[:200],
+        )
+        return _refusal(ANSWER_FAILED_PREFIX + "\n\n" + footer, OUTCOME_ANSWER_FAILED,
+                        report=ready.get("report"), sources=ready["sources"],
+                        attempts=attempts, elapsed=time.monotonic() - started)
+
+    return {
+        "text": compose_answer(answer, footer),
+        "outcome": OUTCOME_OK,
+        "sources": ready["sources"],
+        "report": ready.get("report") or {},
+        "attempts": attempts,
+        "elapsed": time.monotonic() - started,
     }

@@ -17,6 +17,10 @@ import database
 import media_tools
 import html_safe
 import tg_safety
+# Слой качества веб-поиска: разбор выдачи, отсев рекламы клиник, заземлённый
+# ответ со ссылками. Импорт безвреден — ни сети, ни конфига, ни логирования
+# (это сторожит test_web_lookup.py разбором дерева импортов).
+import web_lookup
 import config
 logger = logging.getLogger("assistant")
 
@@ -52,6 +56,53 @@ SUMMARY_DELIVERY_TIMEOUT_SECONDS = 90
 # telethon пересиживает сам, а платить за вторую из десяти внутренних попыток
 # врач не должен. Меньше бюджета сводки (90) и общего сетевого потолка (60).
 CALLBACK_EDIT_TIMEOUT_SECONDS = 25
+
+# Бюджет последнего слова врачу на пути разбора присланного файла. Это ЕДИНСТВЕННОЕ
+# сообщение, которым врач узнаёт, что снимок не открылся, и до этой правки оно шло
+# голым bot_client.edit_message без срока: при зависшем Telegram врач остаётся перед
+# статусом «Скачиваю и анализирую… Подождите» навсегда, замок на пользователя не
+# отпускается (main.py:2272), и все его следующие вопросы не обрабатываются до
+# перезапуска процесса — а в журнале об этом ни строки, зависание не исключение.
+# 45 = половина бюджета доставки (90): отказ короче ответа и обязан уложиться
+# быстрее, чем врач напишет следующее сообщение. Выводится из числа рядом, чтобы
+# два срока на одном пути не разъехались.
+PM_STATUS_EDIT_TIMEOUT_SECONDS = SUMMARY_DELIVERY_TIMEOUT_SECONDS // 2
+
+# --- Бюджет команды веб-поиска (/web, /найди) --------------------------------
+#
+# Считается СЛОЖЕНИЕМ этапов, а не задаётся числом: класс «внутренний срок больше
+# внешнего» в этом проекте всплывал четыре раза, и каждый раз ровно потому, что
+# два разумных числа лежали в разных файлах и никто их не сопоставлял.
+#
+# Арифметика (числа — из web_lookup, где выведены из бюджета ребёнка плюс запаса
+# на подъём подпроцесса, blocking_tools._SUBPROCESS_STARTUP_SLACK_SECONDS = 10):
+#   статус врачу                        20
+#   поиск: (45 + 10) x 2 попытки       110   = web_lookup.SEARCH_TOTAL_COST_SECONDS
+#   генерация ответа: 90 + 10          100
+#   троттлинг LLM-шлюза (3 с)            5
+#   доставка ответа                     90
+#   уборка статусного сообщения         15
+#   ---------------------------------------
+#   итого                              340
+# Поиск (110) строго меньше общего срока (340), и генерация получает ОСТАТОК, а не
+# своё желаемое число: run_lookup считает дедлайн один раз и вычитает из него всё.
+WEB_STATUS_TIMEOUT_SECONDS = 20
+WEB_STATUS_CLEANUP_TIMEOUT_SECONDS = 15
+WEB_DELIVERY_TIMEOUT_SECONDS = SUMMARY_DELIVERY_TIMEOUT_SECONDS
+WEB_LOOKUP_BUDGET_SECONDS = web_lookup.LOOKUP_TOTAL_COST_SECONDS
+WEB_COMMAND_TIMEOUT_SECONDS = (
+    WEB_STATUS_TIMEOUT_SECONDS
+    + WEB_LOOKUP_BUDGET_SECONDS
+    + WEB_DELIVERY_TIMEOUT_SECONDS
+    + WEB_STATUS_CLEANUP_TIMEOUT_SECONDS
+)
+# Внешний поиск — запрос к чужому сервису и целый подпроцесс. Без паузы один врач,
+# задавший пять вопросов подряд, сжигает квоту провайдера на весь чат из 749
+# человек. Столько же, сколько у /итог и прямого вопроса в группе.
+WEB_COOLDOWN_SECONDS = 30
+# Заголовок ответа. Врач обязан видеть, что это НЕ база знаний чата, а открытые
+# источники: доверие к утверждению у них разное, и путать их нельзя.
+WEB_ANSWER_HEADER = "🌐 <b>По открытым источникам</b>\n\n"
 
 STYLE_PROMPTS = {
     "colleague_friendly": "Твой стиль общения — дружелюбный коллега-эксперт. Общайся свободно, на равных, на профессиональном стоматологическом сленге, но вежливо. Разрешено шутить, но без перегибов.",
@@ -3007,6 +3058,9 @@ async def handle_private_message(bot_client, event):
                 "• /stats — показать самые обсуждаемые темы в чате сообщества.\n"
                 "• /bookmarks — просмотреть сохраненные вами клинические закладки.\n"
                 "• /search &lt;запрос&gt; — быстрый прямой поиск по базе знаний стоматологии.\n"
+                "• /web &lt;запрос&gt; — поиск в открытых источниках со ссылками, которые "
+                "можно открыть и проверить (то, чего нет в базе чата: она заканчивается "
+                "февралём 2026). Синоним — /найди.\n"
                 "• /case — запустить интерактивный клинический симулятор.\n"
                 "• /abort — сбросить текущий клинический симулятор.\n\n"
                 "• <b>Текстовый/Голосовой вопрос:</b> Просто напишите его или отправьте голосовое сообщение. Я отвечу с использованием базы знаний.\n"
@@ -3264,6 +3318,119 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=search_out, parse_mode='html')
             return
 
+        if text.lower().startswith(("/web", "/найди")):
+            # Веб-поиск с ПРОВЕРЯЕМОЙ ссылкой — то, чего у врача не было вообще.
+            #
+            # Чем это отличается от /search: тот ищет по нашему корпусу, а корпус
+            # кончается 2026-02-19 (последняя дата в stomat_archive.db, на сегодня
+            # 160 дней назад) и ссылку содержит в 4 фактах из 12 784. То есть на
+            # вопрос про материал, препарат или отзыв последних месяцев бот отвечал
+            # пересказом чужого мнения из чата, а открыть и проверить утверждение
+            # врач не мог. Механизм поиска в проекте был построен и покрыт
+            # проверками, но не вызывался НИКЕМ: слов web_search_async,
+            # perform_search, web_lookup в assistant.py, main.py и summarizer.py
+            # было ноль.
+            parts = text.split(None, 1)
+            query_param = parts[1].strip() if len(parts) > 1 else ""
+            if not query_param:
+                await tg_safety.send_message(
+                    bot_client, chat_id,
+                    "🌐 <b>Что искать в открытых источниках?</b>\n"
+                    "Пример: <code>/web биодентин перфорация дна полости</code>\n\n"
+                    "<i>Это поиск по интернету со ссылками, которые можно открыть. "
+                    "Для поиска по базе чата — /search.</i>",
+                    timeout=WEB_STATUS_TIMEOUT_SECONDS, op="send_message:web_hint",
+                    logger=logger, parse_mode='html',
+                )
+                return
+
+            cooldown_left = check_user_cooldown(chat_id, chat_id, "web_lookup",
+                                                seconds=WEB_COOLDOWN_SECONDS)
+            if cooldown_left > 0:
+                # Молчать нельзя: врач не поймёт, дошёл ли запрос, и повторит его.
+                await tg_safety.send_message(
+                    bot_client, chat_id,
+                    f"⏳ <i>Веб-поиск поднимает внешний сервис — подождите "
+                    f"{cooldown_left} с.</i>",
+                    timeout=WEB_STATUS_TIMEOUT_SECONDS, op="send_message:web_cooldown",
+                    logger=logger, parse_mode='html',
+                )
+                return
+
+            status_res = await tg_safety.send_message(
+                bot_client, chat_id,
+                "🌐 <i>Ищу в открытых источниках и отсеиваю рекламу клиник. "
+                "Внешний поиск — может занять пару минут.</i>",
+                timeout=WEB_STATUS_TIMEOUT_SECONDS, op="send_message:web_status",
+                logger=logger, parse_mode='html',
+            )
+
+            import blocking_tools
+
+            async def _web_search_call(query, timeout):
+                """Транспорт: подпроцесс с провайдером. Отдаёт [{'text','url'}], ошибку."""
+                return await blocking_tools.web_search_async(
+                    query, web_lookup.SEARCH_MAX_RESULTS, timeout=timeout
+                )
+
+            async def _web_answer_call(prompt, timeout):
+                """Генерация по выдержкам. Бюджет приходит СВЕРХУ, а не берётся свой."""
+                web_ctx = {"kind": "pm_web_lookup", "chat_id": chat_id,
+                           "thinking_level": "HIGH"}
+                web_response, web_error = await generate_gemini_text_async(
+                    prompt, web_ctx, timeout=timeout
+                )
+                return (getattr(web_response, "text", None) or "").strip(), web_error
+
+            lookup = await web_lookup.run_lookup(
+                query_param, _web_search_call, _web_answer_call,
+                budget=WEB_LOOKUP_BUDGET_SECONDS, log=logger,
+            )
+
+            # Статус убираем ДО ответа и под сроком: без границы уборка сама может
+            # подвиснуть и удержать замок на пользователе после того, как ответ уже
+            # готов. Неудача уборки ответ не отменяет — она уже в журнале.
+            status_id = getattr(status_res.value, "id", None) if status_res.ok else None
+            if status_id:
+                await tg_safety.delete_messages(
+                    bot_client, chat_id, status_id,
+                    timeout=WEB_STATUS_CLEANUP_TIMEOUT_SECONDS,
+                    op="delete_messages:web_status", logger=logger,
+                )
+
+            # Разметка проходит через clean_html_formatting: он оставляет ровно
+            # <b>, <i>, <code> и экранирует остальное. Битый тег от модели Telegram
+            # отклоняет ЦЕЛИКОМ — врач не увидел бы ни ответа, ни ссылок.
+            answer_text = clean_html_formatting(WEB_ANSWER_HEADER + lookup["text"])
+            delivered = await tg_safety.send_message(
+                bot_client, chat_id, answer_text,
+                timeout=WEB_DELIVERY_TIMEOUT_SECONDS, op="send_message:web_answer",
+                logger=logger, parse_mode='html', link_preview=False,
+            )
+            if not delivered.ok:
+                logger.warning(
+                    "Веб-поиск отработал (исход=%s, источников=%d, попыток=%d, "
+                    "%.1f с), но ответ НЕ доставлен chat_id=%s: %s. Врач остался "
+                    "без ответа и без причины",
+                    lookup["outcome"], len(lookup["sources"]), lookup["attempts"],
+                    lookup["elapsed"], chat_id, delivered.reason,
+                )
+                return
+            logger.info(
+                "Веб-поиск доставлен chat_id=%s исход=%s источников=%d попыток=%d "
+                "%.1f с %d символов",
+                chat_id, lookup["outcome"], len(lookup["sources"]),
+                lookup["attempts"], lookup["elapsed"], len(answer_text),
+            )
+            # В историю ЛС кладём и запрос, и ответ. Без этого следующий ход врача
+            # («а по второй ссылке что?») приходит в общий обработчик без самих
+            # ссылок, и модель отвечает про источники, которых не видела.
+            await database.save_pm_message(
+                chat_id, "Assistant",
+                f"[Веб-поиск: {query_param}]\n{lookup['text']}"
+            )
+            return
+
         if text.lower() == "/case":
             status_msg = await bot_client.send_message(entity=chat_id, message="🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>", parse_mode='html')
             
@@ -3442,7 +3609,29 @@ async def handle_private_message(bot_client, event):
                 logger.error(f"Error analyzing media in PM: {e}")
                 media_error_shown = True
                 if 'status_msg' in locals():
-                    await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>", parse_mode='html')
+                    # Единственная строка, которой врач узнаёт, что снимок не
+                    # открылся. Без границы по времени она сама висла: врач сидел
+                    # перед «Скачиваю и анализирую…» до перезапуска процесса, замок
+                    # на пользователя не отпускался, следующие его вопросы не
+                    # обрабатывались вообще — и в журнале об этом ни строки,
+                    # зависание не исключение и except его не ловит. tg_safety сам
+                    # пишет WARNING с причиной и потраченным временем.
+                    notified = await tg_safety.edit_message(
+                        bot_client, chat_id, status_msg.id,
+                        "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>",
+                        timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                        op="edit_message:pm_media_failed", logger=logger,
+                        parse_mode='html',
+                    )
+                    if not notified.ok:
+                        # Отметку снимаем: врач НЕ получил отказа, и ниже его обязан
+                        # догнать обычный send_message, иначе файл провалится молча.
+                        media_error_shown = False
+                        logger.warning(
+                            "Отказ разбора файла не доставлен chat_id=%s: %s — "
+                            "врач не знает, что снимок не открылся",
+                            chat_id, notified.reason,
+                        )
             finally:
                 # Очистка временных файлов.
                 #
