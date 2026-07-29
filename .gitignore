@@ -87,3 +87,5 @@ _bak_*.py
 _verify_*.py
 _verify_*.txt
 _skeptic_*.py
+*.skepbak
+*.fixedbak

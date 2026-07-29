@@ -121,14 +121,19 @@ class as_child:
         return False
 
 
-# Пишет шесть строк, сбрасывает буфер и висит десять минут. Классический случай:
-# ребёнок УСПЕЛ объяснить, что не так со снимком, и только потом встал.
+# Пишет шесть строк, сбрасывает буфер и висит. Классический случай: ребёнок УСПЕЛ
+# объяснить, что не так со снимком, и только потом встал.
+#
+# Сон 45 с, а не 600: ребёнку достаточно пережить таймаут 1 с плюс отсрочку 2 с,
+# а всё лишнее — это остаток на машине, где осиротевший процесс измеримо жжёт
+# ядро часами. Проверку это не ослабляет: сценарий [1] требует, чтобы вызов
+# вернулся за 20 с, то есть заведомо раньше, чем ребёнок проснулся бы сам.
 LOUD_HANGER = write_child("loud_hanger.py", r'''
 import sys, time
 for i in range(6):
     sys.stderr.buffer.write(("CV2-OPEN-FAILED ЖАЛОБА строка %d\n" % i).encode("utf-8"))
 sys.stderr.buffer.flush()
-time.sleep(600)
+time.sleep(45)
 ''')
 
 # Шестьдесят пронумерованных строк: проверяем, что в журнал уходит ХВОСТ.
@@ -137,7 +142,7 @@ import sys, time
 for i in range(60):
     sys.stderr.buffer.write(("СТРОКА-%02d\n" % i).encode("utf-8"))
 sys.stderr.buffer.flush()
-time.sleep(600)
+time.sleep(45)
 ''')
 
 # Прогресс через \r без перевода строки — так сыплет ffmpeg. readline() на такой
@@ -148,7 +153,7 @@ for i in range(400):
     sys.stderr.buffer.write(("frame=%5d fps=25 q=28.0 size=%7dkB\r" % (i, i * 3)).encode("utf-8"))
 sys.stderr.buffer.write("ОШИБКА-РАЗБОРА moov atom not found\n".encode("utf-8"))
 sys.stderr.buffer.flush()
-time.sleep(600)
+time.sleep(45)
 ''')
 
 # Мегабайт болтовни и выход с ошибкой: кольцо обязано обрезать.
@@ -182,14 +187,14 @@ raise SystemExit(3)
 # Внук с той же трубой: kill() бьёт только ребёнка, EOF не придёт никогда.
 GRANDCHILD = write_child("grandchild.py", r'''
 import time
-time.sleep(120)
+time.sleep(25)
 ''')
 FORKER = write_child("forker.py", r'''
 import subprocess, sys, time
 sys.stderr.buffer.write("ЖАЛОБА-ВНУКА cv2 повис на файле\n".encode("utf-8"))
 sys.stderr.buffer.flush()
 subprocess.Popen([sys.executable, %r], stderr=sys.stderr, stdout=sys.stdout)
-time.sleep(120)
+time.sleep(25)
 ''' % (GRANDCHILD,))
 
 
@@ -234,9 +239,20 @@ async def run():
     check("первая строка вытеснена хвостом", "СТРОКА-00" not in joined,
           "в журнал уехали все 60 строк, прогресс ffmpeg вытеснит причину")
     kept = [seg for seg in joined.split(" | ") if "СТРОКА-" in seg]
-    check("строк в записи не больше предела", 0 < len(kept) <= 12,
-          f"оставлено {len(kept)} строк")
+    # Ровно 12, а не «не больше 12»: счёт идёт по разделителю " | ", и запись,
+    # склеенная в один кусок без разделителей, дала бы len(kept) == 1 и прошла
+    # бы потолок насквозь. Число здесь литеральное, не _STDERR_TAIL_LINES:
+    # проверка, читающая ту же константу, что и код, снятый потолок не заметит.
+    check("в записи ровно 12 последних строк ребёнка", len(kept) == 12,
+          f"оставлено {len(kept)} строк — потолок хвоста стал другим или запись "
+          f"склеена в один кусок")
     check("запись одна, а не шестьдесят", len(logged) == 1, f"записей {len(logged)}")
+    # Сырой перевод строки в записи означает, что хвост уехал в журнал куском
+    # вместо 12 строк. Многострочную запись потом не найдёт ни один rg по
+    # времени, а искать её будут именно так — «что бот сказал про этот снимок».
+    check("запись ОДНОСТРОЧНАЯ, её ищут одним rg по времени",
+          not any(("\n" in m) or ("\r" in m) for m in logged),
+          f"в записи сырые переводы строки: {logged}")
 
     print("\n[3] Прогресс через \\r не ломает чтение и не съедает причину")
     catcher.records.clear()
@@ -248,6 +264,15 @@ async def run():
           any("ОШИБКА-РАЗБОРА" in m for m in logged), f"в журнале: {logged}")
     check("прогресс не поднял исключение на чтении",
           any("extract-frame timeout" in m for m in logged), f"в журнале: {logged}")
+    # Прогресс отбивается через \r без \n. Если его не нормализовать, 400 отбивок
+    # ffmpeg станут ОДНОЙ строкой, потолок в 12 строк молча исчезнет, и в журнал
+    # уедет кусок прогресса вместо причины, по которой снимок не разобран.
+    check("прогресс разобран на строки, а не приехал куском",
+          not any(("\r" in m) or ("\n" in m) for m in logged),
+          f"в записи сырой \\r: потолок строк на прогрессе не работает: {logged}")
+    segments = [seg for seg in " ".join(logged).split(" | ") if seg.strip()]
+    check("на прогрессе потолок хвоста тоже держится", len(segments) == 12,
+          f"в записи {len(segments)} строк вместо 12")
 
     print("\n[4] Внешняя отмена во время уборки после kill() не уносит запись")
     catcher.records.clear()
@@ -361,6 +386,38 @@ async def run():
     check("отсрочка вложена в бюджет вызова",
           media_tools._KILL_REAP_GRACE_SECONDS <= 45,
           "отсрочка больше подготовки снимка (45 с) — вылезет за потолок разбора")
+
+    print("\n[11] Отсрочка уборки зажата бюджетом ВЫЗОВА, а не только константой")
+    # Проверка сценария [10] сама допускает timeout + 2 * константа, поэтому
+    # потерю зажима min(константа, timeout) она увидеть не может. Здесь ребёнка
+    # не заводим вовсе: и дренаж, и proc.wait() не кончаются никогда, поэтому
+    # длительность уборки равна ровно 2 x grace и больше ни от чего не зависит.
+    # Последствие потери зажима: у извлечения кадра внешнего потолка нет вообще
+    # (main.py зовёт его без wait_for), и каждый зависший снимок альбома добавляет
+    # к разбору лишние секунды сверх собственного дедлайна — врач получает разбор
+    # части альбома, а остальные снимки молча выпадают.
+    class NeverReaped:
+        pid = -1
+        returncode = 0
+
+        async def wait(self):
+            await asyncio.sleep(3600)
+
+    settle_spans = []
+    for _ in range(3):
+        catcher.records.clear()
+        forever = asyncio.ensure_future(asyncio.sleep(3600))
+        clock = asyncio.get_event_loop()
+        started = clock.time()
+        await media_tools._settle_after_kill(NeverReaped(), forever, 0.2)
+        settle_spans.append(clock.time() - started)
+        forever.cancel()
+    best_settle = min(settle_spans)
+    check("уборка ограничена таймаутом вызова, а не константой 2 с",
+          best_settle < 1.2,
+          f"минимум из трёх {best_settle:.2f} с при timeout=0.2 с: ждать надо было "
+          f"2 x 0.2 с, а ждали по константе — отсрочка перестала вкладываться в "
+          f"бюджет вызова")
 
 
 asyncio.run(run())

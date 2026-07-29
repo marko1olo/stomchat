@@ -149,6 +149,18 @@ def _web_search_sync(query, max_results):
     вызывающего ровно как «по запросу ничего нет». Врачу в обоих случаях
     печаталось «Информации не найдено», и отказ поиска не попадал ни в журнал,
     ни в разбор.
+
+    Результат — список {"text", "url"}, а не строк.
+    Раньше ссылка клеилась в текст, причём двумя разными способами: tavily
+    отдавал "текст (url)", ddgs — "текст\\n(Source: url)". Вынуть её обратно можно
+    было только регуляркой, а регулярка режет адрес по первой закрывающей скобке.
+    Замер по 556 живым ссылкам из stomat_archive.db и stomat_wiki.db: адрес
+    .../Оксид_циркония(IV) в обеих формах терял хвост и перестал открываться —
+    врач видит источник под утверждением, а проверить утверждение не может.
+    Хуже: если в тексте страницы есть свой маркер «(Источник: url)», регулярка
+    берёт ссылку ИЗ ТЕКСТА, и по чужому хосту считается уровень доверия —
+    измерено, что обзор с pubmed при этом выбрасывается как реклама клиники, а
+    врачу уходит «нашлась только реклама».
     """
     import config
 
@@ -167,7 +179,7 @@ def _web_search_sync(query, max_results):
                 content = item.get("content")
                 url = item.get("url")
                 if content and url:
-                    results.append(f"{content} ({url})")
+                    results.append({"text": content, "url": url})
         except Exception as exc:
             results = []
             errors.append(f"tavily: {type(exc).__name__}: {_redact(str(exc))[:200]}")
@@ -191,7 +203,7 @@ def _web_search_sync(query, max_results):
                     body = item.get("body") if item else None
                     href = item.get("href") if item else None
                     if body and href:
-                        results.append(f"{body}\n(Source: {href})")
+                        results.append({"text": body, "url": href})
         except Exception as exc:
             results = []
             errors.append(f"ddgs: {type(exc).__name__}: {_redact(str(exc))[:200]}")
@@ -710,6 +722,57 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             )
 
 
+def _as_search_entry(item):
+    """
+    Один результат поиска -> {"text", "url"}, независимо от того, что пришло.
+
+    Зачем нормализация здесь, а не у вызывающего: ребёнок отдаёт структуру, но
+    строковая форма из старой версии может ещё приехать (сохранённая нагрузка,
+    неперезапущенный процесс на боевой машине). Вызывающий, который потянется за
+    entry["url"] у строки, получит TypeError по всему поиску — то есть врач вместо
+    ответа со ссылками не получит ничего. Разбор строк не дублируем: регулярки
+    живут в web_lookup, иначе две копии разъедутся и разойдутся молча.
+
+    Ключи content/body/href — имена, которыми отдают сами провайдеры (tavily и
+    ddgs соответственно): принимаем и их, чтобы результат провайдера, переданный
+    как есть, не остался без ссылки.
+    """
+    if isinstance(item, dict):
+        return {
+            "text": (item.get("text") or item.get("content") or item.get("body") or "").strip(),
+            "url": (item.get("url") or item.get("href") or "").strip(),
+        }
+    if not isinstance(item, str):
+        # Ни структура, ни строка — порченая нагрузка, а не находка: показывать
+        # врачу str(None) как выдержку из источника нельзя. Но и молчать нельзя,
+        # иначе «поиск нашёл три, показал одну» останется без объяснения.
+        _throttled(
+            logging.WARNING,
+            "search_entry_unknown_type",
+            "результат поиска неизвестного вида пропущен: %s",
+            type(item).__name__,
+        )
+        return {"text": "", "url": ""}
+    text = item
+    parsed = None
+    try:
+        import web_lookup
+
+        parsed = web_lookup.parse_result(text)
+    except Exception as exc:
+        # Отказ слоя качества не имеет права похоронить саму находку: выдержка без
+        # ссылки — половина ответа, а пустой ответ — ноль.
+        _throttled(
+            logging.WARNING,
+            "search_entry_parse_failed",
+            "результат поиска не разобран (%s) — выдержка уйдёт врачу без ссылки",
+            _describe_exception(exc),
+        )
+    if parsed:
+        return {"text": parsed["text"], "url": parsed["url"]}
+    return {"text": text.strip(), "url": ""}
+
+
 async def web_search_async(query, max_results, timeout):
     payload, error = await _run_json_tool(
         "web-search",
@@ -718,7 +781,10 @@ async def web_search_async(query, max_results, timeout):
     )
     if error:
         return [], error
-    return payload.get("results") or [], None
+    entries = [_as_search_entry(item) for item in (payload.get("results") or [])]
+    # Пустышка (ни текста, ни ссылки) врачу не показывается и в счёт находок не
+    # идёт: иначе поиск отчитается «нашлось 3», а показать будет нечего.
+    return [entry for entry in entries if entry["text"] or entry["url"]], None
 
 
 def _remove_converted_wav(file_path):

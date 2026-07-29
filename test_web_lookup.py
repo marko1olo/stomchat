@@ -319,6 +319,383 @@ check("уровни упорядочены по убыванию доверия"
       < W.tier_of("unknown.example"),
       "иначе сортировка ставит энциклопедию выше обзора")
 
+print("\n[10] Подпроцесс отдаёт СТРУКТУРУ, а не строку")
+# Пока ссылка склеена с текстом, вынуть её можно только регуляркой. Замер по 556
+# живым ссылкам из stomat_archive.db и stomat_wiki.db: адрес
+# .../Оксид_циркония(IV) обе строковые формы обрывали на «(IV» — врач получает
+# ссылку, которая не открывается, то есть утверждение без проверяемого источника.
+# Сеть здесь не трогаем: провайдеры подменены фальшивыми модулями.
+import asyncio  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import types  # noqa: E402
+
+import blocking_tools as B  # noqa: E402
+
+
+def _entry(seq, index=0):
+    """
+    Результат поиска по номеру, не роняя прогон. Не структура -> пустой словарь.
+
+    Обращение entry["url"] к СТРОКЕ даёт TypeError, и он обрывает весь файл на
+    первой же неверной форме. Проверено диверсией: возврат строковой формы в
+    _web_search_sync гасил 25 проверок ниже, включая всю совместимость со старой
+    формой, и сводка PASSED/FAILED не печаталась вовсе — то есть поломка формы
+    прятала за собой любую другую поломку разбора.
+    """
+    try:
+        entry = seq[index]
+    except Exception:
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+# Адреса со скобкой — не редкость: именно так ru.wikipedia разводит
+# стоматологические омонимы, и таких страниц бот ищет больше всего.
+_TAVILY_URL = "https://ru.wikipedia.org/wiki/Пломба_(стоматология)"
+_DDGS_URL = "https://ru.m.wikipedia.org/wiki/Оксид_циркония(IV)"
+
+_fake_config = types.ModuleType("config")
+_fake_config.SEARCH_PROVIDER = "tavily"
+_fake_config.TAVILY_API_KEY = "fake-key-never-used"
+_saved_modules = {name: sys.modules.get(name) for name in ("config", "tavily", "ddgs")}
+sys.modules["config"] = _fake_config
+
+_fake_tavily = types.ModuleType("tavily")
+
+
+class _FakeTavilyClient:
+    def __init__(self, api_key=None):
+        pass
+
+    def search(self, query=None, search_depth=None, max_results=None):
+        return {"results": [{"content": "Биодентин закрывает перфорацию.", "url": _TAVILY_URL}]}
+
+
+_fake_tavily.TavilyClient = _FakeTavilyClient
+sys.modules["tavily"] = _fake_tavily
+
+tav_results, tav_errors = B._web_search_sync("перфорация", 2)
+check("tavily: результат — структура, а не строка",
+      len(tav_results) == 1 and isinstance(tav_results[0], dict), f"got {tav_results!r}")
+check("tavily: ключи text и url на месте",
+      set(_entry(tav_results)) >= {"text", "url"}, f"got {sorted(_entry(tav_results))}")
+check("tavily: ссылка со скобкой доехала посимвольно",
+      _entry(tav_results).get("url") == _TAVILY_URL, f"got {_entry(tav_results).get('url')!r}")
+# Выдержка обязана быть НЕПУСТОЙ: проверка «в тексте нет http» на пустом тексте
+# проходит сама собой, и сломанная форма прошла бы как исправная.
+check("tavily: ссылка не вклеена в текст выдержки",
+      _entry(tav_results).get("text") and "http" not in _entry(tav_results)["text"],
+      f"got {_entry(tav_results).get('text')!r}")
+check("tavily: живой провайдер не считается отказавшим", tav_errors == [], f"got {tav_errors!r}")
+
+_fake_config.SEARCH_PROVIDER = "duckduckgo"
+_fake_ddgs = types.ModuleType("ddgs")
+
+
+class _FakeDDGS:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def text(self, *args, **kwargs):
+        return [{"body": "МТА даёт лучший прогноз (мета-анализ).", "href": _DDGS_URL}]
+
+
+_fake_ddgs.DDGS = _FakeDDGS
+sys.modules["ddgs"] = _fake_ddgs
+
+ddg_results, ddg_errors = B._web_search_sync("мта", 2)
+check("ddgs: результат — структура, а не строка",
+      len(ddg_results) == 1 and isinstance(ddg_results[0], dict), f"got {ddg_results!r}")
+check("ddgs: ссылка со скобкой доехала посимвольно",
+      _entry(ddg_results).get("url") == _DDGS_URL, f"got {_entry(ddg_results).get('url')!r}")
+check("ddgs: ссылка не вклеена в текст выдержки",
+      _entry(ddg_results).get("text") and "http" not in _entry(ddg_results)["text"]
+      and "Source" not in _entry(ddg_results)["text"],
+      f"got {_entry(ddg_results).get('text')!r}")
+check("ddgs: живой провайдер не считается отказавшим", ddg_errors == [], f"got {ddg_errors!r}")
+
+for name, module in _saved_modules.items():
+    if module is None:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = module
+
+# Между ребёнком и родителем стоит JSON. Структура обязана пережить сериализацию:
+# если она превратится в строку или в список, ссылка снова уедет в текст.
+_wire = json.loads(json.dumps({"ok": True, "results": tav_results + ddg_results},
+                              ensure_ascii=False))
+check("структура переживает JSON между процессами",
+      all(isinstance(item, dict) and item.get("url") for item in _wire["results"]),
+      f"got {_wire['results']!r}")
+check("ссылка со скобкой цела и после JSON",
+      [_entry(_wire["results"], i).get("url") for i in range(len(_wire["results"]))]
+      == [_TAVILY_URL, _DDGS_URL],
+      f"got {[_entry(_wire['results'], i).get('url') for i in range(len(_wire['results']))]}")
+
+# Слой качества обязан брать ссылку из ПОЛЯ. Проверяем поведением: гасим все три
+# регулярки разбора строк — структурный путь не имеет права от них зависеть.
+_saved_res = (W._SOURCE_MARKER_RE, W._TRAILING_URL_RE, W._ANY_URL_RE)
+_never = re.compile(r"(?!x)x")
+W._SOURCE_MARKER_RE, W._TRAILING_URL_RE, W._ANY_URL_RE = _never, _never, _never
+try:
+    structural = W.parse_result(_entry(_wire["results"]))
+finally:
+    W._SOURCE_MARKER_RE, W._TRAILING_URL_RE, W._ANY_URL_RE = _saved_res
+check("структурный путь не зависит от регулярок разбора строк",
+      structural and structural["url"] == _TAVILY_URL
+      and structural["host"] == "ru.wikipedia.org", f"got {structural!r}")
+
+# Худшее следствие подмены хоста: на странице бывает свой блок «источник», и по
+# ссылке ИЗ ТЕКСТА считается уровень доверия и работает отсев рекламы. Измерено:
+# обзор с pubmed при строковом разборе выбрасывался как реклама клиники, и врачу
+# уходило «нашлась только реклама» — при обзоре на руках.
+_poisoned = {"text": "Систематический обзор: биодентин не хуже МТА "
+                     "(Источник: https://implant-msk.ru/blog)",
+             "url": "https://pubmed.ncbi.nlm.nih.gov/40000000/"}
+kept_poisoned, report_poisoned = W.rank_sources([_poisoned])
+check("чужой маркер в тексте не подменяет хост источника",
+      [e["host"] for e in kept_poisoned] == ["pubmed.ncbi.nlm.nih.gov"],
+      f"got {[e['host'] for e in kept_poisoned]}, ads={report_poisoned['ads']}")
+check("обзор не выброшен как реклама клиники", not report_poisoned["ads"],
+      f"ads={report_poisoned['ads']}")
+check("обзору присвоен уровень исследования",
+      kept_poisoned and kept_poisoned[0]["tier"] == 1,
+      f"got {kept_poisoned[0]['tier'] if kept_poisoned else None}")
+_ready = W.prepare("Можно ли биодентин при перфорации?", [_poisoned])
+check("врач получает промпт и ссылку, а не «нашлась только реклама»",
+      _ready["prompt"] and "pubmed.ncbi.nlm.nih.gov/40000000/" in _ready["footer"]
+      and not _ready["message"], f"got {_ready['message']!r} / {_ready['footer']!r}")
+
+# Чужая ссылка не имеет права уехать в промпт внутри выдержки. Она не проходила
+# ни ранжирование по уровню, ни отсев рекламы, а в подписи её нет — модель
+# процитирует адрес клиники как часть систематического обзора, и врач получит
+# ссылку, которую выдали за источник. Замер по stomat_archive.db: из 591 строки со
+# ссылкой у 110 ссылка стоит В СЕРЕДИНЕ текста, то есть случай рядовой.
+_ad_in_text = {"text": "Обзор: биодентин не хуже МТА. Разбор с ценами: "
+                       "https://implant-msk.ru/blog/perf — там же протокол клиники.",
+               "url": "https://pubmed.ncbi.nlm.nih.gov/40000000/"}
+_ad_ready = W.prepare("Чем закрыть перфорацию?", [_ad_in_text])
+check("рекламная ссылка из текста не уезжает в промпт",
+      _ad_ready["prompt"] and "implant-msk.ru" not in _ad_ready["prompt"],
+      f"got {_ad_ready['prompt']!r}")
+check("настоящий источник в подписи остался",
+      "pubmed.ncbi.nlm.nih.gov/40000000/" in _ad_ready["footer"], f"got {_ad_ready['footer']!r}")
+# Смысл выдержки при этом обязан выжить: вырезаем ссылку, а не клинику текста.
+check("клинический смысл выдержки не вырезан вместе со ссылкой",
+      "биодентин не хуже МТА" in _ad_ready["prompt"]
+      and "протокол клиники" in _ad_ready["prompt"], f"got {_ad_ready['prompt']!r}")
+# Обе формы обязаны дать ОДНУ выдержку: расхождение путей и есть корень дефекта.
+_ad_legacy = f"{_ad_in_text['text']} (Source: {_ad_in_text['url']})"
+_legacy_ready = W.prepare("Чем закрыть перфорацию?", [_ad_legacy])
+check("старая форма даёт ту же выдержку, что структурная",
+      W.parse_result(_ad_legacy)["text"] == W.parse_result(_ad_in_text)["text"],
+      f"стар={W.parse_result(_ad_legacy)['text']!r} нов={W.parse_result(_ad_in_text)['text']!r}")
+check("старая форма тоже не тащит рекламную ссылку в промпт",
+      _legacy_ready["prompt"] and "implant-msk.ru" not in _legacy_ready["prompt"],
+      f"got {_legacy_ready['prompt']!r}")
+# Выдержка из одной ссылки: как источник с номером она пустая, и модель поставит
+# [1] под утверждением, которого в источнике нет.
+check("выдержка без прозы не становится источником с номером",
+      W.parse_result({"text": "https://ada.org/page", "url": "https://ada.org/page"}) is None,
+      f"got {W.parse_result({'text': 'https://ada.org/page', 'url': 'https://ada.org/page'})!r}")
+check("число в выдержке не пострадало от вырезания ссылки",
+      W.parse_result({"text": "Артикаин не более 7 мг/кг, см. https://rlsnet.ru/x подробнее.",
+                      "url": "https://rlsnet.ru/x"})["text"].count("7 мг/кг") == 1,
+      f"got {W.parse_result({'text': 'Артикаин не более 7 мг/кг, см. https://rlsnet.ru/x подробнее.', 'url': 'https://rlsnet.ru/x'})!r}")
+
+print("\n[11] Родитель отдаёт одну форму, что бы ни прислал ребёнок")
+# Вызывающий, который потянется за entry["url"] у строки, получит TypeError по
+# всему поиску: врач вместо ответа со ссылками не получит ничего. Старая форма
+# может приехать из сохранённой нагрузки прошлой версии, поэтому обе обязаны
+# сводиться к одной структуре.
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+_saved_tool = B._run_json_tool
+
+
+def _tool_returning(results):
+    async def _stub(action, payload, timeout=None):
+        return {"ok": True, "results": results}, None
+    return _stub
+
+
+_LEGACY = [
+    f"Биодентин закрывает перфорацию. ({_TAVILY_URL})",            # старая форма tavily
+    f"МТА даёт лучший прогноз.\n(Source: {_DDGS_URL})",            # старая форма ddgs
+    "Артикаин 4% (Источник: https://rlsnet.ru/drugs/articaine)",   # форма search_engine.py
+]
+B._run_json_tool = _tool_returning(list(_LEGACY))
+legacy_out, legacy_err = _run(B.web_search_async("биодентин", 3, timeout=5))
+check("старые строки приведены к структуре",
+      len(legacy_out) == 3 and all(isinstance(e, dict) for e in legacy_out),
+      f"got {legacy_out!r}")
+check("старая форма tavily: ссылка со скобкой восстановлена целиком",
+      _entry(legacy_out, 0).get("url") == _TAVILY_URL, f"got {_entry(legacy_out, 0).get('url')!r}")
+check("старая форма ddgs: ссылка со скобкой восстановлена целиком",
+      _entry(legacy_out, 1).get("url") == _DDGS_URL, f"got {_entry(legacy_out, 1).get('url')!r}")
+check("старая форма с русским маркером: ссылка восстановлена",
+      _entry(legacy_out, 2).get("url") == "https://rlsnet.ru/drugs/articaine",
+      f"got {_entry(legacy_out, 2).get('url')!r}")
+_legacy_texts = [_entry(legacy_out, i).get("text", "") for i in range(len(_LEGACY))]
+check("текст выдержки очищен от склеенной ссылки",
+      all(text and "http" not in text for text in _legacy_texts), f"got {_legacy_texts!r}")
+
+B._run_json_tool = _tool_returning([
+    {"text": "Биодентин закрывает перфорацию.", "url": _TAVILY_URL},
+    {"content": "Форма самого tavily.", "url": "https://ada.org/a"},
+    {"body": "Форма самого ddgs.", "href": "https://who.int/b"},
+])
+new_out, _ = _run(B.web_search_async("биодентин", 3, timeout=5))
+_new_urls = [_entry(new_out, i).get("url") for i in range(len(new_out))]
+_new_texts = [_entry(new_out, i).get("text") for i in range(len(new_out))]
+check("новая форма проходит без искажений",
+      _new_urls == [_TAVILY_URL, "https://ada.org/a", "https://who.int/b"], f"got {_new_urls!r}")
+check("имена полей самих провайдеров тоже приняты",
+      _new_texts[1:] == ["Форма самого tavily.", "Форма самого ddgs."], f"got {_new_texts!r}")
+
+B._run_json_tool = _tool_returning(["   ", {"text": "", "url": ""}, "Есть текст без ссылки"])
+mixed_out, _ = _run(B.web_search_async("вопрос", 3, timeout=5))
+check("пустышка не считается находкой", len(mixed_out) == 1, f"got {mixed_out!r}")
+check("находка без ссылки не выброшена молча",
+      _entry(mixed_out).get("text") == "Есть текст без ссылки"
+      and _entry(mixed_out).get("url") == "", f"got {mixed_out!r}")
+
+
+# Порченая нагрузка: не строка и не структура. Такой элемент выбрасывается, и
+# выбросить его МОЛЧА — значит оставить «поиск нашёл 3, показал 1» без
+# объяснения: врач не узнает, что часть выдачи потерялась, и разобраться потом
+# будет нечем. Проверяем ЖУРНАЛ, а не только возврат: диверсия показала, что без
+# этой проверки снятие записи не ронял ни одну из 94 проверок.
+
+
+class LogTrap(logging.Handler):
+    """Ловит записи blocking_tools, чтобы проверять ЖУРНАЛ, а не только возврат."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+    def text(self):
+        out = []
+        for record in self.records:
+            try:
+                out.append(record.getMessage())
+            except Exception:
+                out.append(str(record.msg))
+        return "\n".join(out)
+
+
+_trap = LogTrap()
+_bt_logger = logging.getLogger("blocking_tools")
+_bt_logger.addHandler(_trap)
+_prev_level, _prev_prop = _bt_logger.level, _bt_logger.propagate
+_bt_logger.setLevel(logging.DEBUG)
+_bt_logger.propagate = False
+try:
+    B._run_json_tool = _tool_returning([None, 42, {"text": "Живая выдержка", "url": "https://ada.org/x"}])
+    junk_out, _ = _run(B.web_search_async("вопрос", 3, timeout=5))
+finally:
+    _bt_logger.removeHandler(_trap)
+    _bt_logger.setLevel(_prev_level)
+    _bt_logger.propagate = _prev_prop
+
+check("порченая нагрузка не доезжает до врача как выдержка",
+      [_entry(junk_out, i).get("text") for i in range(len(junk_out))] == ["Живая выдержка"],
+      f"got {junk_out!r}")
+check("живая находка рядом с порченой не потеряна",
+      _entry(junk_out).get("url") == "https://ada.org/x", f"got {junk_out!r}")
+_junk_log = _trap.text()
+check("порченая нагрузка попала в журнал, а не выброшена молча",
+      "неизвестного вида" in _junk_log, f"журнал: {_junk_log!r}")
+check("в журнале назван тип, иначе разбирать нечем",
+      "NoneType" in _junk_log or "int" in _junk_log, f"журнал: {_junk_log!r}")
+check("запись о порченой нагрузке — предупреждение, а не отладка",
+      any(r.levelno >= logging.WARNING for r in _trap.records),
+      f"уровни: {[r.levelno for r in _trap.records]}")
+
+
+async def _tool_failing(action, payload, timeout=None):
+    return None, "web-search failed: ddgs: RuntimeError: сеть недоступна"
+
+
+B._run_json_tool = _tool_failing
+fail_out, fail_err = _run(B.web_search_async("вопрос", 2, timeout=5))
+check("отказ поиска остался отказом, а не пустой находкой",
+      fail_out == [] and fail_err and "сеть недоступна" in fail_err, f"got {fail_out!r} {fail_err!r}")
+B._run_json_tool = _saved_tool
+
+# Сквозной путь: структура из подпроцесса -> промпт со ссылкой под ответом.
+end_to_end = W.prepare("Чем закрыть перфорацию?", [
+    {"text": "Биодентин закрывает перфорацию у взрослых.", "url": _TAVILY_URL},
+    {"text": "Оксид циркония как каркас.", "url": _DDGS_URL},
+])
+check("сквозной путь даёт врачу рабочие ссылки",
+      _TAVILY_URL in end_to_end["footer"] and _DDGS_URL in end_to_end["footer"],
+      f"got {end_to_end['footer']!r}")
+check("сквозной путь не теряет скобку в подписи",
+      end_to_end["footer"].count("(стоматология)") == 1
+      and end_to_end["footer"].count("(IV)") == 1, f"got {end_to_end['footer']!r}")
+
+print("\n[12] Ветки, которые диверсия проходила молча")
+# Три проверки ниже добавлены после того, как диверсии в этих ветках НЕ уронили
+# ни одной из 106 проверок: ветка исполнялась, но её результат никто не смотрел.
+
+# Полуструктурная нагрузка: словарь с текстом, но БЕЗ поля url. Такую отдаёт
+# сохранённый ответ прошлой версии. Отбросить её — значит показать врачу
+# утверждение без источника, то есть ровно тот отказ, ради которого слой и
+# написан. Диверсия «return None вместо поиска ссылки в тексте» проходила молча.
+_semi = W.parse_result(
+    {"text": "Биодентин закрывает перфорацию, см. https://pubmed.ncbi.nlm.nih.gov/7/"})
+check("словарь без поля url не выброшен: ссылка взята из текста",
+      _semi and _semi["url"] == "https://pubmed.ncbi.nlm.nih.gov/7/"
+      and _semi["host"] == "pubmed.ncbi.nlm.nih.gov", f"got {_semi!r}")
+check("у полуструктурной нагрузки выдержка непустая и без ссылки",
+      _semi and _semi["text"] and "http" not in _semi["text"], f"got {_semi!r}")
+
+# Чужой маркер «(Источник: …)» обязан уйти из выдержки ЦЕЛИКОМ, а не оставить
+# обрубок «(Источник: )». Обрубок уезжает в промпт, и модель дописывает под него
+# источник, которого в выдержке нет: врач читает ссылку, которой не было.
+# Диверсия «снять со _strip_urls снятие маркера» проходила молча: проверка «в
+# тексте нет http» на обрубке выполняется.
+_marker_left = W.parse_result(
+    {"text": "Систематический обзор: биодентин не хуже МТА "
+             "(Источник: https://implant-msk.ru/blog)",
+     "url": "https://pubmed.ncbi.nlm.nih.gov/40000000/"})
+check("от чужого маркера в выдержке не осталось обрубка",
+      _marker_left and "Источник" not in _marker_left["text"]
+      and "Source" not in _marker_left["text"], f"got {_marker_left['text']!r}")
+
+# Словарь из одних пробелов — не находка. Диверсия «снять .strip() в
+# _as_search_entry» проходила молча: пробел непустой, фильтр пустышек его
+# пропускает, и поиск отчитывается «нашлось 2» при одной показанной выдержке.
+_blank_tool = B._run_json_tool
+try:
+    B._run_json_tool = _tool_returning([
+        {"text": "   ", "url": "  "},
+        {"text": "Живая выдержка", "url": "https://ada.org/x"},
+    ])
+    _blank_out, _ = _run(B.web_search_async("вопрос", 3, timeout=5))
+finally:
+    B._run_json_tool = _blank_tool
+check("словарь из пробелов не считается находкой",
+      len(_blank_out) == 1 and _entry(_blank_out).get("text") == "Живая выдержка",
+      f"got {_blank_out!r}")
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))

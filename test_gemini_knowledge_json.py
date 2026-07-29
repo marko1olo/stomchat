@@ -357,6 +357,35 @@ check("нет ключей -> None и строка в журнале",
       res is None and bool(log.levels("ERROR")) and not reqs, f"{log.levels('ERROR')}")
 config.GOOGLE_KEYS = _saved
 
+print("\n[13] Дырки, найденные диверсиями скептика (без них тест оставался зелёным)")
+# Диверсия «пустой ответ обрывает модель (break вместо continue)» НЕ роняла ни
+# одной проверки: сравнение «строк в журнале == попыток» самореферентно и
+# остаётся верным, когда попыток стало меньше. Здесь пришпилено само ЧИСЛО
+# попыток: пустой кандидат на одном ключе не отменяет остальные девять, иначе
+# пачка уходит в отказ на живой квоте и врач не получает статью, которую
+# следующий ключ отдал бы.
+_saved_keys = config.GOOGLE_KEYS
+config.GOOGLE_KEYS = [f"fake-key-{i}" for i in range(10)]
+res, reqs, log = run(lambda m: Resp(""))
+check("пустой ответ не отменяет ротацию ключей: опрошены все 10 на каждой модели",
+      len(reqs) == len(gk._models_to_try()) * 10,
+      f"запросов {len(reqs)} при {len(gk._models_to_try())} моделях x 10 ключей")
+check("на каждую из этих попыток своя строка в журнале",
+      len(per_model_lines(log)) == len(reqs),
+      f"строк {len(per_model_lines(log))} при {len(reqs)} попытках")
+config.GOOGLE_KEYS = _saved_keys
+
+# Диверсия «снять проверку пустого текста статьи» тоже не роняла ничего: правило
+# в validate_fact_payload было, а проверки на него не было. Пустая статья в вики —
+# это строка в выгрузке savdel.py, под которой врач не найдёт ни одного слова.
+blank = json.dumps({"facts": [{"c": "2.3.2", "f": "   ", "s": [9]}]}, ensure_ascii=False)
+verdict, why = gk.validate_fact_payload(blank)
+check("факт с пустым текстом статьи — контракт нарушен", verdict == "contract", f"{verdict} / {why}")
+res, reqs, log = run(lambda m: Resp(blank))
+check("пустая статья не возвращается вызывающему", res is None, f"вернулось {res!r}")
+check("причина отказа называет пустой текст статьи",
+      any("пустой текст" in m for m in log.levels("ERROR")), f"{log.levels('ERROR')[:1]}")
+
 print(f"\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалились:")
