@@ -84,3 +84,6 @@ _smoke_*.py
 # любой её импорт даёт второй экземпляр модуля с собственным состоянием.
 _bak_*.py
 *.sabbak
+_verify_*.py
+_verify_*.txt
+_skeptic_*.py
