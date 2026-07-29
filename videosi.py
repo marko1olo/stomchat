@@ -3,6 +3,7 @@ import aiosqlite
 import re
 import os
 import json
+import sqlite3
 import config
 from google import genai
 from google.genai import types
@@ -10,9 +11,24 @@ from datetime import datetime
 import time
 
 # Имя файла с твоим текстом (проверь, что он так называется!)
-INPUT_FILE = "videos.txt" 
+INPUT_FILE = "videos.txt"
 DB_PATH = "stomat_wiki.db"
+ARCHIVE_PATH = "stomat_archive.db"
 MODEL_ID = "models/gemma-3-27b-it"
+# Начало каждого видео-факта. Байт-в-байт как у 53 записей, уже лежащих в базе
+# (U+1F3A5 = 🎥): по нему и опознаётся «этот протокол уже импортирован». Стоит
+# изменить хоть пробел — защита от повтора перестанет видеть старые записи и
+# повторный прогон удвоит все 53 протокола.
+VIDEO_MARKER = "\U0001f3a5 [ВИДЕО-ПРОТОКОЛ | MSG "
+# Типы медиа архива, при которых ссылка на msg_id считается проверенной.
+VIDEO_MEDIA_TYPES = ("video",)
+# Сколько раз ждать освобождения базы. Без предела цикл был вечным: ошибка
+# «нет такой таблицы» — тоже OperationalError, и импорт молча висел навсегда.
+DB_BUSY_ATTEMPTS = 30
+# Пауза между протоколами, чтобы не душить API. Вынесена в константу, чтобы
+# защиту от повторного импорта можно было проверить тестом, не высиживая
+# 53 x 2 секунды: непроверяемая защита от дублей — это просто надежда.
+SLEEP_BETWEEN_VIDEOS = 2
 
 KNOWLEDGE_TREE = """
 1. ТЕРАПИЯ
@@ -37,6 +53,54 @@ KNOWLEDGE_TREE = """
 def clean_json_raw(text):
     match = re.search(r'\{.*\}', text, re.DOTALL)
     return match.group(0) if match else text
+
+def clean_codes(raw_codes):
+    """Оставить в category_code только цифровые коды.
+
+    Модель периодически отвечает названием категории словами. Такое название
+    уезжало в category_code как есть, и факт выпадал из выдачи целиком: и
+    экспорт (savdel.py), и поиск ходят по коду, а не по названию. Врач видео-
+    разбор просто не найдёт. Регулярка та же, что в reclass.py.
+    """
+    out = []
+    for code in raw_codes:
+        match = re.search(r'(\d+\.\d+(?:\.\d+)?)', str(code))
+        if match:
+            out.append(match.group(1))
+    # dict.fromkeys, а не set: порядок кодов не должен меняться от прогона к прогону.
+    return ", ".join(dict.fromkeys(out)) if out else "10.1"
+
+def verify_provenance(msg_id, archive_path=None):
+    """Вернуть номер источника, только если ссылка проверяема; иначе пустую строку.
+
+    Номера в videos.txt — это нумерация текстового файла, а НЕ msg_id архива.
+    Замер на боевых базах: 35 из 53 номеров случайно совпали с существующими
+    msg_id, и это чужие реплики — медиа есть только у 6, тип video ровно у 1.
+    То есть врач шёл по «источнику» и читал разговор про контактные пункты
+    вместо видео-разбора, после чего справедливо считал, что бот врёт.
+    Пустой провенанс честнее ложного: пустой ничего не обещает.
+    """
+    path = archive_path or ARCHIVE_PATH
+    text = str(msg_id).strip()
+    if not text.isdigit() or not os.path.exists(path):
+        return ""
+    try:
+        uri = "file:" + os.path.abspath(path).replace(os.sep, "/") + "?mode=ro"
+        archive = sqlite3.connect(uri, uri=True)
+        try:
+            row = archive.execute(
+                "SELECT has_media, media_type FROM archive_messages WHERE msg_id = ?",
+                (int(text),)).fetchone()
+        finally:
+            archive.close()
+    except sqlite3.Error:
+        # Архива нет или он битый — подтвердить ссылку нечем, значит её нет.
+        return ""
+    if not row or not row[0]:
+        return ""
+    if (row[1] or "").strip().lower() not in VIDEO_MEDIA_TYPES:
+        return ""
+    return text
 
 async def classify_video(body):
     """Классификация с ротацией ключей."""
@@ -70,32 +134,67 @@ async def classify_video(body):
             )
             if response and response.text:
                 data = json.loads(clean_json_raw(response.text))
-                return ", ".join(data.get("codes", ["10.1"]))
+                return clean_codes(data.get("codes", ["10.1"]))
         except Exception:
             continue # Пробуем следующий ключ молча
-            
+
     return "10.1" # Если все ключи сдохли
 
-async def save_to_db_safe(params):
-    """Безопасная запись в базу с повторными попытками (если база занята)."""
-    while True:
+async def already_imported(db, msg_id):
+    """Есть ли уже факт по этому протоколу. Сравнение по началу строки, не LIKE.
+
+    substr(...) = marker, а не LIKE '%MSG 148%': подстрока нашла бы «MSG 1489»
+    внутри «MSG 148», и часть протоколов молча не импортировалась бы.
+    Закрывающая скобка в маркере даёт границу номера.
+    """
+    marker = f"{VIDEO_MARKER}{msg_id}]"
+    cursor = await db.execute(
+        "SELECT id FROM distilled_facts WHERE substr(content, 1, ?) = ?",
+        (len(marker), marker))
+    return await cursor.fetchone()
+
+async def save_to_db_safe(params, msg_id):
+    """Записать факт, если такого протокола ещё нет. True — вставили, False — уже был.
+
+    Повторный запуск на том же videos.txt дублировал все 53 протокола: UNIQUE в
+    distilled_facts нет ни одного (PRAGMA index_list -> только idx_cat по
+    category_code), поэтому INSERT OR IGNORE сам по себе не отсекает ничего и
+    стоит здесь только на будущее — когда лид добавит UNIQUE, отсечёт база.
+    Врач в выдаче видел один и тот же разбор дважды и перестаёт верить счётчику.
+    """
+    for attempt in range(1, DB_BUSY_ATTEMPTS + 1):
         try:
             async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+                if await already_imported(db, msg_id):
+                    return False
                 await db.execute('''
-                    INSERT INTO distilled_facts 
+                    INSERT OR IGNORE INTO distilled_facts
                     (category_code, content, source_ids, is_case, confidence, processed_at, is_reclassified)
                     VALUES (?, ?, ?, ?, ?, ?, 1)
                 ''', params)
                 await db.commit()
-                return # Успех
-        except aiosqlite.OperationalError:
-            # Если база залочена (Locked), ждем секунду и пробуем снова
-            print("   ⏳ База занята, жду...")
+                return True # Успех
+        except sqlite3.OperationalError as exc:
+            reason = str(exc).lower()
+            if "locked" not in reason and "busy" not in reason:
+                # «no such table» — тоже OperationalError. Прежний код ждал
+                # освобождения базы вечно и не импортировал ни одного протокола.
+                raise
+            print(f"   [!] База занята, жду ({attempt} из {DB_BUSY_ATTEMPTS})...")
             await asyncio.sleep(1)
+    raise RuntimeError(
+        f"База {DB_PATH} занята {DB_BUSY_ATTEMPTS} попыток подряд, протокол MSG {msg_id} не записан")
 
 async def main():
+    # Печать без эмодзи: консоль боевой машины cp1251, а U+274C/U+2705/U+23F3 в
+    # неё не кодируются — на этой самой строке импорт падал UnicodeEncodeError,
+    # даже не дойдя до базы. Кириллица в cp1251 проходит.
     if not os.path.exists(INPUT_FILE):
-        print(f"❌ Файл {INPUT_FILE} не найден! Создай его и вставь текст.")
+        print(f"[СТОП] Файл {INPUT_FILE} не найден! Создай его и вставь текст.")
+        return
+
+    if not os.path.exists(DB_PATH):
+        print(f"[СТОП] База не найдена: {os.path.abspath(DB_PATH)}")
         return
 
     with open(INPUT_FILE, "r", encoding="utf-8") as f:
@@ -103,42 +202,68 @@ async def main():
 
     # Разбиваем по номерам сообщений (ID на отдельной строке)
     parts = re.split(r'\n(\d{3,})\n', "\n" + content)
-    
-    print("🚀 Старт импорта ВИДЕО-САММАРИ...")
-    
+
+    print("Старт импорта ВИДЕО-САММАРИ...")
+    if not os.path.exists(ARCHIVE_PATH):
+        print(f"[!] Архива {ARCHIVE_PATH} рядом нет: провенанс останется пустым у всех "
+              f"протоколов. Пустая ссылка честнее ссылки на чужую реплику.")
+
     count = 0
+    skipped = 0
+    without_source = 0
     # parts[0] пустой, дальше [ID, Текст, ID, Текст...]
     for i in range(1, len(parts), 2):
         msg_id = parts[i].strip()
-        body = parts[i+1].strip()
-        
+        # Файл может кончиться номером без текста — тогда parts[i+1] нет.
+        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+
         if not body: continue
 
-        print(f"🔄 Обработка Видео MSG_{msg_id}...", end=" ")
-        
-        # 1. Классифицируем
+        # 1. Формируем текст и проверяем, не импортирован ли протокол раньше.
+        #    Проверка ДО обращения к модели: иначе повторный прогон платит за
+        #    классификацию 53 протоколов, которые всё равно будут отброшены.
+        final_content = f"{VIDEO_MARKER}{msg_id}]\n\n{body}"
+        async with aiosqlite.connect(DB_PATH, timeout=30) as probe:
+            if await already_imported(probe, msg_id):
+                print(f"Пропуск Видео MSG_{msg_id}: протокол уже в базе.")
+                skipped += 1
+                continue
+
+        print(f"Обработка Видео MSG_{msg_id}...", end=" ")
+
+        # 2. Классифицируем
         cat_code = await classify_video(body)
-        
-        # 2. Формируем красивый текст
-        final_content = f"🎥 [ВИДЕО-ПРОТОКОЛ | MSG {msg_id}]\n\n{body}"
-        
-        # 3. Сохраняем (безопасно)
-        await save_to_db_safe((
-            cat_code, 
-            final_content, 
-            msg_id, 
+
+        # 3. Провенанс: либо проверенный msg_id архива, либо пусто.
+        source_ids = verify_provenance(msg_id)
+        if not source_ids:
+            without_source += 1
+
+        # 4. Сохраняем (безопасно)
+        inserted = await save_to_db_safe((
+            cat_code,
+            final_content,
+            source_ids,
             1,   # is_case
             100, # confidence
             datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        ))
-        
-        print(f"✅ ОК -> Категория {cat_code}")
-        count += 1
-        
+        ), msg_id)
+
+        if inserted:
+            print(f"ОК -> Категория {cat_code}"
+                  + (f", источник {source_ids}" if source_ids else ", источник не подтверждён"))
+            count += 1
+        else:
+            print("пропуск: протокол уже в базе.")
+            skipped += 1
+
         # Пауза, чтобы не душить API
-        await asyncio.sleep(2) 
-        
-    print(f"\n🏁 Импорт завершен! Добавлено {count} протоколов.")
+        await asyncio.sleep(SLEEP_BETWEEN_VIDEOS)
+
+    print(f"\nИмпорт завершен! Добавлено {count} протоколов, пропущено как повтор {skipped}.")
+    if without_source:
+        print(f"Без подтверждённого источника: {without_source}. Номера из {INPUT_FILE} — "
+              f"нумерация файла, а не msg_id архива; ложную ссылку врач читает как обман.")
 
 if __name__ == '__main__':
     asyncio.run(main())
