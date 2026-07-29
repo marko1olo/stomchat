@@ -12,7 +12,6 @@ from reclass import ModelJsonError, extract_codes
 from google import genai
 from google.genai import types
 from datetime import datetime
-import time
 
 # Имя файла с твоим текстом (проверь, что он так называется!)
 INPUT_FILE = "videos.txt"

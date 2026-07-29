@@ -239,7 +239,10 @@ async def section_reply_index():
 
 async def section_window_ties():
     print("\n[4] Окно последних сообщений: одна секунда — не повод терять реплику")
-    path = fresh_db("ties.db")
+    # Путь тут не нужен, но вызов обязателен: fresh_db переставляет config.DB_PATH
+    # на пустую базу. Снести строку целиком — значит прогнать секцию по базе
+    # предыдущей, и «окно не теряет реплику врача» перестанет проверять окно.
+    fresh_db("ties.db")
     await database.init_db()
 
     base = datetime(2026, 6, 10, 9, 0, 0, tzinfo=timezone.utc)
@@ -473,7 +476,9 @@ async def section_bookmarks():
 
 async def section_pending_media():
     print("\n[10] Неразобранные снимки: подбирается всё, а не последние три дня")
-    path = fresh_db("media.db")
+    # Как в секции [4]: путь не нужен, а вызов — да, иначе снимки лягут в базу
+    # предыдущей секции и выборка неразобранных проверится на чужих строках.
+    fresh_db("media.db")
     await database.init_db()
 
     now = datetime.now(timezone.utc)

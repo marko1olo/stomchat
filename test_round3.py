@@ -3,9 +3,7 @@
 маршрутизация ботов, дедуп колбэков, ссылки закладок.
 Запуск: python test_round3.py
 """
-import asyncio
 import inspect
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 

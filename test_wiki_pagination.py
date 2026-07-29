@@ -27,8 +27,6 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-import config
-
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_wiki_")
 _ORIGINAL_CWD = os.getcwd()
 

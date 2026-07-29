@@ -33,14 +33,13 @@ flood_sleep_threshold=20 (main.py:883, 900-910), то есть ОДИН await в
 Запуск: python test_tg_delivery.py
 """
 import asyncio
-import io
 import logging
 import os
 import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 for _stream in (sys.stdout, sys.stderr):
     try:

@@ -17,7 +17,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 
 for _stream in (sys.stdout, sys.stderr):
     try:

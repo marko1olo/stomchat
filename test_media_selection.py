@@ -38,7 +38,6 @@ for _stream in (sys.stdout, sys.stderr):
 
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(tempfile.mkdtemp(prefix="stomchat_ms_"), "t.log")
 
-import assistant as A  # noqa: E402
 import main as M  # noqa: E402
 import media_tools as MT  # noqa: E402
 

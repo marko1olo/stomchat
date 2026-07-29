@@ -3,8 +3,6 @@ import aiosqlite
 import logging
 import os
 import cv2
-import httpx
-import base64
 import random
 import shutil
 from PIL import Image
@@ -91,7 +89,11 @@ async def download_video_media(client, media, destination):
     return destination
 
 
-# Функция process_with_groq удалена в пользу vision.describe_image
+# Функция process_with_groq удалена в пользу vision.describe_image. Вместе с ней
+# ушли httpx и base64: свой HTTP-запрос и своя кодировка картинки были нужны
+# только ей, теперь и то и другое живёт внутри vision.py. Заводить их здесь
+# снова — значит завести второй путь в Vision, минующий ротацию ключей и
+# кулдауны, то есть снимок врача молча останется без описания при первом лимите.
 
 # === ОСНОВНАЯ ЛОГИКА ===
 
