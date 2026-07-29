@@ -395,6 +395,59 @@ check("обрезанная запись справки кончается гр�
       kept.rstrip().endswith((".", "!", "?", ";", ELL)), repr(kept[-30:]))
 
 
+print("\n[11] Дописано скептиком: три диверсии проходили мимо набора")
+# С1. Ранняя граница не имеет права съесть бюджет. `if best >= limit // 2`
+# заменяется на `if best >= 0` без единого падения: на живой вике при пределе
+# 3904 граница всегда во второй половине, и корпусная проверка [9] слепа.
+# ПОСЛЕДСТВИЕ: у факта, где единственная точка стоит в начале («Да.» или
+# «Рис. 1»), врач и модель получают три символа вместо тысячи двухсот.
+EARLY = "Да. " + "слово " * 80
+starved = []
+for limit in (60, 100, 240, 400, 480):
+    shown, dropped = H.clip_at_sentence(EARLY, limit)
+    if len(shown) < limit - 8:
+        starved.append((limit, len(shown), repr(shown[:20])))
+check("ранняя точка не съедает бюджет разреза", not starved,
+      f"голодных пределов {len(starved)}: {starved[:3]}")
+check("на таком входе отброшено не больше непоместившегося плюс слово",
+      H.clip_at_sentence(EARLY, 240)[1] <= len(EARLY) - 240 + 8,
+      f"отброшено {H.clip_at_sentence(EARLY, 240)[1]} из {len(EARLY)} при пределе 240")
+
+# С2. Экранирование тела в ветке приписки. `body = shown` без replace проходит
+# весь набор: у 12 784 фактов вики «<» встречается в двух, и оба короткие.
+# ПОСЛЕДСТВИЕ: Telegram отклоняет сообщение с неразбираемой разметкой ЦЕЛИКОМ —
+# врач видит не урезанную статью, а пустоту и мёртвые кнопки листания.
+DIRTY = "Условие pH < 7 и связка Ca & P в остатке раствора. " * 90
+dirty_out = A.clean_html_formatting(DIRTY)
+dirty_body = dirty_out.split("\n\n[Показано")[0]
+check("вход подобран: ветка приписки, «<» и «&» в теле",
+      "не поместились" in dirty_out and len(TAG_RE.sub("", DIRTY)) > A._ARTICLE_PLAIN_MAX_CHARS,
+      f"плоских {len(DIRTY)}")
+check("«<» в теле статьи экранирован", "&lt;" in dirty_body and "<" not in dirty_body,
+      f"хвост: {dirty_body[-60:]!r}")
+check("«&» в теле статьи экранирован",
+      "&amp;" in dirty_body and "&" not in re.sub(r"&(amp|lt|gt);", "", dirty_body),
+      f"хвост: {dirty_body[-60:]!r}")
+check("после экранирования незакрытых тегов не осталось",
+      not H.unclosed_tags(dirty_out) and H.balance_html(dirty_out)[0] == dirty_out,
+      f"незакрытые: {H.unclosed_tags(dirty_out)}")
+
+# С3. Двоеточие — не конец предложения. Добавление ':' в набор знаков не ронял
+# ни одной проверки, хотя разрез после «Протокол включает:» — тот же дефект,
+# что и висящий номер пункта. ПОСЛЕДСТВИЕ: врач читает заголовок перечня, за
+# которым в сообщении ничего нет, и не знает, что список потерян.
+LEAD = ("Первый раздел протокола закончен точкой. " + "текст " * 24
+        + "Протокол включает: ")
+COLON = LEAD + "первый пункт, второй пункт и третий пункт перечня"
+dangling = [lim for lim in range(len(LEAD) - 30, len(LEAD) + 2)
+            if H.clip_at_sentence(COLON, lim)[0].rstrip().endswith(":")]
+check("разрез не кончается двоеточием — перечня за ним нет", not dangling,
+      f"пределы с висящим двоеточием: {dangling[:6]}")
+check("двоеточие не считается границей ни на одном пределе",
+      not [lim for lim in LIMITS
+           if H.clip_at_sentence(COLON, lim)[0].rstrip().endswith(":")])
+
+
 print(f"\n{'=' * 62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}   SKIPPED: {len(SKIP)}")
 if SKIP:
     print("Пропущено: " + ", ".join(SKIP))

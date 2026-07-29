@@ -177,6 +177,19 @@ LEAF_CHILDREN = {}
 for _code in sorted(LEAF_CODES):
     LEAF_CHILDREN.setdefault(_code.rsplit(".", 1)[0], []).append(_code)
 
+# --- коды вне дерева, которые обязана показывать НАВИГАЦИЯ ---------------------
+# Дерево знает только свои листья, а в боевой вике есть коды, которых в дереве
+# нет, и факты под ними лежат: замер mode=ro 2026-07-29 — `6.1.2`, 82 факта.
+# Сито поднимает такой код до листа в момент разметки, но кнопки бота читают
+# category_code как он записан в базе. Без этого списка 82 факта не открываются
+# НИ ОДНОЙ кнопкой: для врача этого знания просто нет.
+#
+# Имя такому коду не придумывается. Он показывается под кнопкой того листа, до
+# которого его поднимает `distiller.normalize_category` — ЕДИНСТВЕННОГО листа
+# своего подраздела (`LEAF_CHILDREN["6.1"] == ["6.1.1"]`). Если листьев больше
+# одного, однозначно поднять нельзя, и `consistency_errors()` об этом скажет.
+NAVIGATION_ALIASES = ("6.1.2",)
+
 # --- имена файлов выгрузки ----------------------------------------------------
 # Форма имени файла историческая и трогать её нельзя: prompter.py забирает из папки
 # выгрузки каждый .txt и заказывает по нему платную монографию у Гемини. Переименуй
@@ -317,6 +330,23 @@ def describe(code):
     return UNNAMED_PREFIX + code
 
 
+def alias_leaf(code):
+    """Лист, под кнопкой которого показывается код вне дерева, либо None.
+
+    Сам лист возвращает себя. Для кода вне дерева поднимаем до единственного
+    листа подраздела — той же операцией, которой его поднимает сито. Когда
+    листьев в подразделе несколько, возвращаем None: выбрать один значило бы
+    придумать врачу специфичность, которой в базе нет.
+    """
+    code = normalize_code(code)
+    if code in LEAF_CODES:
+        return code
+    children = LEAF_CHILDREN.get(code.rsplit(".", 1)[0], ())
+    if len(children) == 1:
+        return children[0]
+    return None
+
+
 def is_exportable(code):
     """Попадёт ли факт с этим кодом хотя бы в один файл выгрузки."""
     return normalize_code(code) in EXPORT_SLUGS
@@ -394,6 +424,14 @@ def consistency_errors():
         problems.append(f"{FALLBACK_CODE}: корзина нечитаемых кодов вне дерева")
     if FALLBACK_CODE not in EXPORT_SLUGS:
         problems.append(f"{FALLBACK_CODE}: корзина нечитаемых кодов не выгружается")
+    for code in NAVIGATION_ALIASES:
+        if code in LEAF_CODES:
+            problems.append(f"{code}: код есть в дереве, отдельный алиас навигации "
+                            f"лишний")
+        elif alias_leaf(code) is None:
+            problems.append(f"{code}: алиас навигации не поднимается до "
+                            f"единственного листа — под какой кнопкой показать "
+                            f"факт, неизвестно, а придумывать нельзя")
     nameless = sorted(c for c in EXPORT_SLUGS if c not in DISPLAY_NAMES)
     if nameless:
         problems.append(f"рубрика без человеческого имени: {nameless}")

@@ -504,6 +504,110 @@ check("боевые файлы учёта не тронуты",
 check("боевой файл кулдаунов в корне не создан",
       not os.path.exists("key_cooldowns.json"), "рядом с репозиторием появился боевой файл")
 
+print("\n[13] Попытки одной модели идут по РАЗНЫМ ключам")
+# Дописано проверяющим: диверсия «api_key = available[0] вместо available[attempt]»
+# не была замечена НИ ОДНОЙ из 78 проверок. Без ротации все попытки модели бьют в
+# один и тот же ключ: исчерпанный съедает их все, а девять живых простаивают —
+# ровно тот дефект, из-за которого лана и открыта. Ни одна проверка не доводила
+# модель до ВТОРОЙ попытки, поэтому ротация не наблюдалась вовсе.
+# Число попыток задаём явно: значение по умолчанию берётся из окружения, а его
+# состояние на боевой машине я не контролирую.
+os.environ["STOMCHAT_GEMINI_MAX_ATTEMPTS"] = "3"
+reset({"gemini-3.5-flash-lite": Exception("invalid argument: unsupported field in request")})
+res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
+_per_model = {}
+for _model, _key in TEXT_REQUESTS:
+    _per_model.setdefault(_model, []).append(_key)
+_failing = _per_model.get("gemini-3.5-flash-lite", [])
+check("отказавшая модель получила больше одной попытки", len(_failing) >= 2,
+      f"got {len(_failing)} — ротацию ключей проверять не на чем")
+check("каждая попытка модели ушла на СВОЙ ключ (квота размазана)",
+      len(set(_failing)) == len(_failing), f"got {_failing}")
+check("клиент создан ровно тем ключом, которым ушёл запрос",
+      [k for k, _, _ in CLIENT_CALLS][:len(_failing)] == _failing,
+      f"клиенты {[k for k, _, _ in CLIENT_CALLS][:len(_failing)]} против запросов {_failing}")
+check("ответ врачу всё равно получен следующей моделью",
+      res is not None and res.text == "ответ модели", f"got {res}")
+
+
+print("\n[14] Каскад НЕ начинает запрос, которому не хватит времени до дедлайна")
+# Дописано проверяющим: диверсия «remaining < 0 вместо remaining < MIN_REQUEST_SECONDS»
+# не была замечена. Родитель (blocking_tools) убивает подпроцесс ровно по timeout,
+# поэтому запрос, начатый за секунду до конца, — не «последний шанс», а потерянная
+# секунда врача И потерянная причина провала: записать её уже некому.
+# Часы двигает сам запрос: клиент создаётся один раз на попытку, значит момент
+# создания — это момент старта запроса.
+_CLOCK = [1000.0]
+_SPENT = 296.5              # столько «длится» каждый запрос
+_REMAINING_AT_START = []
+_BUDGET = 2100.0            # боевой бюджет сводки
+_USABLE = max(min(_BUDGET, gc.MIN_REQUEST_SECONDS), _BUDGET * gc.BUDGET_RESERVE_SHARE)
+_DEADLINE = _CLOCK[0] + _USABLE
+_real_monotonic = gc.time.monotonic
+
+
+def clock_client_maker(api_key, base_url, timeout=30.0):
+    _REMAINING_AT_START.append(_DEADLINE - _CLOCK[0])
+    _CLOCK[0] += _SPENT
+    return fake_client_maker(api_key, base_url, timeout=timeout)
+
+
+_heavy_error = Exception("invalid argument: unsupported field in request")
+reset({name: _heavy_error for name in ("gemini-3.6-flash", "gemini-3.5-flash",
+                                       "gemini-3.5-flash-lite",
+                                       "llama-3.3-70b-versatile")})
+gc.get_openai_client = clock_client_maker
+gc.time.monotonic = lambda: _CLOCK[0]
+try:
+    gc.generate_text("сводка за день", {"kind": "daily"}, timeout=_BUDGET)
+finally:
+    gc.time.monotonic = _real_monotonic
+    gc.get_openai_client = fake_client_maker
+
+check("каскад успел сделать несколько запросов", len(_REMAINING_AT_START) >= 3,
+      f"got {len(_REMAINING_AT_START)}")
+_late = [r for r in _REMAINING_AT_START[1:] if r < gc.MIN_REQUEST_SECONDS]
+check("ни один запрос не начат с остатком меньше минимального",
+      not _late, f"начаты с остатком {[round(r, 1) for r in _late]} с")
+check("часы каскада не перешли за родительский дедлайн",
+      _CLOCK[0] <= _DEADLINE,
+      f"израсходовано {_CLOCK[0] - 1000.0:.0f} с при разрешённых {_USABLE:.0f}")
+check("остановка названа исчерпанием бюджета, а не общим провалом",
+      (gc.get_last_failure() or {}).get("reason") == "budget_exhausted",
+      f"got {gc.get_last_failure()}")
+check("остаток бюджета назван в журнале",
+      any("Budget spent" in line for line in LOG.lines),
+      f"журнал: {LOG.lines[-3:]}")
+
+
+print("\n[15] Остаток живых ключей в журнале — настоящий, а не размер пула")
+# Дописано проверяющим: диверсия «в журнал уходит len(pool) вместо alive» не была
+# замечена — проверки [6] требовали лишь подстроку « из 10». Строка «живых ключей
+# осталось 10 из 10» сразу после выбывшего ключа возвращает оператора туда же,
+# откуда его увёл фикс: по журналу не видно, осталось ли чем отвечать врачу.
+# Ожидаемое число спрашиваем у САМОГО учёта, а не пишем литералом.
+reset()
+for _key in GOOGLE_KEYS[:4]:
+    gc.set_key_cooldown("gemini", _key, seconds=300)
+gc.note_key_failure("gemini", GOOGLE_KEYS[4], "429 RESOURCE_EXHAUSTED: quota exceeded")
+_alive_now = len(gc.available_keys("gemini", GOOGLE_KEYS)[0])
+_quota_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
+check("запись об отказе по квоте есть", _quota_lines, f"журнал: {LOG.lines[:4]}")
+check("выбывшие ключи из остатка вычтены", _alive_now == 5,
+      f"учёт говорит {_alive_now} живых при 4 остывающих и одном выбитом из 10")
+check("в журнале названо ровно то число живых, что подтверждает учёт",
+      any(f"осталось {_alive_now} из {len(GOOGLE_KEYS)}" in l for l in _quota_lines),
+      f"учёт говорит {_alive_now}, журнал: {_quota_lines}")
+LOG.lines.clear()
+gc.note_key_failure("gemini", GOOGLE_KEYS[5], "429 RESOURCE_EXHAUSTED: quota exceeded")
+_alive_after = len(gc.available_keys("gemini", GOOGLE_KEYS)[0])
+_next_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
+check("следующий отказ называет уже МЕНЬШЕЕ число живых",
+      _alive_after == _alive_now - 1
+      and any(f"осталось {_alive_after} из {len(GOOGLE_KEYS)}" in l for l in _next_lines),
+      f"было {_alive_now}, стало {_alive_after}, журнал: {_next_lines}")
+
+
 gc.time.sleep = _real_sleep
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 

@@ -86,6 +86,33 @@ F10. Защиты от дублей не было ни в коде, ни в сх
 F11. Пути к БД были относительными: запуск из любого каталога, кроме корня,
      создавал пустую фальшивую `stomat_wiki.db`. Теперь пути от `__file__`.
 
+F12. Гейт очереди стоял на ФАКТЕ «зрение не прошло»: `has_media = 0 OR
+     vision_processed = 1`. Для фото это правильно — описание ещё придёт. Но
+     `visionproc.py` берёт в работу ТОЛЬКО `media_type IN ('photo','video')`,
+     поэтому для остальных типов «ещё придёт» неправда. Замер: все 444
+     непрошедшие реплики имеют `media_type='file'`; фото разобрано 14 754 из
+     14 754, видео 804 из 804, файлов — 0 из 444. Очереди зрения не существует,
+     ожидающих фото в базе НОЛЬ. У 49 из 444 есть СВОЙ текст (20 клинических по
+     dental_vocab, 5 353 симв.), и они не попали бы в вики никогда — не потому,
+     что плохи, а потому, что рядом лежал файл. Теперь гейт стоит на НАЛИЧИИ
+     ПРИГОДНОГО МАТЕРИАЛА (`has_usable_material`): доступных ситу было 0, стало
+     49. Для фото/видео поведение не изменилось — их по-прежнему ждут. Заодно
+     счётчик «заперто до Vision» разделён на честное ожидание и
+     «зрение НЕПРИМЕНИМО»: смешивать «придёт позже» с «не придёт никогда» нельзя,
+     во втором случае человеку надо действовать, а не ждать.
+
+F13. Правка F2 работает ТОЛЬКО ВПЕРЁД: уже помеченные реплики сито не прочитает
+     никогда. Замер: помечено 117 403, в провенансе фактов 48 361 разный msg_id,
+     то есть помечено-и-ни-одного-факта 69 583 при строгом счёте и 67 819 при
+     счёте тем же правилом, каким сито провенанс ПИШЕТ (у 353 фактов все токены
+     вида `MSG_12345` — факт есть, испорчен только провенанс; это 1 764 реплики
+     разницы). С пригодным материалом из них 65 908. Добавлены
+     `find_burned_messages` (только чтение) и `reset_burned_flags`, который по
+     умолчанию НЕ ПИШЕТ, а перед первой записью обязан снять проверенную копию
+     через VACUUM INTO — не снялась, значит ни один флаг не сброшен. Здесь этот
+     сброс НЕ ЗАПУСКАЕТСЯ: перепрогон 65 908 реплик — платная генерация и часы,
+     решение владельца.
+
 Удалено как мёртвое: `call_groq_llama` (синтез идёт через
 `gemini_knowledge.generate_fact_json`), переменная `last_id`, импорты
 `httpx`/`random`/`config`. Благодаря этому модуль ИМПОРТИРУЕТСЯ БЕЗ ПОБОЧНЫХ
@@ -114,6 +141,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime
 
@@ -138,6 +166,11 @@ LOG_PATH = os.environ.get("STOMCHAT_DISTILLER_LOG") or os.path.join(BASE_DIR, "d
 BATCH_SIZE = 80
 OVERLAP = 8  # Нахлёст: последние OVERLAP реплик пачки не помечаются и попадают в следующую.
 
+# Префикс копии архива, снимаемой перед сбросом флага (F13). Отдельный от
+# `reclass.BACKUP_PREFIX`: там копия ВИКИ перед перезаписью категорий, здесь
+# копия АРХИВА перед сбросом флага обработки, и путать их в каталоге нельзя.
+BACKUP_PREFIX = "archive_backup_"
+
 # Сколько раз повторить пачку, по которой модель не ответила или ответила
 # мусором, прежде чем признать её потерянной. Раньше повтора не было вообще:
 # первый же отказ транспорта выжигал 72 реплики навсегда.
@@ -151,6 +184,32 @@ MAX_BATCH_ATTEMPTS = 3
 MSG_CHAR_CAP = 4200        # на одну реплику в промпте
 PROMPT_CHAR_BUDGET = 48000  # на весь лог сообщений в промпте
 CONTENT_CHAR_CAP = 6000     # на текст одного факта; максимум в базе 5 477
+
+# === ГЕЙТ ДОСТУПНОСТИ: ЧТО СИТО ВООБЩЕ ИМЕЕТ ПРАВО ВЗЯТЬ (F12) ===
+# Типы медиа, которые разбирает зрение. Список не выдуман: ровно этот стоит в
+# СВОЁМ запросе `visionproc.py` — `WHERE media_type IN ('photo','video') AND
+# vision_processed = 0`. Всё, чего в списке нет, зрение не берёт НИКОГДА.
+#
+# Замер по живому архиву, который это подтверждает поведением, а не чтением кода:
+#     media_type   vision=1   vision=0   доля разобранных
+#     photo          14 754          0        100.00 %
+#     video             804          0        100.00 %
+#     file                0        444          0.00 %
+# Фото и видео разобраны полностью — ожидающих во всей базе НОЛЬ. Значит очереди
+# зрения не существует, и прежняя формулировка «заперто ДО Vision» обещала
+# ожидание, которого нет: 444 реплики с `media_type='file'` стояли вне очереди с
+# 2023-06-07. У 49 из них есть СВОЙ текст (20 клинических по dental_vocab,
+# в сумме 5 353 симв.), и сито могло бы взять их по тексту.
+VISION_MEDIA_TYPES = ("photo", "video")
+
+# Чем visionproc.py закрывает медиа, из которого описания не вышло: `SKIP_EMPTY`,
+# `SKIP_LINK`, `SKIP_UNREADABLE`, `SKIP_ERROR` и свободное `SKIP. <почему>` от
+# самой модели. Замер: строк с описанием, начинающимся на SKIP, — 3 808, причём
+# по шаблону `SKIP_%` их видно только 76, а по `SKIP.%` — 1 305. Поэтому префикс
+# берётся без разделителя: фильтр `SKIP_` пропустил бы 98 % случаев.
+# Регистр здесь можно сворачивать: `SKIP` — ASCII, а SQLite `UPPER`/`LIKE`
+# сворачивают ТОЛЬКО ASCII (на кириллице они не работают, и это уже ловилось).
+VISION_SKIP_PREFIX = "SKIP"
 
 # === ТАКСОНОМИЯ: ЕДИНСТВЕННЫЙ ИСТОЧНИК ===
 # Дерево знаний 5.0 и все производные от него множества живут в `taxonomy.py`.
@@ -666,14 +725,64 @@ def prepare_fact(f, allowed_ids, known_hashes):
     return row, notes
 
 
+def has_usable_material(text, vision_description):
+    """
+    Есть ли у реплики то, из чего вообще можно сделать факт. ОДНО правило (F12).
+
+    Пригодно: непустой собственный текст либо ОСМЫСЛЕННОЕ описание изображения.
+    Не пригодно: пусто, либо описание — служебная отметка `SKIP...`, то есть
+    зрение честно сказало «тут нечего описывать».
+
+    Правило одно и то же для трёх решений, которые раньше принимались врозь:
+    что сито имеет право взять, что имеет смысл перепрогонять и что заперто
+    навсегда. Расхождение этих трёх правил и есть цена: реплика, признанная
+    негодной для перепрогона, но годной для очереди, крутилась бы в очереди
+    вечно, а обратный перекос сжигал бы платную генерацию на пустышках.
+    """
+    if (text or "").strip():
+        return True
+    v = (vision_description or "").strip()
+    return bool(v) and not v.upper().startswith(VISION_SKIP_PREFIX)
+
+
+def usable_material_sql():
+    """То же правило на SQL. Ровно один текст условия на весь модуль."""
+    body = "TRIM(COALESCE(vision_description, ''))"
+    return ("(TRIM(COALESCE(text, '')) <> '' OR "
+            f"({body} <> '' AND UPPER({body}) NOT LIKE '{VISION_SKIP_PREFIX}%'))")
+
+
+def available_to_sieve_sql():
+    """
+    Условие «ситу есть с чем работать» (F12). Собрано из правила материала, а не
+    написано вторым текстом: иначе гейт очереди и гейт перепрогона разъезжаются.
+
+    Прежний гейт был `has_media = 0 OR vision_processed = 1`, то есть отбор ПО
+    ФАКТУ «зрение не прошло». Для фото это верно: описание ещё придёт, и брать
+    снимок до него значит потерять содержимое кадра навсегда. Но для типов, за
+    которые зрение не берётся вообще (`VISION_MEDIA_TYPES`), «ещё придёт» —
+    неправда, и условие превращалось в пожизненный запрет.
+
+    Поэтому третья ветка: медиа, к которому зрение НЕПРИМЕНИМО, доступно, если у
+    реплики есть свой материал. Замер: доступных ситу было 0, стало 49 — это
+    49 реплик врачей с текстом (20 клинических), которые не попали бы в вики
+    никогда, причём не потому, что плохи, а потому, что рядом лежал файл.
+    Для фото/видео поведение НЕ меняется: их по-прежнему ждут (замер: таких
+    ожидающих в базе 0, то есть послаблению нечего испортить сегодня).
+    """
+    types_in = ", ".join(f"'{t}'" for t in VISION_MEDIA_TYPES)
+    return ("(has_media = 0 OR vision_processed = 1 OR "
+            f"(COALESCE(media_type, '') NOT IN ({types_in}) AND {usable_material_sql()}))")
+
+
 async def fetch_batch():
     """Читает очередную пачку кандидатов. `reply_to_msg_id` добавлен в SELECT (F5)."""
     async with aiosqlite.connect(ARCHIVE_DB, timeout=30) as db:
-        cursor = await db.execute('''
+        cursor = await db.execute(f'''
             SELECT msg_id, date, sender_name, text, vision_description, media_remote_url, reply_to_msg_id
             FROM archive_messages
             WHERE is_processed_for_wiki = 0
-            AND (has_media = 0 OR vision_processed = 1)
+            AND {available_to_sieve_sql()}
             ORDER BY msg_id ASC
             LIMIT ?
         ''', (BATCH_SIZE,))
@@ -689,33 +798,250 @@ async def mark_processed(ids):
         await db.commit()
 
 
+async def find_burned_messages(archive_db=None, wiki_db=None, require_material=True):
+    """
+    Реплики, ПОМЕЧЕННЫЕ обработанными, но не отражённые НИ В ОДНОМ факте (F13).
+
+    Возвращает (ids, stats). НИЧЕГО НЕ ПИШЕТ: оба соединения открываются
+    `file:...?mode=ro`, и это не вкусовщина — rw-ручка к боевой базе даже под
+    один SELECT создаёт рядом файлы `-wal`/`-shm`, а первый же UPDATE по ней
+    уходит в живой архив врачей.
+
+    Зачем эта выборка вообще: правка волны 1 (флаг ставился ВНЕ проверки «факты
+    есть») работает ТОЛЬКО ВПЕРЁД. Уже помеченные реплики сито не прочитает
+    никогда — их надо назвать поимённо, чтобы владелец мог решить про перепрогон.
+
+    Замер по живым базам:
+        помечено обработанными                117 403
+        разных msg_id в провенансе (isdigit)   48 361
+        помечено и НИ ОДНОГО факта             69 583  <- верхняя оценка
+        то же правилом самого сита             67 819  <- сюда
+        из них с пригодным материалом          65 908
+
+    Почему правило сита, а не строгое `isdigit`: у 353 фактов ВСЕ токены
+    `source_ids` имеют вид `MSG_12345`. Факт эти реплики ДАЛИ — испорчен только
+    провенанс. Считая их выжженными, мы отправили бы 1 764 реплики на платный
+    перепрогон ради дубля, который защита F10 всё равно отбросит по хешу.
+    Поэтому провенанс читается ровно тем же `normalize_source_ids`, каким сито
+    его пишет: одно правило на запись и на чтение, иначе они разъедутся.
+
+    Отбор идёт по РАЗБОРУ СПИСКА, а не подстрокой. `source_ids` — это список
+    через запятую, и наивный `source_ids LIKE '%602%'` находит 602 внутри 60245:
+    замер на 400 живых msg_id — у 400 из 400 подстрочный отбор даёт БОЛЬШЕ
+    фактов, чем разбор по токенам. Отобрать по подстроке значит объявить
+    обработанной реплику, которой в фактах нет.
+
+    require_material отсекает то, что перепрогонять бессмысленно (пусто либо
+    только SKIP-отметка зрения): замер — 1 911 реплик из 67 819. Правило
+    материала общее с гейтом очереди, см. has_usable_material.
+    """
+    archive_db = archive_db or ARCHIVE_DB
+    wiki_db = wiki_db or WIKI_DB
+
+    cited = set()
+    async with aiosqlite.connect(f"file:{wiki_db}?mode=ro", uri=True) as wiki:
+        async with wiki.execute("SELECT source_ids FROM distilled_facts") as cur:
+            async for (src,) in cur:
+                ids, _dropped = normalize_source_ids(src, None)
+                cited.update(ids)
+
+    stats = {"cited": len(cited), "marked": 0, "burned": 0, "no_material": 0}
+    ids = []
+    async with aiosqlite.connect(f"file:{archive_db}?mode=ro", uri=True) as db:
+        async with db.execute(
+            "SELECT msg_id, text, vision_description FROM archive_messages "
+            "WHERE is_processed_for_wiki = 1 ORDER BY msg_id ASC"
+        ) as cur:
+            async for msg_id, text, vision in cur:
+                stats["marked"] += 1
+                if msg_id in cited:
+                    continue
+                stats["burned"] += 1
+                if not has_usable_material(text, vision):
+                    stats["no_material"] += 1
+                    if require_material:
+                        continue
+                ids.append(msg_id)
+    stats["selected"] = len(ids)
+    return ids, stats
+
+
+def archive_backup_path(db_path, now=None):
+    """
+    Имя копии рядом с базой: `archive_backup_<дата>_<время>.db`.
+
+    Время в имени, а не одна дата: `VACUUM INTO` отказывается писать в
+    существующий файл, и второй прогон за сутки упал бы на имени. Правило то же,
+    что у `reclass.backup_path_for`.
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    folder = os.path.dirname(os.path.abspath(db_path))
+    return os.path.join(folder, f"{BACKUP_PREFIX}{stamp}.db")
+
+
+def verify_archive_copy(target, expected):
+    """
+    Проверить копию КАК КОПИЮ, а не как факт вызова VACUUM.
+
+    Замер, сделанный ланом reclass на подложенных файлах (SQLite 3.50.4):
+    обрезанная копия ОТКРЫВАЕТСЯ и отдаёт COUNT(*), а `integrity_check` при этом
+    называет пропавшую страницу. Без сверки integrity такая копия молча считалась
+    бы годной, и владелец узнал бы правду в день, когда пошёл бы по ней
+    восстанавливать флаги.
+
+    Возвращает (размер, число реплик), иначе RuntimeError.
+    """
+    if not os.path.exists(target):
+        raise RuntimeError(f"копия не создана: {target}")
+    size = os.path.getsize(target)
+    if size <= 0:
+        raise RuntimeError(f"копия пустая (0 байт): {target}")
+    try:
+        uri = "file:" + os.path.abspath(target).replace(os.sep, "/") + "?mode=ro"
+        probe = sqlite3.connect(uri, uri=True)
+        try:
+            integrity = probe.execute("PRAGMA integrity_check").fetchone()[0]
+            copied = probe.execute("SELECT COUNT(*) FROM archive_messages").fetchone()[0]
+        finally:
+            probe.close()
+    except Exception as exc:
+        raise RuntimeError(f"копия не читается: {type(exc).__name__}: {exc}") from exc
+    if integrity != "ok":
+        raise RuntimeError(f"integrity_check копии: {integrity}")
+    if copied != expected:
+        raise RuntimeError(f"в копии {copied} реплик вместо {expected}")
+    return size, copied
+
+
+async def backup_archive_before_write(db_path, now=None):
+    """
+    Снять копию архива ДО первого сброса флага.
+
+    Сброс `is_processed_for_wiki` меняет 65 908 строк живого архива на 117 847.
+    Ошибка выборки означала бы перепрогон половины архива на платной генерации, и
+    отменить его нечем: прежние значения флага нигде не хранятся. Поэтому копия
+    здесь не удобство — если она не снялась или снялась битой, прогон обязан
+    остановиться, НЕ ТРОНУВ НИ ОДНОЙ строки. Возвращает путь копии, иначе
+    RuntimeError.
+    """
+    target = archive_backup_path(db_path, now)
+    if os.path.exists(target):
+        raise RuntimeError(f"файл копии уже существует: {target}")
+    try:
+        # Отдельное соединение и никакой открытой транзакции: VACUUM внутри
+        # транзакции отказывает ("cannot VACUUM from within a transaction").
+        async with aiosqlite.connect(db_path, timeout=120) as db:
+            await db.execute("VACUUM INTO ?", (target,))
+            cursor = await db.execute("SELECT COUNT(*) FROM archive_messages")
+            expected = (await cursor.fetchone())[0]
+    except Exception as exc:
+        raise RuntimeError(f"VACUUM INTO не выполнен: {type(exc).__name__}: {exc}") from exc
+
+    size, copied = verify_archive_copy(target, expected)
+    say(f"--- Копия архива снята: {target} ({size} байт, {copied} реплик) ---")
+    return target
+
+
+async def reset_burned_flags(archive_db=None, wiki_db=None, apply=False,
+                             require_material=True, now=None):
+    """
+    Вернуть выжженные реплики в очередь сита. По умолчанию НЕ ПИШЕТ (F13).
+
+    `apply=False` — режим отчёта: выборка идёт, копия НЕ снимается, UPDATE НЕ
+    делается. Значение по умолчанию именно такое, потому что случайный вызов
+    этой функции обязан быть безвредным, а перепрогон 65 908 реплик — платная
+    генерация и часы работы, то есть решение владельца, а не побочный эффект.
+
+    Порядок ЖЁСТКИЙ и в нём весь смысл защиты:
+      1. выборка (только чтение);
+      2. нечего делать -> выход БЕЗ копии (иначе каталог владельца заполняется
+         копиями по 47 МБ, и нужную среди них потом не найти — этим уже болел
+         reclass.py);
+      3. КОПИЯ через VACUUM INTO с проверкой integrity и числа реплик;
+      4. и только теперь первый UPDATE.
+    Копия не снялась — RuntimeError, и ни один флаг не сброшен.
+
+    Возвращает stats: сколько выбрано, сколько обновлено, где копия.
+    """
+    archive_db = archive_db or ARCHIVE_DB
+    ids, stats = await find_burned_messages(archive_db, wiki_db, require_material)
+    stats["applied"] = 0
+    stats["backup"] = None
+    stats["dry_run"] = not apply
+
+    if not ids:
+        say("[СБРОС] Выжженных реплик не найдено: копия не снималась, база не тронута.")
+        return stats
+    if not apply:
+        say(f"[СБРОС] РЕЖИМ ОТЧЁТА. Нашлось {len(ids)} выжженных реплик "
+            f"(msg_id {ids[0]}..{ids[-1]}), из них без пригодного материала пропущено "
+            f"{stats['no_material']}. Ни копии, ни единого UPDATE не сделано. "
+            f"Для записи нужен apply=True — это решение владельца: перепрогон "
+            f"платный.")
+        return stats
+
+    # Копия ДО первой записи. Исключение отсюда не глушится: прогон без копии
+    # запрещён, а не «нежелателен».
+    stats["backup"] = await backup_archive_before_write(archive_db, now)
+
+    async with aiosqlite.connect(archive_db, timeout=120) as db:
+        await db.executemany(
+            "UPDATE archive_messages SET is_processed_for_wiki = 0 WHERE msg_id = ?",
+            [(m_id,) for m_id in ids],
+        )
+        await db.commit()
+    stats["applied"] = len(ids)
+    say(f"[СБРОС] Возвращено в очередь сита: {len(ids)} реплик. Копия: {stats['backup']}")
+    return stats
+
+
 async def main():
     setup_logging()
     await init_wiki_db()
     known_hashes = await load_existing_hashes()
     logger.info("Загружено хешей уже существующих фактов: %d (защита от удвоения базы)", len(known_hashes))
 
+    types_in = ", ".join(f"'{t}'" for t in VISION_MEDIA_TYPES)
     async with aiosqlite.connect(f"file:{ARCHIVE_DB}?mode=ro", uri=True) as db:
         async with db.execute(
             'SELECT COUNT(*) FROM archive_messages WHERE is_processed_for_wiki = 0 '
-            'AND (has_media = 0 OR vision_processed = 1)'
+            f'AND {available_to_sieve_sql()}'
         ) as cursor:
             row = await cursor.fetchone()
             total_todo = row[0] if row else 0
+        # Ожидание зрения и НЕПРИМЕНИМОСТЬ зрения считаются РАЗДЕЛЬНО (F12).
+        # Раньше это была одна цифра «заперто до Vision», и она врала про 444
+        # реплики: зрение берёт только photo/video, а все 444 — media_type='file',
+        # то есть ждать им нечего. Смешивать «придёт позже» и «не придёт никогда»
+        # нельзя: во втором случае человеку надо действовать, а не ждать.
         async with db.execute(
             'SELECT COUNT(*) FROM archive_messages WHERE is_processed_for_wiki = 0 '
-            'AND has_media = 1 AND vision_processed = 0'
+            f'AND has_media = 1 AND vision_processed = 0 AND COALESCE(media_type, \'\') IN ({types_in})'
         ) as cursor:
             row = await cursor.fetchone()
             locked = row[0] if row else 0
+        async with db.execute(
+            'SELECT COUNT(*) FROM archive_messages WHERE is_processed_for_wiki = 0 '
+            f'AND has_media = 1 AND vision_processed = 0 AND COALESCE(media_type, \'\') NOT IN ({types_in})'
+        ) as cursor:
+            row = await cursor.fetchone()
+            vision_na = row[0] if row else 0
 
     say(f"[СИТО] Кандидатов к обработке: {total_todo}")
     if locked:
         # Раньше про это не говорилось вообще: цикл упирался в 0 кандидатов и
-        # печатал «Архив полностью обработан», хотя 444 реплики с медиа без
-        # Vision не были ни обработаны, ни помечены.
+        # печатал «Архив полностью обработан», хотя реплики с медиа без Vision не
+        # были ни обработаны, ни помечены. Эта строка теперь ЧЕСТНА: сюда
+        # попадают только photo/video, которые зрение действительно возьмёт.
         say(f"[СИТО] Заперто до Vision (has_media=1, vision_processed=0): {locked} реплик — сито их не увидит")
         logger.warning("Вне очереди дистилляции: %d реплик с медиа без vision_processed", locked)
+    if vision_na:
+        # Замер: 444 реплики media_type='file', из них 49 с собственным текстом
+        # (их новый гейт уже пропустил в очередь) и 395 без текста вообще.
+        say(f"[СИТО] Зрение НЕПРИМЕНИМО (media_type не из {list(VISION_MEDIA_TYPES)}): {vision_na} реплик; "
+            f"те из них, у кого есть свой текст, уже в очереди выше — остальным дистиллировать нечего")
+        logger.warning("Зрение неприменимо к %d репликам: они не ждут очереди, "
+                       "у них просто нет материала", vision_na)
 
     marked_total = 0
     facts_total = 0
@@ -825,5 +1151,24 @@ async def main():
         say(f"[СИТО] ПОТЕРЯНО: msg_id {first_id}..{last_id} ({status})")
 
 
+def _burned_report(stats):
+    """Печать итога сброса. Отдельной функцией, чтобы её мог позвать тест."""
+    say(f"[СБРОС] помечено обработанными: {stats['marked']}; "
+        f"реплик в провенансе фактов: {stats['cited']}; "
+        f"выжжено (помечено, но факта нет): {stats['burned']}; "
+        f"из них без пригодного материала: {stats['no_material']}; "
+        f"выбрано к сбросу: {stats['selected']}; "
+        f"обновлено строк: {stats['applied']}")
+
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    # Два режима, и опасный требует ДВУХ слов. Одно слово `--reset-burned` даёт
+    # только отчёт: перепрогон 65 908 реплик — платная генерация и часы, поэтому
+    # запись обязана быть отдельным осознанным `--apply`, а не значением по
+    # умолчанию у флага, который человек набрал по памяти.
+    if "--reset-burned" in sys.argv:
+        setup_logging()
+        _stats = asyncio.run(reset_burned_flags(apply="--apply" in sys.argv))
+        _burned_report(_stats)
+    else:
+        asyncio.run(main())
