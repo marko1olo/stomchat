@@ -636,23 +636,160 @@ def generate_text(prompt, status_context=None, timeout=None):
     return None
 
 
-def convert_to_wav(file_path):
-    """Convert any audio file to standard 16kHz mono WAV using ffmpeg."""
+# Форматы, которые Whisper-API принимает как есть. Голосовые Telegram — это
+# ogg/opus, то есть штатный вход, и перегонять их в PCM незачем.
+_WHISPER_NATIVE_EXTENSIONS = frozenset({
+    ".ogg", ".oga", ".opus", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm", ".wav", ".flac",
+})
+
+# Потолок размера файла у провайдера. Значение внешнее (документация Groq), и я
+# его не проверял запросом — поэтому оно ниже фактического: лучше сжать лишний
+# раз, чем получить 413. Что провайдер режет по размеру, журнал подтверждает:
+# в bot.log есть "HTTP/1.1 413 Payload Too Large" от api.groq.com.
+_WHISPER_MAX_UPLOAD_BYTES = _env_int("STOMCHAT_WHISPER_MAX_UPLOAD_BYTES", 24 * 1024 * 1024)
+
+
+# Путь к ffmpeg. Голый "ffmpeg" из PATH — не гарантия: на этой машине первым в
+# PATH лежит 108-килобайтный шим (Python/Scripts/ffmpeg.exe), который на
+# "-version" отдаёт код 1 и пустой вывод. Без проверки каждый нештатный файл
+# платил бы за обречённый subprocess и получал одну обезличенную строку
+# "Audio conversion failed" — ни причины, ни того, что дело в отсутствии бинаря.
+_FFMPEG_ENV = "STOMCHAT_FFMPEG_PATH"
+_FFMPEG_RESOLVED = []  # пусто — ещё не искали; [None] — рабочего нет; [путь] — есть
+
+
+def _probe_ffmpeg(path):
+    """True, если бинарь действительно запускается и печатает свою версию."""
     import subprocess
-    base, ext = os.path.splitext(file_path)
-    wav_path = base + "_converted.wav"
+
     try:
-        cmd = ["ffmpeg", "-y", "-i", file_path, "-ar", "16000", "-ac", "1", wav_path]
-        logger.info(f"Converting audio using ffmpeg: {' '.join(cmd)}")
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        if os.path.exists(wav_path):
-            return wav_path
-    except Exception as e:
-        logger.warning(f"Audio conversion failed via ffmpeg: {e}")
-        if os.path.exists(wav_path):
-            try: os.remove(wav_path)
-            except Exception: pass
-    return file_path
+        done = subprocess.run([path, "-version"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=30)
+    except Exception as exc:
+        logger.debug("ffmpeg candidate rejected %s: %s", path, exc)
+        return False
+    ok = done.returncode == 0 and b"ffmpeg version" in (done.stdout or b"")
+    if not ok:
+        logger.debug("ffmpeg candidate rejected %s: rc=%s out=%r",
+                     path, done.returncode, (done.stdout or b"")[:80])
+    return ok
+
+
+def ffmpeg_binary():
+    """Рабочий ffmpeg или None. Ищет и проверяет один раз за процесс."""
+    if _FFMPEG_RESOLVED:
+        return _FFMPEG_RESOLVED[0]
+
+    import shutil as _shutil
+
+    candidates = []
+    override = os.getenv(_FFMPEG_ENV, "").strip().strip('"')
+    if override:
+        candidates.append(override)
+    on_path = _shutil.which("ffmpeg")
+    if on_path:
+        candidates.append(on_path)
+    # Пакеты, которые таскают собственный бинарь: если они стоят, шим из PATH
+    # можно обойти без правки окружения.
+    for module_name, getter in (("imageio_ffmpeg", "get_ffmpeg_exe"),
+                                ("static_ffmpeg", None)):
+        try:
+            module = __import__(module_name)
+            if getter:
+                candidates.append(getattr(module, getter)())
+            else:
+                candidates.append(os.path.join(
+                    os.path.dirname(module.__file__), "bin", "ffmpeg.exe"))
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if candidate and _probe_ffmpeg(candidate):
+            _FFMPEG_RESOLVED.append(candidate)
+            logger.info("ffmpeg resolved: %s", candidate)
+            return candidate
+
+    _FFMPEG_RESOLVED.append(None)
+    logger.warning(
+        "ffmpeg не найден или не запускается (проверено кандидатов: %s). "
+        "Нештатные контейнеры и файлы больше %s Б расшифрованы НЕ БУДУТ; "
+        "штатные ogg/opus/mp3/m4a идут в API как есть и не затронуты. "
+        "Путь к рабочему бинарю задаётся переменной %s.",
+        len(candidates), _WHISPER_MAX_UPLOAD_BYTES, _FFMPEG_ENV)
+    return None
+
+
+def _ffmpeg_to(file_path, out_path, args):
+    """Прогон через ffmpeg с ограничением по времени. None, если не вышло."""
+    import subprocess
+
+    binary = ffmpeg_binary()
+    if not binary:
+        # Спавнить обречённый процесс на каждый файл незачем: причина уже в журнале.
+        return None
+
+    cmd = [binary, "-y", "-i", file_path] + args + [out_path]
+    try:
+        logger.info("Converting audio: %s", " ".join(cmd))
+        # timeout обязателен: без него ffmpeg на битом файле висит бесконечно, а
+        # родитель убивает дерево процессов по своему дедлайну и оставляет
+        # недописанный файл.
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       check=True, timeout=120)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as exc:
+        logger.warning("Audio conversion failed: %s", exc)
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+    return None
+
+
+def convert_to_wav(file_path):
+    """
+    Готовит аудио к отправке в Whisper. Имя историческое: WAV теперь крайний случай.
+
+    Раньше ЛЮБОЙ вход безусловно перегонялся в 16 кГц моно PCM. Размер такого
+    выхода задан форматом точно: 16 000 отсчётов × 2 байта × 1 канал = 32 000 Б/с,
+    то есть 1.92 МБ на минуту речи, сколько бы ни весил вход. Голосовое Telegram
+    идёт opus'ом около 31 кб/с — это 3.9 кБ/с, в 8.2 раза меньше. При потолке
+    загрузки 24 МБ в лимит упирается диктовка длиной 13 минут, тогда как исходный
+    ogg упёрся бы только на 105-й.
+
+    Сценарий отказа: врач диктует подробный разбор случая на 15-20 минут или
+    пересылает аудиозапись лекции (приём аудиодокументов размера не проверяет).
+    Конвертация делает из 5-7 МБ ogg около 30-40 МБ wav, все ключи получают отказ
+    по размеру, расшифровки нет, врачу — тишина. Побочно тот же восьмикратный
+    файл лежит в temp_media всё время работы.
+
+    Теперь: штатный для API контейнер отдаём КАК ЕСТЬ. Слишком большой файл
+    сжимаем в opus (речь при 24 кб/с моно разборчива и весит на порядок меньше
+    PCM), и только если и это не вышло — прежний путь в wav.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        size = 0
+
+    if ext in _WHISPER_NATIVE_EXTENSIONS and 0 < size <= _WHISPER_MAX_UPLOAD_BYTES:
+        logger.info("Audio kept as-is: ext=%s size=%s (no PCM inflation)", ext, size)
+        return file_path
+
+    base = os.path.splitext(file_path)[0]
+    if size > _WHISPER_MAX_UPLOAD_BYTES:
+        # Сжимаем, а не раздуваем: цель — влезть в потолок провайдера.
+        packed = _ffmpeg_to(file_path, base + "_converted.ogg",
+                            ["-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "24k"])
+        if packed:
+            logger.info("Audio recompressed: %s -> %s bytes", size, os.path.getsize(packed))
+            return packed
+
+    wav = _ffmpeg_to(file_path, base + "_converted.wav", ["-ar", "16000", "-ac", "1"])
+    return wav or file_path
 
 
 def transcribe_audio_bytes_or_file(file_path, timeout=None):

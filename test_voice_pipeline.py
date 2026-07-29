@@ -266,6 +266,185 @@ finally:
         pass
     shutil.rmtree(_TMPDIR, ignore_errors=True)
 
+print("\n[N] Подготовка аудио не раздувает файл в восемь раз")
+# Любой вход безусловно перегонялся в 16 кГц моно PCM. Замер на реальном
+# telegram-подобном голосовом (ogg/opus 31 кб/с моно, 5.14 с):
+# 20 361 Б -> 164 244 Б, рост в 8.07 раза. Арифметика: wav 16 кГц/16 бит/моно —
+# это 32 000 Б/с, 1.92 МБ на минуту речи. При потолке загрузки 25 МБ в лимит
+# упирается диктовка длиной 13.7 минуты, тогда как исходный ogg упёрся бы только
+# на 109-й. Что провайдер режет по размеру, журнал подтверждает: в bot.log есть
+# «HTTP/1.1 413 Payload Too Large» от api.groq.com.
+#
+# Сценарий отказа: врач диктует разбор случая на 15-20 минут или пересылает
+# аудиозапись лекции. Из 5-7 МБ ogg получается 30-40 МБ wav, все ключи отдают
+# отказ по размеру, расшифровки нет, врачу — тишина.
+import gemini_client as _gc  # noqa: E402
+import io as _io  # noqa: E402
+import subprocess as _sp  # noqa: E402
+import wave  # noqa: E402
+
+_audio_tmp = tempfile.mkdtemp(prefix="stomchat_audio_")
+
+
+def _fake_audio(name, size):
+    path = os.path.join(_audio_tmp, name)
+    with open(path, "wb") as handle:
+        handle.write(b"\x00" * size)
+    return path
+
+
+# Сверять один результат мало: подложенные байты — не аудио, ffmpeg на них падает,
+# и convert_to_wav мягко возвращает исходный путь. Тогда проверка «отдан как есть»
+# прошла бы и на безусловной перегонке в PCM — то есть не значила бы ничего.
+# Поэтому подменяем сам вызов ffmpeg: он записывает выход и рапортует об успехе,
+# а тест смотрит, ВЫЗЫВАЛСЯ ли он вообще и с какими аргументами.
+_FFMPEG_CALLS = []
+_ffmpeg_real = _gc._ffmpeg_to
+_FFMPEG_SUCCEEDS = [True]
+
+
+def _ffmpeg_spy(file_path, out_path, args):
+    _FFMPEG_CALLS.append((file_path, out_path, list(args)))
+    if not _FFMPEG_SUCCEEDS[0]:
+        return None
+    with open(out_path, "wb") as handle:
+        handle.write(b"\x00" * 4096)
+    return out_path
+
+
+_gc._ffmpeg_to = _ffmpeg_spy
+
+check("штатные для API форматы перечислены",
+      ".ogg" in _gc._WHISPER_NATIVE_EXTENSIONS and ".opus" in _gc._WHISPER_NATIVE_EXTENSIONS,
+      "голосовые Telegram — это ogg/opus, они и есть основной вход")
+check("потолок загрузки объявлен и ниже провайдерских 25 МБ",
+      0 < _gc._WHISPER_MAX_UPLOAD_BYTES <= 25 * 1024 * 1024,
+      f"got {_gc._WHISPER_MAX_UPLOAD_BYTES}")
+
+for _label, _name, _size in (("голосовое ogg", "voice.ogg", 20 * 1024),
+                             ("диктовка opus", "dict.opus", 1024 * 1024),
+                             ("лекция mp3", "lecture.mp3", 5 * 1024 * 1024),
+                             ("готовый wav", "already.wav", 2 * 1024 * 1024)):
+    _src_path = _fake_audio(_name, _size)
+    del _FFMPEG_CALLS[:]
+    _out = _gc.convert_to_wav(_src_path)
+    check(f"{_label}: перекодировки не было", not _FFMPEG_CALLS,
+          f"ffmpeg позван на штатном формате: {_FFMPEG_CALLS[:1]} — рост в 8 раз вернулся")
+    check(f"{_label}: отдан исходный путь", _out == _src_path,
+          f"got {os.path.basename(_out) if _out else _out!r}")
+
+# Файл сверх потолка обязан ПОПЫТАТЬСЯ сжаться — и именно сжаться, а не раздуться.
+_huge = _fake_audio("huge.ogg", _gc._WHISPER_MAX_UPLOAD_BYTES + 1024)
+del _FFMPEG_CALLS[:]
+_out = _gc.convert_to_wav(_huge)
+check("файл сверх потолка перекодируется", bool(_FFMPEG_CALLS),
+      "ничего не сделано: 25+ МБ уйдут в API и получат 413")
+check("первая попытка — сжатие в opus, а не PCM",
+      bool(_FFMPEG_CALLS) and "libopus" in _FFMPEG_CALLS[0][2],
+      f"got {_FFMPEG_CALLS[0][2] if _FFMPEG_CALLS else None}")
+check("результат меньше потолка",
+      bool(_out) and os.path.getsize(_out) <= _gc._WHISPER_MAX_UPLOAD_BYTES,
+      f"got {os.path.getsize(_out) if _out and os.path.exists(_out) else '?'}")
+check("сжатие моно и 16 кГц — речь не теряет разборчивости",
+      bool(_FFMPEG_CALLS) and "-ac" in _FFMPEG_CALLS[0][2] and "-ar" in _FFMPEG_CALLS[0][2])
+
+# Провал ffmpeg (нет кодека, битый файл, таймаут) не должен ронять расшифровку:
+# лучше отправить исходник и получить отказ, чем упасть с исключением.
+_FFMPEG_SUCCEEDS[0] = False
+_broken = _fake_audio("broken.amr", 64 * 1024)
+try:
+    _out = _gc.convert_to_wav(_broken)
+    _soft = _out == _broken
+    _detail = f"got {_out!r}"
+except Exception as exc:
+    _soft, _detail = False, f"{type(exc).__name__}: {exc}"
+check("провал ffmpeg отдаёт исходник, а не исключение", _soft, _detail)
+_FFMPEG_SUCCEEDS[0] = True
+_gc._ffmpeg_to = _ffmpeg_real
+
+# Незнакомый контейнер всё-таки надо привести к штатному формату.
+del _FFMPEG_CALLS[:]
+_gc._ffmpeg_to = _ffmpeg_spy
+_gc.convert_to_wav(_fake_audio("weird.amr", 32 * 1024))
+check("незнакомый контейнер конвертируется", bool(_FFMPEG_CALLS),
+      "amr/aac уйдут в API как есть и получат отказ по формату")
+_gc._ffmpeg_to = _ffmpeg_real
+
+_gc_src = _io.open("gemini_client.py", encoding="utf-8").read()
+check("у ffmpeg есть таймаут",
+      "timeout=120" in _gc_src.split("def _ffmpeg_to", 1)[1][:900],
+      "без таймаута ffmpeg на битом файле висит бесконечно")
+
+# Размер PCM задан форматом ТОЧНО, поэтому кратность считается, а не берётся из
+# комментария: 16 кГц × 16 бит × моно = 32 000 Б/с против ~3.9 кБ/с у opus.
+_SPEECH_SECONDS = 5 * 60
+_pcm_path = os.path.join(_audio_tmp, "ruler.wav")
+with wave.open(_pcm_path, "wb") as _w:
+    _w.setnchannels(1)
+    _w.setsampwidth(2)
+    _w.setframerate(16000)
+    _w.writeframes(b"\x00" * (16000 * 2 * _SPEECH_SECONDS))
+_pcm_bytes = os.path.getsize(_pcm_path)
+_opus_bytes = int(31000 / 8 * _SPEECH_SECONDS)  # битрейт голосового Telegram
+check("PCM-раздувание кратно, а не на проценты", _pcm_bytes > _opus_bytes * 4,
+      f"{_opus_bytes} -> {_pcm_bytes}")
+_min_pcm = _gc._WHISPER_MAX_UPLOAD_BYTES / (_pcm_bytes / _SPEECH_SECONDS) / 60
+_min_opus = _gc._WHISPER_MAX_UPLOAD_BYTES / (_opus_bytes / _SPEECH_SECONDS) / 60
+print(f"       предельная диктовка: {_min_pcm:.0f} мин в PCM -> {_min_opus:.0f} мин как есть")
+check("предельная диктовка выросла в разы", _min_opus > _min_pcm * 4,
+      f"{_min_pcm:.1f} -> {_min_opus:.1f}")
+check("пятиминутное голосовое в исходном виде проходит с запасом",
+      _opus_bytes < _gc._WHISPER_MAX_UPLOAD_BYTES,
+      f"{_opus_bytes} против потолка {_gc._WHISPER_MAX_UPLOAD_BYTES}")
+# Тот же файл, но уже как wav — штатный формат, значит без второй перегонки.
+del _FFMPEG_CALLS[:]
+_gc._ffmpeg_to = _ffmpeg_spy
+check("настоящий wav отдаётся без повторной обработки",
+      _gc.convert_to_wav(_pcm_path) == _pcm_path and not _FFMPEG_CALLS,
+      f"позвали ffmpeg: {_FFMPEG_CALLS[:1]}")
+_gc._ffmpeg_to = _ffmpeg_real
+
+print("\n[N+1] Отсутствие ffmpeg не тратит процессы и объяснено в журнале")
+# На рабочей машине первым в PATH оказался 108-килобайтный шим: "-version" даёт
+# код 1 и пустой вывод. Голая проверка «файл существует» такой бинарь принимает,
+# и каждый нештатный файл платит за обречённый subprocess.
+_probe_real = _gc._probe_ffmpeg
+_run_real = _sp.run
+_spawned = []
+
+
+def _no_spawn(*a, **k):
+    _spawned.append(a[0] if a else None)
+    return _run_real(*a, **k)
+
+
+_gc._FFMPEG_RESOLVED[:] = []
+_gc._probe_ffmpeg = lambda path: False
+try:
+    check("сломанный бинарь не признаётся рабочим", _gc.ffmpeg_binary() is None)
+    # _ffmpeg_to делает import subprocess внутри себя, но модуль в sys.modules
+    # тот же самый объект — подмена run перехватывает запуск.
+    _sp.run = _no_spawn
+    _out = _gc._ffmpeg_to(_fake_audio("x.amr", 1024), os.path.join(_audio_tmp, "x.wav"),
+                          ["-ar", "16000"])
+    check("обречённый процесс не запускается", not _spawned and _out is None,
+          f"spawned={_spawned} out={_out!r}")
+finally:
+    _sp.run = _run_real
+    _gc._probe_ffmpeg = _probe_real
+    _gc._FFMPEG_RESOLVED[:] = []
+check("результат поиска кэшируется, а не проверяется на каждый файл",
+      "_FFMPEG_RESOLVED" in _gc_src and "if _FFMPEG_RESOLVED:" in _gc_src,
+      "проба -version на каждый файл — это до 30 с на файл")
+check("путь к бинарю можно задать переменной окружения",
+      "STOMCHAT_FFMPEG_PATH" in _gc_src,
+      "иначе сломанный шим в PATH нечем обойти")
+check("в предупреждении названы последствия, а не только факт",
+      "расшифрованы НЕ БУДУТ" in _gc_src,
+      "«ffmpeg not found» не говорит дежурному, что именно перестало работать")
+
+shutil.rmtree(_audio_tmp, ignore_errors=True)
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
