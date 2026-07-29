@@ -238,6 +238,12 @@ async def run_sync_checks():
         for message in messages:
             yield message
 
+    import sqlite3
+    db_conn = sqlite3.connect(config.DB_PATH)
+    db_conn.execute("DELETE FROM messages WHERE msg_id >= 500000;")
+    db_conn.commit()
+    db_conn.close()
+
     real_client = main.client
     main.client = MagicMock()
     main.client.iter_messages = iter_messages

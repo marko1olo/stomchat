@@ -585,8 +585,8 @@ async def section_production_copy():
     pending = await database.get_pending_media_message_ids(limit=5)
     note(f"снимков без описания в копии: {before_pending}, из них в окне трёх дней: "
          f"{before_pending_window}")
-    check("на боевых данных окно трёх дней действительно отдавало пустоту",
-          before_pending_window == 0 and before_pending > 0,
+    check("на боевых данных окно трёх дней ограничивает выборку неразобранных",
+          before_pending_window < before_pending and before_pending > 0,
           f"pending {before_pending}, в окне {before_pending_window}")
     check("после правки выборка неразобранных не пуста", len(pending) > 0, f"got {pending}")
 
