@@ -97,11 +97,20 @@ check("успех тред помечает", 170978 in A.load_state()["processe
 A.record_passive_success(thread_id=170978)
 check("повторный успех не дублирует", A.load_state()["processed_threads"].count(170978) == 1)
 
+# Граница была по ДЛИНЕ: del threads[:-100]. Замер по архиву показал, что хвост
+# обсуждения клинического поста живёт до 281.7 суток (p99), а сотня записей
+# проедалась за 52-104 суток — то есть бот забывал ветку раньше, чем она умирала,
+# и возвращался в неё второй раз (20 повторных входов на реплее 4075 кандидатов).
+# Теперь граница по ВОЗРАСТУ, длина — только вторичный предохранитель.
 reset(processed_threads=list(range(150)))
 A.record_passive_success(thread_id=999)
 threads = A.load_state()["processed_threads"]
-check("список ограничен 100", len(threads) == 100, f"got {len(threads)}")
-check("свежий тред сохранён (обрезается голова, не хвост)", 999 in threads)
+check("свежие ветки не режутся до сотни", len(threads) == 151, f"got {len(threads)}")
+check("свежий тред сохранён", 999 in threads)
+check("граница по возрасту покрывает жизнь ветки",
+      A.PROCESSED_THREAD_TTL_DAYS >= 282, f"got {A.PROCESSED_THREAD_TTL_DAYS}")
+check("предохранитель по длине выше измеренной потребности",
+      A.PROCESSED_THREADS_MAX > 507, f"got {A.PROCESSED_THREADS_MAX}")
 
 print("\n[5] Битый таймстамп не роняет обработчик")
 reset(last_passive_text_run="не-дата", last_passive_attempt=None)

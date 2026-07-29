@@ -276,6 +276,11 @@ STATE_DEFAULTS = {
     "last_referee_run": "2000-01-01T00:00:00",
     "last_passive_attempt": "2000-01-01T00:00:00",
     "processed_threads": [],
+    # Когда каждая ветка из processed_threads была отвечена: {"12345": iso}.
+    # Отдельным словарём, а не списком пар, чтобы processed_threads остался
+    # списком id — проверка `reply_to_msg_id not in processed_threads` и старые
+    # файлы состояния продолжают работать без миграции.
+    "processed_thread_dates": {},
     "pm_pings": {},
 }
 
@@ -287,6 +292,23 @@ STATE_DEFAULTS = {
 # Прямые обращения (упоминание, ответ на реплику бота, ЛС) этот гейт не проходят.
 PASSIVE_COOLDOWN_MINUTES = 120  # после РЕАЛЬНО отправленного пассивного ответа
 PASSIVE_RETRY_MINUTES = 10      # после попытки, не давшей сообщения
+
+# Сколько держать ветку в processed_threads. Граница была по ДЛИНЕ — последние
+# 100 записей, `del threads[:-100]`, молча. Замер по архиву (117 847 реплик,
+# 1016 суток): при 0.88 вторжения в сутки запись жила в среднем 115 суток, в
+# худшем случае 52, и обрезка выбрасывала 791 ветку. Хвост обсуждения ПОСЛЕ
+# третьего ответа — то есть отрезок, на котором бот может влезть второй раз, —
+# даёт p90 = 9.7 суток, p95 = 37.5, p99 = 281.7, максимум 810. То есть память
+# была КОРОЧЕ жизни ветки, и бот возвращался в уже отвеченную: 20 повторных
+# вторжений за 1016 суток, разрыв от 75.6 до 810.2 суток. Тот же реплей без
+# обрезки даёт 0 повторов.
+# Год покрывает p99 хвоста и снимает 19 из 20 измеренных повторов.
+PROCESSED_THREAD_TTL_DAYS = 365
+# Вторичная граница, только чтобы файл состояния не мог расти без предела.
+# Замер: чтобы удержать 365 суток истории, хватает 507 записей, поэтому в
+# нормальном режиме этот предел не срабатывает. Если сработал — это аномалия,
+# и она пишется в журнал: молчаливая обрезка запрещена.
+PROCESSED_THREADS_MAX = 2000
 
 
 class _TrackedState(dict):
@@ -486,6 +508,153 @@ def passive_gate_block_reason(state):
     return None
 
 
+# Заявки на незваный ответ, взятые в этом процессе и ещё не отпущенные:
+# ключ -> (таск-владелец, время взятия).
+#
+# Зачем нужны. Гейт кулдауна читается из state, прочитанного на входе функции,
+# а списывается только на record_passive_attempt — между ними await'ы на
+# get_last_n_messages, round-trip к Telegram get_messages и два запроса к базе.
+# main.py диспатчит КАЖДОЕ сообщение отдельным таском
+# (`create_task(run_assistant_safe(), name=f"assistant_{msg_id}")`), Telethon
+# делает это конкурентно, поэтому два сообщения одной ветки — это два таска в
+# одном событийном цикле: оба читают открытый гейт и пустой processed_threads,
+# оба доходят до отправки. Замер по архиву: пар текстовых реплик к одному
+# родителю в пределах 2 с — 126, из них с реально открытым гейтом 3; в пределах
+# 60 с — 4711 и 105 соответственно.
+#
+# Заявка НЕ ждёт, а отказывает: второй ответ в ту же ветку не нужен вообще,
+# и держать за ним входящее сообщение на всю генерацию (90 с) незачем.
+_PASSIVE_CLAIMS = {}
+
+# Верхняя граница жизни заявки. Полный проход — триаж (25 с) + генерация (90 с)
+# + рецензент, то есть реальная заявка живёт секунды-минуты. Всё, что старше,
+# считаем протёкшим: заявка, залипшая навсегда, запирает бота МОЛЧА, а это
+# ровно тот класс отказа, который мы здесь и убираем.
+PASSIVE_CLAIM_TTL_SECONDS = 600
+
+
+def _release_claims_of_task(task):
+    """Снимает все заявки таска. Зовётся из его done-callback."""
+    for key, (owner, _taken_at) in list(_PASSIVE_CLAIMS.items()):
+        if owner is task:
+            _PASSIVE_CLAIMS.pop(key, None)
+
+
+def _drop_stale_passive_claims():
+    """
+    Снимает заявки, чей владелец уже завершился, и заявки старше TTL.
+
+    Проверка на завершившегося владельца не страховка, а рабочий путь:
+    add_done_callback отрабатывает через loop.call_soon, то есть на следующем
+    проходе цикла, и запись успевает пережить своего владельца на один тик.
+    """
+    now = datetime.now()
+    for key, (owner, taken_at) in list(_PASSIVE_CLAIMS.items()):
+        age = (now - taken_at).total_seconds()
+        owner_done = owner is not None and owner.done()
+        if not owner_done and age <= PASSIVE_CLAIM_TTL_SECONDS:
+            continue
+        _PASSIVE_CLAIMS.pop(key, None)
+        if not owner_done:
+            logger.warning(
+                "Passive claim %r leaked and was force-released after %.0fs.", key, age
+            )
+
+
+def claim_passive_slot(key):
+    """
+    Пытается занять слот незваного ответа. True — заняли, False — этим уже
+    занимается другой таск.
+
+    Снятие привязано к завершению таска, а не к явному вызову: у
+    check_and_trigger_assistant одиннадцать точек выхода после места заявки, и
+    любая необработанная ошибка между ними оставила бы заявку висеть навсегда.
+    done-callback отрабатывает на ЛЮБОМ исходе — return, исключение, отмена.
+
+    Между проверкой и записью нет ни одного await, поэтому для одного
+    событийного цикла операция неделима и отдельный замок не нужен.
+    """
+    _drop_stale_passive_claims()
+    if key in _PASSIVE_CLAIMS:
+        logger.info("Passive slot %r is already claimed by another task. Skipping duplicate reply.", key)
+        return False
+
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    _PASSIVE_CLAIMS[key] = (task, datetime.now())
+    if task is not None:
+        task.add_done_callback(_release_claims_of_task)
+    return True
+
+
+def _prune_processed_threads(state, add=None):
+    """
+    Держит processed_threads в границах ВОЗРАСТА, а не длины, и возвращает
+    актуальный список.
+
+    Раньше список резался до последних ста записей без единой строки в журнал.
+    Замер по архиву: выброшено 791 ветка, срок памяти в среднем 115 суток при
+    p99 хвоста обсуждения 281.7 суток — то есть бот забывал ветку раньше, чем
+    она затихала, и заходил в неё второй раз (20 повторов за 1016 суток).
+
+    Возраст лежит в отдельном словаре processed_thread_dates: список остаётся
+    списком id, поэтому проверка `reply_to_msg_id not in processed_threads` и
+    уже лежащие на диске файлы состояния работают без миграции.
+    """
+    threads = state.setdefault("processed_threads", [])
+    if not isinstance(threads, list):
+        logger.error("processed_threads is %s, not a list. Resetting.", type(threads).__name__)
+        threads = state["processed_threads"] = []
+    stamps = state.setdefault("processed_thread_dates", {})
+    if not isinstance(stamps, dict):
+        logger.error("processed_thread_dates is %s, not an object. Resetting.", type(stamps).__name__)
+        stamps = state["processed_thread_dates"] = {}
+
+    now = datetime.now()
+    now_iso = now.isoformat()
+
+    if add is not None:
+        if add not in threads:
+            threads.append(add)
+        stamps[str(add)] = now_iso  # ветку отвечали только что, метку обновляем
+
+    ttl = timedelta(days=PROCESSED_THREAD_TTL_DAYS)
+    kept, expired = [], []
+    for tid in threads:
+        # default=now: непонятная метка означает «оставить», а не «выбросить».
+        # Сюда же попадают ветки из старого файла состояния, у которых метки
+        # ещё нет: они считаются увиденными сейчас и начинают стареть с этого
+        # момента. Иначе первая же чистка выбросила бы всю накопленную историю
+        # и бот разом вернулся бы во все ветки, которые уже отвечал.
+        seen_at = _parse_state_dt(stamps.get(str(tid)), default=now)
+        (expired if now - seen_at > ttl else kept).append(tid)
+
+    dropped_by_size = []
+    if len(kept) > PROCESSED_THREADS_MAX:
+        dropped_by_size = kept[:-PROCESSED_THREADS_MAX]
+        kept = kept[-PROCESSED_THREADS_MAX:]
+
+    if expired:
+        logger.info(
+            "processed_threads: dropped %s threads older than %s days: %s",
+            len(expired), PROCESSED_THREAD_TTL_DAYS, expired[:20],
+        )
+    if dropped_by_size:
+        # Молчаливая обрезка запрещена: это выброс ЕЩЁ АКТУАЛЬНЫХ веток, и бот
+        # после него может влезть в них второй раз.
+        logger.warning(
+            "processed_threads hit the %s-entry cap: dropped %s still-fresh threads, "
+            "the bot may re-enter them: %s",
+            PROCESSED_THREADS_MAX, len(dropped_by_size), dropped_by_size[:20],
+        )
+
+    state["processed_threads"] = kept
+    state["processed_thread_dates"] = {str(t): stamps.get(str(t), now_iso) for t in kept}
+    return kept
+
+
 def record_passive_attempt():
     """
     Отмечает попытку пассивного ответа, которая ещё может не дойти до отправки
@@ -509,11 +678,7 @@ def record_passive_success(thread_id=None):
     state["last_passive_attempt"] = now_iso
 
     if thread_id is not None:
-        threads = state.setdefault("processed_threads", [])
-        if thread_id not in threads:
-            threads.append(thread_id)
-            if len(threads) > 100:
-                del threads[:-100]
+        _prune_processed_threads(state, add=thread_id)
 
     save_state(state)
 
@@ -1305,10 +1470,24 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
     if text and text.strip().startswith("/"):
         return False
+
+    # На это сообщение уже отвечали — второй раз не отвечаем.
+    # REPLIED_MSG_IDS был мёртвым кодом ровно на этом пути: медиа-ветка его
+    # читает на входе (check_and_trigger_assistant_media) и пишет после
+    # отправки, а текстовая не делала ни того, ни другого. Из-за этого гард
+    # медиа-ветки не видел текстовых отправок, и одно и то же сообщение —
+    # например снимок с подписью — могло получить два ответа. Единственная
+    # защита текстового пути жила в main.py (PROCESSED_MSG_IDS, 500 записей в
+    # памяти), а её снимает и рестарт, и повторный прогон sync_history.
+    if msg_id in REPLIED_MSG_IDS:
+        logger.info("Assistant already replied to message %s. Skipping text trigger.", msg_id)
+        return False
+
     global BOT_ID
-    
+
     # 1. Проверяем глобальную критику / требование выключить бота
     if await check_and_apply_silence(event, text, reply_to_msg_id):
+        REPLIED_MSG_IDS[msg_id] = True  # извинение отправлено — это тоже ответ
         return True
 
     state = load_state()
@@ -1362,6 +1541,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     # Apologize politely and shut up
                     apology = "Понял, умолкаю. Если понадоблюсь — позовите."
                     await event.reply(apology)
+                    REPLIED_MSG_IDS[msg_id] = True
                     return True
                 
                 # Reconstruct reply chain
@@ -1464,6 +1644,25 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             reply_count = reply_count_rows[0][0] if reply_count_rows else 0
             
             if reply_count >= 3 and reply_to_msg_id not in state.get("processed_threads", []):
+                # Заявка на слот незваного ответа. И гейт кулдауна (выше), и
+                # processed_threads (строкой выше) прочитаны из state, взятого
+                # до нескольких await'ов, а списываются они только в
+                # record_passive_attempt/record_passive_success. Две реплики
+                # одной ветки, попавшие в это окно, обе видели гейт открытым и
+                # обе доходили до отправки — два ответа в одну ветку. Замер:
+                # 3 такие пары в окне 2 с и 105 в окне 60 с за 1016 суток архива.
+                #
+                # Ключ один и общий, не по ветке: и last_passive_text_run, и
+                # processed_threads — глобальные ключи состояния, одно окно
+                # тишины на весь чат. Заявка по ветке была бы вторым ключом,
+                # который в поведении неотличим от этого, — то есть ровно та
+                # мёртвая защита, от которой мы избавляемся в REPLIED_MSG_IDS.
+                #
+                # Заявка отказывает сразу, а не ждёт: второй ответ в ту же
+                # ветку не нужен, и держать за ним входящее сообщение на всю
+                # генерацию (90 с) незачем.
+                if not claim_passive_slot(("passive_text",)):
+                    return False
                 # We have a discussion under a clinical post!
                 triggered = True
                 trigger_reason = f"Clinical post {reply_to_msg_id} discussion thread (reply_count={reply_count})"
@@ -1509,6 +1708,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             passive_cooldown_active = passive_gate_block_reason(load_state()) is not None
 
             if not is_obviously_junk and not passive_cooldown_active:
+                # Тот же общий слот. Пере-чтение состояния строкой выше окно
+                # гонки сужает, но не закрывает: своя запись у этой ветки идёт
+                # только в record_passive_attempt ниже, то есть между чтением и
+                # записью два таска по-прежнему проходят оба.
+                if not claim_passive_slot(("passive_text",)):
+                    return False
                 triggered = True
                 trigger_reason = "Passive trigger (pending LLM triage)"
                 
@@ -1793,6 +1998,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info("Sent shadow assistant message to Telegram test topic.")
+            REPLIED_MSG_IDS[msg_id] = True
             if not is_dialogue:
                 record_passive_success(pending_thread_id)
             return True
@@ -1816,6 +2022,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 parse_mode='html'
             )
             logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
+            # Сообщение помечаем отвеченным ДО списания окна: гард на входе
+            # функции читает именно этот кэш, и повторный прогон того же
+            # msg_id (sync_history после рестарта, снимок с подписью в двух
+            # обработчиках) дальше входа не пройдёт.
+            REPLIED_MSG_IDS[msg_id] = True
             # Полное окно тишины списывается только здесь — после того, как
             # сообщение реально ушло. Тред помечается обработанным тоже здесь.
             if not is_dialogue:
