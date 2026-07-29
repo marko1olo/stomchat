@@ -1623,6 +1623,35 @@ async def transcribe_voice_backlog(messages, source="sync"):
     return done
 
 
+async def _mark_media_processed(messages, msg_id, reason):
+    """
+    Последняя отметка «медиа разобрано» на аварийных путях. Возвращает число строк.
+
+    Зачем громко: провал самой этой отметки прежде глотался `except Exception:
+    pass` — двумя одинаковыми блоками, на таймауте и на исключении. А отметка тут
+    ровно для того, чтобы строка не осталась в состоянии «ещё не разбирали»:
+    recover_pending_media_analysis такую строку тянет из Telegram и качает файл
+    ЗАНОВО на каждом рестарте, вечно, тратя бюджет зрения на сообщение, которое
+    уже признано неразбираемым. То есть молчал именно тот отказ, который и
+    заводит бесконечный круг.
+    """
+    marked = 0
+    try:
+        for message in messages:
+            await asyncio.wait_for(
+                database.update_media_description(message.id, "-"), timeout=10
+            )
+            marked += 1
+    except Exception as exc:
+        logger.error(
+            "media msg_id=%s НЕ отмечен как разобранный (%s; отмечено %s из %s; "
+            "%s: %s) — строка остаётся в догоне и будет качаться заново на каждом "
+            "рестарте",
+            msg_id, reason, marked, len(messages), type(exc).__name__, exc,
+        )
+    return marked
+
+
 async def process_media_message(messages, msg_id, text, media_type_hint=None):
     files_to_analyze = []
     # Чьи именно снимки дошли до Vision. Нужно потому, что описание одно на
@@ -1730,18 +1759,10 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
 
     except asyncio.TimeoutError:
         logger.warning("media processing timeout msg_id=%s, marking as processed to avoid loop", msg_id)
-        try:
-            for message in messages:
-                await asyncio.wait_for(database.update_media_description(message.id, "-"), timeout=10)
-        except Exception:
-            pass
+        await _mark_media_processed(messages, msg_id, "таймаут обработки")
     except Exception:
         logger.exception("Ошибка обработки медиа %s, marking as processed to avoid loop", msg_id)
-        try:
-            for message in messages:
-                await asyncio.wait_for(database.update_media_description(message.id, "-"), timeout=10)
-        except Exception:
-            pass
+        await _mark_media_processed(messages, msg_id, "исключение при обработке")
     finally:
         for p in temp_paths:
             _remove_temp_file(p)
@@ -2271,8 +2292,11 @@ async def handle_callback_query(event):
             logger.info(f"Deduplicator: skipping repeated callback id={cb_id}")
             try:
                 await event.answer()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Не сняли спиннер на повторном нажатии: у врача кнопка крутится
+                # до таймаута клиента, и он жмёт ещё раз — новый повтор.
+                logger.debug("callback dedup: answer не прошёл id=%s (%s: %s)",
+                             cb_id, type(exc).__name__, exc)
             return
         if len(HANDLED_CALLBACK_IDS) == HANDLED_CALLBACK_IDS.maxlen:
             _HANDLED_CALLBACK_SET.discard(HANDLED_CALLBACK_IDS[0])
@@ -2295,8 +2319,12 @@ async def handle_callback_query(event):
         if not answered:
             try:
                 await event.answer()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Последняя попытка снять спиннер провалилась — врач видит вечно
+                # крутящуюся кнопку и не знает, что ответ уже не придёт.
+                logger.warning("callback: спиннер не снят (%s: %s) — у врача "
+                               "кнопка крутится до таймаута клиента",
+                               type(exc).__name__, exc)
 
 @client.on(events.NewMessage(pattern=r'\.dump', outgoing=True))
 async def dump_handler(event):
@@ -2397,8 +2425,12 @@ async def manual_weekly_test(event):
         if result:
             try:
                 await event.delete() # Удаляем служебное сообщение ".weekly"
-            except:
-                pass # Если нет прав на удаление, просто оставляем
+            except Exception as exc:
+                # Голый `except:` здесь ловил и CancelledError с KeyboardInterrupt,
+                # то есть остановка бота выглядела как «нет прав на удаление».
+                # Сама неудача безобидна — служебная строка просто остаётся.
+                logger.debug("weekly: служебное сообщение не удалено (%s: %s)",
+                             type(exc).__name__, exc)
         else:
             await event.edit("❌ Ошибка генерации (вернулся None). Проверь логи.")
             
