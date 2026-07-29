@@ -37,6 +37,22 @@ LAST_REFEREE_RUN = datetime(2000, 1, 1)
 USER_COOLDOWNS = TTLCache(maxsize=10000, ttl=86400) # 24 часа
 REPLIED_MSG_IDS = TTLCache(maxsize=50000, ttl=604800) # 7 дней
 
+# Бюджет доставки готовой сводки. Без него сгенерированная (и уже оплаченная)
+# сводка не уходит НИКОМУ: клиент настроен как timeout=30, request_retries=10,
+# flood_sleep_threshold=20 (main.py:883, 900-910), то есть один await висит до
+# 500 с, родительского срока на этом пути нет вовсе, и в журнале об этом ни
+# строки. Число не новое: столько же в summarizer.TELEGRAM_SEND_TIMEOUT_SECONDS
+# и tg_safety.DEFAULT_TIMEOUT_SECONDS — второе число рядом разъехалось бы.
+SUMMARY_DELIVERY_TIMEOUT_SECONDS = 90
+
+# Бюджет правки сообщения по нажатию инлайн-кнопки. Спиннер на кнопке снимает
+# event.answer() строкой ниже, поэтому зависший edit_message означает вечно
+# крутящуюся кнопку: врач думает, что бот считает, и жмёт снова. 25 = 20 + 5 =
+# flood_sleep_threshold + retry_delay (main.py:883, 907) — короткое ожидание
+# telethon пересиживает сам, а платить за вторую из десяти внутренних попыток
+# врач не должен. Меньше бюджета сводки (90) и общего сетевого потолка (60).
+CALLBACK_EDIT_TIMEOUT_SECONDS = 25
+
 STYLE_PROMPTS = {
     "colleague_friendly": "Твой стиль общения — дружелюбный коллега-эксперт. Общайся свободно, на равных, на профессиональном стоматологическом сленге, но вежливо. Разрешено шутить, но без перегибов.",
     "clinical_dry": "Твой стиль общения — сухие клинические факты. Отвечай максимально строго, академично, лаконично и по делу. Категорически ЗАПРЕЩЕНЫ любые шутки, каламбуры, смайлы, метафоры или лирические отступления. Только голая наука, стандарты EBM, дозировки и анатомические обоснования. Никаких смайлов вообще.",
@@ -2064,23 +2080,39 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         length_guideline = "Отвечай кратко, до 3-4 предложений."
 
     
+    # Личность бота берётся из BOT_ID/BOT_USERNAME, а не из get_me() на каждый
+    # снимок. Раньше здесь стояли два сетевых get_me() под пустым except: при
+    # обрыве связи (51723 события по журналам) оба флага оставались False,
+    # прямое обращение врача считалось пассивным и попадало под 2-часовой
+    # кулдаун — снимок отбрасывался молча, и врач не узнавал, что бот просто не
+    # разобрал, к кому обращались. Догоняющий резолв — как в
+    # check_and_trigger_assistant.
+    if (getattr(message, 'reply_to_msg_id', None) or text) and not BOT_ID:
+        if await resolve_bot_identity(bot_client):
+            logger.info(f"Dynamically resolved BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
+
     is_direct_reply = False
-    if getattr(message, 'reply_to_msg_id', None):
+    if getattr(message, 'reply_to_msg_id', None) and BOT_ID:
         try:
             parent = await bot_client.get_messages(message.chat_id, ids=message.reply_to_msg_id)
-            if parent and parent.sender_id == (await bot_client.get_me()).id:
+            if parent and parent.sender_id == BOT_ID:
                 is_direct_reply = True
-        except Exception:
-            pass
+        except Exception as parent_err:
+            # Молчать нельзя: не опознав ответ боту, мы уводим снимок врача под
+            # пассивный 2-часовой кулдаун вместо разбора.
+            logger.warning(
+                "Не удалось получить сообщение-родитель msg_id=%s для снимка: %s",
+                message.reply_to_msg_id, parent_err,
+            )
 
     is_mentioned = False
-    if text:
-        try:
-            bot_info = await bot_client.get_me()
-            if bot_info and bot_info.username and bot_info.username.lower() in text.lower():
-                is_mentioned = True
-        except Exception:
-            pass
+    if text and BOT_USERNAME:
+        # Имя ищем с «@» и с границей слова, как strip_bot_mention в main.py.
+        # Без «@» за обращение сходила любая подстрока, а без границы слова
+        # «@stomchat_bot_old» — это ДРУГОЙ аккаунт, и принимать его за обращение
+        # к нам значит разбирать снимок, которого у нас никто не просил.
+        if re.search(rf"(?i)@{re.escape(BOT_USERNAME)}\b", text):
+            is_mentioned = True
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     is_passive = not (is_direct_reply or is_mentioned)
@@ -3896,7 +3928,15 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
             scope_note = f"последние {SUMMARY_RECENT_LIMIT} сообщений"
 
         if not chat_rows:
-            await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось найти сообщения для саммари.</i>", parse_mode='html')
+            # И на отказе граница нужна: без неё задача висит навсегда на
+            # попытке сказать врачу, что сводки не будет.
+            await tg_safety.edit_message(
+                bot_client, chat_id, status_msg.id,
+                "❌ <i>Не удалось найти сообщения для саммари.</i>",
+                timeout=SUMMARY_DELIVERY_TIMEOUT_SECONDS,
+                op="edit_message:group_summary_empty", logger=logger,
+                parse_mode='html',
+            )
             return
             
         history_msgs = []
@@ -3927,7 +3967,13 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
         
         if error or not response or not getattr(response, "text", None):
-            await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Ошибка генерации саммари. Пожалуйста, попробуйте позже.</i>", parse_mode='html')
+            await tg_safety.edit_message(
+                bot_client, chat_id, status_msg.id,
+                "❌ <i>Ошибка генерации саммари. Пожалуйста, попробуйте позже.</i>",
+                timeout=SUMMARY_DELIVERY_TIMEOUT_SECONDS,
+                op="edit_message:group_summary_genfail", logger=logger,
+                parse_mode='html',
+            )
             return
             
         summary_text = response.text.strip()
@@ -3938,12 +3984,44 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
             f"📋 <b>Результаты клинического анализа дискуссии</b>\n"
             f"<i>Разобрано: {scope_note} ({len(chat_rows)} реплик)</i>\n\n{summary_text}"
         )
-        await bot_client.edit_message(chat_id, status_msg.id, final_text, parse_mode='html')
+        # Единственный путь, которым готовая сводка попадает врачу. Без границы
+        # по времени зависший Telegram означал: сводка собрана и потеряна, врач
+        # сидит перед «Собираю и анализирую... Подождите» до бесконечности, и в
+        # журнале об этом ни строки — зависание не исключение, except ниже его
+        # не ловит. tg_safety сам пишет WARNING с причиной и потраченным временем.
+        delivered = await tg_safety.edit_message(
+            bot_client, chat_id, status_msg.id, final_text,
+            timeout=SUMMARY_DELIVERY_TIMEOUT_SECONDS,
+            op="edit_message:group_summary", logger=logger, parse_mode='html',
+        )
+        if not delivered.ok:
+            logger.warning(
+                "Сводка собрана (%d реплик, %d символов), но НЕ доставлена в "
+                "chat_id=%s: %s. Врач остался с сообщением «Подождите» и не "
+                "узнает, что ответа не будет",
+                len(chat_rows), len(final_text), chat_id, delivered.reason,
+            )
+            return
         logger.info(f"Successfully posted group summary for chat_id={chat_id}")
     except Exception as e:
         logger.error(f"Error generating group summary: {e}")
-        try: await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Произошла неожиданная ошибка при составлении сводки.</i>", parse_mode='html')
-        except Exception: pass
+        # Последнее слово врачу — тоже под сроком: иначе задача повисает уже
+        # внутри обработчика ошибки, и врач не получает даже отказа. Наружу
+        # отсюда не пускаем ничего: иначе вызывающий (main.py:2084) сочтёт
+        # команду необработанной и следом отвечать полезет пассивный ассистент.
+        try:
+            await tg_safety.edit_message(
+                bot_client, chat_id, status_msg.id,
+                "❌ <i>Произошла неожиданная ошибка при составлении сводки.</i>",
+                timeout=SUMMARY_DELIVERY_TIMEOUT_SECONDS,
+                op="edit_message:group_summary_error", logger=logger,
+                parse_mode='html',
+            )
+        except Exception as notify_err:
+            logger.error(
+                "Не удалось сообщить врачу об ошибке сводки chat_id=%s: %s",
+                chat_id, notify_err,
+            )
 
 
 async def handle_group_direct_ask(bot_client, event, question):
@@ -4544,6 +4622,26 @@ async def query_random_wiki_fact():
     return fact
 
 
+async def edit_callback_message(bot_client, event, text, op, **kwargs):
+    """
+    Правка сообщения по нажатию инлайн-кнопки — обязательно под сроком.
+
+    Спиннер на кнопке снимает event.answer(), а он стоит строкой НИЖЕ правки.
+    Пока правка была без границы, зависший Telegram означал: врач смотрит на
+    крутящуюся кнопку до 500 с (timeout=30 x request_retries=10, main.py:900-910),
+    решает, что бот считает, и жмёт снова. Страховка в main.py:2315 тут не
+    помогает: она ловит исключение, а зависание не исключение — await просто не
+    возвращается, и finally не наступает.
+
+    Исключение наружу не летит (tg_safety отдаёт TgOutcome), поэтому
+    event.answer() после вызова выполняется в любом случае и кнопка гаснет.
+    """
+    return await tg_safety.edit_message(
+        bot_client, event.chat_id, event.message_id, text,
+        timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, **kwargs,
+    )
+
+
 async def handle_quiz_callback(bot_client, event):
     """Проверка ответа пользователя при клике на инлайн-кнопку."""
     data_str = event.data.decode('utf-8', errors='ignore')
@@ -4572,7 +4670,8 @@ async def handle_quiz_callback(bot_client, event):
             f"Новый стиль: <b>{style_name}</b>\n\n"
             "Он применяется и в личных сообщениях, и в ответах в общем чате. Изменить можно в любой момент командой /style."
         )
-        await bot_client.edit_message(event.chat_id, event.message_id, confirm_text, parse_mode='html')
+        await edit_callback_message(bot_client, event, confirm_text,
+                                   "edit_message:style_confirm", parse_mode='html')
         await event.answer()
         return
 
@@ -4592,7 +4691,9 @@ async def handle_quiz_callback(bot_client, event):
             [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
             [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")]
         ]
-        await bot_client.edit_message(event.chat_id, event.message_id, protocols_text, buttons=buttons, parse_mode='html')
+        await edit_callback_message(bot_client, event, protocols_text,
+                                   "edit_message:proto_list", buttons=buttons,
+                                   parse_mode='html')
         await event.answer()
         return
 
@@ -4631,7 +4732,9 @@ async def handle_quiz_callback(bot_client, event):
         
         from telethon import Button
         back_btn = Button.inline("⬅️ Назад к списку", data="proto:back")
-        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html', link_preview=False)
+        await edit_callback_message(bot_client, event, response_text,
+                                   "edit_message:proto_article", buttons=back_btn,
+                                   parse_mode='html', link_preview=False)
         await event.answer()
         return
 
@@ -4647,7 +4750,9 @@ async def handle_quiz_callback(bot_client, event):
             [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics")],
             [Button.inline("🎲 Случайный факт", data="wiki_cat:random"), Button.inline("🔍 Поиск по базе", data="wiki_cat:search_info")]
         ]
-        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await edit_callback_message(bot_client, event, wiki_text,
+                                   "edit_message:wiki_menu", buttons=buttons,
+                                   parse_mode='html')
         await event.answer()
         return
 
@@ -4658,7 +4763,9 @@ async def handle_quiz_callback(bot_client, event):
         # появляется здесь сам. Раньше список был отдельным, и разделы
         # без кнопки существовали только в обработчике.
         buttons = wiki_topic_buttons()
-        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await edit_callback_message(bot_client, event, wiki_text,
+                                   "edit_message:wiki_topics", buttons=buttons,
+                                   parse_mode='html')
         await event.answer()
         return
 
@@ -4675,7 +4782,9 @@ async def handle_quiz_callback(bot_client, event):
         )
         from telethon import Button
         back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
-        await bot_client.edit_message(event.chat_id, event.message_id, search_info, buttons=back_btn, parse_mode='html')
+        await edit_callback_message(bot_client, event, search_info,
+                                   "edit_message:wiki_search_info",
+                                   buttons=back_btn, parse_mode='html')
         await event.answer()
         return
 
@@ -4691,7 +4800,9 @@ async def handle_quiz_callback(bot_client, event):
             [Button.inline("🔄 Ещё факт", data="wiki_cat:random")],
             [Button.inline("⬅️ Назад в меню", data="wiki_cat:back")]
         ]
-        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=buttons, parse_mode='html', link_preview=False)
+        await edit_callback_message(bot_client, event, response_text,
+                                   "edit_message:wiki_random", buttons=buttons,
+                                   parse_mode='html', link_preview=False)
         await event.answer()
         return
 
@@ -4705,7 +4816,9 @@ async def handle_quiz_callback(bot_client, event):
         buttons = wiki_category_buttons(cat_id, await wiki_subtopic_counts(cat_id))
 
         wiki_text = f"📚 <b>Раздел: {title}</b>\n\nвыберите интересующую клиническую подтему для просмотра статей:"
-        await bot_client.edit_message(event.chat_id, event.message_id, wiki_text, buttons=buttons, parse_mode='html')
+        await edit_callback_message(bot_client, event, wiki_text,
+                                   "edit_message:wiki_category", buttons=buttons,
+                                   parse_mode='html')
         await event.answer()
         return
 
@@ -4727,7 +4840,9 @@ async def handle_quiz_callback(bot_client, event):
             from telethon import Button
             back_cat = subtopic_id.split("_")[0]
             back_btn = Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
-            await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=back_btn, parse_mode='html')
+            await edit_callback_message(bot_client, event, response_text,
+                                       "edit_message:wiki_page_empty",
+                                       buttons=back_btn, parse_mode='html')
             await event.answer()
             return
 
@@ -4759,7 +4874,9 @@ async def handle_quiz_callback(bot_client, event):
             Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
         ])
         
-        await bot_client.edit_message(event.chat_id, event.message_id, response_text, buttons=buttons, parse_mode='html', link_preview=False)
+        await edit_callback_message(bot_client, event, response_text,
+                                   "edit_message:wiki_page", buttons=buttons,
+                                   parse_mode='html', link_preview=False)
         await event.answer()
         return
 

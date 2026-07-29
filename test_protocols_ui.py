@@ -84,7 +84,13 @@ check("в тексте перечислено столько же, скольк�
       f"в тексте {listed.count('• <b>')}, кнопок {len(protocols)}")
 
 print("\n[3] Кнопка «назад» повторяет тот же набор")
-back_block = SOURCE.split('if data_str == "proto:back"', 1)[1].split("await bot_client.edit_message", 1)[0]
+# Границей блока служит `edit_message` без имени модуля. Прежде здесь стояло
+# `await bot_client.edit_message`, и когда доставку завели под таймаут через
+# tg_safety.edit_message(bot_client, ...), эта строка исчезла: срез уехал в
+# следующую ветку, подобрал ЧУЖУЮ кнопку и уронил проверку, хотя набор кнопок
+# «назад» не менялся. Проверка про кнопки не должна зависеть от того, КТО
+# выполняет правку сообщения.
+back_block = SOURCE.split('if data_str == "proto:back"', 1)[1].split("edit_message", 1)[0]
 back_ids = set(re.findall(r'data="proto:(\w+)"', back_block))
 check("возврат к списку показывает все протоколы", back_ids == protocols,
       f"в возврате {sorted(back_ids)}, всего {sorted(protocols)}")
