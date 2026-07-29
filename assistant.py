@@ -16,6 +16,7 @@ import vision
 import database
 import media_tools
 import html_safe
+import tg_safety
 import config
 logger = logging.getLogger("assistant")
 
@@ -5243,6 +5244,46 @@ PING_QUIET_START_HOUR = 22   # с 22:00 …
 PING_QUIET_END_HOUR = 9      # … до 09:00 проактивных сообщений не шлём
 MAX_PINGS_PER_CYCLE = 5      # чтобы джоб не занимал LLM-шлюз на минуты
 MAX_PING_FAILURES = 3        # после стольких неудач подряд перестаём долбиться
+# Потолок на пачку приглашений в чат. Без него бралось 20% активных кандидатов:
+# при 749 врачах это до 150 личных сообщений подряд без единой паузы. По журналам
+# доминирующий отказ у этого бота — обрыв связи (51 723 события), но FloodWait по
+# ним НЕ измерить: telethon спит внутри вызова молча, а его логгер приглушён до
+# ERROR. Так что потолок ставится по конструкции, а не по замеру, и это сказано
+# прямо.
+GROUP_PING_BATCH_MAX = 25
+# Пауза между отправками в пачке: Telegram ограничивает не только объём, но и
+# частоту. 25 сообщений по секунде — это 25 секунд на цикл, приемлемо для джоба.
+GROUP_PING_DELAY_SECONDS = 1.0
+
+
+def select_ping_targets(candidates, batch_max=None):
+    """
+    Кому из кандидатов уходит приглашение в этом цикле.
+
+    Вынесено из тела рассылки отдельной функцией, чтобы потолок проверялся
+    поведением, а не наличием константы: проверка «константа объявлена и разумна»
+    проходила и после того, как применение потолка убрали, — то есть не значила
+    ничего.
+
+    Берём случайные 20% (минимум один), но не больше потолка. Без потолка при 749
+    врачах уходило до 150 личных сообщений подряд, настолько быстро, насколько
+    успевает сеть. Урезание пишется в журнал: разослать 25 из 150 и промолчать
+    значит соврать о покрытии.
+    """
+    if not candidates:
+        return []
+    limit = GROUP_PING_BATCH_MAX if batch_max is None else batch_max
+    sample_size = max(1, int(math.ceil(len(candidates) * 0.20)))
+    sample_size = min(sample_size, limit, len(candidates))
+    targets = random.sample(list(candidates), sample_size)
+    skipped = len(candidates) - sample_size
+    if skipped:
+        logger.info(
+            "Group ping batch capped: кандидатов %s, разослано будет %s "
+            "(потолок %s) — остальные %s попадут в следующие циклы",
+            len(candidates), sample_size, limit, skipped,
+        )
+    return targets
 
 
 def is_ping_quiet_hours(now=None):
@@ -5378,7 +5419,21 @@ async def check_and_send_pm_pings(bot_client):
                                 continue
                             raise
                         except Exception as send_err:
-                            # UserIsBlockedError, FloodWait, peer-flood и прочее.
+                            # Раньше здесь в одну кучу шли UserIsBlockedError и
+                            # FloodWait, а счётчик рос на любой из них. FloodWait
+                            # — НАША вина (шлём слишком часто), и трёх таких
+                            # хватало, чтобы живой врач навсегда выпал из
+                            # приглашений: MAX_PING_FAILURES проверяется на входе
+                            # и обратной дороги у записи нет.
+                            if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
+                                wait_seconds = tg_safety.flood_wait_seconds(send_err)
+                                logger.warning(
+                                    "DM ping hit FloodWait chat_id=%s wait=%ss — счётчик "
+                                    "НЕ увеличен (это наша скорость, не врач), рассылка "
+                                    "остановлена до следующего цикла",
+                                    chat_id, wait_seconds,
+                                )
+                                break
                             failures = info.get("ping_failures", 0) + 1
                             commit_pm_ping(chat_id_str, ping_failures=failures)
                             logger.warning(
@@ -5538,14 +5593,16 @@ async def check_and_send_group_activity_pings(bot_client):
             logger.info("No users available for group activity ping (all on cooldown).")
             return
             
-        # Отправляем случайным 20% кандидатов (минимум 1 пользователю)
-        import math
-        sample_size = max(1, int(math.ceil(len(candidates) * 0.20)))
-        targets = random.sample(candidates, min(sample_size, len(candidates)))
-        
+        targets = select_ping_targets(candidates)
+
         logger.info(f"Sending proactive group activity pings to {len(targets)} users (out of {len(candidates)} candidates).")
-        
-        for uid in targets:
+
+        for ping_index, uid in enumerate(targets):
+            if ping_index:
+                # Пауза между отправками. Telegram считает не только объём, но и
+                # частоту; без паузы пачка уходит настолько быстро, насколько
+                # успевает сеть.
+                await asyncio.sleep(GROUP_PING_DELAY_SECONDS)
             try:
                 msg = f"🔥 <b>{teaser}</b>\n\n💬 Тема: {topic}\n\n👉 <a href=\"{chat_link}\">Перейти к обсуждению в чате</a>"
                 try:
@@ -5566,6 +5623,18 @@ async def check_and_send_group_activity_pings(bot_client):
                     # Кулдаун раньше выставлялся ТОЛЬКО после успешной отправки,
                     # поэтому заблокировавший бота оставался вечным кандидатом
                     # и каждый раз разбавлял 20%-ную выборку.
+                    if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
+                        # FloodWait — вина нашей скорости. Счётчик не растёт, а
+                        # рассылка прекращается: продолжать в закрытую дверь
+                        # значит копить наказание и терять остальных из выборки.
+                        logger.warning(
+                            "Group ping hit FloodWait uid=%s wait=%ss — счётчик НЕ "
+                            "увеличен, рассылка остановлена до следующего цикла "
+                            "(осталось не разослано: %s)",
+                            uid, tg_safety.flood_wait_seconds(send_err),
+                            len(targets) - targets.index(uid) - 1,
+                        )
+                        break
                     failures = pings.get(str(uid), {}).get("ping_failures", 0) + 1
                     commit_pm_ping(
                         uid,
