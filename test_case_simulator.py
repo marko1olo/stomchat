@@ -130,7 +130,7 @@ async def run():
     print("\n[3] Отказ поиска не оставляет вечный «Анализирую…»")
     global _corpus_error
     reset()
-    _corpus_error = sqlite_error = RuntimeError("database is locked")
+    _corpus_error = RuntimeError("database is locked")
     try:
         await assistant.handle_interactive_case_step(BOT, USER_ID, "препарирую 26", state(1))
     except RuntimeError:

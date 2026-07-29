@@ -30,6 +30,7 @@ extract_keywords, который делает text.lower(). Факты вики 
 import asyncio
 import io
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -53,8 +54,8 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-CODE = "\n".join(l for l in io.open("assistant.py", encoding="utf-8").read().split("\n")
-                 if not l.lstrip().startswith("#"))
+CODE = "\n".join(ln for ln in io.open("assistant.py", encoding="utf-8").read().split("\n")
+                 if not ln.lstrip().startswith("#"))
 
 print("\n[1] Корень: SQLite не складывает регистр кириллицы")
 # mode=ro: этот набор читает боевую вику (12 784 факта) на уровне модуля и делает
@@ -119,7 +120,7 @@ async def corpora():
                            ("МТА при перфорации дна полости", "мта")):
         keys = A.select_search_keywords(A.extract_keywords(question))
         wiki, archive = await A.search_knowledge_corpus(keys)
-        lines = [l for l in (wiki + "\n" + archive).split("\n") if l.strip()]
+        lines = [ln for ln in (wiki + "\n" + archive).split("\n") if ln.strip()]
         check(f"«{question[:34]}»: справка не пуста", len(lines) >= 5,
               f"строк {len(lines)} — модель ответит по памяти")
         check(f"«{term}» действительно встречается в справке",
@@ -130,12 +131,78 @@ async def corpora():
 asyncio.run(corpora())
 
 print("\n[7] Цена правки измерена, а не предположена")
-# Замер берётся по ЛУЧШЕМУ из прогонов, а не по среднему. Среднее ловит чужую
-# нагрузку на машине: при параллельных питонах эта проверка уже отваливалась на
-# отношении 46.9 -> 114.4 мс, то есть флакала. Флакующая проверка не доказывает
-# ничего — минимум устойчив к планировщику, потому что чужой квант времени может
-# прогон только замедлить, но не ускорить.
+# Здесь сравнивались ДВА тайминга с порогом «вчетверо», и в полном прогоне свиты
+# (рядом идут 76 других наборов) проверка упала на 17.7 против 77.8 мс — отношение
+# 4.40 при пороге 4.0, — а в одиночных прогонах на тихой машине проходила. Замер
+# 12 пар подряд на этой машине объясняет почему: минимум naive гуляет от 29.3 до
+# 98.0 мс (3.3x), а ОТНОШЕНИЕ минимума к минимуму от 0.77 до 2.79 (3.6x) — ошибки
+# числителя и знаменателя идут в разные стороны и умножаются, поэтому отношение
+# дрожит СИЛЬНЕЕ каждого из замеров. Флакующая проверка приучает не верить
+# красному набору, то есть не защищает врача ни от чего.
+#
+# Цена теперь считается шагами виртуальной машины SQLite (set_progress_handler) и
+# от нагрузки на машину не зависит ВООБЩЕ: замер дал 0.0000% дрожания на пяти
+# прогонах подряд и точную модель «шагов на строку = 1 + 3k» для k форм LIKE —
+# 4.001 / 7.001 / 10.001 / 13.001 при k = 1/2/3/4. Порог 3.0 лежит между тремя
+# формами (2.500) и четырьмя (3.250), поэтому проверка стала СТРОЖЕ прежней:
+# лишнюю форму LIKE порог 4.0 пропускал, а этот ловит.
 term = "внчс"
+FACT_ROWS = db.execute("SELECT COUNT(*) FROM distilled_facts").fetchone()[0]
+
+
+def _vdbe_steps(sql, args):
+    """Шаги виртуальной машины SQLite: цена запроса, посчитанная без часов."""
+    counted = [0]
+
+    def _tick():
+        counted[0] += 1
+        return 0
+
+    db.execute(sql, args).fetchall()  # прогрев: первый разбор схемы даёт лишние шаги
+    db.set_progress_handler(_tick, 1)
+    try:
+        db.execute(sql, args).fetchall()
+    finally:
+        db.set_progress_handler(None, 0)
+    return counted[0]
+
+
+naive_sql = "SELECT COUNT(*) FROM distilled_facts WHERE content LIKE ?"
+naive_steps = _vdbe_steps(naive_sql, (f"%{term}%",))
+where, params = A.like_any_case("content", term)
+fixed_sql = f"SELECT COUNT(*) FROM distilled_facts WHERE {where}"
+fixed_steps = _vdbe_steps(fixed_sql, params)
+print(f"      {FACT_ROWS} фактов: было {naive_steps} шагов SQLite "
+      f"({naive_steps / FACT_ROWS:.3f} на строку), стало {fixed_steps} "
+      f"({fixed_steps / FACT_ROWS:.3f} на строку), отношение "
+      f"{fixed_steps / max(naive_steps, 1):.3f}")
+# Порядок важен: сперва убеждаемся, что счётчик вообще работает. Если бы он молчал,
+# оба числа были бы нулями и проверка отношения стала бы пустышкой, которая
+# «проходит» при любой поломке продакшна.
+check("счётчик цены детерминирован: два прогона дают одно число",
+      _vdbe_steps(fixed_sql, params) == fixed_steps,
+      "второй прогон дал другое число — проверка ниже опять начнёт флакать")
+check("счётчик действительно считает, а не молчит", naive_steps >= FACT_ROWS,
+      f"{naive_steps} шагов на {FACT_ROWS} строк — счётчик не сработал, "
+      f"и отношение ниже ничего не проверяет")
+check("три формы дороже одной не более чем втрое", fixed_steps <= naive_steps * 3,
+      f"{naive_steps} -> {fixed_steps} шагов (x{fixed_steps / max(naive_steps, 1):.2f}) — "
+      f"лишняя форма LIKE либо скан вместо обрыва: врач ждёт справку дольше")
+# Счётчик шагов считает КОЛИЧЕСТВО инструкций, а не их цену, и на этом он слеп:
+# замер показал, что вариант с питоновской функцией складывания регистра стоит
+# 1.25 шага от одиночного LIKE, но 108 мс против 60 — то есть 1.8x реального
+# времени при «подешевевшем» счётчике. Поэтому отдельно смотрим скомпилированную
+# программу запроса: вызывать на каждую строку она должна только встроенный like,
+# без обратного вызова в питон. Помощник и выбран ровно поэтому — три формы в
+# одном запросе дешевле create_function.
+_fns = sorted({row[5] for row in db.execute("EXPLAIN " + fixed_sql, params).fetchall()
+               if row[1].startswith("Function")})
+check("на каждую строку зовётся только встроенный like, без питона",
+      _fns == ["like(2)"], f"в программе запроса функции {_fns}")
+# Абсолютный потолок по часам оставлен: он ловит то, чего счётчик шагов не видит —
+# если сама база станет медленной (диск, WAL, чужой писатель), шаги не изменятся, а
+# врач будет ждать ответа секунды. Потолок абсолютный, не относительный, и замер
+# 12 прогонов дал максимум 84 мс при пороге 500 — запас шестикратный.
 
 
 def _best_ms(sql, args, runs=7):
@@ -149,23 +216,64 @@ def _best_ms(sql, args, runs=7):
     return best
 
 
-naive_ms = _best_ms("SELECT COUNT(*) FROM distilled_facts WHERE content LIKE ?",
-                    (f"%{term}%",))
-where, params = A.like_any_case("content", term)
-fixed_ms = _best_ms(f"SELECT COUNT(*) FROM distilled_facts WHERE {where}", params)
-print(f"      один запрос по 12784 фактам: было {naive_ms:.1f} мс, стало {fixed_ms:.1f} мс "
-      f"(лучшее из 7)")
-# Три варианта LIKE вместо одного — рост втрое заложен в конструкцию. Порог
-# держим на четырёх с запасом, чтобы проверка ловила настоящий обвал (скан
-# вместо индекса, запрос на каждый ключ), а не дрожание планировщика.
-check("цена выросла не более чем вчетверо", fixed_ms <= naive_ms * 4 + 5,
-      f"{naive_ms:.1f} -> {fixed_ms:.1f} мс")
-# Абсолютный потолок ловит то, чего отношение не поймает: если обвалятся ОБА
-# запроса, отношение останется прежним, а врач будет ждать ответа секунды.
+fixed_ms = _best_ms(fixed_sql, params)
+print(f"      он же по часам: {fixed_ms:.1f} мс (лучшее из 7)")
 check("запрос по корпусу остаётся быстрее полусекунды", fixed_ms < 500,
       f"{fixed_ms:.1f} мс на один запрос — при 6 ключах это {fixed_ms * 6 / 1000:.1f} с")
 check("вариантов LIKE ровно три, а не больше", where.count("LIKE") == 3
       and len(params) == 3, f"got {where.count('LIKE')} LIKE, {len(params)} параметров")
+
+print("\n[7a] Каждый ключ врача доходит до базы, и выборка ограничена")
+# Считаем не время, а СКОЛЬКО РАЗ бот сходил в базу за один поиск: от нагрузки на
+# машину это не зависит вообще. Проверка ловит то, чего тайминг не видел ни в одной
+# формулировке. Замер: если снять LIMIT у выборки, первый же ключ набирает
+# _CORPUS_CANDIDATE_CAP=60 кандидатов, цикл по ключам обрывается через break, и
+# запросов становится 2 вместо 6 — врач спросил про три вещи, а искали только
+# первую, причём молча. Строк в справке при этом стало даже МЕНЬШЕ (16 против 20).
+_real_connect = sqlite3.connect
+_traced = []
+
+
+def _tracing_connect(target, *a, **kw):
+    # Продакшн открывает боевые базы НА ЗАПИСЬ (sqlite3.connect без mode=ro), а тут
+    # идёт только чтение — на время замера уводим соединение в ro и вешаем трассу.
+    if isinstance(target, str) and target.endswith(".db") and not kw.get("uri"):
+        kw = dict(kw)
+        kw["uri"] = True
+        target = f"file:{target}?mode=ro"
+    conn = _real_connect(target, *a, **kw)
+    conn.set_trace_callback(_traced.append)
+    return conn
+
+
+async def traced_corpus(keys):
+    del _traced[:]
+    sqlite3.connect = _tracing_connect
+    try:
+        return await A.search_knowledge_corpus(keys)
+    finally:
+        sqlite3.connect = _real_connect
+
+
+CORPUS_KEYS = ["внчс", "адгезив", "цирконий"]
+traced_wiki, traced_archive = asyncio.run(traced_corpus(list(CORPUS_KEYS)))
+selects = [" ".join(s.split()) for s in _traced if s.lstrip().upper().startswith("SELECT")]
+limits = [int(m.group(1)) for m in (re.search(r"LIMIT\s+(\d+)", s, re.I) for s in selects) if m]
+print(f"      поиск по {len(CORPUS_KEYS)} ключам: операторов {len(_traced)}, "
+      f"из них SELECT {len(selects)}, LIMIT-ы {limits}")
+check("справка по трём ключам не пуста", traced_wiki.strip() != "",
+      "трасса сняла соединение, а не только посчитала его")
+check("на каждый ключ по одной выборке в вике и в архиве",
+      len(selects) == 2 * len(CORPUS_KEYS),
+      f"SELECT-ов {len(selects)}, ожидалось {2 * len(CORPUS_KEYS)} — либо часть ключей "
+      f"врача до базы не дошла, либо запрос размножился на каждую форму")
+check("каждая выборка ограничена LIMIT", len(limits) == len(selects) and len(selects) > 0,
+      f"без LIMIT {len(selects) - len(limits)} из {len(selects)} — лишние строки читаются "
+      f"впустую и вытесняют другие ключи")
+check(f"строк на ключ не больше запаса кандидатов ({A._CORPUS_CANDIDATE_CAP})",
+      bool(limits) and max(limits) <= A._CORPUS_CANDIDATE_CAP,
+      f"LIMIT {limits} против запаса {A._CORPUS_CANDIDATE_CAP}: один ключ съедает весь "
+      f"запас и следующие ключи молча не ищутся")
 
 print("\n[8] Проверки выше ловят поломку")
 # Сравнение «стало больше, чем было» слепо, если помощник вернёт одну форму:
