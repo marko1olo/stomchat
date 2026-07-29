@@ -84,6 +84,106 @@ def _extract_frame_sync(video_path):
             vid_cap.release()
 
 
+# Сколько stderr ребёнка держать под рукой. Столько же, сколько буферизует сам
+# StreamReader по умолчанию: меньше — и мы потеряли бы то, что здоровый ребёнок
+# успел сказать до backpressure, больше — незачем. Главное, что теперь это
+# ПОТОЛОК: раньше communicate() копил весь stderr без границы.
+_STDERR_KEEP_BYTES = 65536
+# Сколько последних строк stderr уходит в журнал. Трассировка Python на три кадра
+# — восемь строк (заголовок, 3x2, строка исключения); двенадцать берут её целиком
+# плюс предупреждение cv2/PIL над ней. Весь stderr в журнал не влезет: ffmpeg
+# сыплет прогрессом, и он вытеснит из кольца сам себя, а не причину отказа.
+_STDERR_TAIL_LINES = 12
+# Отсрочка на «дожать хвост и похоронить ребёнка» ПОСЛЕ kill(). Ограничена
+# бюджетом самого вызова (см. _settle_after_kill), чтобы не вылезти за дедлайн
+# вызывающего: у извлечения кадра внешнего потолка нет вообще.
+_KILL_REAP_GRACE_SECONDS = 2.0
+
+
+async def _drain_stderr(stream, sink):
+    """Тянет stderr ребёнка ПО ХОДУ дела, оставляя в sink последние байты.
+
+    Смысл в том, что sink живёт СНАРУЖИ этой корутины: отмена по таймауту
+    уносит корутину, а собранный хвост остаётся. Иначе объяснение зависшего
+    разбора снимка теряется целиком — замерено, было 0 байт из 6 строк.
+
+    Читаем кусками, а не readline(): ffmpeg отбивает прогресс через \\r без
+    перевода строки, и readline() на такой строке падает ValueError по лимиту.
+    """
+    while True:
+        try:
+            chunk = await stream.read(4096)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Труба порвалась. То, что уже в sink, ценнее исключения.
+            return
+        if not chunk:
+            return
+        sink += chunk
+        if len(sink) > _STDERR_KEEP_BYTES:
+            del sink[:-_STDERR_KEEP_BYTES]
+
+
+def _kill_quietly(proc):
+    """Убить ребёнка, не дав самому kill() отобрать у нас запись в журнале.
+
+    kill() уже мёртвого ребёнка поднимает ProcessLookupError. Гонка узкая (мы
+    попали в таймаут ровно в момент выхода), но исключение отсюда улетело бы
+    вызывающему вместо строки «timeout ... stderr=...» — то есть съело бы ровно
+    ту диагностику, ради которой всё это и делается.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception as exc:
+        logger.warning("не удалось убить ребёнка pid=%s: %s", proc.pid, exc)
+
+
+async def _settle_after_kill(proc, drain, timeout):
+    """Дожать хвост stderr и дождаться убитого ребёнка — но не бесконечно.
+
+    Прежде здесь стоял второй `await proc.communicate()` без потолка. Он висел
+    НАВСЕГДА, если убитый ребёнок оставил внука с той же трубой: EOF приходит,
+    когда трубу отпустит последний держатель, а kill() бьёт только ребёнка.
+    Замерено: вызов не вернулся за 12 с при таймауте инструмента 1 с, и в
+    журнале не было ни строки. Воркер медиа один — вставал весь разбор снимков
+    до перезапуска бота, молча.
+
+    Отсрочка вложена в бюджет вызова: min(2 с, timeout). Ждать больше нечего —
+    хвост stderr уже собран дренажом, здесь мы лишь добираем последний вздох.
+    """
+    grace = min(_KILL_REAP_GRACE_SECONDS, max(0.1, timeout))
+    # Ожидания создаём ПООЧЕРЁДНО, а не готовым кортежем. Кортеж вычисляется
+    # целиком заранее, и внешняя отмена на первом ожидании уносила нас из цикла
+    # с так и не запущенным proc.wait(): интерпретатор ругался «coroutine
+    # Process.wait was never awaited», а убитый ребёнок оставался непожатым — на
+    # этой машине непожатые процессы измеримо живут часами и едят ядра.
+    for make_waitable in (lambda: asyncio.shield(drain), proc.wait):
+        try:
+            await asyncio.wait_for(make_waitable(), timeout=grace)
+        except Exception:
+            # Ни таймаут добора, ни порванная труба не должны мешать записи в
+            # журнал: она идёт следующей строкой и она здесь главная.
+            pass
+    if proc.returncode is None:
+        # Ребёнок пережил kill() — это утёкший процесс, а на этой машине
+        # утёкшие процессы измеримо съедают ядра часами. Пусть будет в журнале.
+        logger.warning("ребёнок пережил kill() pid=%s, отпущен как утёкший", proc.pid)
+
+
+def _tail_lines(raw, lines=_STDERR_TAIL_LINES):
+    """Последние `lines` непустых строк stderr, склеенных в ОДНУ запись журнала.
+
+    Многострочная запись в журнале не ищется потом ни одним rg по времени, а
+    искать её будут именно так — «что бот сказал про этот снимок».
+    """
+    text = bytes(raw or b"").decode("utf-8", errors="replace")
+    parts = [p.strip() for p in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return " | ".join([p for p in parts if p][-lines:])[-1200:]
+
+
 async def _run_tool(action, file_path, timeout):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -93,6 +193,14 @@ async def _run_tool(action, file_path, timeout):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    # stderr тянем ОТДЕЛЬНОЙ задачей в кольцо снаружи, а не через communicate().
+    # communicate() отдаёт собранное только по EOF: у зависшего ребёнка EOF не
+    # наступает, wait_for отменяет чтение, и всё вычитанное выбрасывается
+    # (StreamReader.read(-1) копит куски в локальном списке). Замерено: ребёнок
+    # написал и сбросил 6 строк, в журнал попало stderr=''. То есть ровно в том
+    # случае, который и надо диагностировать, причина отказа терялась целиком.
+    err_tail = bytearray()
+    drain = asyncio.ensure_future(_drain_stderr(proc.stderr, err_tail))
     # Всё, что ребёнок сказал в stderr, до этой правки выбрасывалось на трёх из
     # четырёх путей отказа, и ни один путь не писал в журнал сам — строка отказа
     # только возвращалась вызывающему, а тот её местами теряет. Итог: на весь
@@ -103,23 +211,50 @@ async def _run_tool(action, file_path, timeout):
     def _tail(raw):
         return (raw or b"").decode("utf-8", errors="replace").strip()[-400:]
 
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        _out, _err = await proc.communicate()
-        logger.warning("%s timeout после %s с pid=%s path=%s stderr=%r",
-                       action, timeout, proc.pid, file_path, _tail(_err))
-        return None, f"{action} timeout"
-    except asyncio.CancelledError:
-        proc.kill()
-        _out, _err = await proc.communicate()
-        # Отмену пробрасываем, но сказать, что успел сообщить ребёнок, обязаны:
-        # иначе отменённый разбор неотличим от несуществующего.
-        logger.warning("%s cancelled pid=%s path=%s stderr=%r",
-                       action, proc.pid, file_path, _tail(_err))
-        raise
+    async def _read_child():
+        # То же, что делал communicate(): stdout и stderr читаются
+        # ОДНОВРЕМЕННО, иначе ребёнок упёрся бы в полную трубу и встал.
+        out = await proc.stdout.read()
+        await asyncio.shield(drain)
+        await proc.wait()
+        return out
 
+    try:
+        try:
+            stdout, _sink = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _kill_quietly(proc)
+            try:
+                await _settle_after_kill(proc, drain, timeout)
+            finally:
+                # Запись уходит ДАЖЕ если отсрочку унесла внешняя отмена: её
+                # `except Exception` внутри не ловит, CancelledError — не
+                # Exception. Без этого finally замерено 0 строк в журнале, то
+                # есть снимок врача пропадал совсем без следа — а отмена сюда
+                # долетает на каждой остановке бота и на альбоме, где внешний
+                # потолок разбора кончается раньше подготовки пятого снимка.
+                logger.warning("%s timeout после %s с pid=%s path=%s stderr=%r",
+                               action, timeout, proc.pid, file_path, _tail_lines(err_tail))
+            return None, f"{action} timeout"
+        except asyncio.CancelledError:
+            _kill_quietly(proc)
+            # Пишем ДО уборки: хвост stderr уже собран дренажом, а любое ожидание
+            # на пути отмены может не вернуться — тогда отменённый разбор снимка
+            # снова стал бы неотличим от несуществующего.
+            logger.warning("%s cancelled pid=%s path=%s stderr=%r",
+                           action, proc.pid, file_path, _tail_lines(err_tail))
+            raise
+        # Дальше по коду stderr читается как байты — отдаём ему хвост из кольца.
+        stderr = bytes(err_tail)
+        return _parse_child_output(action, file_path, proc, stdout, stderr, _tail)
+    finally:
+        # Дренаж — задача, а не корутина: без отмены он остался бы висеть на
+        # мёртвой трубе и всплыл бы «Task was destroyed but it is pending».
+        if not drain.done():
+            drain.cancel()
+
+
+def _parse_child_output(action, file_path, proc, stdout, stderr, _tail):
     if proc.returncode != 0 and not stdout:
         err_text = stderr.decode("utf-8", errors="replace").strip()
         logger.warning("%s код=%s path=%s stderr=%r",
