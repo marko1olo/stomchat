@@ -57,7 +57,9 @@ CODE = "\n".join(l for l in io.open("assistant.py", encoding="utf-8").read().spl
                  if not l.lstrip().startswith("#"))
 
 print("\n[1] Корень: SQLite не складывает регистр кириллицы")
-db = sqlite3.connect("stomat_wiki.db")
+# mode=ro: этот набор читает боевую вику (12 784 факта) на уровне модуля и делает
+# только SELECT. Без ro импорт открывает ручку НА ЗАПИСЬ к боевым данным.
+db = sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True)
 cyr, ascii_ = db.execute("select 'А' LIKE 'а', 'A' LIKE 'a'").fetchone()
 check("кириллица регистр НЕ складывает", cyr == 0, f"got {cyr} — проверка потеряла смысл")
 check("латиница складывает", ascii_ == 1, f"got {ascii_}")

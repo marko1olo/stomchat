@@ -13,6 +13,7 @@ assistant_state.json фантомных пользователей 777 и 4242 �
 
 Запуск: python test_isolation.py
 """
+import ast
 import io
 import json
 import os
@@ -116,6 +117,39 @@ for name in TESTS:
     bad_write = re.search(r'open\(\s*["\'](assistant_state\.json|stomat_\w+\.db)["\']\s*,\s*["\'][wa]', code)
     check(f"{name} не открывает боевой файл на запись", bad_write is None,
           f"найдено: {bad_write.group(0) if bad_write else ''}")
+    # sqlite-соединение к боевой базе БЕЗ mode=ro — это ручка НА ЗАПИСЬ, и
+    # проверка выше её не видела: она искала только open(..., "w"). Замер разведки
+    # нашёл ТРИ таких места (test_fix_pm2:121, test_message_splitting:197,
+    # test_search_case:60), плюс этот сторож сразу нашёл четвёртое и пятое в
+    # test_rag_quality. Все они делали лишь SELECT, поэтому md5 боевой вики не
+    # менялся — вреда не было, но и защиты не было: первый же UPDATE по такой
+    # ручке уходит в 12 784 боевых факта. Отдельно замерено, что на базе в режиме
+    # WAL даже чтение через rw-соединение создаёт рядом файлы -wal и -shm.
+    #
+    # Разбор через ast, а НЕ регуляркой: первая версия проверки была регуляркой и
+    # дала три ложные тревоги на test_import_safety и test_dead_tools, где строки
+    # вида 'sqlite3.connect("stomat_archive.db")' лежат внутри python-исходника,
+    # поданного детектору как ОБРАЗЕЦ. ast видит настоящий вызов, а не текст.
+    rw_targets = []
+    try:
+        for node in ast.walk(ast.parse(code)):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            func = node.func
+            fname = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if fname != "connect":
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                continue
+            target = first.value
+            if re.search(r"stomat_\w+\.db", target) and not target.startswith("file:"):
+                rw_targets.append(target)
+    except SyntaxError:
+        rw_targets.append("файл не разобран — проверка не выполнена")
+    check(f"{name} не открывает боевую базу на запись через connect",
+          not rw_targets,
+          f'найдено: {rw_targets} — нужен connect("file:...?mode=ro", uri=True)')
 
 print("\n[5] Тесты, доходящие до генерации, уводят файл статуса")
 # generate_gemini_text_async снимает флаг «идёт генерация» в finally, то есть

@@ -194,7 +194,9 @@ if not _os.path.exists("stomat_wiki.db"):
 else:
     import assistant as _assistant
 
-    _facts = [r[0] for r in _sq.connect("stomat_wiki.db").execute(
+    # mode=ro: соединение к боевой вике на уровне модуля, читаем только SELECT.
+    # Без ro от простого импорта появляется ручка на запись к 12 784 фактам.
+    _facts = [r[0] for r in _sq.connect("file:stomat_wiki.db?mode=ro", uri=True).execute(
         "SELECT content FROM distilled_facts WHERE content IS NOT NULL")]
     check("корпус прочитан", len(_facts) > 10000, f"got {len(_facts)}")
 

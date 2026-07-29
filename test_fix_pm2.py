@@ -118,7 +118,12 @@ check("подсветка не делается через <u>", "<u>\\1</u>" no
 import sqlite3  # noqa: E402
 
 if os.path.exists("stomat_wiki.db"):
-    row = sqlite3.connect("stomat_wiki.db").execute(
+    # mode=ro обязателен: соединение открывается НА УРОВНЕ МОДУЛЯ, то есть ручка
+    # на запись к 12 784 боевым фактам появляется от простого импорта. Здесь идёт
+    # только SELECT и вреда сегодня нет (замерено: md5, размер и mtime базы не
+    # меняются), но защиты без ro тоже нет — первый же UPDATE по этой ручке уйдёт
+    # в боевые данные. ro отклоняет запись физически.
+    row = sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True).execute(
         "SELECT content FROM distilled_facts WHERE content LIKE '%BOPT%' LIMIT 1").fetchone()
     if row:
         highlighted = re.sub("(?i)(BOPT)", r"<b>\1</b>", row[0])

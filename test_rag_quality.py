@@ -176,7 +176,9 @@ async def run():
               f"{extra} лишних одинаковых абзацев из {len(all_bodies)}")
 
     # Дубли обязаны существовать в базе — иначе проверка выше ничего не стоит.
-    copies = _sq.connect("stomat_wiki.db").execute(
+    # mode=ro: читаем боевую вику только на чтение. Без него импорт открывает
+    # ручку НА ЗАПИСЬ к 12 784 фактам, и это ловит test_isolation [4].
+    copies = _sq.connect("file:stomat_wiki.db?mode=ro", uri=True).execute(
         "SELECT COUNT(*) FROM distilled_facts WHERE content LIKE '%BOPT (Biologically%'").fetchone()[0]
     check("в базе действительно лежит несколько копий факта", copies > 1,
           f"копий {copies}; проверка на дедуп потеряла смысл")
@@ -198,7 +200,8 @@ async def run():
     # рецензент видит лишь первые 3000 символов основания.
     import sqlite3 as _sq3
 
-    archive = _sq3.connect("stomat_archive.db")
+    # mode=ro: архив на 117 847 реплик читается только на чтение.
+    archive = _sq3.connect("file:stomat_archive.db?mode=ro", uri=True)
     probes = [r[0] for r in archive.execute(
         "SELECT text FROM archive_messages WHERE text LIKE '%?' "
         "AND LENGTH(text) BETWEEN 25 AND 200 LIMIT 120")]
