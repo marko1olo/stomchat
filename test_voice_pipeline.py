@@ -194,14 +194,54 @@ async def run():
           f"got {await stored_text(6002)!r}")
     check("само сообщение при этом сохранено", await row_exists(6002))
 
-    print("\n[3] Отказ Whisper не теряет сообщение")
+    print("\n[3] Отказ Whisper не теряет сообщение и не остаётся тайной")
+    # Раньше здесь стояло «публикации не было» — то есть тест ЗАКРЕПЛЯЛ саму
+    # находку: все шесть тупиков голосового пути молчали, врач видел своё
+    # голосовое, считал, что бот услышал, диктовку не повторял, а в базе
+    # оставалась пустая строка — случай выпадал из дайджеста, из контекста и из
+    # поиска. В ЛС бот на этом же месте отвечает, в группе не отвечал.
+    # Молчать по-прежнему правильно там, где отказа НЕТ (см. [2]: аудио
+    # разобрано, речи в нём нет) — но не там, где сломались мы.
     main.PROCESSED_MSG_IDS.clear()
     SENT.clear()
+    main._VOICE_FAILURE_NOTICE.clear()
     set_whisper(None, error="whisper subprocess died")
     msg = attach_download(voice_message(6003))
     await main.handle_new_message(VoiceEvent(msg, FakeSender()))
     check("сообщение в базе есть", await row_exists(6003))
-    check("публикации не было", SENT == [])
+    check("врач узнал об отказе", len(SENT) == 1
+          and "не удалось распознать" in SENT[0]["message"].lower(),
+          f"got {SENT}")
+    check("ложной транскрипции при этом нет",
+          all("Транскрипция" not in item["message"] for item in SENT), f"got {SENT}")
+    check("жалоба привязана к самому голосовому", SENT and SENT[0]["reply_to"] == 6003,
+          f"got {SENT[0].get('reply_to') if SENT else None}")
+
+    # Серия отказов не должна превратиться в спам: причина у них общая (упал ключ,
+    # умер подпроцесс, не нашёлся ffmpeg), а по архиву диктовка идёт серями — 68
+    # серий из двух и более голосовых подряд, самая длинная 19.
+    SENT.clear()
+    for burst_id in range(6010, 6019):
+        main.PROCESSED_MSG_IDS.clear()
+        await main.handle_new_message(VoiceEvent(attach_download(voice_message(burst_id)),
+                                                 FakeSender()))
+    check("серия отказов не залила чат", len(SENT) == 0,
+          f"в окне тишины ушло {len(SENT)} строк: {[i['message'][:40] for i in SENT]}")
+    check("подавленные отказы посчитаны",
+          main._VOICE_FAILURE_NOTICE.get(-1001234567890, [0, 0])[1] == 9
+          or any(rec[1] == 9 for rec in main._VOICE_FAILURE_NOTICE.values()),
+          f"got {dict(main._VOICE_FAILURE_NOTICE)}")
+
+    # Когда окно вышло, следующая жалоба обязана назвать число подавленных:
+    # «не распознал одно» и «не распознал десять» — разные новости.
+    for record in main._VOICE_FAILURE_NOTICE.values():
+        record[0] -= main.VOICE_FAILURE_NOTICE_COOLDOWN_SECONDS + 1
+    SENT.clear()
+    main.PROCESSED_MSG_IDS.clear()
+    await main.handle_new_message(VoiceEvent(attach_download(voice_message(6019)),
+                                             FakeSender()))
+    check("после окна жалоба ушла и назвала число подавленных",
+          len(SENT) == 1 and "ещё 9" in SENT[0]["message"], f"got {SENT}")
 
     print("\n[4] Пустая правка терминов откатывается к сырой расшифровке")
     main.PROCESSED_MSG_IDS.clear()
@@ -216,6 +256,10 @@ async def run():
     print("\n[5] Зависшее скачивание ограничено таймаутом")
     main.PROCESSED_MSG_IDS.clear()
     SENT.clear()
+    # Окно тишины из секции [3] надо снять руками. Иначе проверка «ложной
+    # транскрипции не опубликовано» пройдёт потому, что бот в этом окне вообще
+    # молчит, — и перестанет отличать «не опубликовал выдумку» от «не работает».
+    main._VOICE_FAILURE_NOTICE.clear()
     set_whisper("этого не должно случиться")
     original_timeout = main.VOICE_DOWNLOAD_TIMEOUT_SECONDS
     main.VOICE_DOWNLOAD_TIMEOUT_SECONDS = 0.2
@@ -231,7 +275,15 @@ async def run():
 
     check("обработчик не завис на скачивании", elapsed < 5, f"elapsed={elapsed:.1f}s")
     check("сообщение всё равно сохранено", await row_exists(6005))
-    check("ложной транскрипции не опубликовано", SENT == [], f"got {SENT}")
+    # Заглушка Whisper вернула бы текст, если бы её позвали. Значит проверка
+    # смотрит именно на то, что подготовленный текст НЕ уехал в чат, а не на
+    # общее молчание бота.
+    check("ложной транскрипции не опубликовано",
+          all("этого не должно случиться" not in item["message"] for item in SENT),
+          f"got {SENT}")
+    check("таймаут скачивания — наш отказ, и врач о нём знает",
+          len(SENT) == 1 and "не удалось распознать" in SENT[0]["message"].lower(),
+          f"got {SENT}")
 
     print("\n[6] Голосовое от бота не расшифровывается и не переотправляется")
     main.PROCESSED_MSG_IDS.clear()

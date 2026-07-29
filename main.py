@@ -180,6 +180,29 @@ def _remember_queued_media(msg_ids):
         _QUEUED_MEDIA_ORDER.append(queued_id)
         _QUEUED_MEDIA_IDS.add(queued_id)
 
+
+# Голосовые, которые в ЭТОМ процессе уже расшифрованы или уже отданы в
+# расшифровку. Отдельно от PROCESSED_MSG_IDS: тот считает обработанные АПДЕЙТЫ, а
+# здесь важно другое — одно голосовое не должно уехать в Whisper дважды. Теперь
+# на него смотрят два пути (живой обработчик и догон офлайн-окна), и без общей
+# отметки повторная доставка апдейта или второй проход синхронизации означали бы
+# второй платный вызов И вторую «🎤 Транскрипцию» в чате.
+#
+# Ограничение по длине как у _QUEUED_MEDIA_IDS: без него набор растёт на каждое
+# голосовое за всё время жизни процесса.
+_TRANSCRIBED_MSG_IDS = set()
+_TRANSCRIBED_ORDER = deque(maxlen=512)
+
+
+def _remember_transcribed(msg_id):
+    if msg_id is None or msg_id in _TRANSCRIBED_MSG_IDS:
+        return
+    if len(_TRANSCRIBED_ORDER) == _TRANSCRIBED_ORDER.maxlen:
+        _TRANSCRIBED_MSG_IDS.discard(_TRANSCRIBED_ORDER[0])
+    _TRANSCRIBED_ORDER.append(msg_id)
+    _TRANSCRIBED_MSG_IDS.add(msg_id)
+
+
 async def get_my_id():
     global MY_ID
     me = await client.get_me()
@@ -1095,6 +1118,56 @@ def _remove_temp_file(path):
 VOICE_DOWNLOAD_TIMEOUT_SECONDS = 120
 VOICE_TRANSCRIBE_TIMEOUT_SECONDS = 60
 
+# Накладные ОДНОГО голосового поверх скачивания и самой расшифровки: запас на
+# подъём подпроцесса расшифровки (blocking_tools._SUBPROCESS_STARTUP_SLACK_SECONDS
+# = 10 с, родитель ждёт на столько дольше, чем выдал ребёнку) плюс правка
+# терминов (blocking_tools.correct_dental_transcription_async, свой timeout=20 по
+# умолчанию) плюс запас на файловые операции. Числа не выдуманы здесь, а взяты из
+# чужих бюджетов; вложенность проверяет test_voice_offline.py — расхождение двух
+# независимых чисел в этом проекте всплывало четыре раза (test_budget_nesting.py).
+VOICE_ITEM_OVERHEAD_SECONDS = 45
+# Худший случай одного голосового целиком. Из слагаемых, а не отдельным числом.
+VOICE_ITEM_BUDGET_SECONDS = (
+    VOICE_DOWNLOAD_TIMEOUT_SECONDS + VOICE_TRANSCRIBE_TIMEOUT_SECONDS + VOICE_ITEM_OVERHEAD_SECONDS
+)
+# Сколько голосовых из офлайн-окна догоняем за один заход.
+#
+# Предел обязателен: окна догона по журналу доходят до 587 сообщений (bot.log,
+# июль; максимум мая по bot.log.1 — 134), а расшифровка платная и медленная.
+# Очередь без предела означала бы часы Whisper на каждом подъёме. Отброшенное НЕ
+# исчезает молча: id уходят в журнал, а строка в базе получает
+# VOICE_UNRECOGNIZED_MARK.
+VOICE_BACKLOG_MAX_ITEMS = max(0, _env_int("STOMCHAT_VOICE_BACKLOG_MAX", 10))
+# Общий бюджет захода догона. Выведен так, чтобы в него гарантированно влезало
+# минимум два худших голосовых: догон, в который не влезает даже одна диктовка, —
+# это не догон. Каждое отдельное голосовое ограничено МИНИМУМОМ из своего бюджета
+# и ОСТАТКА общего (см. transcribe_voice_backlog), поэтому внутренний срок не
+# может пережить внешний ни при каком значении переменной окружения.
+VOICE_BACKLOG_TOTAL_SECONDS = max(
+    VOICE_ITEM_BUDGET_SECONDS * 2,
+    _env_int("STOMCHAT_VOICE_BACKLOG_SECONDS", 1800),
+)
+# Ниже этого остатка следующее голосовое не начинается. Попытка «на 0.2 с»
+# провалится гарантированно, но заплатит скачиванием, запуском подпроцесса и
+# строкой в журнале: без порога исчерпанный бюджет превращался бы не в один
+# честный отказ «времени не осталось», а в десять бессмысленных попыток.
+VOICE_BACKLOG_MIN_ITEM_SECONDS = 15
+
+# «Аудио разобрано, речи в нём нет». Единственный класс отказа, о котором в
+# группе говорить не надо: терять нечего, а реплика бота на каждый чужой шум —
+# это шум в чате 749 врачей. Все остальные причины — НАШ отказ, и о нём врач
+# обязан узнать сразу (в ЛС так и сделано, assistant.py).
+VOICE_FAILURE_SILENCE = "silence"
+
+# Отметка «голосовое было, расшифровки нет».
+#
+# Без неё строка голосового в базе неотличима от стикера или пустого сообщения:
+# text='', has_media=0, media_type=NULL — никакого признака, что это была
+# диктовка врача. Замер по stomat_archive.db: 395 строк без подписи, и
+# восстановить пост-фактум нельзя ни одну. Отметка ставится ТОЛЬКО на нашем
+# отказе и только в пустую строку — подпись к аудиофайлу не затирается.
+VOICE_UNRECOGNIZED_MARK = "[голосовое — расшифровка не получена]"
+
 # Whisper на тишине, шуме и обрывках стабильно выдаёт один и тот же набор
 # фраз. Публиковать их как расшифровку нельзя: в чате это выглядит как реплика
 # коллеги, а в базе становится текстом сообщения и уезжает в дайджест.
@@ -1105,9 +1178,39 @@ SILENCE_HALLUCINATIONS = {
 }
 
 
+def is_voice_message(message):
+    """
+    Голосовое или присланный аудиофайл. Правило ОДНО на все места пути.
+
+    Догоняющая синхронизация про голосовые не знала вообще, а живой обработчик
+    решал сам двумя строками у себя внутри. clinical_media_kind сюда не годится:
+    для голосового он возвращает None — это не клинический снимок, — и именно
+    из-за этого голосовое не попадало ни в очередь разбора медиа, ни в догон
+    неразобранного (тот выбирает строки с has_media = 1).
+
+    Проверка на MagicMock сохранена: у мока «есть» любой атрибут, и подставное
+    текстовое сообщение в тестах иначе считалось бы голосовым.
+    """
+    for attribute in ("voice", "audio"):
+        value = getattr(message, attribute, None)
+        if value is not None and type(value).__name__ != "MagicMock":
+            return True
+    return False
+
+
 async def transcribe_group_voice(message):
     """
-    Расшифровывает голосовое из группы. Возвращает текст либо None.
+    Расшифровывает голосовое из группы. Возвращает (текст, причина_отказа).
+
+    Причина ВОЗВРАЩАЕТСЯ, а не только пишется в журнал. Раньше все шесть тупиков
+    отдавали одно и то же None, и вызывающий не мог отличить «в аудио нет речи»
+    от «мы не смогли его обработать». В группе это выливалось в полную тишину на
+    любом отказе: врач видел своё голосовое и был уверен, что бот его услышал, —
+    а в базе оставался text='' и случай выпадал из дайджеста, из контекста
+    ответов и из поиска. В ЛС на том же отказе бот отвечает (assistant.py).
+
+    VOICE_FAILURE_SILENCE означает «аудио дошло и разобрано, речи в нём нет».
+    Всё остальное — наш отказ, о котором в чате надо сказать вслух.
 
     download_media собственного таймаута не имеет: на подвисшей загрузке
     обработчик стоял неограниченно долго, а вместе с ним стояло и всё, что
@@ -1124,36 +1227,338 @@ async def transcribe_group_voice(message):
             timeout=VOICE_DOWNLOAD_TIMEOUT_SECONDS,
         )
         if not temp_path or not os.path.exists(temp_path):
-            return None
+            # Раньше этот тупик не оставлял вообще ничего: ни строки в журнале,
+            # ни ответа врачу. Отличить его от «Whisper не смог» было нельзя.
+            logger.warning("voice download produced no file msg_id=%s", msg_id)
+            return None, "скачивание не дало файла"
 
         import blocking_tools
         transcribed, error = await blocking_tools.transcribe_audio_async(
             temp_path, timeout=VOICE_TRANSCRIBE_TIMEOUT_SECONDS
         )
-        if error or not transcribed:
-            if error:
-                logger.warning("voice transcription failed msg_id=%s: %s", msg_id, error)
-            return None
+        if error:
+            logger.warning("voice transcription failed msg_id=%s: %s", msg_id, error)
+            return None, f"whisper: {error}"
+        if not transcribed:
+            return None, VOICE_FAILURE_SILENCE
 
         corrected = await blocking_tools.correct_dental_transcription_async(transcribed.strip())
         # Правка терминов идёт через LLM и вполне может вернуть пустое —
         # тогда остаётся сырая расшифровка, а не молчание.
         text = (corrected or transcribed).strip()
         if not text:
-            return None
+            return None, VOICE_FAILURE_SILENCE
 
         if text.lower().rstrip(".").rstrip(",").strip() in SILENCE_HALLUCINATIONS:
             logger.info("voice transcription discarded as silence hallucination msg_id=%s", msg_id)
-            return None
-        return text
+            return None, VOICE_FAILURE_SILENCE
+        return text, None
     except asyncio.TimeoutError:
         logger.warning("voice download timed out msg_id=%s", msg_id)
-        return None
+        return None, f"таймаут скачивания {VOICE_DOWNLOAD_TIMEOUT_SECONDS} с"
+    except asyncio.CancelledError:
+        # Отмену пропускаем наружу: её выставляет внешний бюджет догона, и
+        # превращать её в «отказ расшифровки» нельзя — задача обязана умереть.
+        raise
     except Exception as audio_err:
         logger.error(f"Error handling group voice message: {audio_err}")
-        return None
+        return None, f"{type(audio_err).__name__}: {audio_err}"
     finally:
         _remove_temp_file(temp_path)
+
+
+async def _publish_voice_transcription(chat_id, msg_id, text):
+    """Публикует расшифровку реплаем на исходное голосовое."""
+    try:
+        # Регистрировать сообщение в bot_sent_messages здесь не нужно:
+        # bot_client.send_message обёрнут patched_send_message, который делает
+        # это для КАЖДОЙ отправки бота.
+        await bot_client.send_message(
+            entity=chat_id,
+            message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
+            reply_to=msg_id,
+            parse_mode='html',
+        )
+        return True
+    except Exception as send_err:
+        logger.error("failed to post voice transcription msg_id=%s: %s", msg_id, send_err)
+        return False
+
+
+# Окно между жалобами на отказ расшифровки. Отказы приходят не по одному:
+# причина у них общая (упал ключ Whisper, умер подпроцесс, не нашёлся ffmpeg), а
+# диктовка идёт серями — по архиву 68 серий из двух и более голосовых подряд,
+# самая длинная 19. Без окна сломанный Whisper выдал бы 19 строк «не удалось
+# распознать» подряд в чат на 749 врачей, то есть превратил полезное признание
+# в спам.
+VOICE_FAILURE_NOTICE_COOLDOWN_SECONDS = max(
+    60, _env_int("STOMCHAT_VOICE_FAILURE_NOTICE_COOLDOWN_SECONDS", 600))
+# Сколько ключей помним. Ключ — пара (чат, автор), а личных диалогов столько же,
+# сколько врачей, так что границу ставим и выбрасываем самую старую запись.
+_VOICE_FAILURE_NOTICE_MAX_KEYS = 512
+# (chat_id, sender_id) -> [момент последней жалобы (monotonic), подавлено с тех пор]
+_VOICE_FAILURE_NOTICE = {}
+
+
+def _voice_failure_notice_allowed(chat_id, sender_id=None):
+    """
+    Пора ли снова жаловаться. Возвращает (можно, сколько подавлено).
+
+    Окно держится на пару (чат, АВТОР), а не на чат целиком. Узнать об отказе
+    должен тот, чьё голосовое не распознали: при окне на весь чат сломанный
+    Whisper сообщал бы первому врачу и молчал остальным, а они как раз и
+    остались бы в уверенности, что бот их услышал. Серия от одного врача при
+    этом всё равно схлопывается в одну строку.
+
+    Часы берутся монотонные, а не стенные: скачок стенных часов назад запер бы
+    жалобы на величину скачка — ровно тот дефект, который в этом проекте уже
+    запирал пассивный триггер на восемь тысяч лет по метке «9999-12-31».
+    """
+    key = (chat_id, sender_id)
+    now = time.monotonic()
+    record = _VOICE_FAILURE_NOTICE.get(key)
+    if record is None or now - record[0] >= VOICE_FAILURE_NOTICE_COOLDOWN_SECONDS:
+        suppressed = record[1] if record else 0
+        if len(_VOICE_FAILURE_NOTICE) >= _VOICE_FAILURE_NOTICE_MAX_KEYS and record is None:
+            # Выбрасываем самую старую запись, а не молча растём.
+            oldest = min(_VOICE_FAILURE_NOTICE, key=lambda item: _VOICE_FAILURE_NOTICE[item][0])
+            _VOICE_FAILURE_NOTICE.pop(oldest, None)
+        _VOICE_FAILURE_NOTICE[key] = [now, 0]
+        return True, suppressed
+    record[1] += 1
+    return False, record[1]
+
+
+async def _notify_voice_failure(chat_id, msg_id, reason, sender_id=None):
+    """
+    Одна строка в чат на НАШ отказ расшифровки, не чаще раза в окно.
+
+    Все тупики голосового пути молчали: врач видел своё голосовое, был уверен,
+    что бот его услышал, и диктовку не повторял — а в базе оставалась пустая
+    строка, то есть случай выпадал из дайджеста, из контекста и из поиска. В ЛС
+    ровно на этом месте бот отвечает («❌ Не удалось распознать аудио»,
+    assistant.py), в группе не отвечал.
+
+    Текст один на все причины: врачу важно только «услышали или нет», разбор
+    причины — дело журнала, куда она и уходит рядом. Подавленные жалобы не
+    исчезают: их число уходит в журнал и в следующую жалобу, потому что «не
+    распознано одно» и «не распознано двадцать» — это разные новости.
+    """
+    allowed, suppressed = _voice_failure_notice_allowed(chat_id, sender_id)
+    if not allowed:
+        logger.warning("voice failure NOT notified (окно тишины) msg_id=%s reason=%s "
+                       "подавлено подряд=%s chat=%s sender=%s",
+                       msg_id, reason, suppressed, chat_id, sender_id)
+        return False
+
+    logger.warning("voice failure notified msg_id=%s reason=%s подавлено до этого=%s",
+                   msg_id, reason, suppressed)
+    tail = ""
+    if suppressed:
+        tail = (f" Пока молчал, не распознал ещё {suppressed} — "
+                "видимо, распознавание лежит.")
+    try:
+        await bot_client.send_message(
+            entity=chat_id,
+            # Формулировка та же, что в ЛС (assistant.py), и «аудио», а не
+            # «голосовое»: этим же путём идут присланные аудиофайлы.
+            message="❌ <i>Не удалось распознать аудио. "
+                    "Повторите или напишите текстом." + tail + "</i>",
+            reply_to=msg_id,
+            parse_mode='html',
+        )
+        return True
+    except Exception as send_err:
+        logger.error("failed to notify voice failure msg_id=%s: %s", msg_id, send_err)
+        return False
+
+
+async def _store_voice_text(msg_id, text, repair=None):
+    """
+    Дописывает расшифровку в базу и ПРОВЕРЯЕТ, что строка нашлась.
+
+    Результат update_message_text не проверялся, а функция возвращает rowcount и
+    0 при отсутствии строки, гася исключения внутрь лога базы (database.py). То
+    есть при провалившемся save_message — а рядом на этот случай стоит громкий
+    MESSAGE NOT PERSISTED — транскрипция уходила в чат, но в базу не попадала
+    ВООБЩЕ, и ни одной строки об этом в журнале не появлялось. Класс тот же, что
+    уже закрыли для save_message; update_message_text остался без проверки.
+
+    repair — поля save_message для восстановления пропавшей строки. Вставка
+    безопасна: save_message это INSERT OR IGNORE, существующую строку она не
+    перезапишет. Без repair (догон, где полей автора на руках нет) остаётся
+    громкая запись в журнал.
+    """
+    updated = await asyncio.wait_for(database.update_message_text(msg_id, text), timeout=30)
+    if updated:
+        return True
+
+    logger.error(
+        "VOICE TEXT NOT PERSISTED msg_id=%s — строки в базе нет, расшифровка не "
+        "попадёт ни в дайджест, ни в контекст, ни в поиск",
+        msg_id,
+    )
+    if not repair:
+        return False
+
+    saved = await asyncio.wait_for(database.save_message(**repair), timeout=30)
+    if saved:
+        logger.info("voice row re-inserted with transcription msg_id=%s", msg_id)
+        return True
+    logger.error("voice row repair failed msg_id=%s — расшифровка потеряна", msg_id)
+    return False
+
+
+async def _mark_voice_unrecognized(messages, reason):
+    """
+    Ставит в базе отметку «голосовое было, расшифровки нет».
+
+    Зачем вообще: строка голосового (text='', has_media=0, media_type=NULL)
+    неотличима от стикера и от пустого сообщения, поэтому потеря диктовки была
+    невидима и невосстановима — замер по stomat_archive.db: 395 таких строк, и ни
+    одну нельзя опознать как голосовое пост-фактум. С отметкой пропажа видна и в
+    дайджесте, и глазами в базе.
+
+    Непустой текст НЕ затирается: у аудиофайла бывает подпись, а расшифровка
+    могла уже дойти другим путём. Поэтому сначала читаем строку.
+    """
+    marked = 0
+    for message in messages:
+        msg_id = getattr(message, "id", None)
+        if msg_id is None:
+            continue
+        try:
+            row = await asyncio.wait_for(database.get_text_by_id(msg_id), timeout=30)
+            if row is None:
+                logger.error(
+                    "voice mark skipped msg_id=%s: строки в базе нет — сообщение не сохранилось",
+                    msg_id,
+                )
+                continue
+            if (row[1] or "").strip():
+                continue
+            if await _store_voice_text(msg_id, VOICE_UNRECOGNIZED_MARK):
+                marked += 1
+        except Exception:
+            logger.exception("voice mark failed msg_id=%s", msg_id)
+    if marked:
+        logger.info("voice marked as unrecognized count=%s reason=%s", marked, reason)
+    return marked
+
+
+async def transcribe_voice_backlog(messages, source="sync"):
+    """
+    Расшифровывает голосовые, накопившиеся за офлайн. Возвращает число успешных.
+
+    Чего не было: догон сохранял голосовое как обычное сообщение и на этом
+    заканчивал. clinical_media_kind для голосового отдаёт None, значит
+    has_media=0 — и в очередь разбора медиа оно не попадало ни из sync_history,
+    ни из recover_pending_media_analysis (тот выбирает строки с has_media = 1 и
+    пустым описанием). transcribe_group_voice в догоне не вызывался ни разу.
+    Расшифровку получало РОВНО ОДНО голосовое окна — последнее сообщение, и то
+    лишь потому, что sync_history прогоняет last_synced_message через
+    handle_new_message. Остальные терялись молча и невосстановимо.
+
+    Замер (stomat_archive.db, 117 847 сообщений; размеры окон — из bot.log):
+    395 строк голосовых/аудио. При окне 17 сообщений (среднее мая) расшифровку
+    получали 20, терялось 375 — 94.9%; при окне 37 (среднее июля) терялось 389;
+    при окне 587 (максимум июля) — все 395. Диктовка идёт сериями: 68 серий из
+    двух и более голосовых подряд, самая длинная — 19.
+
+    Пределы обязательны и оба настоящие: не больше VOICE_BACKLOG_MAX_ITEMS
+    голосовых и не дольше VOICE_BACKLOG_TOTAL_SECONDS на весь заход. Берём
+    ПОСЛЕДНИЕ: свежую диктовку в чате ещё обсуждают. Отброшенное не исчезает
+    молча — id уходят в журнал, а строки получают VOICE_UNRECOGNIZED_MARK.
+
+    Отказы догона в чат не отправляются: после подъёма их может быть десяток
+    подряд, и чат коллег получил бы десять «не распознал» про сообщения часовой
+    давности. Живой путь отвечает врачу сразу — там отказ один и врач ещё ждёт.
+    """
+    if not messages:
+        return 0
+
+    fresh = []
+    for message in messages:
+        msg_id = getattr(message, "id", None)
+        if msg_id is None or msg_id in _TRANSCRIBED_MSG_IDS:
+            continue
+        fresh.append(message)
+    if not fresh:
+        logger.info("voice backlog source=%s: всё уже расшифровано в этом запуске", source)
+        return 0
+
+    fresh.sort(key=lambda item: getattr(item, "id", 0))
+    if VOICE_BACKLOG_MAX_ITEMS <= 0:
+        work, dropped = [], list(fresh)
+    else:
+        work, dropped = fresh[-VOICE_BACKLOG_MAX_ITEMS:], fresh[:-VOICE_BACKLOG_MAX_ITEMS]
+
+    # Отмечаем ДО первого скачивания, как это делает постановка медиа в очередь:
+    # повторная доставка апдейта или второй проход синхронизации не должны
+    # расшифровать и опубликовать то же голосовое второй раз.
+    for message in work + dropped:
+        _remember_transcribed(message.id)
+
+    if dropped:
+        logger.warning(
+            "voice backlog truncated source=%s dropped=%s max=%s ids=%s — эти "
+            "голосовые расшифрованы НЕ БУДУТ, в базе у них отметка «%s»",
+            source, len(dropped), VOICE_BACKLOG_MAX_ITEMS,
+            [message.id for message in dropped][:20], VOICE_UNRECOGNIZED_MARK,
+        )
+        await _mark_voice_unrecognized(dropped, "предел догона")
+
+    deadline = asyncio.get_running_loop().time() + VOICE_BACKLOG_TOTAL_SECONDS
+    done = 0
+    failed = 0
+    for index, message in enumerate(work):
+        left = deadline - asyncio.get_running_loop().time()
+        # Внутренний срок = МИНИМУМ из бюджета одного голосового и остатка
+        # общего. Внутренний бюджет, не влезающий во внешний, — тот самый класс
+        # дефекта, который в этом проекте всплывал четыре раза.
+        item_budget = min(VOICE_ITEM_BUDGET_SECONDS, left)
+        if item_budget < VOICE_BACKLOG_MIN_ITEM_SECONDS:
+            rest = work[index:]
+            logger.warning(
+                "voice backlog out of budget source=%s limit=%s с dropped=%s ids=%s — "
+                "остаток окна расшифрован не будет",
+                source, VOICE_BACKLOG_TOTAL_SECONDS, len(rest),
+                [item.id for item in rest][:20],
+            )
+            await _mark_voice_unrecognized(rest, "бюджет догона исчерпан")
+            break
+
+        try:
+            text, failure = await asyncio.wait_for(
+                transcribe_group_voice(message), timeout=item_budget
+            )
+        except asyncio.TimeoutError:
+            text, failure = None, f"таймаут догона {item_budget:.0f} с"
+        except asyncio.CancelledError:
+            raise
+        except Exception as backlog_err:
+            text, failure = None, f"{type(backlog_err).__name__}: {backlog_err}"
+
+        if text:
+            stored = await _store_voice_text(message.id, text)
+            await _publish_voice_transcription(
+                getattr(message, "chat_id", None) or config.SOURCE_CHAT_ID, message.id, text
+            )
+            done += 1
+            logger.info(
+                "voice backlog transcribed msg_id=%s stored=%s chars=%s", message.id, stored, len(text)
+            )
+        else:
+            failed += 1
+            logger.warning("voice backlog item failed msg_id=%s reason=%s", message.id, failure)
+            if failure != VOICE_FAILURE_SILENCE:
+                await _mark_voice_unrecognized([message], failure)
+
+    logger.info(
+        "voice backlog done source=%s расшифровано=%s отказов=%s отброшено=%s из %s",
+        source, done, failed, len(dropped), len(fresh),
+    )
+    return done
 
 
 async def process_media_message(messages, msg_id, text, media_type_hint=None):
@@ -1362,10 +1767,11 @@ async def handle_new_message(event):
         text = event.message.message or ""
         date = event.message.date
 
-        # Group Voice Note / Audio processing
-        is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
-        is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
-        is_audio = is_voice or is_audio_file
+        # Group Voice Note / Audio processing.
+        # Правило вынесено в is_voice_message: то же самое нужно догоняющей
+        # синхронизации, а два независимых определения одного признака в этом
+        # файле уже расходились (media_type/clinical_media_kind).
+        is_audio = is_voice_message(event.message)
 
         # Получаем ID сообщения, на которое ответили (если есть)
         reply_to_msg_id = None
@@ -1424,26 +1830,46 @@ async def handle_new_message(event):
         # Расшифрованный текст догоняется в базу отдельным UPDATE, поэтому
         # обрыв на середине больше не теряет сообщение целиком — теряется
         # только расшифровка, ровно как при обычном сбое Whisper.
-        if is_audio and not is_any_bot:
-            transcribed_text = await transcribe_group_voice(event.message)
+        #
+        # Голосовые из офлайн-окна догоняет transcribe_voice_backlog, поэтому
+        # здесь стоит общая отметка _TRANSCRIBED_MSG_IDS: одно голосовое не
+        # должно уехать в платный Whisper дважды и не должно получить вторую
+        # «🎤 Транскрипцию» в чате.
+        if is_audio and not is_any_bot and msg_id not in _TRANSCRIBED_MSG_IDS:
+            _remember_transcribed(msg_id)
+            transcribed_text, voice_failure = await transcribe_group_voice(event.message)
             if transcribed_text:
                 text = transcribed_text
                 if event.chat_id == config.SOURCE_CHAT_ID:
-                    await asyncio.wait_for(
-                        database.update_message_text(msg_id, text), timeout=30
+                    # Результат записи ПРОВЕРЯЕТСЯ: без проверки транскрипция
+                    # уходила в чат и не доезжала до базы совершенно молча.
+                    # Поля для восстановления строки — те же, что у save_message
+                    # выше, и на руках они уже есть.
+                    await _store_voice_text(
+                        msg_id,
+                        text,
+                        repair={
+                            "msg_id": msg_id,
+                            "reply_to_msg_id": reply_to_msg_id,
+                            "sender_id": sender_id,
+                            "sender_name": sender_name,
+                            "sender_username": sender_username,
+                            "text": text,
+                            "date": date,
+                            "has_media": has_media,
+                            "media_type": media_type,
+                        },
                     )
-                try:
-                    # Регистрировать сообщение в bot_sent_messages здесь не
-                    # нужно: bot_client.send_message обёрнут patched_send_message,
-                    # который делает это для КАЖДОЙ отправки бота.
-                    await bot_client.send_message(
-                        entity=event.chat_id,
-                        message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
-                        reply_to=msg_id,
-                        parse_mode='html'
-                    )
-                except Exception as send_err:
-                    logger.error("failed to post voice transcription msg_id=%s: %s", msg_id, send_err)
+                await _publish_voice_transcription(event.chat_id, msg_id, text)
+            elif voice_failure and voice_failure != VOICE_FAILURE_SILENCE:
+                # Наш отказ: врачу отвечаем вслух, а в базе оставляем отметку —
+                # иначе строка неотличима от стикера и диктовка теряется без
+                # следа. На VOICE_FAILURE_SILENCE не делаем ни того, ни другого:
+                # аудио разобрано, речи в нём нет, терять нечего.
+                if event.chat_id == config.SOURCE_CHAT_ID:
+                    await _mark_voice_unrecognized([event.message], voice_failure)
+                await _notify_voice_failure(event.chat_id, msg_id, voice_failure,
+                                            sender_id=sender_id)
 
         if event.chat_id == config.SOURCE_CHAT_ID:
             # Сообщение бота уже сохранено в базу выше — дальше ничего не делаем.
@@ -1938,6 +2364,11 @@ async def sync_history():
     
     synced_albums = {}
     synced_singles = []
+    # Голосовые окна собираем ОТДЕЛЬНО от медиа: clinical_media_kind для них
+    # отдаёт None, поэтому ни в synced_singles, ни в догон неразобранного
+    # (has_media = 1) они не попадают, и без этого списка расшифровку получало
+    # ровно одно голосовое окна — последнее.
+    synced_voices = []
     # Автора спрашиваем один раз на догоняющий проход, а не на каждое
     # сообщение. Уникальных отправителей в чате сотни (по локальному снимку —
     # 749), а догонять приходится тысячи реплик: без кэша одна и та же справка
@@ -2018,6 +2449,8 @@ async def sync_history():
                     synced_albums[g_id].append(message)
                 else:
                     synced_singles.append(message)
+            elif is_voice_message(message):
+                synced_voices.append(message)
 
             last_synced_message = message
             count += 1
@@ -2061,6 +2494,24 @@ async def sync_history():
             media_queued, media_deferred, MEDIA_QUEUE_MAX_SIZE,
         )
 
+    # Голосовые окна отдаём ОТДЕЛЬНОЙ задаче, а не расшифровываем здесь.
+    #
+    # Внутри sync_history этого делать нельзя: подъём ждёт синхронизацию ровно
+    # SYNC_HISTORY_TIMEOUT_SECONDS (900 с) и по таймауту роняет весь start_bot, а
+    # десять голосовых по VOICE_ITEM_BUDGET_SECONDS — это до 2250 с. Бот ушёл бы
+    # в цикл перезапусков ровно так же, как уходил при потолке синхронизации
+    # 300 с. Отдельная задача со своим бюджетом подъём не срывает: сообщения уже
+    # в базе, расшифровка догоняется отдельным UPDATE.
+    if synced_voices:
+        logger.info(
+            "sync voice backlog: голосовых в окне %s (предел за заход %s)",
+            len(synced_voices), VOICE_BACKLOG_MAX_ITEMS,
+        )
+        runtime_guard.create_task(
+            transcribe_voice_backlog(synced_voices, source="sync"),
+            name=f"voice_backlog_{synced_voices[-1].id}",
+        )
+
     if count > 0:
         logger.info(f"✅ Синхронизация завершена. Докачано {count} сообщений.")
         if last_synced_message:
@@ -2072,6 +2523,10 @@ async def sync_history():
             already_enqueued = {m.id for m in synced_singles}
             for msgs in synced_albums.values():
                 already_enqueued.update(m.id for m in msgs)
+            # Голосовые уже отданы в догон расшифровки. Прогон последнего из них
+            # через handle_new_message расшифровал бы его вторым платным вызовом
+            # и опубликовал транскрипцию дважды.
+            already_enqueued.update(m.id for m in synced_voices)
 
             if last_synced_message.id in already_enqueued:
                 logger.info(
