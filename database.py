@@ -292,8 +292,15 @@ async def init_db():
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
                 logger.info("database schema migrated: added media_remote_url")
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                # «duplicate column name» — штатный повторный запуск, молчим.
+                # Всё остальное молчать не имеет права: этим же исключением
+                # приходит «database is locked» и «no such table», то есть
+                # МИГРАЦИЯ НЕ ПРИМЕНИЛАСЬ, и следующая запись в media_remote_url
+                # упадёт уже в другом месте, где причину не связать с миграцией.
+                if "duplicate column" not in str(exc).lower():
+                    logger.warning("database migration media_remote_url НЕ применена: "
+                                   "%s: %s", type(exc).__name__, exc)
 
     return await _run_db(operation)
 

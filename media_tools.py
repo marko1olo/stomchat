@@ -93,28 +93,60 @@ async def _run_tool(action, file_path, timeout):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    # Всё, что ребёнок сказал в stderr, до этой правки выбрасывалось на трёх из
+    # четырёх путей отказа, и ни один путь не писал в журнал сам — строка отказа
+    # только возвращалась вызывающему, а тот её местами теряет. Итог: на весь
+    # bot.log ни одной записи про prepare-image или extract-frame, то есть провал
+    # разбора снимка врача был полностью невидим. Логируем ЗДЕСЬ, чтобы потеря
+    # не зависела от дисциплины вызывающего. Поток управления при этом не
+    # меняется: наблюдаемость не имеет права менять поведение.
+    def _tail(raw):
+        return (raw or b"").decode("utf-8", errors="replace").strip()[-400:]
+
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        await proc.communicate()
+        _out, _err = await proc.communicate()
+        logger.warning("%s timeout после %s с pid=%s path=%s stderr=%r",
+                       action, timeout, proc.pid, file_path, _tail(_err))
         return None, f"{action} timeout"
     except asyncio.CancelledError:
         proc.kill()
-        await proc.communicate()
+        _out, _err = await proc.communicate()
+        # Отмену пробрасываем, но сказать, что успел сообщить ребёнок, обязаны:
+        # иначе отменённый разбор неотличим от несуществующего.
+        logger.warning("%s cancelled pid=%s path=%s stderr=%r",
+                       action, proc.pid, file_path, _tail(_err))
         raise
 
     if proc.returncode != 0 and not stdout:
         err_text = stderr.decode("utf-8", errors="replace").strip()
+        logger.warning("%s код=%s path=%s stderr=%r",
+                       action, proc.returncode, file_path, _tail(stderr))
         return None, err_text or f"{action} failed with code {proc.returncode}"
+
+    if proc.returncode != 0:
+        # Вышел с ошибкой, но что-то написал в stdout: разбираем дальше, как
+        # раньше, однако жалобу ребёнка больше не теряем.
+        logger.warning("%s код=%s, но вывод есть path=%s stderr=%r",
+                       action, proc.returncode, file_path, _tail(stderr))
 
     try:
         payload = json.loads(stdout.decode("utf-8"))
     except json.JSONDecodeError as exc:
+        logger.warning("%s нечитаемый вывод path=%s: %s stdout=%r stderr=%r",
+                       action, file_path, exc, _tail(stdout), _tail(stderr))
         return None, f"{action} invalid output: {exc}"
 
     if not payload.get("ok"):
+        logger.warning("%s отказался path=%s reason=%s stderr=%r", action, file_path,
+                       payload.get("error") or payload.get("reason"), _tail(stderr))
         return None, payload.get("error") or f"{action} failed"
+    if stderr:
+        # Успех с жалобами: предупреждения cv2/PIL про битый файл видеть полезно.
+        logger.info("%s ok, но ребёнок жаловался path=%s stderr=%r",
+                    action, file_path, _tail(stderr))
     return payload, None
 
 

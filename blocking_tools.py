@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -9,6 +10,79 @@ import time
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform == "win32"
+
+# Хвост ключа, который разрешено печатать. Ровно столько же печатает
+# gemini_client (`f"{provider}...{api_key[-5:]}"`, gemini_client.py:475 и :842) —
+# держим один формат, иначе журнал нельзя сопоставить по ключу.
+_SECRET_TAIL = 5
+
+# Формы секретов, которые могут приехать В ТЕКСТЕ ЧУЖОГО ИСКЛЮЧЕНИЯ.
+#
+# Замер по всем журналам на диске (bot.log, bot.log.1, bot_test.log,
+# distiller.log, bot_supervisor.log — 131 219 строк): ни одного совпадения ни по
+# одной из этих форм, то есть сегодня ключи в журнал не текут. Но правки ниже
+# впервые начинают печатать str() чужих исключений — от google.genai, openai,
+# tavily, telegraph, — а google отдаёт ключ в query string (`?key=...`) и
+# показывает URL в тексте некоторых ошибок. Маскируем на входе, чтобы новая
+# диагностика не оказалась первым источником утечки.
+_SECRET_PATTERNS = (
+    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
+    re.compile(r"\b(?:sk|gsk)_[0-9A-Za-z]{16,}"),
+    re.compile(r"tvly-[0-9A-Za-z_\-]{10,}"),
+    re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}"),
+    re.compile(r"(?<=[?&]key=)[0-9A-Za-z_\-]{15,}"),
+    re.compile(r"(?<=[Bb]earer )[0-9A-Za-z._\-]{20,}"),
+)
+
+# Сколько символов чужого текста вообще пускаем в строку журнала. Ответ модели и
+# промпт сводки — десятки КБ; целиком они не диагностика, а заливка журнала,
+# который ротируется по 5 МБ.
+_ERROR_TEXT_LIMIT = 300
+
+
+def _redact(text):
+    """Замаскировать секретоподобное, оставив хвост для сопоставления с ключом."""
+    if not text:
+        return text
+    result = str(text)
+    for pattern in _SECRET_PATTERNS:
+        result = pattern.sub(lambda m: "***" + m.group(0)[-_SECRET_TAIL:], result)
+    return result
+
+
+def _describe_exception(exc):
+    """
+    Тип + текст, замаскированные и обрезанные.
+
+    Тип обязателен: замер прямой — `str(ConnectionResetError())`,
+    `str(TimeoutError())`, `str(IndexError())` и `str(asyncio.CancelledError())`
+    все равны пустой строке. Такое исключение давало в журнале запись с пустым
+    полем причины (в bot.log таких 12 из 1393 ERROR/WARNING), и разбирать её
+    было нечем.
+    """
+    text = _redact(str(exc))[:_ERROR_TEXT_LIMIT]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _throttled(level, key, message, *args):
+    """
+    Строка с ограничителем частоты: правило «одна на минуту на ключ» живёт в
+    runtime_guard.throttled_log, дубля здесь нет.
+
+    Импорт ленивый по образцу остальных обращений к runtime_guard в этом файле
+    (:383, :416, :471): дочерний процесс поднимается на каждый вызов LLM, а
+    бюджет его старта уже дефицитный, см. _SUBPROCESS_STARTUP_SLACK_SECONDS.
+
+    Ограничитель — удобство, а не условие записи: если runtime_guard недоступен
+    (в дочернем процессе он может быть не нужен вовсе), строка обязана выйти всё
+    равно, иначе правка сама себя обнулит.
+    """
+    try:
+        import runtime_guard
+
+        runtime_guard.throttled_log(level, key, message, *args, logger=logger)
+    except Exception:
+        logger.log(level, message, *args)
 
 
 def _json_exit(payload, code=0):
@@ -96,7 +170,17 @@ def _web_search_sync(query, max_results):
                     results.append(f"{content} ({url})")
         except Exception as exc:
             results = []
-            errors.append(f"tavily: {type(exc).__name__}: {str(exc)[:200]}")
+            errors.append(f"tavily: {type(exc).__name__}: {_redact(str(exc))[:200]}")
+            # errors доезжает до вызывающего ТОЛЬКО когда пусты оба провайдера
+            # (:_json_exit ниже отдаёт ok: True и results, а errors выбрасывает).
+            # То есть «tavily не отвечает уже месяц, поиск втихую держится на
+            # ddgs» не видно нигде. Запись — единственный канал для этого случая.
+            #
+            # Ограничитель не берём: это дочерний процесс, он поднимается заново
+            # на каждый вызов, состояние окна не переживёт выход, а лишний импорт
+            # runtime_guard удлинил бы его старт. Частота здесь и так одна строка
+            # на один поиск врача.
+            logger.warning("web search: провайдер tavily отказал: %s", _describe_exception(exc))
 
     if not results:
         try:
@@ -110,7 +194,8 @@ def _web_search_sync(query, max_results):
                         results.append(f"{body}\n(Source: {href})")
         except Exception as exc:
             results = []
-            errors.append(f"ddgs: {type(exc).__name__}: {str(exc)[:200]}")
+            errors.append(f"ddgs: {type(exc).__name__}: {_redact(str(exc))[:200]}")
+            logger.warning("web search: провайдер ddgs отказал: %s", _describe_exception(exc))
 
     return results, errors
 
@@ -161,6 +246,42 @@ def _relay_child_log(action, stderr_text):
         logger.log(level, "[%s] %s", action, line)
 
 
+def _log_tool_failure(action, pid, reason, error):
+    """
+    Одна запись на КАЖДЫЙ неудавшийся вызов подпроцесса.
+
+    Почему именно здесь, а не у вызывающих: строку ошибки они регулярно
+    выбрасывают. assistant.py:104-106 на `error` возвращает врачу готовую фразу
+    «Недостаточно сообщений…» и не пишет ничего; assistant.py:135-137 возвращает
+    False молча; assistant.py:1213-1214 сворачивает причину в _unavailable. То
+    есть отказ доезжает до врача, но не до журнала: «врач говорит, что бот
+    молчит» и в bot.log ни одной строки за эту минуту. Одна запись в общей точке
+    закрывает все такие вызовы разом, включая те, что появятся позже.
+
+    Ограничитель обязателен. Триаж (`llama_triage`) вызывается на КАЖДОЕ
+    сообщение группы, и при постоянном отказе провайдера — а он наблюдался
+    постоянным: 45 записей `400 FAILED_PRECONDITION User location is not
+    supported` по всем четырём ключам — эта строка выходила бы на каждое
+    сообщение 749 врачей и вытеснила бы из bot.log (ротация 5 МБ) всю историю
+    работы. Ключ ограничителя включает action и вид отказа, чтобы редкий новый
+    отказ не оказался подавлен частым старым.
+
+    WARNING, а не ERROR: одиночный провал вызова закрывается ретраем каскада, и
+    ERROR на нём обесценил бы поиск настоящих аварий по журналу. И не DEBUG:
+    замер по 131 219 строкам всех журналов на диске — 0 записей DEBUG, корень
+    стоит на INFO (runtime_guard.py:72), то есть DEBUG здесь равен молчанию.
+    """
+    _throttled(
+        logging.WARNING,
+        f"tool_failure:{action}:{reason}",
+        "подпроцесс не дал ответа action=%s pid=%s вид=%s: %s",
+        action,
+        pid,
+        reason,
+        _redact(str(error))[:_ERROR_TEXT_LIMIT],
+    )
+
+
 async def _kill_process_tree(proc):
     """
     Убить ребёнка ВМЕСТЕ с внуками.
@@ -191,12 +312,26 @@ async def _kill_process_tree(proc):
             # Ребёнок запущен с start_new_session=True, то есть он лидер своей
             # группы процессов, и внуки наследуют её же.
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (asyncio.TimeoutError, Exception):
-        pass
+    except (asyncio.TimeoutError, Exception) as exc:
+        # Провал снятия дерева означает живого внука: ffmpeg от whisper-transcribe
+        # остаётся сиротой — без родителя, без таймаута и без читателя результата.
+        # Молчание здесь стоило того, что сирот на этой машине никто не считал:
+        # искать их приходится в диспетчере задач, а не в журнале.
+        # WARNING, а не ERROR: прямой ребёнок ниже всё равно будет убит, отказ
+        # частичный. Управление не меняется — finally как был.
+        _throttled(
+            logging.WARNING,
+            "kill_tree_failed",
+            "дерево процессов не снято pid=%s: %s — внуки (ffmpeg) могли остаться сиротами",
+            proc.pid,
+            _describe_exception(exc),
+        )
     finally:
         try:
             proc.kill()
         except (ProcessLookupError, OSError):
+            # Процесс уже мёртв — штатный исход, а не отказ: сюда приходят и после
+            # успешного taskkill выше. Записи не заслуживает.
             pass
 
 
@@ -227,15 +362,33 @@ async def _run_json_tool(action, payload, timeout=None):
     # ключе он завис. Читаем в списки снаружи корутины — они переживают отмену.
     stdout_chunks, stderr_lines = [], []
 
+    # Сколько строк журнала ребёнка потеряно на переполнении лимита потока.
+    # Копится, а не пишется на месте: см. _read_lines.
+    dropped_stderr = [0]
+
     async def _feed_stdin():
         try:
             proc.stdin.write(request_bytes)
             await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            # Ребёнок умер, не дочитав задание. Дальше родитель не найдёт JSON и
+            # вернёт `... failed with code N`, где про недоставленный промпт нет
+            # ничего — а это разные отказы: не дошло задание против «модель не
+            # ответила». Размер пишем, сам промпт нет: это текст врача.
+            _throttled(
+                logging.WARNING,
+                f"feed_stdin_failed:{action}",
+                "задание не доставлено подпроцессу action=%s pid=%s байт=%d: %s",
+                action,
+                proc.pid,
+                len(request_bytes),
+                _describe_exception(exc),
+            )
         try:
             proc.stdin.close()
         except (BrokenPipeError, ConnectionResetError, OSError):
+            # Закрытие пайпа у мёртвого ребёнка — штатный исход и ничего не
+            # говорит о причине; отказ записи уже сделан выше.
             pass
 
     async def _read_chunks(stream, sink):
@@ -252,6 +405,13 @@ async def _run_json_tool(action, payload, timeout=None):
             except ValueError:
                 # Строка длиннее лимита потока (64 КБ): дочитывать её нечем,
                 # но и бросать дренаж нельзя — иначе ребёнок встанет на записи.
+                #
+                # Пишем НЕ здесь: это тело while True, и на одной переполненной
+                # строке ветка срабатывает многократно. Строка журнала на каждый
+                # оборот залила бы bot.log (ротация 5 МБ) быстрее, чем оператор
+                # успел бы его открыть. Копим счётчик, одна сводная запись — в
+                # конце обмена.
+                dropped_stderr[0] += 1
                 continue
             if not line:
                 return
@@ -267,17 +427,42 @@ async def _run_json_tool(action, payload, timeout=None):
         )
         await proc.wait()
 
+    def _report_dropped_stderr():
+        """Сводная запись о потерянных строках журнала ребёнка (см. _read_lines)."""
+        if dropped_stderr[0]:
+            _throttled(
+                logging.WARNING,
+                f"stderr_overflow:{action}",
+                "журнал подпроцесса потерян частично action=%s pid=%s:"
+                " %d строк длиннее лимита потока 64 КБ",
+                action,
+                proc.pid,
+                dropped_stderr[0],
+            )
+
     async def _reap():
         """Добить процесс с внуками, не зависнув на дренаже его пайпов."""
         await _kill_process_tree(proc)
         tail = None
         try:
             _, tail = await asyncio.wait_for(proc.communicate(), timeout=5)
-        except (asyncio.TimeoutError, Exception):
-            pass
+        except (asyncio.TimeoutError, Exception) as exc:
+            # Это последний дренаж убитого ребёнка. Молчание здесь означало, что
+            # хвост его журнала — самые последние строки перед зависанием, ровно
+            # то, что и нужно разбирать, — исчезал, и оператор не знал даже, что
+            # чего-то не хватает. Дренаж дальше не идёт, управление то же.
+            _throttled(
+                logging.WARNING,
+                f"reap_drain_failed:{action}",
+                "хвост журнала подпроцесса не дочитан action=%s pid=%s: %s",
+                action,
+                proc.pid,
+                _describe_exception(exc),
+            )
         if tail:
             stderr_lines.append(tail.decode("utf-8", errors="replace"))
         _relay_child_log(action, "\n".join(stderr_lines))
+        _report_dropped_stderr()
 
     # Дедлайн родителя = бюджет ребёнка + запас на его запуск, см.
     # _SUBPROCESS_STARTUP_SLACK_SECONDS. timeout=None оставляем None: это
@@ -287,7 +472,9 @@ async def _run_json_tool(action, payload, timeout=None):
         await asyncio.wait_for(_exchange(), timeout=deadline)
     except asyncio.TimeoutError:
         await _reap()
-        return None, f"{action} timeout after {deadline}s (бюджет ребёнка {timeout}s)"
+        error = f"{action} timeout after {deadline}s (бюджет ребёнка {timeout}s)"
+        _log_tool_failure(action, proc.pid, "timeout", error)
+        return None, error
     except asyncio.CancelledError:
         await _reap()
         raise
@@ -295,6 +482,7 @@ async def _run_json_tool(action, payload, timeout=None):
     stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr_text = "\n".join(stderr_lines).strip()
     _relay_child_log(action, stderr_text)
+    _report_dropped_stderr()
     json_line = None
     for line in reversed(stdout_text.splitlines()):
         stripped = line.strip()
@@ -304,15 +492,24 @@ async def _run_json_tool(action, payload, timeout=None):
 
     if not json_line:
         details = stderr_text or stdout_text.strip()
-        return None, details or f"{action} failed with code {proc.returncode}"
+        error = details or f"{action} failed with code {proc.returncode}"
+        _log_tool_failure(action, proc.pid, "no_json", error)
+        return None, error
 
     try:
         result = json.loads(json_line)
     except json.JSONDecodeError as exc:
-        return None, f"{action} invalid output: {exc}"
+        # Саму строку не печатаем: для gemini-text это ответ модели врачу, то есть
+        # payload целиком. Длины и позиции ошибки хватает, чтобы отличить обрезанный
+        # вывод от постороннего мусора в stdout.
+        error = f"{action} invalid output: {exc}"
+        _log_tool_failure(action, proc.pid, "bad_json", f"{error} (длина строки {len(json_line)})")
+        return None, error
 
     if not result.get("ok"):
-        return None, result.get("error") or f"{action} failed"
+        error = result.get("error") or f"{action} failed"
+        _log_tool_failure(action, proc.pid, result.get("reason") or "not_ok", error)
+        return None, error
     return result, None
 
 
@@ -387,8 +584,18 @@ def _foreign_summary_status(context):
         current = runtime_guard.read_summary_status()
         if current.get("active") and current.get("kind") in runtime_guard.SUMMARY_KINDS:
             return current
-    except Exception:
-        pass
+    except Exception as exc:
+        # Без снимка чужую отметку сводки уже не вернуть: файл одноместный, и
+        # ребёнок затрёт её своей записью. Итог отказа ровно тот, который описан
+        # выше в докстроке — сторож сводки разоружён, зависший дайджест всего чата
+        # врачей теряется молча. Возврат None остаётся, управление не меняем.
+        _throttled(
+            logging.WARNING,
+            "foreign_summary_snapshot_failed",
+            "снимок чужой отметки сводки не сделан: %s — зависание дайджеста"
+            " на время этого вызова сторож не поймает",
+            _describe_exception(exc),
+        )
     return None
 
 
@@ -428,7 +635,19 @@ def _restore_foreign_summary_status(snapshot):
             snapshot.get("kind"), snapshot.get("stage"), snapshot.get("utc"),
         )
         return True
-    except Exception:
+    except Exception as exc:
+        # Отметка сводки НЕ восстановлена: сторож сводки с этого момента слеп до
+        # конца дайджеста. Успешное восстановление уже пишется строкой выше —
+        # молчащим оставался ровно отказ, то есть в журнале был виден только
+        # хороший исход. Возврат False сохраняем.
+        _throttled(
+            logging.WARNING,
+            "restore_summary_failed",
+            "затёртая отметка сводки НЕ восстановлена kind=%s stage=%s: %s",
+            snapshot.get("kind"),
+            snapshot.get("stage"),
+            _describe_exception(exc),
+        )
         return False
 
 
@@ -473,8 +692,22 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             runtime_guard.release_generation_status(
                 context.get("kind") if isinstance(context, dict) else None
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Здесь гасился и отказ записи файла статуса: write_summary_status
+            # (runtime_guard.py:120) после пяти ретраев поднимает OSError, и
+            # единственным её получателем был этот pass. Незакрытый флаг генерации
+            # оставляет сторожу сводки повод перезапустить бота через полчаса
+            # впустую, а незакрытый и невидимый — ещё и без объяснения в журнале.
+            # finally остаётся finally: отказ уборки не имеет права подменить
+            # результат вызова, ради которого врач ждал ответа.
+            _throttled(
+                logging.WARNING,
+                "release_status_failed",
+                "флаг генерации не снят kind=%s: %s — сторож сводки может"
+                " перезапустить процесс по устаревшей отметке",
+                context.get("kind") if isinstance(context, dict) else None,
+                _describe_exception(exc),
+            )
 
 
 async def web_search_async(query, max_results, timeout):
@@ -505,8 +738,18 @@ def _remove_converted_wav(file_path):
     try:
         if os.path.exists(wav_path):
             os.remove(wav_path)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Утечка диска, а не отказ распознавания: минута голосового — около 2 МБ
+        # wav, и невывезенный конвертат остаётся лежать навсегда. Молча это
+        # заканчивается заполненным диском, у которого в журнале нет ни одной
+        # причины. Путь печатать можно: имя файла — не содержимое голосового.
+        _throttled(
+            logging.WARNING,
+            "converted_wav_not_removed",
+            "конвертат голосового не удалён path=%s: %s",
+            wav_path,
+            _describe_exception(exc),
+        )
 
 
 async def transcribe_audio_async(file_path, timeout):
@@ -629,8 +872,33 @@ def _main():
             _json_exit({"ok": bool(text), "text": text})
 
         _json_exit({"ok": False, "error": f"unknown action: {action}"}, 2)
+    except SystemExit:
+        # _json_exit — это штатный выход, а не отказ: он бросает SystemExit из
+        # каждой ветки выше. Без этой ветки `except Exception` его не поймал бы
+        # (SystemExit наследует BaseException), но полагаться на это молча нельзя:
+        # ветка объявлена явно, чтобы правка ниже не начала писать «ребёнок упал»
+        # на каждый УСПЕШНЫЙ ответ.
+        raise
     except Exception as exc:
-        _json_exit({"ok": False, "error": str(exc)}, 1)
+        # Трейсбек падения ребёнка не попадал НИКУДА.
+        #
+        # _json_exit пишет только в stdout, а stdout здесь — JSON-протокол, куда
+        # трейсбек положить нельзя (родитель ищет последнюю строку вида {...}).
+        # Журнал ребёнка идёт в stderr (:567) и именно stderr родитель переливает
+        # в bot.log через _relay_child_log. То есть до этой правки писать было
+        # некуда, и не писали: `error: str(exc)` — всё, что доезжало.
+        #
+        # Чем это стоило: str() у ConnectionResetError, TimeoutError, IndexError и
+        # CancelledError пуст, поэтому родитель на :315 подставлял
+        # `f"{action} failed"`, и оператор читал `gemini-text failed` — без типа,
+        # файла, строки, модели и ключа. Замер по bot.log: 12 записей ERROR/WARNING
+        # с пустым полем причины.
+        #
+        # logger.exception уходит в stderr, откуда родитель заберёт его сам.
+        # Локальных переменных в трейсбеке нет (стандартный traceback их не
+        # печатает), то есть промпт врача и ключи в него не попадают.
+        logger.exception("дочерний процесс упал action=%s", action)
+        _json_exit({"ok": False, "error": _describe_exception(exc)}, 1)
 
 
 if __name__ == "__main__":
