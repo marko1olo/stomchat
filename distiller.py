@@ -120,6 +120,11 @@ from datetime import datetime
 import aiosqlite
 
 import taxonomy
+# Обрезка по границе предложения — одна реализация на бот, в html_safe. Своя
+# копия здесь расходилась с копиями в assistant.py и web_lookup.py на 6 входах
+# из 8 и оставляла в конце факта висящий номер пункта «5.» без самого пункта:
+# врач читает пункт, которого в статье нет.
+from html_safe import clip_at_sentence
 
 # === КОНФИГУРАЦИЯ ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -235,32 +240,6 @@ def norm_content_key(text):
 
 def content_hash(text):
     return hashlib.sha1(norm_content_key(text).encode("utf-8")).hexdigest()
-
-
-def clip_at_sentence(text, cap):
-    """
-    Обрезает текст по границе предложения, а не по середине слова.
-
-    Возвращает (текст, сколько символов отброшено). Обрезка на полуслове —
-    отдельный класс порчи: замер по базе показал 1 факт из 12 784, который
-    кончается буквой без знака конца предложения ('...использование клиньев и
-    матриц в стоматологии'), и восстановить его уже нечем. Поэтому режем по
-    последнему `.`/`!`/`?`/`;`, а если такого в пределах разумного нет — по
-    границе слова.
-    """
-    t = text or ""
-    if len(t) <= cap:
-        return t, 0
-    head = t[:cap]
-    cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), head.rfind("; "))
-    if cut < cap // 2:
-        # Ни одной границы предложения во второй половине — режем по слову.
-        cut = head.rfind(" ")
-    if cut <= 0:
-        cut = cap - 1
-    else:
-        cut += 1
-    return t[:cut].rstrip(), len(t) - cut
 
 
 def normalize_source_ids(raw_list, allowed_ids):
