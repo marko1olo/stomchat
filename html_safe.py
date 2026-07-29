@@ -137,7 +137,7 @@ def clip_at_sentence(text, limit):
             trimmed = _TRAILING_TOKEN_RE.sub("", head).rstrip()
             clipped = (trimmed or head[:limit - 1]) + "…"
 
-    return clipped, len(source) - limit
+    return clipped, len(source) - len(clipped)
 
 
 def clip_at_sentence_text(text, limit):
