@@ -548,10 +548,12 @@ async def init_wiki_db():
                 media_links TEXT,
                 is_case BOOLEAN,
                 confidence INTEGER,
-                processed_at TIMESTAMP
+                processed_at TIMESTAMP,
+                content_hash TEXT
             )
         ''')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_cat ON distilled_facts(category_code)')
+        await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON distilled_facts(content_hash)')
         await db.commit()
 
 
@@ -659,6 +661,7 @@ def prepare_fact(f, allowed_ids, known_hashes):
         bool(f.get("case", False)),
         10,  # confidence: константа; поле читают savdel.py и filemake.py, семантику не меняю
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        h,
     )
     return row, notes
 
@@ -771,9 +774,9 @@ async def main():
                 say(f"  [{row[0]}] {row[1][:200]}")
             async with aiosqlite.connect(WIKI_DB, timeout=30) as wiki:
                 await wiki.executemany('''
-                    INSERT INTO distilled_facts
-                        (category_code, content, source_ids, media_links, is_case, confidence, processed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO distilled_facts
+                        (category_code, content, source_ids, media_links, is_case, confidence, processed_at, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', prepared)
                 await wiki.commit()
             facts_total += len(prepared)
