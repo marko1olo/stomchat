@@ -279,6 +279,36 @@ for _bad in ("2.1.1'; DROP TABLE distilled_facts--", "2.1._", "2.1.%", "", "abc"
         pass
 check("недопустимый код категории отвергается до похода в SQL",
       not _bad_ok, f"пропущены: {_bad_ok} — '_' и '%' в LIKE наберут в файл чужие факты")
+
+
+# Выгрузка обязана БРАТЬ правило границы отсюда, а не собирать своё: правильный
+# taxonomy.py ничего не спасает, если savdel вернётся к '%код%'. Проверяется
+# поведением — шаблоны выгрузки гоняются по тому же стенду, а не сверяются по тексту.
+def by_savdel(code):
+    return {r[0] for r in mem.execute(
+        f"SELECT id FROM distilled_facts WHERE {T.token_sql()}",
+        savdel.category_patterns(code))}
+
+
+check("шаблоны выгрузки — те же, что у источника",
+      savdel.category_patterns("2.1.1") == T.token_patterns("2.1.1"),
+      f"выгрузка отдала {savdel.category_patterns('2.1.1')} — у неё снова своё правило")
+check("отбор выгрузки не тянет 2.1.10 и 12.1.1 в файл 2.1.1",
+      by_savdel("2.1.1") == _tok211,
+      f"выгрузка взяла {sorted(by_savdel('2.1.1'))}, источник {sorted(_tok211)} — "
+      f"врач читает чужой раздел как свой")
+check("отбор выгрузки видит мультитег в обеих рубриках",
+      9 in by_savdel("2.2.6") and 9 in by_savdel("2.1.2"))
+_savdel_bad = []
+for _bad in ("2.1.%", "2.1._", "2.1.1'; DROP TABLE distilled_facts--"):
+    try:
+        savdel.category_patterns(_bad)
+        _savdel_bad.append(_bad)
+    except ValueError:
+        pass
+check("выгрузка отвергает код с подстановочными знаками",
+      not _savdel_bad, f"пропущены: {_savdel_bad} — '%' в LIKE наберёт в файл ревью "
+      f"чужие факты, и по ним закажут платную монографию")
 mem.close()
 
 # Живая вика: тот же вопрос на реальных данных, два независимых способа счёта.
@@ -348,6 +378,27 @@ check("корзина нечитаемых кодов выгружается",
       "всё, что модель не смогла классифицировать, не попадёт ни в один файл")
 check("каждый лист дерева доезжает до файла выгрузки",
       not T.NON_EXPORTABLE_LEAVES, f"без рубрики: {sorted(T.NON_EXPORTABLE_LEAVES)}")
+# Пустой список листьев без рубрики обязан быть ВЫЧИСЛЕН, а не записан пустым:
+# записанный руками он остаётся пустым и после того, как рубрику из выгрузки убрали,
+# и тогда факт сохраняется, но ни в один файл ревью не попадает — молча. Проверка
+# поведенческая: у КОПИИ источника в памяти отобрана одна рубрика, и производное
+# множество обязано её назвать. Боевой taxonomy.py при этом не меняется, файлы не
+# пишутся. `_probe_n == 1` обязателен: без него проверка «зеленела бы по построению»,
+# если формат строки рубрики изменится и вырезать станет нечего.
+_probe_src, _probe_n = re.subn(
+    r'(?m)^[ \t]*"2\.2\.6":.*\n', "",
+    io.open(REPO / "taxonomy.py", encoding="utf-8-sig").read())
+_probe_ns = {"__name__": "taxonomy_probe"}
+exec(compile(_probe_src, "taxonomy_probe", "exec"), _probe_ns)
+check("рубрику убрали из источника — лист без рубрики НАЗВАН, а не потерян молча",
+      _probe_n == 1 and _probe_ns["NON_EXPORTABLE_LEAVES"] == frozenset({"2.2.6"})
+      and any("2.2.6" in _e for _e in _probe_ns["consistency_errors"]()),
+      f"вырезано строк {_probe_n}, получено "
+      f"{sorted(_probe_ns['NON_EXPORTABLE_LEAVES'])} — список снова не вычисляется, "
+      f"и лист дерева без файла ревью уедет в тишину")
+check("проба на копии не задела боевой источник",
+      "2.2.6" in T.EXPORT_SLUGS and not T.NON_EXPORTABLE_LEAVES
+      and T.EXPORT_SLUGS["2.2.6"] == "Орто_Фиксация_Цементы")
 _illegal = {c: s for c, s in T.EXPORT_SLUGS.items()
             if set(s) & set(':/\\*?"<>|') or " " in s}
 check("имя файла выгрузки не содержит запрещённых Windows символов",
