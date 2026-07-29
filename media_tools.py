@@ -221,7 +221,7 @@ async def _run_tool(action, file_path, timeout):
 
     try:
         try:
-            stdout, _sink = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout = await asyncio.wait_for(_read_child(), timeout=timeout)
         except asyncio.TimeoutError:
             _kill_quietly(proc)
             try:

@@ -78,4 +78,9 @@ ffmpeg.exe
 _probe_*.py
 _measure_*.py
 _sabotage_*.py
+_smoke_*.py
+# Бэкапы, которые агент делает перед саботажем. _bak_assistant_*.py — это полная
+# копия боевого модуля рядом с ним: её видит os.listdir в test_import_safety, и
+# любой её импорт даёт второй экземпляр модуля с собственным состоянием.
+_bak_*.py
 *.sabbak
