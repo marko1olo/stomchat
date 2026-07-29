@@ -21,7 +21,17 @@ MODEL_ID = "models/gemma-3-27b-it"
 # повторный прогон удвоит все 53 протокола.
 VIDEO_MARKER = "\U0001f3a5 [ВИДЕО-ПРОТОКОЛ | MSG "
 # Типы медиа архива, при которых ссылка на msg_id считается проверенной.
+# Замер архива: media_type бывает только NULL (101 845), photo (14 754),
+# video (804) и file (444). Тип file сюда НЕ включён намеренно: под ним лежат
+# документы, и назвать документ видео — то же самое угадывание, из-за которого
+# провенанс и оказался ложным.
 VIDEO_MEDIA_TYPES = ("video",)
+# Код, который классификатор отдаёт, когда не смог определить категорию: все
+# ключи в лимите или модель ответила словами вместо цифр. Ни одна подтема
+# рубрикатора этот код не несёт (замер: 53 кода в WIKI_TREE, 10.1 среди них нет,
+# и ни один не является его подстрокой), поэтому факт с таким кодом врачу
+# недостижим — он лежит в базе и не показывается ни в одном разделе.
+FALLBACK_CODE = "10.1"
 # Сколько раз ждать освобождения базы. Без предела цикл был вечным: ошибка
 # «нет такой таблицы» — тоже OperationalError, и импорт молча висел навсегда.
 DB_BUSY_ATTEMPTS = 30
@@ -68,7 +78,7 @@ def clean_codes(raw_codes):
         if match:
             out.append(match.group(1))
     # dict.fromkeys, а не set: порядок кодов не должен меняться от прогона к прогону.
-    return ", ".join(dict.fromkeys(out)) if out else "10.1"
+    return ", ".join(dict.fromkeys(out)) if out else FALLBACK_CODE
 
 def verify_provenance(msg_id, archive_path=None):
     """Вернуть номер источника, только если ссылка проверяема; иначе пустую строку.
@@ -134,11 +144,11 @@ async def classify_video(body):
             )
             if response and response.text:
                 data = json.loads(clean_json_raw(response.text))
-                return clean_codes(data.get("codes", ["10.1"]))
+                return clean_codes(data.get("codes", [FALLBACK_CODE]))
         except Exception:
             continue # Пробуем следующий ключ молча
 
-    return "10.1" # Если все ключи сдохли
+    return FALLBACK_CODE # Если все ключи сдохли
 
 async def already_imported(db, msg_id):
     """Есть ли уже факт по этому протоколу. Сравнение по началу строки, не LIKE.
@@ -189,13 +199,19 @@ async def main():
     # Печать без эмодзи: консоль боевой машины cp1251, а U+274C/U+2705/U+23F3 в
     # неё не кодируются — на этой самой строке импорт падал UnicodeEncodeError,
     # даже не дойдя до базы. Кириллица в cp1251 проходит.
+    # SystemExit, а не return: с return процесс заканчивался с кодом 0, и для
+    # обёртки, cron и любого «запустил и посмотрел в конец лога» это УСПЕХ.
+    # Замер до правки: нет videos.txt -> returncode 0. То есть импорт, не
+    # вставивший ни одного протокола, отчитывался как выполненный, врач ждал
+    # новые видео-разборы в рубрикаторе, а их там не появлялось никогда — и
+    # никто не искал причину, потому что формально всё прошло.
     if not os.path.exists(INPUT_FILE):
         print(f"[СТОП] Файл {INPUT_FILE} не найден! Создай его и вставь текст.")
-        return
+        raise SystemExit(1)
 
     if not os.path.exists(DB_PATH):
         print(f"[СТОП] База не найдена: {os.path.abspath(DB_PATH)}")
-        return
+        raise SystemExit(1)
 
     with open(INPUT_FILE, "r", encoding="utf-8") as f:
         content = f.read()
@@ -211,6 +227,7 @@ async def main():
     count = 0
     skipped = 0
     without_source = 0
+    unclassified = 0
     # parts[0] пустой, дальше [ID, Текст, ID, Текст...]
     for i in range(1, len(parts), 2):
         msg_id = parts[i].strip()
@@ -233,6 +250,21 @@ async def main():
 
         # 2. Классифицируем
         cat_code = await classify_video(body)
+
+        # 2a. Классификатор не справился — протокол НЕ записываем.
+        #     Иначе получается худший из вариантов: факт лежит в базе с
+        #     confidence 100, но ни одна подтема рубрикатора код 10.1 не несёт,
+        #     значит врач его не увидит ни в одном разделе. И вылечить это уже
+        #     нельзя: защита от повтора опознает протокол по номеру и следующий
+        #     прогон, когда ключи оживут, честно его пропустит — невидимка
+        #     останется в базе навсегда. Не записав, мы оставляем протокол в
+        #     videos.txt: повторный прогон возьмёт его и разметит нормально.
+        if cat_code == FALLBACK_CODE:
+            print(f"НЕ ЗАПИСАН: классификатор не дал код (заглушка {FALLBACK_CODE}). "
+                  f"Протокол остаётся в {INPUT_FILE}, повтори прогон.")
+            unclassified += 1
+            await asyncio.sleep(SLEEP_BETWEEN_VIDEOS)
+            continue
 
         # 3. Провенанс: либо проверенный msg_id архива, либо пусто.
         source_ids = verify_provenance(msg_id)
@@ -261,6 +293,10 @@ async def main():
         await asyncio.sleep(SLEEP_BETWEEN_VIDEOS)
 
     print(f"\nИмпорт завершен! Добавлено {count} протоколов, пропущено как повтор {skipped}.")
+    if unclassified:
+        # Громко и последней строкой: молчаливый ноль оператор принимает за успех.
+        print(f"[ВНИМАНИЕ] Без категории и потому НЕ записано: {unclassified}. Эти протоколы врач "
+              f"в рубрикаторе не найдёт, поэтому они не в базе; повтори прогон, когда ключи оживут.")
     if without_source:
         print(f"Без подтверждённого источника: {without_source}. Номера из {INPUT_FILE} — "
               f"нумерация файла, а не msg_id архива; ложную ссылку врач читает как обман.")
