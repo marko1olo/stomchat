@@ -430,6 +430,8 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         return "model_overloaded"
 
     if "403" in err_msg or "permission" in err_msg:
+        set_key_cooldown(provider, api_key, 31536000) # 365 days
+        logger.warning(f"{provider.capitalize()} key permanently denied (403). Banned for 365 days.")
         _record_failure("key_denied", error_text, api_key)
         return "key_denied"
 

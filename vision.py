@@ -301,7 +301,8 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 timeout=GROQ_HTTP_TIMEOUT_SECONDS,
                             )
                             content_arr = [{"type": "text", "text": system_prompt}]
-                            for iu in image_urls:
+                            max_images = 3 if provider == "groq" else len(image_urls)
+                            for iu in image_urls[:max_images]:
                                 content_arr.append({"type": "image_url", "image_url": {"url": iu}})
                             
                             resp = await client.chat.completions.create(
@@ -343,16 +344,13 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             err_str = str(e).lower()
                             if _PAYLOAD_TOO_LARGE_RE.search(err_str):
                                 logger.warning(
-                                    "Vision payload too large (413) for %s images; giving up.",
+                                    "Vision payload too large (413) for %s images. Skipping to next model.",
                                     len(image_urls),
                                 )
-                                # Снимок меньше не станет ни от другого ключа, ни
-                                # от другой модели — попытки прекращаем. Но
-                                # описание, уже полученное от предыдущей модели
-                                # каскада, возвращаем: раньше здесь стоял
-                                # return None, и годный английский вариант
-                                # выбрасывался вместе с отказом.
-                                return english_fallback
+                                # Снимок может быть слишком велик для одной модели (например Groq), но
+                                # пройти в другую (Gemini). Поэтому не сдаёмся целиком, а пробуем
+                                # следующую модель в каскаде.
+                                break
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель
