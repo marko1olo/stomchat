@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot</title>
+
+    <!-- Open Graph & Social Meta Tags -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://marko1olo.github.io/stomchat/">
+    <meta property="og:title" content="StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot">
+    <meta property="og:description" content="Autonomous Multimodal Dental Case Listener, Agentic Fact Checker, and Telegraph Digest Publisher powered by Telethon MTProto, Gemini 1.5 Vision, and Groq LPU.">
+    <meta property="og:image" content="https://marko1olo.github.io/stomchat/og-card.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="StomChat — Dentistry AI Telegram Bot">
+    <meta name="twitter:description" content="Autonomous Multimodal Dental Case Listener, Agentic Fact Checker, and Telegraph Digest Publisher.">
+    <meta name="twitter:image" content="https://marko1olo.github.io/stomchat/og-card.png">
+
+    <!-- Google Fonts & Icons -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-dark: #07090e;
+            --bg-card: rgba(18, 24, 38, 0.75);
+            --bg-card-hover: rgba(26, 35, 56, 0.85);
+            --accent-cyan: #06b6d4;
+            --accent-emerald: #10b981;
+            --accent-purple: #8b5cf6;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --border-glow: rgba(6, 182, 212, 0.25);
+            --border-subtle: rgba(255, 255, 255, 0.08);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            line-height: 1.6;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 15% 15%, rgba(6, 182, 212, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 85% 60%, rgba(139, 92, 246, 0.08) 0%, transparent 40%);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+
+        /* Header / Navbar */
+        header {
+            border-bottom: 1px solid var(--border-subtle);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(7, 9, 14, 0.8);
+        }
+
+        .nav-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 70px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-weight: 800;
+            font-size: 1.25rem;
+            color: #fff;
+            text-decoration: none;
+        }
+
+        .logo-icon {
+            width: 38px;
+            height: 38px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            color: #000;
+            box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 1.5rem;
+            align-items: center;
+        }
+
+        .nav-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--accent-cyan);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald));
+            color: #040914;
+            box-shadow: 0 0 20px rgba(6, 182, 212, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 25px rgba(6, 182, 212, 0.5);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--accent-cyan);
+        }
+
+        /* Hero Section */
+        .hero {
+            padding: 5rem 0 3rem;
+            text-align: center;
+        }
+
+        .badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0.4rem 1rem;
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid var(--border-glow);
+            border-radius: 50px;
+            color: var(--accent-cyan);
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+        }
+
+        .hero h1 {
+            font-size: 3.2rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin-bottom: 1.2rem;
+            background: linear-gradient(180deg, #ffffff 0%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 1.2rem;
+            color: var(--text-muted);
+            max-width: 780px;
+            margin: 0 auto 2.5rem;
+        }
+
+        .hero-cta {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-bottom: 3.5rem;
+        }
+
+        /* Media Preview Embed */
+        .media-preview-container {
+            position: relative;
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid var(--border-glow);
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 30px rgba(6, 182, 212, 0.2);
+            margin-bottom: 5rem;
+            background: #000;
+        }
+
+        .media-preview-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+            aspect-ratio: 16 / 9;
+            object-fit: cover;
+        }
+
+        .media-badge {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: rgba(7, 9, 14, 0.85);
+            backdrop-filter: blur(8px);
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            color: var(--accent-cyan);
+            border: 1px solid var(--border-glow);
+        }
+
+        /* Features Grid */
+        .section-title {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .section-title h2 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .section-title p {
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 5rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 1.8rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-glow);
+            transform: translateY(-4px);
+        }
+
+        .card-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 10px;
+            background: rgba(6, 182, 212, 0.1);
+            color: var(--accent-cyan);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.2rem;
+            border: 1px solid var(--border-glow);
+        }
+
+        .card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.75rem;
+            color: #fff;
+        }
+
+        .card p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Interactive Code / Architecture Showcase */
+        .arch-section {
+            background: rgba(12, 17, 29, 0.6);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            padding: 2.5rem;
+            margin-bottom: 5rem;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 1rem;
+            border-bottom: 1px solid var(--border-subtle);
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+            overflow-x: auto;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab-btn.active {
+            background: rgba(6, 182, 212, 0.15);
+            color: var(--accent-cyan);
+            border: 1px solid var(--border-glow);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .code-box {
+            background: #04060a;
+            border: 1px solid var(--border-subtle);
+            border-radius: 10px;
+            padding: 1.2rem;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.88rem;
+            color: #e5e7eb;
+            overflow-x: auto;
+        }
+
+        .code-box .keyword { color: #f472b6; }
+        .code-box .string { color: #a7f3d0; }
+        .code-box .comment { color: #6b7280; font-style: italic; }
+        .code-box .function { color: #60a5fa; }
+
+        /* Interactive Simulator Demo */
+        .sim-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-glow);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 5rem;
+        }
+
+        .sim-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .sim-body {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .sim-body { grid-template-columns: 1fr; }
+            .hero h1 { font-size: 2.2rem; }
+        }
+
+        .sim-input, .sim-output {
+            background: #05070c;
+            border: 1px solid var(--border-subtle);
+            border-radius: 10px;
+            padding: 1rem;
+        }
+
+        .sim-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--accent-cyan);
+            margin-bottom: 0.75rem;
+            font-weight: 700;
+        }
+
+        /* Tech Stack Tags */
+        .tech-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 1rem;
+        }
+
+        .tag {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-subtle);
+            padding: 0.3rem 0.7rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            color: #d1d5db;
+        }
+
+        footer {
+            border-top: 1px solid var(--border-subtle);
+            padding: 3rem 0;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="container nav-content">
+            <a href="#" class="logo">
+                <div class="logo-icon">SC</div>
+                <span>StomChat AI</span>
+            </a>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#architecture">Architecture</a>
+                <a href="#simulator">Live Simulator</a>
+                <a href="#tech-stack">Tech Stack</a>
+                <a href="https://github.com/marko1olo/stomchat" target="_blank" class="btn btn-secondary">GitHub Repo</a>
+                <a href="https://t.me/" target="_blank" class="btn btn-primary">Launch Bot</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Hero -->
+        <section class="hero">
+            <div class="badge-pill">
+                <span>⚡ Powered by Telethon, Gemini 1.5 Vision & Groq LPU</span>
+            </div>
+            <h1>Autonomous Dentistry Chat Knowledge Base & AI Bot</h1>
+            <p>StomChat continuously ingests Telegram dental community channels, extracts clinical keyframes with OpenCV, verifies diagnoses via agentic web search, and compiles automated Telegraph articles.</p>
+            <div class="hero-cta">
+                <a href="https://marko1olo.github.io/stomchat/" class="btn btn-primary">Live Interactive Site</a>
+                <a href="#architecture" class="btn btn-secondary">Explore Architecture</a>
+            </div>
+        </section>
+
+        <!-- Media Preview -->
+        <div class="media-preview-container">
+            <span class="media-badge">16:9 Live Pipeline Visualization</span>
+            <img src="media-preview.png" alt="StomChat System Architecture & Processing Dashboard">
+        </div>
+
+        <!-- Features Grid -->
+        <section id="features">
+            <div class="section-title">
+                <h2>Engineered for Clinical Chat Intelligence</h2>
+                <p>High-concurrency async pipeline handling MTProto streams, medical computer vision, and structured article publishing.</p>
+            </div>
+            <div class="grid-3">
+                <div class="card">
+                    <div class="card-icon">📡</div>
+                    <h3>Hybrid MTProto Userbot + Bot</h3>
+                    <p>Uses Telethon MTProto to listen seamlessly to target dental groups without missing media attachments, while a secondary bot client handles channel publishing.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">👁️</div>
+                    <h3>Gemini 1.5 Vision & OpenCV</h3>
+                    <p>Automatically isolates keyframes from uploaded clinical MP4 videos using OpenCV/FFmpeg and feeds dental X-rays & photos into Gemini 1.5 Vision multi-key rotation pools.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">🔎</div>
+                    <h3>Agentic Fact-Checking Engine</h3>
+                    <p>Integrates Tavily and DuckDuckGo search workers to verify medical claims made in discussions, citing peer-reviewed dental literature automatically.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">📰</div>
+                    <h3>Telegraph Digest Publisher</h3>
+                    <p>Formats raw daily/weekly discussions into beautifully rendered web articles via <code>html-telegraph-poster</code> and posts instant preview links to channels.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">⚡</div>
+                    <h3>Multi-Key Failover & Cooldowns</h3>
+                    <p>Built-in <code>gemini_client.py</code> engine manages API quota rotation across multiple keys with exponential backoff on HTTP 429 and rate limits.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">🗄️</div>
+                    <h3>Async SQLite & Taxonomy</h3>
+                    <p>Powered by <code>aiosqlite</code> and specialized dental vocabulary dictionaries (<code>dental_vocab.py</code>) for fast keyword categorization and case tracking.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture & Code Showcase -->
+        <section id="architecture" class="arch-section">
+            <div class="section-title" style="text-align: left; margin-bottom: 1.5rem;">
+                <h2>Deep Technical Architecture</h2>
+                <p>Inspect exact codebase modules powering StomChat</p>
+            </div>
+            <div class="tabs">
+                <button class="tab-btn active" onclick="openTab(event, 'tab-gemini')">gemini_client.py (Vision AI)</button>
+                <button class="tab-btn" onclick="openTab(event, 'tab-telethon')">assistant.py (MTProto Handler)</button>
+                <button class="tab-btn" onclick="openTab(event, 'tab-publisher')">summarizer.py (Telegraph)</button>
+            </div>
+
+            <div id="tab-gemini" class="tab-content active">
+                <div class="code-box">
+<span class="keyword">class</span> <span class="function">GeminiKnowledgeEngine</span>:
+    <span class="comment"># Multi-key rotation pool with rate-limit backoff</span>
+    <span class="keyword">def</span> __init__(self, api_keys: list[str]):
+        self.key_pool = [genai.Client(api_key=k) <span class="keyword">for</span> k <span class="keyword">in</span> api_keys]
+        self.current_idx = 0
+
+    <span class="keyword">async def</span> <span class="function">analyze_dental_case</span>(self, image_bytes: bytes, prompt: str) -> dict:
+        <span class="comment"># Analyze dental X-rays & photos with Gemini 1.5 Vision</span>
+        client = self._get_active_client()
+        response = <span class="keyword">await</span> client.models.generate_content(
+            model=<span class="string">"gemini-1.5-flash"</span>,
+            contents=[Image.open(io.BytesIO(image_bytes)), prompt]
+        )
+        <span class="keyword">return</span> self._parse_clinical_json(response.text)
+                </div>
+            </div>
+
+            <div id="tab-telethon" class="tab-content">
+                <div class="code-box">
+<span class="comment"># Telethon MTProto Event Listener for Dental Case Ingestion</span>
+<span class="keyword">@userbot.on</span>(events.NewMessage(chats=DENTAL_TARGET_CHATS))
+<span class="keyword">async def</span> <span class="function">handle_incoming_case</span>(event):
+    <span class="keyword">if</span> event.media:
+        file_path = <span class="keyword">await</span> event.download_media(file=<span class="string">"uploaded_media/"</span>)
+        <span class="keyword">if</span> file_path.endswith((<span class="string">".mp4"</span>, <span class="string">".mov"</span>)):
+            keyframes = extract_opencv_keyframes(file_path, num_frames=4)
+            <span class="keyword">await</span> db.store_video_case(event.id, keyframes)
+    <span class="keyword">await</span> db.save_message(event.id, event.raw_text, event.sender_id)
+                </div>
+            </div>
+
+            <div id="tab-publisher" class="tab-content">
+                <div class="code-box">
+<span class="comment"># Telegraph Article Generator & Channel Dispatch</span>
+<span class="keyword">async def</span> <span class="function">publish_weekly_digest</span>(summary_data: dict) -> str:
+    poster = TelegraphPoster(use_api=<span class="keyword">True</span>)
+    poster.create_api_token(author_name=<span class="string">"StomChat Dental AI"</span>)
+    html_content = render_telegraph_html(summary_data)
+    page = poster.post(
+        title=f<span class="string">"Dental Case Digest — {datetime.now().strftime('%B %Y')}"</span>,
+        author=<span class="string">"StomChat AI"</span>,
+        text=html_content
+    )
+    <span class="keyword">return</span> page[<span class="string">"url"</span>]
+                </div>
+            </div>
+        </section>
+
+        <!-- Interactive Live Simulator -->
+        <section id="simulator">
+            <div class="sim-container">
+                <div class="sim-header">
+                    <h3>⚡ Interactive StomChat Case Pipeline Simulator</h3>
+                    <span style="font-size: 0.85rem; color: var(--accent-emerald);">● Real-Time Agent Simulation</span>
+                </div>
+                <div class="sim-body">
+                    <div class="sim-input">
+                        <div class="sim-title">1. Incoming Case Input (Simulated)</div>
+                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">Clinical discussion captured from Telegram MTProto stream:</p>
+                        <div style="background: #0b0f19; padding: 0.8rem; border-radius: 6px; font-size: 0.85rem; color: #e5e7eb;">
+                            <strong>Dr. Alex:</strong> "Patient presents with deep carious lesion on tooth #46. Endodontic treatment vs vital pulp therapy options? Attached X-ray."
+                        </div>
+                        <button class="btn btn-primary" style="width: 100%; margin-top: 1rem; justify-content: center;" onclick="runSimulation()">
+                            Run Pipeline Simulation
+                        </button>
+                    </div>
+                    <div class="sim-output">
+                        <div class="sim-title">2. AI Synthesis & Telegraph Digest</div>
+                        <div id="sim-result" style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5;">
+                            <em>Click "Run Pipeline Simulation" to view Gemini Vision analysis, Tavily fact-check, and Telegraph rendering output...</em>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tech Stack -->
+        <section id="tech-stack" style="margin-bottom: 5rem;">
+            <div class="section-title">
+                <h2>Technical Stack & Dependencies</h2>
+            </div>
+            <div class="tech-tags" style="justify-content: center;">
+                <span class="tag">Python 3.10+</span>
+                <span class="tag">Telethon MTProto</span>
+                <span class="tag">Pyrogram</span>
+                <span class="tag">Google Gemini 1.5 Vision</span>
+                <span class="tag">Groq LPU Cascade</span>
+                <span class="tag">Tavily Search API</span>
+                <span class="tag">DuckDuckGo API</span>
+                <span class="tag">OpenCV Keyframes</span>
+                <span class="tag">FFmpeg</span>
+                <span class="tag">aiosqlite</span>
+                <span class="tag">html-telegraph-poster</span>
+                <span class="tag">Pillow (PIL)</span>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot</p>
+            <p style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--text-muted);">Maintained under MIT License. Interactive Documentation Landing Site.</p>
+        </div>
+    </footer>
+
+    <script>
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tab-content");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].classList.remove("active");
+            }
+            tablinks = document.getElementsByClassName("tab-btn");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].classList.remove("active");
+            }
+            document.getElementById(tabName).classList.add("active");
+            evt.currentTarget.classList.add("active");
+        }
+
+        function runSimulation() {
+            const output = document.getElementById("sim-result");
+            output.innerHTML = `<span style="color: var(--accent-cyan)">[1/3] OpenCV keyframe isolated...</span><br/>` +
+                `<span style="color: var(--accent-cyan)">[2/3] Gemini 1.5 Vision analyzing tooth #46 pulp proximity...</span><br/>` +
+                `<span style="color: var(--accent-emerald)">[3/3] Tavily verified 2 literature citations on MTA vital pulp therapy.</span><br/><br/>` +
+                `<strong style="color: #fff">Published Telegraph Article:</strong><br/>` +
+                `<a href="https://telegra.ph/" target="_blank" style="color: var(--accent-cyan)">https://telegra.ph/Dental-Case-Digest-46-Vital-Pulp-07-30</a>`;
+        }
+    </script>
+</body>
+</html>
