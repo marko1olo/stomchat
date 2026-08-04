@@ -160,6 +160,8 @@ async def init_db():
             # только одна из двух колонок, поэтому одна вторая половина условия
             # обесценивала уникальный индекс на msg_id.
             db.execute("CREATE INDEX IF NOT EXISTS idx_reply_to ON messages(reply_to_msg_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_is_summarized ON messages(is_summarized, date)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_pending_media ON messages(msg_id) WHERE has_media = 1 AND (media_description IS NULL OR media_description = '')")
 
             db.execute(
                 """
@@ -197,20 +199,22 @@ async def init_db():
             # уже стоит, а CREATE ... IF NOT EXISTS сверяет только имя и молча
             # оставил бы прежнее двухколоночное определение.
             try:
-                db.execute("DROP INDEX IF EXISTS idx_bookmark_unique")
-                db.execute(
-                    """
-                    DELETE FROM clinical_bookmarks
-                    WHERE id NOT IN (
-                        SELECT MIN(id) FROM clinical_bookmarks
-                        GROUP BY saved_by_user_id, msg_id, IFNULL(chat_id, 0)
+                idx_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_bookmark_unique'").fetchone()
+                if not idx_exists:
+                    db.execute("DROP INDEX IF EXISTS idx_bookmark_unique")
+                    db.execute(
+                        """
+                        DELETE FROM clinical_bookmarks
+                        WHERE id NOT IN (
+                            SELECT MIN(id) FROM clinical_bookmarks
+                            GROUP BY saved_by_user_id, msg_id, IFNULL(chat_id, 0)
+                        )
+                        """
                     )
-                    """
-                )
-                db.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookmark_unique "
-                    "ON clinical_bookmarks(saved_by_user_id, msg_id, IFNULL(chat_id, 0))"
-                )
+                    db.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookmark_unique "
+                        "ON clinical_bookmarks(saved_by_user_id, msg_id, IFNULL(chat_id, 0))"
+                    )
             except Exception as e:
                 logger.warning(f"Could not enforce bookmark uniqueness: {e}")
 
@@ -277,6 +281,8 @@ async def init_db():
             # каждого пользователя в почасовом цикле пингов. Таблица не чистится
             # и растёт бессрочно.
             db.execute("CREATE INDEX IF NOT EXISTS idx_pm_user ON pm_messages(user_id, id)")
+            db.execute("DROP INDEX IF EXISTS idx_pm_date")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_pm_date_user ON pm_messages(date, user_id)")
 
             db.execute(
                 """

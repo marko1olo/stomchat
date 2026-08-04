@@ -6,6 +6,7 @@ import json
 import math
 import sqlite3
 import asyncio
+import contextlib
 import logging
 import random
 import threading
@@ -1017,14 +1018,20 @@ def _rank_corpus_entries(entries, keywords):
         return []
 
     weights = {kw: (2 if is_dental_keyword(kw) else 1) for kw in keywords}
+    regexes = {kw: re.compile(rf'\b{re.escape(kw)}', re.IGNORECASE) for kw in weights}
 
     scored = []
     for idx, entry in enumerate(entries):
-        low = entry.lower()
-        score = sum(w for kw, w in weights.items() if kw in low)
-        distinct = sum(1 for kw in weights if kw in low)
-        # idx — стабильный тай-брейк: одинаковый запрос даёт одинаковую справку.
-        scored.append((score, distinct, -idx, entry))
+        score = 0
+        distinct = 0
+        for kw, weight in weights.items():
+            if regexes[kw].search(entry):
+                score += weight
+                distinct += 1
+        
+        # CRITICAL: Discard entries that matched in SQL but failed the regex boundary check!
+        if score > 0:
+            scored.append((score, distinct, -idx, entry))
 
     scored.sort(reverse=True)
 
@@ -1204,6 +1211,9 @@ def _corpus_body_key(body):
     return " ".join(str(body or "").split()).lower()
 
 
+_WIKI_WAL_READY = False
+_ARCHIVE_WAL_READY = False
+
 async def search_knowledge_corpus(keywords):
     if not keywords:
         return "", ""
@@ -1220,66 +1230,75 @@ async def search_knowledge_corpus(keywords):
         # 1. Search stomat_wiki.db
         if os.path.exists("stomat_wiki.db"):
             try:
-                conn = sqlite3.connect("stomat_wiki.db", timeout=30)
-                conn.execute("PRAGMA busy_timeout = 30000")
-                c = conn.cursor()
-                for kw in keywords:
-                    # like_any_case: ключ приходит в нижнем регистре, а
-                    # аббревиатуры в фактах заглавные, и SQLite кириллицу не
-                    # складывает — ВНЧС не находился ни разу из 88 фактов.
-                    where, params = like_any_case("content", kw)
-                    c.execute(
-                        "SELECT category_code, content FROM distilled_facts "
-                        f"WHERE {where} LIMIT ?",
-                        params + (rows_per_kw,),
-                    )
-                    for row in c.fetchall():
-                        body_key = _corpus_body_key(row[1])
-                        if body_key in seen_bodies:
-                            continue
-                        seen_bodies.add(body_key)
-                        wiki_facts.append(_corpus_entry(f"[{row[0]}]", row[1]))
-                    if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
-                        break
-                conn.close()
+                import re
+                def regexp(expr, item):
+                    if item is None:
+                        return 0
+                    return 1 if re.search(expr, item, re.IGNORECASE) else 0
+
+                with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=30)) as conn:
+                    conn.execute("PRAGMA busy_timeout = 30000")
+                    
+                    global _WIKI_WAL_READY
+                    if not _WIKI_WAL_READY:
+                        conn.execute("PRAGMA journal_mode = WAL")
+                        _WIKI_WAL_READY = True
+                        
+                    conn.create_function("REGEXP", 2, regexp)
+                    c = conn.cursor()
+                    for kw in keywords:
+                        c.execute(
+                            "SELECT category_code, content FROM distilled_facts "
+                            "WHERE content REGEXP ? LIMIT ?",
+                            (rf'\b{re.escape(kw)}', rows_per_kw)
+                        )
+                        for row in c.fetchall():
+                            body_key = _corpus_body_key(row[1])
+                            if body_key in seen_bodies:
+                                continue
+                            seen_bodies.add(body_key)
+                            wiki_facts.append(_corpus_entry(f"[{row[0]}]", row[1]))
+                        if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
+                            break
             except Exception as e:
                 logger.error(f"Error searching stomat_wiki.db: {e}")
 
         # 2. Search stomat_archive.db
         if os.path.exists("stomat_archive.db"):
             try:
-                conn = sqlite3.connect("stomat_archive.db", timeout=30)
-                conn.execute("PRAGMA busy_timeout = 30000")
-                c = conn.cursor()
-                for kw in keywords:
-                    # Тот же регистронезависимый поиск, что и по вике: реплики
-                    # коллег пишутся как попало, а ключ всегда в нижнем.
-                    _arch_where, _arch_params = like_any_case("text", kw)
-                    c.execute(
-                        # Вопросы и обрывки из справки исключаются. Замер на
-                        # шести реальных вопросах: из 160 подтянутых реплик
-                        # архива 19 были сами вопросами и 29 короче сорока
-                        # символов вроде «Контаминация.» — 30% контекста без
-                        # знания внутри. Вопрос, прочитанный как утверждение,
-                        # ещё и уводит модель: на «протокол травления емакс»
-                        # первой в справке шла реплика «Какой протокол
-                        # травления циркона?».
-                        "SELECT sender_name, text FROM archive_messages "
-                        f"WHERE {_arch_where} AND TRIM(text) <> '' "
-                        f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
-                        "AND TRIM(text) NOT LIKE '%?' "
-                        "LIMIT ?",
-                        _arch_params + (rows_per_kw,),
-                    )
-                    for row in c.fetchall():
-                        body_key = _corpus_body_key(row[1])
-                        if body_key in seen_bodies:
-                            continue
-                        seen_bodies.add(body_key)
-                        archive_msgs.append(_corpus_entry(f"{row[0]}:", row[1]))
-                    if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
-                        break
-                conn.close()
+                import re
+                def regexp(expr, item):
+                    if item is None:
+                        return 0
+                    return 1 if re.search(expr, item, re.IGNORECASE) else 0
+
+                with contextlib.closing(sqlite3.connect("stomat_archive.db", timeout=30)) as conn:
+                    conn.execute("PRAGMA busy_timeout = 30000")
+                    
+                    global _ARCHIVE_WAL_READY
+                    if not _ARCHIVE_WAL_READY:
+                        conn.execute("PRAGMA journal_mode = WAL")
+                        _ARCHIVE_WAL_READY = True
+                        
+                    conn.create_function("REGEXP", 2, regexp)
+                    c = conn.cursor()
+                    for kw in keywords:
+                        c.execute(
+                            "SELECT sender_name, text FROM archive_messages "
+                            "WHERE text REGEXP ? AND TRIM(text) <> '' "
+                            f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                            "AND TRIM(text) NOT LIKE '%?' "
+                            "LIMIT ?",
+                            (rf'\b{re.escape(kw)}', rows_per_kw)
+                        )
+                        for row in c.fetchall():
+                            body_key = _corpus_body_key(row[1])
+                            if body_key in seen_bodies:
+                                continue
+                            seen_bodies.add(body_key)
+                            archive_msgs.append(_corpus_entry(f"{row[0]}:", row[1]))
+                        if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
+                            break
             except Exception as e:
                 logger.error(f"Error searching stomat_archive.db: {e}")
 
@@ -1291,19 +1310,13 @@ async def search_knowledge_corpus(keywords):
     return await loop.run_in_executor(None, sync_search)
 
 async def query_db_async(query_sql, params=()):
-    # Helper to query the main bot database stomat_bot.db
-    loop = asyncio.get_running_loop()
+    import database
     def operation():
-        conn = sqlite3.connect("stomat_bot.db", timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        try:
-            c = conn.cursor()
+        with database._connection() as db:
+            c = db.cursor()
             c.execute(query_sql, params)
             return c.fetchall()
-        finally:
-            conn.close()
-    return await loop.run_in_executor(None, operation)
+    return await database._run_db(operation)
 
 
 # Жёсткий предел Telegram на ОДНО сообщение. Считается по тексту без разметки:
@@ -1610,14 +1623,17 @@ async def check_llm_triage(context_msgs):
 
 Когда ОТВЕЧАТЬ (should_reply: true):
 1. Прямой вопрос к боту (тег, упоминание).
-2. Четкий клинический/технический вопрос к сообществу (например: "Коллеги, кто знает, в чем разница между методикой Мелкера в biological shaping и коронкой по Мелкеру?").
-3. Структурный клинический вопрос (протоколы, материалы, осложнения, диагностика, разбор кейса/снимка).
+2. Чёткий клинический/технический вопрос к сообществу без ответа (протоколы, материалы, осложнения, диагностика, выбор тактики).
+3. Разбор клинического кейса или снимка где просят мнение коллег.
 
 Когда ИГНОРИРОВАТЬ (should_reply: false):
-1. Мысли вслух, короткие неполные реплики ("а что там", "посмотрим", "я делаю так").
-2. Общение двух врачей между собой в контексте, где ответ бота будет выглядеть неуместно.
-3. Быт, флуд, цены, расписание, политика, юмор.
-4. Вопрос уже получил исчерпывающий ответ от живых коллег.
+1. Двое конкретных коллег общаются между собой — спорят, объясняют, уточняют. Третий голос (бот) будет лишним.
+2. Обсуждение НЕ стоматологической темы: налоги, зарплаты, автомобили, политика, погода, юмор, расписание, цены, оборудование (аспираторы, кресла).
+3. Мысли вслух, короткие неполные реплики ("посмотрим", "я делаю так", "ок", "спасибо").
+4. Вопрос уже получил конкретный ответ от живых коллег выше в чате.
+5. Чисто эмоциональная реакция — возмущение, восхищение, шутки.
+
+КРИТИЧЕСКИ ВАЖНО: Если последние 3+ сообщения — это диалог двух конкретных людей (одни и те же имена туда-обратно) — это их разговор, НЕ ЛЕЗТЬ.
 
 Последние сообщения в чате:
 {context_str}
@@ -1637,11 +1653,10 @@ async def check_llm_triage(context_msgs):
             return False
             
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
-        if "```" in text:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1:
-                text = text[start:end+1]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end+1]
         
         import json
         data = json.loads(text)
@@ -1783,18 +1798,18 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     logger.info(f"Dialogue reply is stale. {count_since} messages have passed since bot message {reply_to_msg_id}. Skipping to avoid thread hijacking.")
                     return False
 
+                # 2. Проводим умный анализ продолжения диалога через Llama для ЛЮБОГО сообщения в цепочке
                 # Загружаем последние 5 сообщений из БД для сверки темы чата
                 recent_group_db = await database.get_last_n_messages(limit=5)
                 recent_group_texts = []
                 if recent_group_db:
+                    recent_group_db = recent_group_db[::-1] # Reverse chronologically!
                     for r in recent_group_db:
                         if isinstance(r, (list, tuple)) and len(r) > 3:
                             sender_name = r[1] or "Участник"
                             msg_text = r[3] or ""
                             if msg_text:
                                 recent_group_texts.append(f"{sender_name}: {msg_text}")
-
-                # 2. Проводим умный анализ продолжения диалога через Llama для ЛЮБОГО сообщения в цепочке
                 should_continue = await check_dialogue_continuation_triage(chain[::-1], recent_group_texts)
                 if not should_continue:
                     logger.info(f"Dialogue triage rejected continuation for chain with {bot_msg_count} bot replies. Stopping.")
@@ -1927,7 +1942,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                                 thread_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
                             seen = set(thread_msgs)
                             extra = [m for m in context_msgs if m not in seen]
-                            context_msgs = thread_msgs + extra
+                            combined = thread_msgs + extra
+                            
+                            import re
+                            def _get_msg_id(s):
+                                m = re.search(r'\[Сообщение #(\d+)', s)
+                                return int(m.group(1)) if m else 0
+                                
+                            context_msgs = sorted(combined, key=_get_msg_id)
                     except Exception as thread_err:
                         logger.warning(f"Failed to fetch reply thread for passive context: {thread_err}")
 
@@ -1974,14 +1996,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     # EXTRACT KEYWORDS & SEARCH DB
     # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
     if is_dialogue:
-        user_context_msgs = [m for m in context_msgs if not m.startswith("Бот ")]
+        user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
         if not user_context_msgs:
             user_context_msgs = context_msgs
         keyword_source = " ".join(user_context_msgs)
     else:
         keyword_source = text if text else ""
         if not keyword_source:
-            user_context_msgs = [m for m in context_msgs if not m.startswith("Бот ")]
+            user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
             keyword_source = " ".join(user_context_msgs) if user_context_msgs else ""
             
     keywords = extract_keywords(keyword_source)
@@ -2038,6 +2060,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if is_dialogue:
         ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
     
+    # Защита от "шизофрении" (когда бот читает свой же ответ и соглашается с ним как с чужим)
+    for i in range(len(context_msgs)):
+        if "Бот Учимся Вместе 🤖:" in context_msgs[i] or "Учимся Вместе:" in context_msgs[i]:
+            context_msgs[i] = context_msgs[i].replace("Бот Учимся Вместе 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("Учимся Вместе:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+
     if is_dialogue:
         prompt = f"""
 Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и решил ответить на заданный вопрос.
@@ -2045,9 +2072,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Не строишь из себя учебник — ты коллега, который знает ответ и выдаёт его точно и ёмко.
 
 История диалога (последние сообщения со структурой ответов):
+<user_dialogue>
 {chr(10).join(context_msgs)}
+</user_dialogue>
 
-ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос!
+ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос! Если ты видишь свои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и не соглашаться с самим собой!
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
@@ -2095,7 +2124,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Текущая переписка в чате (последние сообщения со структурой ответов):
 {chr(10).join(context_msgs)}
 
-ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения!
+ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения! Если в переписке есть твои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и ни в коем случае не соглашаться с самим собой от третьего лица!
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
@@ -2132,6 +2161,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     - Если идёт клиническое обсуждение — отвечай профессионально, но без категоричности. Не утверждай вещи безапелляционно, оставляй пространство для клинического мнения коллег («я бы сделал так, но надо смотреть по ситуации...»).
     - Если в чате шутят, иронизируют или делятся усталостью от работы — можешь поддержать разговор профессиональным юмором или лёгким цинизмом. Твоя роль — классный коллега в ординаторской, а не токсичный спорщик.
     - Здоровая зубастость (когда можно проявить токсичность): Если кто-то прямо стебёт тебя, пытается подколоть, ведёт себя пассивно-агрессивно или высокомерно по отношению к тебе или коллегам — тут тебе официально разрешено «выпустить зубы». Ответь едко, тонко и остроумно, умой собеседника профессиональным стёбом с высоты своего опыта, но оставайся в рамках врачебного класса (без площадной ругани, мата и прямой грубости).
+14. ЗАПРЕТ ПОДМЕНЫ ТЕМЫ (КРИТИЧЕСКОЕ ПРАВИЛО): Ты ОБЯЗАН отвечать строго на ту тему, которую поднял пользователь. Категорически запрещено "уводить" разговор в клиническую сторону, если вопрос был про налоги, оборудование, бизнес, юридические моменты или что-то организационное. Пример грубой ошибки: человек спросил "это грабёж?" про удержание НДФЛ → бот отвечает про фотопротоколы ортопедии. Это полный провал. Если твой RAG вытащил клинические данные, а вопрос — про деньги/оборудование/быт, просто НЕ ИСПОЛЬЗУЙ клинический контекст. Отвечай только на то, о чём спросили.
 
 {ignore_instruction}
 
@@ -2311,7 +2341,6 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     # Клиническая тема — по словам, а не подстрокой: «кт» сидит внутри «кто»,
     # «эффективно» и «комплекта», «бор» — внутри «выбора». См. has_dental_term.
     has_dental_topic = has_dental_term(full_context_str)
-    has_question = "?" in caption_text
     
     triggered = False
     trigger_reason = ""
@@ -2332,10 +2361,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             except Exception:
                 pass
 
-    if has_dental_topic or has_question:
+    if has_dental_topic:
         # Dental Case: Always query RAG!
         triggered = True
-        trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic}, has_question={has_question})"
+        trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic})"
         is_dental = True
         wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
     else:
@@ -2371,10 +2400,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         try:
             chain = await database.get_reply_chain_texts(reply_to_msg_id, max_depth=7)
             if chain:
-                chain_msgs = [f"[Контекст ответа #{r[0]}] {r[1]}: {r[2]}" for r in chain]
+                chain_msgs = [f"[Сообщение #{r[0]}] {r[1]}: {r[2]}" for r in chain]
                 seen = set(chain_msgs)
                 extra = [m for m in context_msgs if m not in seen]
-                context_msgs = chain_msgs + extra
+                combined = chain_msgs + extra
+                
+                import re
+                def _get_msg_id(s):
+                    m = re.search(r'\[Сообщение #(\d+)', s)
+                    return int(m.group(1)) if m else 0
+                    
+                context_msgs = sorted(combined, key=_get_msg_id)
         except Exception as chain_err:
             logger.warning(f"Failed to fetch reply chain for media: {chain_err}")
 
@@ -2612,16 +2648,15 @@ def _scan_topic_statistics():
         if not os.path.exists(path):
             continue
         try:
-            conn = sqlite3.connect(path, timeout=30)
-            conn.execute("PRAGMA busy_timeout = 30000")
-            for (text,) in conn.execute(f"SELECT text FROM {table}"):
-                if not text:
-                    continue
-                scanned += 1
-                for label, pattern in _STATS_PATTERNS.items():
-                    if pattern.search(text):
-                        counts[label] += 1
-            conn.close()
+            with contextlib.closing(sqlite3.connect(path, timeout=30)) as conn:
+                conn.execute("PRAGMA busy_timeout = 30000")
+                for (text,) in conn.execute(f"SELECT text FROM {table}"):
+                    if not text:
+                        continue
+                    scanned += 1
+                    for label, pattern in _STATS_PATTERNS.items():
+                        if pattern.search(text):
+                            counts[label] += 1
         except Exception as e:
             logger.error(f"Topic statistics scan failed for {path}: {e}")
     return counts, scanned
@@ -3023,11 +3058,10 @@ async def handle_private_message(bot_client, event):
                 or getattr(event.message, "video", None) is not None
                 or media_tools.image_document(event.message) is not None
             )
-            if case_attachment and (text or "").strip():
+            if case_attachment:
                 await bot_client.send_message(
                     entity=chat_id,
-                    message="📎 <i>Снимок в режиме симулятора я не читаю — учёл только "
-                            "текст подписи. Чтобы разобрать рентген, выйдите из кейса: /abort.</i>",
+                    message="📎 <i>Снимок в режиме симулятора я не читаю" + (" — учёл только текст подписи." if (text or "").strip() else ". Отправьте текстовое описание вашего шага.") + " Чтобы разобрать рентген, выйдите из кейса: /abort.</i>",
                     parse_mode='html'
                 )
             await handle_interactive_case_step(bot_client, chat_id, text, user_state)
@@ -3421,30 +3455,29 @@ async def handle_private_message(bot_client, event):
             wiki_facts = []
             if os.path.exists("stomat_wiki.db"):
                 try:
-                    conn = sqlite3.connect("stomat_wiki.db", timeout=10)
-                    c = conn.cursor()
-                    for kw in keywords:
-                        _w, _p = like_any_case("content", kw)
-                        c.execute("SELECT category_code, content FROM distilled_facts "
-                                  f"WHERE {_w} LIMIT 5", _p)
-                        for row in c.fetchall():
-                            cat_code, content = row
-                            import re
-                            try:
-                                # Подсветка через <b>, а не <u>: ниже весь ответ
-                                # проходит clean_html_formatting, а он сохраняет
-                                # ровно три тега — <b>, <i>, <code>. Остальное
-                                # экранируется, и врач видел в выдаче литеральные
-                                # «&lt;u&gt;BOPT&lt;/u&gt;» вместо выделения —
-                                # то есть подсветка не просто не работала, а
-                                # засоряла каждый найденный факт.
-                                content_hl = re.sub(f"(?i)({re.escape(kw)})", r"<b>\1</b>", content)
-                            except Exception:
-                                content_hl = content
-                            fact = f"• {content_hl}"
-                            if fact not in wiki_facts:
-                                wiki_facts.append(fact)
-                    conn.close()
+                    with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+                        c = conn.cursor()
+                        for kw in keywords:
+                            _w, _p = like_any_case("content", kw)
+                            c.execute("SELECT category_code, content FROM distilled_facts "
+                                      f"WHERE {_w} LIMIT 5", _p)
+                            for row in c.fetchall():
+                                cat_code, content = row
+                                import re
+                                try:
+                                    # Подсветка через <b>, а не <u>: ниже весь ответ
+                                    # проходит clean_html_formatting, а он сохраняет
+                                    # ровно три тега — <b>, <i>, <code>. Остальное
+                                    # экранируется, и врач видел в выдаче литеральные
+                                    # «&lt;u&gt;BOPT&lt;/u&gt;» вместо выделения —
+                                    # то есть подсветка не просто не работала, а
+                                    # засоряла каждый найденный факт.
+                                    content_hl = re.sub(f"(?i)({re.escape(kw)})", r"<b>\1</b>", content)
+                                except Exception:
+                                    content_hl = content
+                                fact = f"• {content_hl}"
+                                if fact not in wiki_facts:
+                                    wiki_facts.append(fact)
                 except Exception as e:
                     logger.error(f"Error direct searching wiki: {e}")
             if not wiki_facts:
@@ -4529,13 +4562,10 @@ async def handle_group_quiz(bot_client, event):
         
     try:
         raw_text = response.text.strip()
-        if raw_text.startswith("```"):
-            lines = raw_text.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines[-1].startswith("```"):
-                lines = lines[:-1]
-            raw_text = "\n".join(lines).strip()
+        start = raw_text.find("{")
+        end = raw_text.rfind("}")
+        if start != -1 and end != -1:
+            raw_text = raw_text[start:end+1]
             
         data = json.loads(raw_text)
         question = str(data["question"]).strip()
@@ -4888,8 +4918,7 @@ async def wiki_subtopic_counts(cat_id):
 
     def sync_count():
         result = {}
-        conn = sqlite3.connect("stomat_wiki.db", timeout=10)
-        try:
+        with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
             conn.execute("PRAGMA busy_timeout = 10000")
             for sub_id, _title, _codes in entry[1]:
                 where, params = _wiki_code_filter(sub_id)
@@ -4901,8 +4930,6 @@ async def wiki_subtopic_counts(cat_id):
                     params,
                 ).fetchone()
                 result[sub_id] = row[0] if row else 0
-        finally:
-            conn.close()
         return result
 
     try:
@@ -4981,8 +5008,7 @@ async def query_wiki_fact_page(subtopic_id, page_idx):
         return facts[page_idx % len(facts)], len(facts)
 
     def sync_query():
-        conn = sqlite3.connect("stomat_wiki.db", timeout=10)
-        try:
+        with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
             conn.execute("PRAGMA busy_timeout = 10000")
             base = (f"FROM distilled_facts WHERE {where} "
                     f"AND content IS NOT NULL AND TRIM(content) <> '' GROUP BY content")
@@ -4995,8 +5021,6 @@ async def query_wiki_fact_page(subtopic_id, page_idx):
                 params + [offset],
             ).fetchone()
             return (row[0].strip() if row else None), total
-        finally:
-            conn.close()
 
     try:
         fact, total = await asyncio.get_running_loop().run_in_executor(None, sync_query)
@@ -5083,13 +5107,12 @@ async def query_random_wiki_fact():
     if os.path.exists("stomat_wiki.db"):
         try:
             import sqlite3
-            conn = sqlite3.connect("stomat_wiki.db", timeout=10)
-            c = conn.cursor()
-            c.execute("SELECT content FROM distilled_facts ORDER BY RANDOM() LIMIT 1")
-            row = c.fetchone()
-            if row:
-                fact = row[0].strip()
-            conn.close()
+            with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+                c = conn.cursor()
+                c.execute("SELECT content FROM distilled_facts ORDER BY RANDOM() LIMIT 1")
+                row = c.fetchone()
+                if row:
+                    fact = row[0].strip()
         except Exception as e:
             logger.error(f"Error querying random wiki fact: {e}")
     return fact
