@@ -79,28 +79,21 @@ flowchart TD
 
 ---
 
-## 📂 File Tree & Component Matrix
+## 📂 Runtime Map
 
-```
-stomchat/
-├── bot/                     # Core bot handlers & Telegram event triggers
-├── userbot/                 # Telethon MTProto listener & media grabber
-├── ai/                      # Gemini Vision & Groq cascade processing
-├── database/                # SQLite async connectors & schema models
-├── media/                   # Video frame extractor & image pre-processors
-├── publisher/               # Telegraph HTML formatting & publishing engine
-├── assets/                  # Documentation banners & graphics
-├── requirements.txt         # Python dependency manifest
-└── main.py                  # Daemon launcher entry point
-```
+The repository is organized as a focused Python application rather than a set of package directories. The startup path, operational services, and test coverage below reflect the files that are actually present in the codebase.
 
-| Component | Primary Tech | Role / Description |
-| :--- | :--- | :--- |
-| `main.py` | Python 3.10 | Application entry point running Telethon listener and async scheduler |
-| `userbot/` | Telethon / MTProto | Userbot module capturing incoming messages, photos, and video attachments |
-| `ai/` | Gemini GenAI / Groq | Multimodal AI engine inspecting X-rays, generating clinical digests |
-| `publisher/` | Telegraph HTML API | Renderer formatting markdown digests into published Telegraph web articles |
-| `database/` | aiosqlite / SQLite | High-concurrency async SQLite interface storing messages & medical tags |
+| Component | Primary responsibility |
+| :--- | :--- |
+| `main.py` | Starts the database, Telethon listener, bot client, history synchronization, scheduler, recovery workers, and runtime watchdogs. |
+| `assistant.py`, `summarizer.py`, `distiller.py` | Build assistant replies, daily summaries, and long-form digest material. |
+| `gemini_client.py`, `gemini_knowledge.py`, `vision.py` | Coordinate LLM, knowledge, and multimodal analysis paths. |
+| `search_engine.py`, `search_engine_safe.py`, `web_lookup.py` | Retrieve and validate external context for answer and digest workflows. |
+| `media_tools.py`, `visionproc.py`, `videosi.py` | Process media, recover analysis jobs, and prepare visual inputs. |
+| `database.py`, `taxonomy.py`, `dental_vocab.py` | Persist chat knowledge and keep dental terminology structured. |
+| `runtime_guard.py` | Maintains heartbeats, watchdog diagnostics, and safe recovery state. |
+| `test_*.py`, `run_all_tests.py` | Provide regression coverage for configuration, delivery, media, safety, scheduling, and summarization behaviour. |
+| `assets/`, `docs/` | Contain the public documentation banner and generated project documentation. |
 
 ---
 
@@ -119,41 +112,54 @@ stomchat/
 ## 📦 Getting Started
 
 ### 📋 Prerequisites
-- Python 3.10+
-- API ID & API Hash from [my.telegram.org](https://my.telegram.org/)
-- Google Gemini API Key
-- Groq API Key (optional)
-- Tavily API Key (optional)
-- FFmpeg installed in system path
+
+- Python 3.10 or newer.
+- Telegram API credentials from [my.telegram.org](https://my.telegram.org/).
+- A Telegram bot token.
+- At least one configured AI provider key for summary generation.
+- FFmpeg on the system path when the media-processing workflows are enabled.
 
 ### ⚙️ Installation
 
-1. **Clone the repository**:
+1. **Clone the repository and install dependencies**:
    ```bash
    git clone https://github.com/marko1olo/stomchat.git
    cd stomchat
-   ```
-
-2. **Install dependencies**:
-   ```bash
    pip install -r requirements.txt
    ```
 
-3. **Configure Environment Variables**:
-   Create a `.env` file in the root directory:
+2. **Create the local configuration module**. The application imports `config.py`; the committed `config.example.py` is the complete, safe template and `config.py` remains untracked:
+   ```bash
+   cp config.example.py config.py
+   ```
+
+3. **Create `.env` next to `config.py`**. The following values are required for a functional Telegram connection:
    ```env
-   API_ID=your-telegram-api-id
-   API_HASH=your-telegram-api-hash
-   BOT_TOKEN=your-telegram-bot-token
-   SESSION_NAME=your-userbot-session
-   GEMINI_API_KEY=your-gemini-key
-   TAVILY_API_KEY=your-tavily-key
-   GROQ_API_KEY=your-groq-key
-   REPORT_CHAT_ID=-100xxxxxxxxxx
+   TG_BOT_TOKEN=your-telegram-bot-token
+   TG_API_ID=your-telegram-api-id
+   TG_API_HASH=your-telegram-api-hash
+   TG_SESSION_NAME=stomchat
+   ```
+
+   Add the chat and delivery configuration that matches your deployment. `REPORT_TARGETS` is a JSON array; an empty array intentionally disables digest delivery.
+   ```env
+   SOURCE_CHAT_ID=-1000000000000
+   REPORT_CHAT_ID=-1000000000000
+   REPORT_TARGETS=[{"chat_id":-1000000000000,"topic_id":null}]
    REPORT_HOUR=20
    ```
 
-4. **Run the Bot**:
+   Configure at least one model provider. Model names are environment-driven so deployments can follow provider availability without source changes.
+   ```env
+   GOOGLE_API_KEYS=key-one,key-two
+   GROQ_API_KEYS=optional-groq-key
+   GEMINI_MODEL=your-selected-gemini-model
+   GROQ_MODEL=your-selected-groq-model
+   ```
+
+   Optional integrations include `TELEGRAPH_TOKEN`, `SEARCH_PROVIDER`, and `TAVILY_API_KEY`. See `config.example.py` for their exact semantics and for the full configuration contract.
+
+4. **Run the bot**:
    ```bash
    python main.py
    ```
