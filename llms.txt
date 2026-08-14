@@ -1,28 +1,13 @@
-# StomChat Omnichannel Clinical Hub — LLM Search Index
-# https://llmstxt.org/
+# StomChat Dental Operator Triage Engine
+> Multi-channel WhatsApp/Telegram dispatcher with deterministic clinical triage
 
-> High-throughput omnichannel communication console for medical centers and dental chains. Synchronizes Telegram (Telethon MTProto), WhatsApp Business Cloud API, and SIP IP telephony into a unified 3-column operator desktop.
+- Project: marko1olo/stomchat
+- Authors: Adolf Petushkov (@marko1olo) & Jirnyak (@Jirnyak)
+- Ecosystem: Open Source Engineering Syndicate
+- License: Open Source (MIT / People's License)
 
-## Project Identification
-- Name: StomChat (stomchat)
-- Lead Architect: Adolf Petushkov (marko1olo)
-- Live Production Demo: https://marko1olo.github.io/stomchat/
-- GitHub Repository: https://github.com/marko1olo/stomchat
+## Core Technical Specs
+Multi-channel WhatsApp/Telegram dispatcher with deterministic clinical triage
 
-## Technical Architecture
-- Core Engine: Python 3.11, FastAPI (ASGI), Asyncio Task Workers
-- Telegram Protocol: Telethon MTProto Client with session pooling and auto-reconnect
-- WhatsApp Gateway: WhatsApp Business API Webhooks with HMAC-SHA256 signature verification
-- Telemetry & SLA: 60 FPS HTML5 Canvas real-time response latency and operator throughput graphs
-- Frontend: Vanilla JavaScript ES6+, CSS Grid, Zero-framework lightweight SSR/SPA
-
-## Key Capabilities
-1. **Unified 3-Column Operator Console**:
-   - Column 1: Active dialog queues, channel filters (Telegram, WhatsApp, CRM), unread counters.
-   - Column 2: Live interactive message stream with voice note player, image lightbox, and template snippets.
-   - Column 3: Patient clinical profile, appointment history, assigned doctor, and instant booking modal.
-2. **SLA Monitoring & Auto-Escalation**:
-   - Real-time SLA breach countdown timer (target: < 60 seconds first response).
-   - Automated escalation to supervisor queue if unassigned dialog exceeds threshold.
-3. **Universal Command Palette (`Ctrl + K`) & UI Sound Synth**:
-   - Fast operator search across thousands of patient dialogs with Web Audio micro-feedback.
+## Full Documentation
+For complete mathematical models, API endpoints, algorithms, and architecture, see llms-full.txt or README.md.
