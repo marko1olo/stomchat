@@ -1646,7 +1646,72 @@ if ('serviceWorker' in navigator) {
         <p>All sensitive patient records remain stored in encrypted local SQLite WAL databases, keeping medical data safe and GDPR/FZ-152 compliant.</p>
       </div>
     </section>
-  </main>
+  
+    <!-- VOIP SIP TELEPHONY & VOICE NOTE WAVEFORM DECK -->
+    <section class="stom-voip-deck" style="margin: 2rem 0; background: #0f172a; border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 12px; padding: 1.5rem; box-shadow: 0 8px 30px rgba(0,0,0,0.5); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 1rem; margin-bottom: 1.25rem;">
+        <div>
+          <span style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #10b981; font-size: 0.75rem; font-weight: bold; padding: 0.2rem 0.6rem; border-radius: 999px; font-family: monospace;">SIP IP-TELEPHONY 2.0</span>
+          <h3 style="font-size: 1.25rem; color: #fff; margin-top: 0.4rem;">Incoming Patient Call Dispatcher & Voice Waveform Engine</h3>
+        </div>
+        <button id="voip-sim-call-btn" style="background: #10b981; border: none; color: #fff; font-family: monospace; font-size: 0.8rem; font-weight: bold; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; box-shadow: 0 0 15px rgba(16,185,129,0.3);">
+          📞 SIMULATE INCOMING CALL
+        </button>
+      </div>
+
+      <!-- Live Call Card -->
+      <div id="voip-call-box" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem;">
+        <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.25rem;">
+          <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+            <span style="font-size: 0.8rem; color: #94a3b8; font-family: monospace;">CALLER ID</span>
+            <span style="font-size: 0.75rem; color: #22c55e; font-family: monospace;">● SIP CONNECTED (G.711u)</span>
+          </div>
+          <div style="font-size: 1.1rem; font-weight: bold; color: #f1f5f9; margin-bottom: 0.2rem;">+7 (999) 345-21-98</div>
+          <div style="font-size: 0.85rem; color: #38bdf8; margin-bottom: 1rem;">Patient: Смирнова Анна Викторовна (Card #8491)</div>
+          
+          <div style="display: flex; gap: 0.5rem;">
+            <button style="flex: 1; background: #22c55e; border: none; color: #fff; padding: 0.5rem; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 0.8rem;">ACCEPT CALL</button>
+            <button style="flex: 1; background: #f43f5e; border: none; color: #fff; padding: 0.5rem; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 0.8rem;">HOLD / TRANSFER</button>
+          </div>
+        </div>
+
+        <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.25rem; display: flex; flex-direction: column; justify-content: space-between;">
+          <div style="display: flex; justify-content: space-between; font-size: 0.8rem; font-family: monospace; color: #94a3b8; margin-bottom: 0.5rem;">
+            <span>VOICE NOTE TRANSCRIPTION</span>
+            <span>SPEED: 1.0x / 1.5x / 2.0x</span>
+          </div>
+          <canvas id="stom-waveform-canvas" width="300" height="50" style="background:#0f172a; border-radius:4px; margin-bottom:0.5rem; width:100%;"></canvas>
+          <div style="font-size: 0.8rem; color: #cbd5e1; background: rgba(0,0,0,0.25); padding: 0.5rem; border-radius: 4px;">
+            💬 <em>"Здравствуйте, хочу записаться на гигиену к доктору Петушкову на пятницу..."</em>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+    (function() {
+      const cvs = document.getElementById('stom-waveform-canvas');
+      if (!cvs) return;
+      const ctx = cvs.getContext('2d');
+      let t = 0;
+      function drawWave() {
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, cvs.width, cvs.height);
+        ctx.fillStyle = '#10b981';
+        const bars = 40;
+        const w = cvs.width / bars;
+        for (let i = 0; i < bars; i++) {
+          const h = Math.abs(Math.sin(t * 0.05 + i * 0.3)) * 35 + 5;
+          ctx.fillRect(i * w + 2, (cvs.height - h) / 2, w - 4, h);
+        }
+        t++;
+        requestAnimationFrame(drawWave);
+      }
+      drawWave();
+    })();
+    </script>
+
+</main>
 
   <!-- Semantic Accessible Footer -->
   
