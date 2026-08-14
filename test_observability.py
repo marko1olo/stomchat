@@ -811,7 +811,10 @@ if found:
     check("уровень не ниже WARNING", found[0].levelno >= logging.WARNING,
           logging.getLevelName(found[0].levelno))
     check("в строке pid", "pid=4242" in msg, msg)
-    check("в строке тип отказа", "OSError" in msg, msg)
+    # На POSIX процесс может исчезнуть до getpgid(): это ProcessLookupError,
+    # подкласс OSError. Важно сохранить тип в диагностике, а не требовать одно
+    # имя исключения от конкретной платформы.
+    check("в строке тип отказа", any(t in msg for t in ("OSError", "ProcessLookupError")), msg)
     check("в строке названы сироты", "ffmpeg" in msg, msg)
     check("простыня от драйвера обрезана", len(msg) < 600, f"длина {len(msg)}")
 check("управление не изменилось: страховочный kill() всё равно вызван", proc.killed)

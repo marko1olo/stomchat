@@ -80,8 +80,17 @@ def parse(path):
 
 
 def local_modules():
-    """Имена модулей, которые лежат рядом. Импорт чего-то ещё — внешняя зависимость."""
-    return {name[:-3] for name in SOURCES}
+    """Локальные модули плюс обязательный, но неотслеживаемый config.py.
+
+    Проект намеренно хранит только config.example.py: настоящий config.py содержит
+    ключи и остаётся вне Git. Для графа запуска это всё равно локальная терминальная
+    зависимость main.py и assistant.py; разбирать или требовать сам секретный файл
+    от чистого checkout нельзя.
+    """
+    modules = {name[:-3] for name in SOURCES}
+    if os.path.exists("config.example.py"):
+        modules.add("config")
+    return modules
 
 
 def imports_of(module, known):
@@ -92,6 +101,12 @@ def imports_of(module, known):
     telethon, а assistant так тянет часть инструментов. Для замыкания «что
     поднимает бота» важен факт зависимости, а не место строки.
     """
+    # config.py — локальная конфигурация, но в чистом checkout он намеренно
+    # отсутствует. Он является листом графа: его импорт фиксируем, а содержимое
+    # безопасно не анализируем.
+    if module + ".py" not in SOURCES:
+        return set()
+
     found = set()
     for node in ast.walk(parse(module + ".py")):
         if isinstance(node, ast.Import):
@@ -570,6 +585,8 @@ _IMPORT_RE = __import__("re").compile(
 _local = local_modules()
 _missed = set()
 for _module in sorted(PRODUCTION):
+    if _module + ".py" not in SOURCES:
+        continue  # неотслеживаемый config.py — терминальная локальная зависимость
     _text = io.open(_module + ".py", encoding="utf-8-sig").read()
     for _m in _IMPORT_RE.finditer(_text):
         _dep = _m.group(1) or _m.group(2)

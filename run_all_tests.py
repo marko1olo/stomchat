@@ -26,6 +26,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 os.environ.setdefault("STOMCHAT_LOG_PATH", "bot_test.log")
@@ -88,6 +89,67 @@ def count_checks(output):
     return passed, failed, failures
 
 
+_TEST_DRIVER = (
+    "import runpy, sys; "
+    "config_dir, script, *args = sys.argv[1:]; "
+    "sys.path.insert(0, config_dir); "
+    "sys.argv = [script, *args]; "
+    "runpy.run_path(script, run_name='__main__')"
+)
+
+
+def prepare_test_config():
+    """Создать временный config.py из публичного шаблона, не трогая локальный.
+
+    Настоящий config.py намеренно не отслеживается: в нём ключи и идентификаторы
+    рабочего Telegram-контура. Полный регресс-прогон обязан работать и без него,
+    поэтому каждый дочерний тест получает копию config.example.py раньше корня
+    проекта в sys.path и безопасные значения окружения ниже.
+    """
+    directory = tempfile.mkdtemp(prefix="stomchat_test_config_")
+    with open("config.example.py", encoding="utf-8") as source:
+        template = source.read()
+    with open(os.path.join(directory, "config.py"), "w", encoding="utf-8") as target:
+        target.write(template)
+    return directory
+
+
+def test_environment(config_dir):
+    """Изолированные, заведомо нерабочие настройки для статических регрессий."""
+    env = os.environ.copy()
+    env.update({
+        "TG_BOT_TOKEN": "000000000:stomchat-test-token",
+        "TG_API_ID": "123456",
+        "TG_API_HASH": "stomchat-test-api-hash",
+        "TG_SESSION_NAME": "stomchat_test_session",
+        "SOURCE_CHAT_ID": "-1000000000001",
+        "REPORT_CHAT_ID": "-1000000000002",
+        "REPORT_TARGETS": "[]",
+        "GOOGLE_API_KEYS": "",
+        "GROQ_API_KEYS": "",
+        "GROQ_VISION_MODEL": "",
+        "TELEGRAPH_TOKEN": "",
+        "GEMINI_MODEL": "",
+        "GROQ_MODEL": "",
+        "SEARCH_PROVIDER": "",
+        "TAVILY_API_KEY": "",
+        "DB_PATH": os.path.join(config_dir, "stomchat_test.db"),
+    })
+    return env
+
+
+def remove_test_config(directory):
+    """Убрать временную конфигурацию даже после частично неудачного прогона."""
+    for path in (os.path.join(directory, "config.py"), directory):
+        try:
+            if os.path.isdir(path):
+                os.rmdir(path)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def main():
     patterns = [arg.lower() for arg in sys.argv[1:]]
     tests = sorted(f for f in os.listdir(".") if f.startswith("test_") and f.endswith(".py"))
@@ -96,6 +158,9 @@ def main():
     if not tests:
         print("наборы не найдены")
         return 1
+
+    config_dir = prepare_test_config()
+    child_env = test_environment(config_dir)
 
     before = snapshot()
     total_passed = total_failed = 0
@@ -107,9 +172,9 @@ def main():
         began = time.monotonic()
         try:
             proc = subprocess.run(
-                [sys.executable, name],
+                [sys.executable, "-c", _TEST_DRIVER, config_dir, name],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=TEST_TIMEOUT_SECONDS,
+                timeout=TEST_TIMEOUT_SECONDS, env=child_env,
             )
             output = (proc.stdout or "") + (proc.stderr or "")
             code = proc.returncode
@@ -162,7 +227,9 @@ def main():
     else:
         print("\nохраняемые файлы целы: " + str(len(before)) + " шт, md5 совпал")
 
-    return 1 if (total_failed or crashed or changed) else 0
+    result = 1 if (total_failed or crashed or changed) else 0
+    remove_test_config(config_dir)
+    return result
 
 
 if __name__ == "__main__":
