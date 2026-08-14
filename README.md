@@ -17,6 +17,9 @@ StomChat combines a Telethon listener, local SQLite storage, configurable LLM an
 
 <img src="assets/banner.svg" alt="StomChat project banner" width="100%" />
 
+
+<img src="https://raw.githubusercontent.com/marko1olo/gigahrush/main/docs/stomchat_operator.jpg" width="100%" alt="StomChat Clinical Operator Triage Center"/>
+
 </div>
 
 ---
