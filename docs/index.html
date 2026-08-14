@@ -534,6 +534,76 @@
             </div>
         </section>
 
+        <!-- Interactive Dental Case & Telegraph Digest Sandbox -->
+        <section id="case-sandbox" style="margin-bottom: 5rem;">
+            <div class="section-title">
+                <h2>🧪 Interactive Dental Case &amp; Digest Sandbox</h2>
+                <p>Simulate Gemini 1.5 Vision extraction, clinical fact-checking, and instant Telegraph digest rendering.</p>
+            </div>
+
+            <div style="background: var(--bg-card); border: 1px solid var(--border-glow); border-radius: 16px; padding: 2rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5);">
+                <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.5rem;">
+                    <button type="button" class="tab-btn active" id="case-btn-1" onclick="runDentalCaseDemo(1)">🦷 Кейс 1: Синус-лифтинг &amp; КТ</button>
+                    <button type="button" class="tab-btn" id="case-btn-2" onclick="runDentalCaseDemo(2)">🔬 Кейс 2: Эндодонтия (MB2 канал)</button>
+                    <button type="button" class="tab-btn" id="case-btn-3" onclick="runDentalCaseDemo(3)">💎 Кейс 3: E.max Виниры (Тотальная реабилитация)</button>
+                </div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                    <div style="background: rgba(7, 9, 14, 0.9); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 1.25rem;">
+                        <div style="font-size: 0.8rem; color: var(--accent-cyan); text-transform: uppercase; font-family: 'Fira Code', monospace; margin-bottom: 0.5rem;">[1] Входящее MTProto сообщение &amp; Снимок</div>
+                        <div id="demo-case-input" style="font-size: 0.95rem; color: var(--text-main); line-height: 1.6;">
+                            Пациент 46 лет. Остаточная толщина костной ткани в проекции 16 зуба 3.2 мм по КТ. Планируется закрытый или открытый синус-лифтинг с одновременной установкой 4.5x10mm.
+                        </div>
+                    </div>
+
+                    <div style="background: rgba(7, 9, 14, 0.9); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 1.25rem;">
+                        <div style="font-size: 0.8rem; color: var(--accent-emerald); text-transform: uppercase; font-family: 'Fira Code', monospace; margin-bottom: 0.5rem;">[2] Анализ Gemini 1.5 Vision &amp; PubMed Fact-Check</div>
+                        <div id="demo-case-analysis" style="font-size: 0.92rem; color: #34d399; font-family: 'Fira Code', monospace; line-height: 1.5;">
+                            ✓ Протокол: Открытый латеральный синус-лифтинг (субантральная аугментация)<br>
+                            ✓ Обоснование: При высоте &lt;4 мм закрытый метод ассоциирован с риском перфорации Шнайдеровой мембраны (J Clin Periodontol 2023)<br>
+                            ✓ Графт: Ксеногенный костный матрикс + мембрана Bio-Gide
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 1.5rem; background: rgba(139, 92, 246, 0.08); border: 1px solid var(--accent-purple); border-radius: 12px; padding: 1.25rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                    <div>
+                        <div style="font-size: 0.8rem; color: var(--accent-purple); text-transform: uppercase; font-family: 'Fira Code', monospace;">[3] Сформированная публикация Telegraph</div>
+                        <div id="demo-telegraph-title" style="font-size: 1.05rem; font-weight: 700; color: #fff; margin-top: 0.25rem;">
+                            📖 Дайджест: Клинический разбор субантральной аугментации в боковом отделе ВЧ
+                        </div>
+                    </div>
+                    <span class="badge" style="background: var(--accent-purple); color: #fff; padding: 0.4rem 0.8rem; border-radius: 6px; font-weight: 700; font-size: 0.82rem;">ГОТОВО К ПУБЛИКАЦИИ</span>
+                </div>
+            </div>
+        </section>
+
+        <script>
+            function runDentalCaseDemo(caseId) {
+                document.querySelectorAll('#case-sandbox .tab-btn').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById('case-btn-' + caseId);
+                if (btn) btn.classList.add('active');
+
+                const inputEl = document.getElementById('demo-case-input');
+                const analysisEl = document.getElementById('demo-case-analysis');
+                const titleEl = document.getElementById('demo-telegraph-title');
+
+                if (caseId === 1) {
+                    inputEl.innerText = "Пациент 46 лет. Остаточная толщина костной ткани в проекции 16 зуба 3.2 мм по КТ. Планируется закрытый или открытый синус-лифтинг с одновременной установкой 4.5x10mm.";
+                    analysisEl.innerHTML = "✓ Протокол: Открытый латеральный синус-лифтинг (субантральная аугментация)<br>✓ Обоснование: При высоте &lt;4 мм закрытый метод ассоциирован с риском перфорации мембраны Шнайдера<br>✓ Графт: Ксеногенный костный матрикс + мембрана Bio-Gide";
+                    titleEl.innerText = "📖 Дайджест: Клинический разбор субантральной аугментации в боковом отделе ВЧ";
+                } else if (caseId === 2) {
+                    inputEl.innerText = "Пациент 32 года. Периодонтит 26 зуба. На КЛКТ визуализируется ненайденный MB2 канал с периапикальным очагом деструкции 3.5 мм.";
+                    analysisEl.innerHTML = "✓ Протокол: Повторное эндодонтическое лечение под операционным микроскопом (OMSCO)<br>✓ Тактика: Локализация устья MB2 ультразвуковой насадкой Start-X #2, ирригация 3% NaOCl + 17% EDTA с УЗ-активацией<br>✓ Обтурация: Гидравлическая конденсация биокерамическим силером";
+                    titleEl.innerText = "🔬 Дайджест: Особенности эндодонтического перелечивания MB2 каналов моляров";
+                } else if (caseId === 3) {
+                    inputEl.innerText = "Пациентка 28 лет. Патологическая стираемость I степени, дисколорит фронтальной группы 13-23. Запрос на высокоэстетичные виниры.";
+                    analysisEl.innerHTML = "✓ Протокол: Микроинвазивное препарирование в пределах эмали (0.3-0.5 мм) под контролем силиконового ключа<br>✓ Материал: Дисиликат лития IPS e.max CAD/Press LT A1<br>✓ Адгезивная фиксация: Коффердам, Total-Etch, светоотверждаемый композитный цемент";
+                    titleEl.innerText = "💎 Дайджест: Протоколы минимально-инвазивного микропротезирования керамическими винирами";
+                }
+            }
+        </script>
+
         <!-- Architecture & Code Showcase -->
         <section id="architecture" class="arch-section">
             <div class="section-title" style="text-align: left; margin-bottom: 1.5rem;">
