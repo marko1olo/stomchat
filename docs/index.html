@@ -9,11 +9,11 @@
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://marko1olo.github.io/stomchat/">
     <meta property="og:title" content="StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot">
-    <meta property="og:description" content="Autonomous Multimodal Dental Case Listener, Agentic Fact Checker, and Telegraph Digest Publisher powered by Telethon MTProto, Gemini 1.5 Vision, and Groq LPU.">
+    <meta property="og:description" content="Source-backed overview of a Telegram dental knowledge workflow: Telethon intake, configurable AI providers, optional web lookup, and digest delivery paths.">
     <meta property="og:image" content="https://marko1olo.github.io/stomchat/og-card.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="StomChat — Dentistry AI Telegram Bot">
-    <meta name="twitter:description" content="Autonomous Multimodal Dental Case Listener, Agentic Fact Checker, and Telegraph Digest Publisher.">
+    <meta name="twitter:description" content="A static, source-backed guide to StomChat’s Telegram intake, AI-provider, lookup, and digest-delivery paths.">
     <meta name="twitter:image" content="https://marko1olo.github.io/stomchat/og-card.png">
 
     <!-- Google Fonts & Icons -->
@@ -464,10 +464,10 @@
             <div class="nav-links">
                 <a href="#features">Features</a>
                 <a href="#architecture">Architecture</a>
-                <a href="#simulator">Live Simulator</a>
+                <a href="#simulator">Workflow demo</a>
                 <a href="#tech-stack">Tech Stack</a>
                 <a href="https://github.com/marko1olo/stomchat" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">GitHub Repo</a>
-                <a href="#simulator" class="btn btn-primary">Try workflow demo</a>
+                <a href="#simulator" class="btn btn-primary">View workflow demo</a>
             </div>
         </div>
     </header>
@@ -479,7 +479,7 @@
                 <span>AI-assisted dental knowledge workflow</span>
             </div>
             <h1>From clinical conversations to structured knowledge</h1>
-            <p>StomChat connects secure Telegram intake, media-aware analysis, research context, and digest-ready summaries in one operational workflow for dental teams.</p>
+            <p>StomChat is a Python project for Telegram intake, media processing, configurable model calls, web-lookup routes, and digest delivery. This page explains the source tree; it does not run a clinical service.</p>
             <div class="hero-cta">
                 <a href="#simulator" class="btn btn-primary">Explore the pipeline</a>
                 <a href="#architecture" class="btn btn-secondary">View architecture</a>
@@ -496,38 +496,38 @@
         <section id="features">
             <div class="section-title">
                 <h2>Engineered for Clinical Chat Intelligence</h2>
-                <p>High-concurrency async pipeline handling MTProto streams, medical computer vision, and structured article publishing.</p>
+                <p>Source-backed modules for Telegram workflows, optional media preparation, provider routing, lookup, storage, and digest delivery.</p>
             </div>
             <div class="grid-3">
                 <div class="card">
-                    <div class="card-icon">📡</div>
-                    <h3>Hybrid MTProto Userbot + Bot</h3>
-                    <p>Uses Telethon MTProto to listen seamlessly to target dental groups without missing media attachments, while a secondary bot client handles channel publishing.</p>
+                    <div class="card-icon">01</div>
+                    <h3>Telethon message workflows</h3>
+                    <p><code>assistant.py</code> contains Telegram-facing handlers for private, group, mention, media, and digest-oriented flows. Runtime access still depends on the local Telegram configuration.</p>
                 </div>
                 <div class="card">
-                    <div class="card-icon">👁️</div>
-                    <h3>Gemini 1.5 Vision & OpenCV</h3>
-                    <p>Automatically isolates keyframes from uploaded clinical MP4 videos using OpenCV/FFmpeg and feeds dental X-rays & photos into Gemini 1.5 Vision multi-key rotation pools.</p>
+                    <div class="card-icon">02</div>
+                    <h3>Media preparation routes</h3>
+                    <p><code>visionproc.py</code> uses OpenCV and Pillow for video-frame extraction and image resizing. Whether a media item is analyzed depends on configured providers and the runtime path that receives it.</p>
                 </div>
                 <div class="card">
-                    <div class="card-icon">🔎</div>
-                    <h3>Agentic Fact-Checking Engine</h3>
-                    <p>Integrates Tavily and DuckDuckGo search workers to verify medical claims made in discussions, citing peer-reviewed dental literature automatically.</p>
+                    <div class="card-icon">03</div>
+                    <h3>Lookup with source links</h3>
+                    <p>Configured Tavily and DDGS routes can retrieve web results for a request. Search output is context for professional review, not automatic clinical verification or medical advice.</p>
                 </div>
                 <div class="card">
-                    <div class="card-icon">📰</div>
-                    <h3>Telegraph Digest Publisher</h3>
-                    <p>Formats raw daily/weekly discussions into beautifully rendered web articles via <code>html-telegraph-poster</code> and posts instant preview links to channels.</p>
+                    <div class="card-icon">04</div>
+                    <h3>Digest delivery</h3>
+                    <p><code>summarizer.py</code> builds daily and weekly summary flows and can use the Telegraph publishing adapter when its local token and delivery configuration are available.</p>
                 </div>
                 <div class="card">
-                    <div class="card-icon">⚡</div>
-                    <h3>Multi-Key Failover & Cooldowns</h3>
-                    <p>Built-in <code>gemini_client.py</code> engine manages API quota rotation across multiple keys with exponential backoff on HTTP 429 and rate limits.</p>
+                    <div class="card-icon">05</div>
+                    <h3>Provider cascade safeguards</h3>
+                    <p><code>gemini_client.py</code> selects configured Gemini and Groq providers, persists hashed key cooldowns, retries retryable failures, and temporarily removes unavailable models from a cascade.</p>
                 </div>
                 <div class="card">
-                    <div class="card-icon">🗄️</div>
-                    <h3>Async SQLite & Taxonomy</h3>
-                    <p>Powered by <code>aiosqlite</code> and specialized dental vocabulary dictionaries (<code>dental_vocab.py</code>) for fast keyword categorization and case tracking.</p>
+                    <div class="card-icon">06</div>
+                    <h3>Async local storage and helpers</h3>
+                    <p>The project declares <code>aiosqlite</code> alongside dental vocabulary and text-processing helpers. Local data, credentials, and session material remain outside the public Pages surface.</p>
                 </div>
             </div>
         </section>
@@ -539,57 +539,52 @@
                 <p>Inspect exact codebase modules powering StomChat</p>
             </div>
             <div class="tabs" role="tablist" aria-label="StomChat architecture modules">
-                <button id="tab-trigger-gemini" class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="tab-gemini" onclick="openTab(event, 'tab-gemini')">gemini_client.py (Vision AI)</button>
-                <button id="tab-trigger-telethon" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-telethon" onclick="openTab(event, 'tab-telethon')">assistant.py (MTProto Handler)</button>
-                <button id="tab-trigger-publisher" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-publisher" onclick="openTab(event, 'tab-publisher')">summarizer.py (Telegraph)</button>
+                <button id="tab-trigger-gemini" class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="tab-gemini" onclick="openTab(event, 'tab-gemini')">gemini_client.py (Provider cascade)</button>
+                <button id="tab-trigger-telethon" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-telethon" onclick="openTab(event, 'tab-telethon')">assistant.py (Telegram workflows)</button>
+                <button id="tab-trigger-publisher" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-publisher" onclick="openTab(event, 'tab-publisher')">summarizer.py (Digest delivery)</button>
             </div>
 
             <div id="tab-gemini" class="tab-content active" role="tabpanel" aria-labelledby="tab-trigger-gemini">
                 <div class="code-box">
-<span class="keyword">class</span> <span class="function">GeminiKnowledgeEngine</span>:
-    <span class="comment"># Multi-key rotation pool with rate-limit backoff</span>
-    <span class="keyword">def</span> __init__(self, api_keys: list[str]):
-        self.key_pool = [genai.Client(api_key=k) <span class="keyword">for</span> k <span class="keyword">in</span> api_keys]
-        self.current_idx = 0
+<span class="keyword">def</span> <span class="function">generate_text</span>(prompt, status_context=<span class="keyword">None</span>, timeout=<span class="keyword">None</span>):
+    <span class="comment"># Select a configured Gemini/Groq cascade for the task kind.</span>
+    active_cascade = active_models(models_cascade)
 
-    <span class="keyword">async def</span> <span class="function">analyze_dental_case</span>(self, image_bytes: bytes, prompt: str) -> dict:
-        <span class="comment"># Analyze dental X-rays & photos with Gemini 1.5 Vision</span>
-        client = self._get_active_client()
-        response = <span class="keyword">await</span> client.models.generate_content(
-            model=<span class="string">"gemini-1.5-flash"</span>,
-            contents=[Image.open(io.BytesIO(image_bytes)), prompt]
-        )
-        <span class="keyword">return</span> self._parse_clinical_json(response.text)
+    <span class="keyword">for</span> model_index, (model_name, provider) <span class="keyword">in</span> enumerate(active_cascade):
+        keys = list(config.GOOGLE_KEYS <span class="keyword">if</span> provider == <span class="string">"gemini"</span> <span class="keyword">else</span> config.GROQ_KEYS)
+        <span class="comment"># Cooldowns and temporary model bans are persisted without exposing keys.</span>
+        client_maker = <span class="keyword">lambda</span> key: get_provider_client(provider, key, timeout=req_timeout)
                 </div>
             </div>
 
             <div id="tab-telethon" class="tab-content" role="tabpanel" aria-labelledby="tab-trigger-telethon" hidden>
                 <div class="code-box">
-<span class="comment"># Telethon MTProto Event Listener for Dental Case Ingestion</span>
-<span class="keyword">@userbot.on</span>(events.NewMessage(chats=DENTAL_TARGET_CHATS))
-<span class="keyword">async def</span> <span class="function">handle_incoming_case</span>(event):
-    <span class="keyword">if</span> event.media:
-        file_path = <span class="keyword">await</span> event.download_media(file=<span class="string">"uploaded_media/"</span>)
-        <span class="keyword">if</span> file_path.endswith((<span class="string">".mp4"</span>, <span class="string">".mov"</span>)):
-            keyframes = extract_opencv_keyframes(file_path, num_frames=4)
-            <span class="keyword">await</span> db.store_video_case(event.id, keyframes)
-    <span class="keyword">await</span> db.save_message(event.id, event.raw_text, event.sender_id)
+<span class="comment"># Telegram-facing owner functions in assistant.py</span>
+<span class="keyword">async def</span> <span class="function">check_and_trigger_assistant</span>(
+    bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=<span class="keyword">None</span>
+):
+    <span class="comment"># Route an eligible text message through the configured assistant path.</span>
+    ...
+
+<span class="keyword">async def</span> <span class="function">check_and_trigger_assistant_media</span>(
+    bot_client, message, msg_id, text, media_description
+):
+    <span class="comment"># Media handling is a separate, explicitly named route.</span>
+    ...
                 </div>
             </div>
 
             <div id="tab-publisher" class="tab-content" role="tabpanel" aria-labelledby="tab-trigger-publisher" hidden>
                 <div class="code-box">
-<span class="comment"># Telegraph Article Generator & Channel Dispatch</span>
-<span class="keyword">async def</span> <span class="function">publish_weekly_digest</span>(summary_data: dict) -> str:
-    poster = TelegraphPoster(use_api=<span class="keyword">True</span>)
-    poster.create_api_token(author_name=<span class="string">"StomChat Dental AI"</span>)
-    html_content = render_telegraph_html(summary_data)
-    page = poster.post(
-        title=f<span class="string">"Dental Case Digest — {datetime.now().strftime('%B %Y')}"</span>,
-        author=<span class="string">"StomChat AI"</span>,
-        text=html_content
+<span class="comment"># Summary and optional Telegraph delivery owners</span>
+<span class="keyword">async def</span> <span class="function">process_summary_batch</span>(
+    messages, client, chat_id, topic_id=<span class="keyword">None</span>, msg_count=0, cached_message=<span class="keyword">None</span>, delivery_hook=<span class="keyword">None</span>
+):
+    <span class="comment"># Build a summary through the configured generation route.</span>
+    ...
+    page_url, telegraph_error = <span class="keyword">await</span> create_telegraph_page_async(
+        title, final_html, timeout=TELEGRAPH_TIMEOUT_SECONDS
     )
-    <span class="keyword">return</span> page[<span class="string">"url"</span>]
                 </div>
             </div>
         </section>
@@ -598,24 +593,24 @@
         <section id="simulator">
             <div class="sim-container">
                 <div class="sim-header">
-                    <h3>⚡ Interactive StomChat Case Pipeline Simulator</h3>
-                    <span style="font-size: 0.85rem; color: var(--accent-emerald);">● Real-Time Agent Simulation</span>
+                    <h3>Interactive workflow documentation preview</h3>
+                    <span style="font-size: 0.85rem; color: var(--accent-emerald);">Static sequence — no data is sent</span>
                 </div>
                 <div class="sim-body">
                     <div class="sim-input">
-                        <div class="sim-title">1. Incoming Case Input (Simulated)</div>
-                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">Clinical discussion captured from Telegram MTProto stream:</p>
+                        <div class="sim-title">1. Example intake (synthetic)</div>
+                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">A fictional prompt used only to explain the project’s processing boundaries:</p>
                         <div style="background: #0b0f19; padding: 0.8rem; border-radius: 6px; font-size: 0.85rem; color: #e5e7eb;">
-                            <strong>Dr. Alex:</strong> "Patient presents with deep carious lesion on tooth #46. Endodontic treatment vs vital pulp therapy options? Attached X-ray."
+                            <strong>Example:</strong> "A clinician asks how the project can route a discussion for a configured summary workflow."
                         </div>
                         <button id="sim-run-button" class="btn btn-primary" type="button" style="width: 100%; margin-top: 1rem; justify-content: center;" onclick="runSimulation()">
-                            Run Pipeline Simulation
+                            Run documentation preview
                         </button>
                     </div>
                     <div class="sim-output">
-                        <div class="sim-title">2. AI Synthesis & Telegraph Digest</div>
+                        <div class="sim-title">2. Configured workflow boundary</div>
                         <div id="sim-result" role="status" aria-live="polite" style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5;">
-                            <em>Click "Run Pipeline Simulation" to view the simulated analysis, literature check, and digest rendering sequence...</em>
+                            <em>Click "Run documentation preview" to view a static description of the source-level route. It does not call AI providers, search engines, Telegram, or Telegraph.</em>
                         </div>
                     </div>
                 </div>
@@ -630,24 +625,23 @@
             <div class="tech-tags" style="justify-content: center;">
                 <span class="tag">Python 3.10+</span>
                 <span class="tag">Telethon MTProto</span>
-                <span class="tag">Pyrogram</span>
-                <span class="tag">Google Gemini 1.5 Vision</span>
-                <span class="tag">Groq LPU Cascade</span>
-                <span class="tag">Tavily Search API</span>
-                <span class="tag">DuckDuckGo API</span>
-                <span class="tag">OpenCV Keyframes</span>
-                <span class="tag">FFmpeg</span>
+                <span class="tag">OpenAI-compatible provider clients</span>
+                <span class="tag">Gemini and Groq cascades</span>
+                <span class="tag">Tavily lookup</span>
+                <span class="tag">DDGS lookup</span>
+                <span class="tag">OpenCV media preparation</span>
                 <span class="tag">aiosqlite</span>
                 <span class="tag">html-telegraph-poster</span>
                 <span class="tag">Pillow (PIL)</span>
             </div>
+            <p style="max-width: 760px; margin: 1.5rem auto 0; color: var(--text-muted); text-align: center;">External AI, lookup, and publishing integrations run only in a configured local deployment. They may fail, return incomplete material, or be unavailable; their output requires qualified professional review and is not clinical advice.</p>
         </section>
     </main>
 
     <footer>
         <div class="container">
             <p>StomChat — Dentistry Chat Knowledge Base & AI Telegram Bot</p>
-            <p style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--text-muted);">Maintained under MIT License. Interactive Documentation Landing Site.</p>
+            <p style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--text-muted);">Maintained under MIT License. Static, source-backed workflow documentation.</p>
         </div>
     </footer>
 
@@ -686,13 +680,13 @@
             const outputPanel = output.closest(".sim-output");
             const button = document.getElementById("sim-run-button");
             const steps = [
-                "OpenCV isolates a representative keyframe from the simulated case.",
-                "Gemini Vision reviews the pulp-proximity question in the simulated input.",
-                "The literature-check stage prepares a digest-ready evidence summary."
+                "The preview marks the example as synthetic and keeps all data in this browser.",
+                "A configured deployment can route eligible text or media through its separate Telethon, media, and provider modules.",
+                "Optional lookup and Telegraph delivery paths require credentials, runtime configuration, and qualified professional review."
             ];
 
             button.disabled = true;
-            button.textContent = "Simulating pipeline…";
+            button.textContent = "Loading preview…";
             outputPanel.classList.add("is-running");
             output.innerHTML = "";
 
@@ -706,11 +700,11 @@
                     if (index === steps.length - 1) {
                         const note = document.createElement("p");
                         note.style.marginTop = "1rem";
-                        note.innerHTML = "<strong style=\"color: #fff\">Simulation complete.</strong> This preview illustrates a workflow; clinical decisions require qualified professional review.";
+                        note.innerHTML = "<strong style=\"color: #fff\">Preview complete.</strong> This static page does not create a clinical opinion, contact external services, or replace qualified professional review.";
                         output.appendChild(note);
                         outputPanel.classList.remove("is-running");
                         button.disabled = false;
-                        button.textContent = "Run Pipeline Simulation Again";
+                        button.textContent = "Run documentation preview again";
                     }
                 }, index * 650);
             });
