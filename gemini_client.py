@@ -311,6 +311,7 @@ def available_keys(provider, keys):
 def active_models(cascade):
     """
     Убирает из каскада модели, забаненные за 5xx. Проверка бана — тоже здесь.
+    Также дедуплицирует повторяющиеся имена моделей с сохранением порядка.
 
     Если забанены все — возвращаем последнюю: попытка по забаненной модели
     дешевле, чем гарантированное молчание бота.
@@ -318,8 +319,12 @@ def active_models(cascade):
     now = time.time()
     banned = get_banned_models()
     active = []
+    seen = set()
     for entry in cascade:
         model_name = entry[0] if isinstance(entry, (tuple, list)) else entry
+        if model_name in seen:
+            continue
+        seen.add(model_name)
         ban_until = banned.get(model_name, 0)
         if ban_until > now:
             logger.info(
@@ -562,12 +567,29 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     if is_triage:
         models_cascade = [
-            ("llama-3.3-70b-versatile", "groq"),
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini")
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("qwen/qwen3.6-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq")
+        ]
+    elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
+        models_cascade = [
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
+            ("qwen/qwen3.6-27b", "groq")
         ]
     elif is_chatbot:
         models_cascade = [
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.6-27b", "groq"),
@@ -576,9 +598,11 @@ def generate_text(prompt, status_context=None, timeout=None):
     else:
         # Complex tasks (Summaries, analytics, etc)
         models_cascade = [
-            (config.GEMINI_MODEL, "gemini"), # gemini-3.6-flash
+            (config.GEMINI_MODEL, "gemini"), # gemini-3.7-flash
+            ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
             (groq_fallback, "groq")
         ]
 
@@ -1103,3 +1127,204 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
         except Exception: pass
         
     return None
+
+
+def sanitize_supplement_output(text):
+    """Очищает ответ 120b от HTML-документных оберток, мета-тегов и преамбул."""
+    if not text:
+        return ""
+    text = strip_reasoning(text)
+    text = re.sub(r"<(head|title|meta|style|script)[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<!DOCTYPE.*?>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?(?:html|body|head|title|meta)[^>]*>", "", text, flags=re.IGNORECASE)
+    text = text.strip()
+    text = re.sub(r"(?i)^(?:конечно[,\s]+дополняю|конечно|в дополнение[,\s]+к сказанному|в дополнение|дополняю|дополнение)[^:\n]*:?\s*", "", text).strip()
+    return text
+
+
+def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
+    """
+    Генерирует лаконичное клиническое дополнение (дельту) к первичному ответу через Groq (openai/gpt-oss-120b)
+    с автоматическим фоллбеком на Gemini (gemini-3.5-flash).
+    Если первичный ответ полон, возвращает 'NONE'.
+    """
+    _reset_failure()
+    system_prompt = (
+        "Ты — опытный старший коллега-стоматолог, рецензент клинических протоколов.\n"
+        "Твоя задача — критически оценить входящий запрос и первичный ответ на вопрос врача и выдать ТОЛЬКО упущенные важные клинические детали (дельту).\n\n"
+        "КРИТИЧЕСКИЕ ИНСТРУКЦИИ:\n"
+        "1. СТРОГИЙ ФИЛЬТР НЕКЛИНИЧЕСКИХ СООБЩЕНИЙ:\n"
+        "   - Если сообщение врача — это приветствие («привет», «здравствуй», «добрый день»), смолл-ток («как дела», «что делаешь»), благодарность («спасибо», «ок»), мета-вопрос о боте («кто ты», «что умеешь») или не содержит конкретного клинического кейса/вопроса — верни СТРОГО ОДНО СЛОВО: NONE\n"
+        "2. СТРОГИЙ ФИЛЬТР ПОЛНОТЫ:\n"
+        "   - Если первичный ответ уже исчерпывающий, точен и существенных клинических пробелов нет — верни СТРОГО ОДНО СЛОВО: NONE\n"
+        "3. КЛИНИЧЕСКАЯ ДЕЛЬТА (когда дополнение РЕАЛЬНО нужно):\n"
+        "   - Выдавай дополнение ТОЛЬКО если упущены критические риски осложнений, анатомические ориентиры, точные дозировки или обязательные протокольные этапы (изоляция, экспозиция, выбор цемента/файлов).\n"
+        "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+        "   - Вступать в диалог при смолл-токе, здороваться или объяснять причину отсутствия дополнений.\n"
+        "   - Повторять или пересказывать то, что уже сказано в первом ответе.\n"
+        "   - Писать вводные фразы («Конечно, дополняю:», «В дополнение к сказанному...»).\n"
+        "   - Генерировать обертки <html>, <head>, <body>, <!DOCTYPE>.\n"
+        "5. ФОРМАТ: 1–3 емких пункта (список <ul><li>...</li></ul>). Объем: до 600–900 символов. Разметка: только <b> и <ul><li>."
+    )
+    user_prompt = (
+        f"Вопрос врача:\n{user_question}\n\n"
+        f"Первичный ответ:\n{initial_answer}\n\n"
+        "Выдай клинические дополнения (или строго NONE, если дополнять нечего):"
+    )
+
+    cascade = [
+        ("openai/gpt-oss-120b", "groq"),
+        ("gemini-3.5-flash", "gemini"),
+    ]
+
+    for model_name, provider in cascade:
+        keys = config.GROQ_KEYS if provider == "groq" else config.GOOGLE_KEYS
+        live_keys, cooldown_keys, _ = available_keys(provider, keys)
+        candidates = live_keys or cooldown_keys
+        if not candidates:
+            continue
+
+        for api_key in candidates[:2]:
+            key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
+            try:
+                client = get_provider_client(provider, api_key, timeout=min(25.0, timeout or 25.0))
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.5,
+                    max_tokens=600,
+                )
+                if response and response.choices and len(response.choices) > 0:
+                    raw = response.choices[0].message.content or ""
+                    cleaned = sanitize_supplement_output(raw)
+                    if not cleaned:
+                        continue
+                    note_success(provider, api_key, model_name=model_name)
+                    logger.info(f"PM supplement success model={model_name} chars={len(cleaned)}")
+                    return DummyResponse(cleaned)
+            except Exception as e:
+                logger.warning(f"PM supplement failed model={model_name} key={key_id}: {e}")
+                note_key_failure(provider, api_key, str(e), model_name=model_name)
+                continue
+
+    return None
+
+
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=35.0):
+    """Асинхронная обертка для вызова генерации дополнения через изолированный подпроцесс."""
+    import blocking_tools
+    return await blocking_tools.generate_pm_supplement_async(user_question, initial_answer, timeout=timeout)
+
+
+def generate_google_grounding(prompt_or_query, timeout=40.0):
+    """
+    Генерация клинического ответа с заземлением на живой веб-поиск через Google Search Grounding.
+    Модель: gemini-2.5-flash с tools=[google_search].
+    Возвращает (result_dict, error_str).
+    """
+    keys = list(config.GOOGLE_KEYS)
+    if not keys:
+        return None, "no_google_keys"
+
+    available, _cooling, cooldown_wait = available_keys("gemini", keys)
+    candidates = available or keys
+    if not candidates:
+        return None, f"all_keys_cooling:{cooldown_wait}"
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as imp_err:
+        logger.warning("google.genai SDK not available: %s", imp_err)
+        return None, f"sdk_import_error: {imp_err}"
+
+    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    system_instruction = (
+        "Ты — старший клинический эксперт-стоматолог сообщества StomChat. "
+        "Твоя задача — дать четкий, доказательный медицинский ответ на основе актуальных "
+        "научных публикаций, исследований (PubMed, Cochrane, ADA) и клинических протоколов.\n\n"
+        "ФОРМАТ ОТВЕТА:\n"
+        "1. Структурируй ответ четкими клиническими тезисами: суть, доказательная база, тактика/протокол, дозировки/сроки при наличии.\n"
+        "2. Выделяй ключевые термины тегом <b>жирный</b> (разметка только HTML).\n"
+        "3. После каждого утверждения ставь номер источника [1], [2].\n"
+        "4. Пиши профессионально и строго по делу, как коллега коллеге, без пустых вводных слов и без рекламы."
+    )
+
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    last_err = None
+
+    for model_name in models_to_try:
+        if model_name in get_banned_models():
+            continue
+        for api_key in candidates[:3]:
+            key_id = f"gemini...{api_key[-5:]}" if api_key else "none"
+            try:
+                client = genai.Client(api_key=api_key)
+                cfg = types.GenerateContentConfig(
+                    tools=[grounding_tool],
+                    temperature=0.3,
+                    system_instruction=system_instruction,
+                )
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_or_query,
+                    config=cfg,
+                )
+                text = (response.text or "").strip()
+                text = strip_reasoning(text)
+                if not text:
+                    continue
+
+                sources = []
+                queries = []
+                if response.candidates and response.candidates[0].grounding_metadata:
+                    meta = response.candidates[0].grounding_metadata
+                    if hasattr(meta, "web_search_queries") and meta.web_search_queries:
+                        queries = list(meta.web_search_queries)
+                    if hasattr(meta, "grounding_chunks") and meta.grounding_chunks:
+                        for chunk in meta.grounding_chunks:
+                            if chunk.web and chunk.web.uri:
+                                uri = chunk.web.uri
+                                title = chunk.web.title or ""
+                                domain = chunk.web.domain or ""
+                                if not domain:
+                                    try:
+                                        from urllib.parse import urlsplit
+                                        domain = (urlsplit(uri).hostname or "").lower()
+                                        if domain.startswith("www."):
+                                            domain = domain[4:]
+                                    except Exception:
+                                        domain = ""
+                                sources.append({
+                                    "text": title or uri,
+                                    "url": uri,
+                                    "host": domain,
+                                    "title": title,
+                                })
+
+                note_success("gemini", api_key, model_name=model_name)
+                logger.info(
+                    "Google Search Grounding success model=%s key=%s chars=%d sources=%d",
+                    model_name, key_id, len(text), len(sources),
+                )
+                return {
+                    "text": text,
+                    "sources": sources,
+                    "queries": queries,
+                }, None
+
+            except Exception as exc:
+                last_err = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning(
+                    "Google Search Grounding failed model=%s key=%s err=%s",
+                    model_name, key_id, last_err,
+                )
+                note_key_failure("gemini", api_key, str(exc), model_name=model_name)
+
+    return None, last_err or "all_grounding_attempts_failed"
+
+
+

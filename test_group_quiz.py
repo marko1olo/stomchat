@@ -90,6 +90,14 @@ GOOD = json.dumps({
 FALLBACK_MARKER = "недопломбировка язычного канала"
 
 
+def is_fallback(msg):
+    if not msg:
+        return False
+    if hasattr(assistant, "CLINICAL_QUIZ_FALLBACKS"):
+        return any(fb["question"] in msg or fb["options"][0] in msg for fb in assistant.CLINICAL_QUIZ_FALLBACKS)
+    return FALLBACK_MARKER in msg
+
+
 def last_quiz():
     return SENT[-1] if SENT else None
 
@@ -115,7 +123,7 @@ async def run():
     await run_quiz(GOOD)
     check("викторина отправлена", last_quiz() is not None)
     check("вопрос модели на месте", "накусывании" in last_quiz()["message"], f"got {last_quiz()['message'][:60]}")
-    check("фолбэк не подставлен", FALLBACK_MARKER not in last_quiz()["message"])
+    check("фолбэк не подставлен", not is_fallback(last_quiz()["message"]))
     check("четыре кнопки", len(button_data()) == 4, f"got {button_data()}")
     check("верный индекс проставлен во все кнопки",
           all(d.split(":")[1] == "1" for d in button_data()), f"got {button_data()}")
@@ -124,7 +132,7 @@ async def run():
     await run_quiz(json.dumps({"question": "Вопрос?", "options": ["A", "B", "C"],
                                "correct": 1, "explanation": "..."}, ensure_ascii=False))
     check("обработчик не упал, викторина отправлена", last_quiz() is not None)
-    check("подставлен запасной вопрос", FALLBACK_MARKER in last_quiz()["message"],
+    check("подставлен запасной вопрос", is_fallback(last_quiz()["message"]),
           f"got {last_quiz()['message'][:80]}")
     check("кнопок всё равно четыре", len(button_data()) == 4, f"got {button_data()}")
 
@@ -132,7 +140,7 @@ async def run():
     for bad_index in (4, 7, -1):
         await run_quiz(json.dumps({"question": "Вопрос?", "options": ["A", "B", "C", "D"],
                                    "correct": bad_index, "explanation": "..."}, ensure_ascii=False))
-        check(f"correct={bad_index} отвергнут", FALLBACK_MARKER in last_quiz()["message"],
+        check(f"correct={bad_index} отвергнут", is_fallback(last_quiz()["message"]),
               f"got {last_quiz()['message'][:60]}")
         indices = {int(d.split(":")[1]) for d in button_data()}
         check(f"correct={bad_index}: в кнопках допустимый индекс",
@@ -141,18 +149,18 @@ async def run():
     print("\n[4] Пустые варианты и пустой вопрос отвергаются")
     await run_quiz(json.dumps({"question": "Вопрос?", "options": ["A", "", "C", "D"],
                                "correct": 0, "explanation": "..."}, ensure_ascii=False))
-    check("пустой вариант отвергнут", FALLBACK_MARKER in last_quiz()["message"])
+    check("пустой вариант отвергнут", is_fallback(last_quiz()["message"]))
     await run_quiz(json.dumps({"question": "   ", "options": ["A", "B", "C", "D"],
                                "correct": 0, "explanation": "..."}, ensure_ascii=False))
-    check("пустой вопрос отвергнут", FALLBACK_MARKER in last_quiz()["message"])
+    check("пустой вопрос отвергнут", is_fallback(last_quiz()["message"]))
 
     print("\n[5] Невалидный JSON и лишние варианты")
     await run_quiz("это вообще не json")
-    check("мусор вместо JSON — фолбэк", FALLBACK_MARKER in last_quiz()["message"])
+    check("мусор вместо JSON — фолбэк", is_fallback(last_quiz()["message"]))
     await run_quiz(json.dumps({"question": "Вопрос?", "options": ["A", "B", "C", "D", "E", "F"],
                                "correct": 2, "explanation": "..."}, ensure_ascii=False))
     check("лишние варианты обрезаются, вопрос модели сохранён",
-          FALLBACK_MARKER not in last_quiz()["message"], f"got {last_quiz()['message'][:60]}")
+          not is_fallback(last_quiz()["message"]), f"got {last_quiz()['message'][:60]}")
     check("кнопок ровно четыре", len(button_data()) == 4, f"got {button_data()}")
 
     print("\n[6] Ответ в ```json``` разбирается")

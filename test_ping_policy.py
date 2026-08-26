@@ -12,6 +12,12 @@ import tempfile
 import types
 from datetime import datetime, timedelta
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 for name in ("vision", "database", "config", "blocking_tools", "runtime_guard"):
     sys.modules.setdefault(name, types.ModuleType(name))
 sys.modules["config"].DENTAL_KEYWORDS = []

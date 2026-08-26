@@ -1029,11 +1029,11 @@ async def get_user_recent_group_messages(user_id, limit=20):
 async def get_active_pm_users(days_limit=30):
     def operation():
         with _connection() as db:
-            # Выбираем уникальных пользователей, которые писали боту в ЛС за последние N дней
+            # Выбираем уникальных пользователей, которые РЕАЛЬНО писали боту в ЛС за последние N дней
             rows = db.execute(
                 """
                 SELECT DISTINCT user_id FROM pm_messages 
-                WHERE date >= datetime('now', ?)
+                WHERE sender_name = 'User' AND date >= datetime('now', ?)
                 """,
                 (f"-{days_limit} days",)
             ).fetchall()

@@ -122,10 +122,10 @@ check("протухшая запись отброшена при чтении",
 print("\n[4] Попытки не сгорают на ключах, стоящих на кулдауне")
 # Восемь из десяти ключей Google остывают. При бюджете 3 попытки живых ключей
 # хватает — модель обязана быть опрошена, а не пропущена.
-reset({"gemini-3.5-flash-lite": None})
+reset({"gemini-3.5-flash": None})
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
-_behaviour["gemini-3.5-flash-lite"] = "готовый ответ"
+_behaviour["gemini-3.5-flash"] = "готовый ответ"
 
 res = gc.generate_text("вопрос", {"kind": "pm_chat"})
 check("ответ получен, несмотря на 8 остывающих ключей", res is not None and res.text == "готовый ответ",
@@ -136,8 +136,9 @@ check("ни один запрос не ушёл на остывающий клю
 check("сделан ровно один запрос", len(REQUESTS) == 1, f"got {REQUESTS}")
 
 print("\n[5] Все ключи провайдера на кулдауне — каскад идёт дальше, а не молчит")
-reset({"gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
-       "qwen/qwen3.6-27b": "ответ от groq"})
+reset({"gemini-3.5-flash": None, "gemini-3.7-flash": None, "gemini-3.6-flash": None,
+       "gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
+       "llama-3.3-70b-versatile": "ответ от groq"})
 for key in GOOGLE_KEYS:
     gc.set_key_cooldown("gemini", key, seconds=300)
 
@@ -148,7 +149,7 @@ check("к Google не обращались вовсе", not (set(keys_used()) & 
       f"got {keys_used()}")
 
 print("\n[6] 429 ставит ключ на кулдаун и переходит к следующему")
-reset({"gemini-3.5-flash-lite": Exception("429 Too Many Requests: rate limit exceeded")})
+reset({"gemini-3.5-flash": Exception("429 Too Many Requests: rate limit exceeded")})
 res = gc.generate_text("вопрос", {"kind": "pm_chat"})
 tried = keys_used()
 check("испробовано несколько разных ключей", len(set(tried)) > 1, f"got {tried}")

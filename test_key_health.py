@@ -246,7 +246,7 @@ check("неизвестный провайдер — отказ, а не мол�
 
 
 print("\n[2] Текстовый каскад: ключ на кулдауне НЕ пробуется раньше срока")
-reset({"gemini-3.5-flash-lite": "готовый ответ"})
+reset({"gemini-3.5-flash": "готовый ответ"})
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
 res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
@@ -345,7 +345,7 @@ check("снятие названо в журнале",
       any("cooldown lifted" in line for line in LOG.lines),
       f"журнал: {LOG.lines[-4:]}")
 
-reset({"gemini-3.5-flash-lite": "ответ модели"})
+reset({"gemini-3.5-flash": "ответ модели"})
 gc.set_key_cooldown("gemini", GOOGLE_KEYS[0], seconds=300)
 gc.generate_text("вопрос", {"kind": "pm_chat"})
 check("удача по живому ключу чужих пометок не снимает",
@@ -354,7 +354,8 @@ check("удача по живому ключу чужих пометок не с
 # Бан модели снимается тем же правилом: active_models принудительно берёт
 # последнюю забаненную, она отвечает — значит забанена она напрасно.
 reset({"llama-3.3-70b-versatile": "ответ резервной"})
-for model in ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+for model in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+              "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
               "llama-3.3-70b-versatile"):
     gc.ban_model(model, 1200)
 res = gc.generate_text("вопрос", {"kind": "assistant"})
@@ -369,8 +370,8 @@ check("снятие бана названо в журнале", any("ban lifted"
 
 
 print("\n[6] Отказ по квоте называет в журнале ПОСЛЕДСТВИЕ, а не механику")
-reset({"gemini-3.5-flash-lite": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
-       "gemini-3.1-flash-lite": "ответ резервной"})
+reset({"gemini-3.5-flash": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
+       "gemini-3.7-flash": "ответ резервной"})
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
 quota_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
 check("запись об отказе по квоте есть", quota_lines, f"журнал: {LOG.lines[:6]}")
@@ -379,7 +380,7 @@ check("в записи назван остаток живых ключей",
 check("остаток назван числом из живого пула",
       any(" из 10" in l for l in quota_lines), f"got {quota_lines}")
 
-reset({"gemini-3.5-flash-lite": Exception("429 quota exceeded")})
+reset({"gemini-3.5-flash": Exception("429 quota exceeded")})
 for key in GOOGLE_KEYS[1:]:
     gc.set_key_cooldown("gemini", key, seconds=300)
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
@@ -463,7 +464,7 @@ check("расшифровка отдаёт клиенту свою долю бю
 check("суммарный внутренний бюджет расшифровки влезает в родительские 70 с",
       sum(t for _, _, t in CLIENT_CALLS) <= 70, f"got {sum(t for _, _, t in CLIENT_CALLS):.0f} с")
 
-reset({"gemini-3.5-flash-lite": Exception("connection reset by peer")})
+reset({"gemini-3.5-flash": Exception("connection reset by peer")})
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=30)
 text_timeouts = [t for _, _, t in CLIENT_CALLS]
 check("текстовый каскад тоже отдаёт долю, а не значение по умолчанию",
@@ -513,12 +514,12 @@ print("\n[13] Попытки одной модели идут по РАЗНЫМ 
 # Число попыток задаём явно: значение по умолчанию берётся из окружения, а его
 # состояние на боевой машине я не контролирую.
 os.environ["STOMCHAT_GEMINI_MAX_ATTEMPTS"] = "3"
-reset({"gemini-3.5-flash-lite": Exception("invalid argument: unsupported field in request")})
+reset({"gemini-3.5-flash": Exception("invalid argument: unsupported field in request")})
 res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
 _per_model = {}
 for _model, _key in TEXT_REQUESTS:
     _per_model.setdefault(_model, []).append(_key)
-_failing = _per_model.get("gemini-3.5-flash-lite", [])
+_failing = _per_model.get("gemini-3.5-flash", [])
 check("отказавшая модель получила больше одной попытки", len(_failing) >= 2,
       f"got {len(_failing)} — ротацию ключей проверять не на чем")
 check("каждая попытка модели ушла на СВОЙ ключ (квота размазана)",

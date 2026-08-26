@@ -722,6 +722,22 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             )
 
 
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=35.0):
+    """Асинхронный вызов генерации дополнения через изолированный подпроцесс gemini_client."""
+    effective_timeout = float(timeout) if timeout else 35.0
+    payload, error = await _run_json_tool(
+        "pm-supplement",
+        {"user_question": user_question, "initial_answer": initial_answer, "timeout": effective_timeout},
+        timeout=effective_timeout,
+    )
+    if error:
+        return None, error
+    text = payload.get("text")
+    if not text:
+        return None, "empty supplement text"
+    return text, None
+
+
 def _as_search_entry(item):
     """
     Один результат поиска -> {"text", "url"}, независимо от того, что пришло.
@@ -785,6 +801,21 @@ async def web_search_async(query, max_results, timeout):
     # Пустышка (ни текста, ни ссылки) врачу не показывается и в счёт находок не
     # идёт: иначе поиск отчитается «нашлось 3», а показать будет нечего.
     return [entry for entry in entries if entry["text"] or entry["url"]], None
+
+
+async def google_grounding_async(query, timeout=45.0):
+    """
+    Выполняет Google Search Grounding через изолированный подпроцесс.
+    Возвращает (result_dict, error).
+    """
+    payload, error = await _run_json_tool(
+        "google-grounding",
+        {"query": query, "timeout": timeout},
+        timeout=timeout,
+    )
+    if error:
+        return None, error
+    return payload.get("result"), None
 
 
 def _remove_converted_wav(file_path):
@@ -973,6 +1004,25 @@ def _main():
                 payload.get("file_path") or "", timeout=payload.get("timeout")
             )
             _json_exit({"ok": bool(text), "text": text})
+
+        if action == "pm-supplement":
+            import gemini_client
+            user_question = payload.get("user_question") or ""
+            initial_answer = payload.get("initial_answer") or ""
+            timeout = payload.get("timeout")
+            res = gemini_client.generate_pm_supplement(user_question, initial_answer, timeout=timeout)
+            text = getattr(res, "text", "") if res else ""
+            _json_exit({"ok": True, "text": text})
+
+        if action == "google-grounding":
+            import gemini_client
+            query = payload.get("query") or ""
+            timeout = payload.get("timeout") or 40.0
+            res, err = gemini_client.generate_google_grounding(query, timeout=timeout)
+            if res:
+                _json_exit({"ok": True, "result": res})
+            else:
+                _json_exit({"ok": False, "error": err or "grounding_failed"})
 
         _json_exit({"ok": False, "error": f"unknown action: {action}"}, 2)
     except SystemExit:

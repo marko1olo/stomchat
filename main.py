@@ -849,20 +849,6 @@ async def pm_ping_scheduler_task(bot_client):
             )
         except Exception as e:
             logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
-
-        try:
-            await asyncio.wait_for(
-                assistant.check_and_send_group_activity_pings(bot_client),
-                timeout=PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "Group pings timed out after %ss — проход прерван, цикл продолжается",
-                PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.error(f"Error in pm_ping_scheduler_task (Group pings): {e}")
-
         await asyncio.sleep(3600)  # Проверка каждый час
 
 # Порог, после которого telethon перестаёт спать на FloodWait и поднимает
@@ -917,7 +903,6 @@ client = TelegramClient(
     connection_retries=1000,
     retry_delay=5,
     auto_reconnect=True,
-    catch_up=True,
     flood_sleep_threshold=TELETHON_FLOOD_SLEEP_THRESHOLD,
 )
 
@@ -937,6 +922,19 @@ bot_client = TelegramClient(
 # Wrapper to track bot's own outgoing message IDs for safety wipe commands
 original_send_message = bot_client.send_message
 async def patched_send_message(*args, **kwargs):
+    text = None
+    if len(args) > 1:
+        text = args[1]
+    elif "message" in kwargs:
+        text = kwargs.get("message")
+
+    has_file = bool(kwargs.get("file") or (len(args) > 2 and args[2]))
+    if not has_file:
+        if not text or not (str(text) if text is not None else "").strip():
+            entity = args[0] if len(args) > 0 else kwargs.get("entity")
+            logger.warning(f"bot_client.send_message: aborted sending empty message to entity={entity}")
+            return None
+
     sent_msg = await original_send_message(*args, **kwargs)
     if sent_msg and hasattr(sent_msg, 'id') and hasattr(sent_msg, 'peer_id'):
         try:
@@ -946,7 +944,6 @@ async def patched_send_message(*args, **kwargs):
             # с ним, если Telethon добавит новый тип peer.
             chat_id = telethon_utils.get_peer_id(sent_msg.peer_id)
             if chat_id:
-                import database
                 await database.save_bot_sent_message(sent_msg.id, chat_id)
         except Exception as e:
             logger.error(f"Error saving bot outgoing message ID: {e}")
@@ -1988,7 +1985,7 @@ async def handle_new_message(event):
 
             # Check bookmark saving command
             cmd_clean = text.strip().lower()
-            if cmd_clean in ("/save", "/сохранить", "сохранить") and reply_to_msg_id:
+            if cmd_clean in ("/save", "/сохранить") and reply_to_msg_id:
                 try:
                     parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
                     if parent_msg:
@@ -2077,7 +2074,7 @@ async def handle_new_message(event):
                 cmd_lower = cmd.lower()
                 
                 # 0. Экстренное удаление сообщений (админское)
-                if cmd_lower in ("/wipe", "/delete", "/del", "удалить", "wipe") and reply_to_msg_id:
+                if cmd_lower in ("/wipe", "/delete", "/del") and reply_to_msg_id:
                     try:
                         is_super_admin = False
                         if event.sender_id in (7716348189, 1890028643):
@@ -2098,7 +2095,6 @@ async def handle_new_message(event):
                             except Exception as e2:
                                 logger.warning(f"Failed to delete command message {msg_id}: {e2}")
                                 
-                            import database
                             await database.remove_bot_sent_message(reply_to_msg_id)
                             return True
                     except Exception as delete_exc:
@@ -2332,7 +2328,7 @@ _HANDLED_CALLBACK_SET = set()
 
 @bot_client.on(events.CallbackQuery)
 async def handle_callback_query(event):
-    """Обработчик нажатий на инлайн-кнопки (викторины)."""
+    """Централизованный диспетчер нажатий на инлайн-кнопки (навигация nav:*, меню menu:*, викторины quiz:*, кейсы case:*, калькулятор calc:*, стиль style:*)."""
     cb_id = getattr(event, "id", None)
     if cb_id is not None:
         if cb_id in _HANDLED_CALLBACK_SET:
@@ -2360,7 +2356,7 @@ async def handle_callback_query(event):
         else:
             logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
     finally:
-        # event.answer() вызывался только внутри handle_quiz_callback. Если
+        # event.answer() вызывается в начале обработки внутри handle_quiz_callback. Если
         # исключение случалось раньше, ответ Telegram не уходил и у врача
         # крутился спиннер на кнопке до таймаута клиента.
         if not answered:

@@ -179,7 +179,7 @@ for kind, budget in (("assistant", 90), ("pm_chat", 90), ("bot_mention_reply", 6
                      ("referee_analyser", 45), ("daily", 2100),
                      ("transcription_corrector", 20)):
     reset({m: ANY_FAIL for m in (
-        "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+        "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile",
         "openai/gpt-oss-120b")})
     res = gc.generate_text("вопрос", {"kind": kind, "thinking_level": "HIGH"}, timeout=budget)
@@ -199,7 +199,7 @@ for kind, budget in (("assistant", 90), ("pm_chat", 90), ("bot_mention_reply", 6
 print("\n[2] Резервный провайдер теперь достижим (за ним каскад и написан)")
 # Быстрый отказ: 429/400 приходят мгновенно, а не по таймауту.
 reset({m: Exception("400 invalid argument") for m in (
-    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")}, spend_full_timeout=False)
+    "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")}, spend_full_timeout=False)
 _behaviour["qwen/qwen3.6-27b"] = "ответ резервного провайдера"
 res = gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("ответ получен от groq после провала gemini",
@@ -210,8 +210,8 @@ check("уложились в бюджет", CLOCK.t <= 90.0, f"got {CLOCK.t:.1f}
 
 # То же при полном таймауте каждого запроса: до groq доходим или честно
 # останавливаемся, но бюджет не превышаем ни в одном из случаев.
-reset({m: ANY_FAIL for m in ("gemini-3.6-flash", "gemini-3.5-flash",
-                             "gemini-3.5-flash-lite")}, spend_full_timeout=True)
+reset({m: ANY_FAIL for m in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+                             "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")}, spend_full_timeout=True)
 _behaviour["openai/gpt-oss-120b"] = "ответ резерва"
 gc.generate_text("сводка", {"kind": "daily", "thinking_level": "HIGH"}, timeout=2100)
 check("на большом бюджете резерв опрошен", "openai/gpt-oss-120b" in models_used(),
@@ -235,8 +235,8 @@ check("виды работ найдены в вызывающих файлах",
 
 # Сводки — единственные, кому тяжёлый каскад положен: их ждут не в диалоге.
 HEAVY_ALLOWED = {"daily", "weekly", "group_summary"}
-TRIAGE_FIRST = "llama-3.3-70b-versatile"
-CHAT_FIRST = "gemini-3.5-flash-lite"
+TRIAGE_FIRST = "gemini-3.5-flash-lite"
+CHAT_FIRST = "gemini-3.7-flash"
 
 
 def first_model_for(kind):
@@ -302,28 +302,28 @@ check("следующая модель каскада всё равно опро
       f"got {models_used()}")
 
 print("\n[5] Настоящая перегрузка модель по-прежнему банит")
-reset({"gemini-3.6-flash": Exception("503 Service Unavailable: model is overloaded")},
+reset({config.GEMINI_MODEL: Exception("503 Service Unavailable: model is overloaded")},
       spend_full_timeout=False)
 gc.generate_text("сводка", {"kind": "daily"}, timeout=2100)
-check("503 банит модель", "gemini-3.6-flash" in gc.get_banned_models(),
+check("503 банит модель", config.GEMINI_MODEL in gc.get_banned_models(),
       f"got {gc.get_banned_models()}")
 check("на 503 не долбили модель остальными ключами",
-      models_used().count("gemini-3.6-flash") == 1, f"got {models_used()}")
+      models_used().count(config.GEMINI_MODEL) == 1, f"got {models_used()}")
 check("503 не ставит ключ на кулдаун — виновата модель, не ключ",
       not any(gc._key_fingerprint("gemini", k) in gc.get_key_cooldowns() for k in GOOGLE_KEYS),
       f"got {gc.get_key_cooldowns()}")
-reset({"gemini-3.6-flash": Exception(
+reset({config.GEMINI_MODEL: Exception(
     "Invalid request: max_tokens 1500 exceeds context length of 500000 tokens")},
     spend_full_timeout=False)
 gc.generate_text("сводка", {"kind": "daily"}, timeout=2100)
 check("посторонний отказ с числом 500 в тексте не банит",
-      "gemini-3.6-flash" not in gc.get_banned_models(), f"got {gc.get_banned_models()}")
+      config.GEMINI_MODEL not in gc.get_banned_models(), f"got {gc.get_banned_models()}")
 
 print("\n[6] После последней попытки последней модели каскад не спит")
 # Сон 8-10 с стоял перед самым `return None`: повторять было уже нечем, а врач
 # ждал эти секунды впустую.
 reset({m: Exception("connection reset by peer") for m in (
-    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+    "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
     "openai/gpt-oss-120b", "llama-3.3-70b-versatile")}, spend_full_timeout=False)
 res = gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("каскад провалился (условия проверки соблюдены)", res is None and len(REQUESTS) >= 2,
@@ -335,7 +335,7 @@ check("снов ровно на один меньше числа запросо�
 
 # Тот же случай без бюджета: сон перед возвратом None не нужен и здесь.
 reset({m: Exception("connection reset by peer") for m in (
-    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+    "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
     "openai/gpt-oss-120b", "llama-3.3-70b-versatile")}, spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"})
 check("без бюджета тоже не спит перед сдачей", EVENTS[-1][0] == "req",
@@ -364,7 +364,7 @@ check("стадия помечена исчерпанием каскада", sta
       f"got {status().get('stage')}")
 
 reset({m: Exception("400 The input token count exceeds the maximum number of tokens allowed")
-       for m in ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+       for m in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
                  "openai/gpt-oss-120b")}, spend_full_timeout=False)
 res = gc.generate_text("очень длинный промпт", {"kind": "pm_chat", "thinking_level": "HIGH"},
                        timeout=90)
@@ -385,7 +385,7 @@ check("после успеха причина провала сброшена",
 # Ключ — секрет: он не должен просочиться в файл статуса вместе с причиной.
 leaky_key = GOOGLE_KEYS[0]
 reset({m: Exception(f"401 invalid api key {leaky_key} rejected")
-       for m in ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+       for m in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
                  "openai/gpt-oss-120b")}, spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "pm_chat", "thinking_level": "HIGH"}, timeout=90)
 leaked = (gc.get_last_failure() or {}).get("detail", "")
@@ -394,7 +394,7 @@ check("ключ из текста ошибки вырезан", leaky_key not in
 print("\n[8] Бюджет не тратится на попытки, которые не успеют завершиться")
 reset({m: Exception("504 gateway timeout") for m in ()}, spend_full_timeout=True)
 _behaviour.update({m: Exception("connection reset") for m in (
-    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
+    "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
     "openai/gpt-oss-120b")})
 gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("каскад остановился внутри бюджета", CLOCK.t <= 90.0, f"got {CLOCK.t:.1f}s")

@@ -612,7 +612,6 @@ async def init_wiki_db():
             )
         ''')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_cat ON distilled_facts(category_code)')
-        await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON distilled_facts(content_hash)')
         await db.commit()
 
 

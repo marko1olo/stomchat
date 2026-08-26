@@ -12,7 +12,9 @@ import random
 import threading
 import time
 from datetime import datetime, timedelta
-from blocking_tools import generate_gemini_text_async
+import blocking_tools
+generate_gemini_text_async = getattr(blocking_tools, "generate_gemini_text_async", None)
+generate_pm_supplement_async = getattr(blocking_tools, "generate_pm_supplement_async", None)
 import vision
 import database
 import media_tools
@@ -110,10 +112,13 @@ WEB_COOLDOWN_SECONDS = 30
 # источники: доверие к утверждению у них разное, и путать их нельзя.
 WEB_ANSWER_HEADER = "🌐 <b>По открытым источникам</b>\n\n"
 
+# Глубина памяти диалога в ЛС
+PM_HISTORY_LIMIT = 35
+
 STYLE_PROMPTS = {
-    "colleague_friendly": "Твой стиль общения — дружелюбный коллега-эксперт. Общайся свободно, на равных, на профессиональном стоматологическом сленге, но вежливо. Разрешено шутить, но без перегибов.",
+    "colleague_friendly": "Твой стиль общения — сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.",
     "clinical_dry": "Твой стиль общения — сухие клинические факты. Отвечай максимально строго, академично, лаконично и по делу. Категорически ЗАПРЕЩЕНЫ любые шутки, каламбуры, смайлы, метафоры или лирические отступления. Только голая наука, стандарты EBM, дозировки и анатомические обоснования. Никаких смайлов вообще.",
-    "humor_cynic": "Твой стиль общения — ироничный стоматолог-циник с черным юмором. Ты слегка устал от пациентов, любишь профессиональный медицинский цинизм, иронию и шутки про деньги, сломанные файлы или пульпу, но остаешься в рамках приличия и врачебного этикета."
+    "humor_cynic": "Твой стиль общения — ироничный стоматолог-циник с легким профессиональным юмором. Ты понимаешь реалии врачебных будней, профессиональный юмор про сложные каналы, перелечивания и пациентов, но сохраняешь такт и клиническую грамотность. Тон: живой, ироничный, профессиональный, без панибратства и без дурацких эмодзи."
 }
 
 # Стиль по умолчанию: для него отдельная вставка в промпт не нужна — тон
@@ -147,11 +152,49 @@ def style_instruction_block(selected_style):
 
 
 AD_HINTS = [
-    "\\n\\n<i>💡 Кстати, вы можете прислать мне рентген-снимок или задать клинический вопрос в ЛС — там я помню историю сообщений и общаюсь тет-а-тет.</i>",
-    "\\n\\n<i>💡 Напоминаю, что в личных сообщениях я умею разбирать рентген-снимки, проводить викторины (/quiz) и интерактивные кейсы (/case).</i>",
-    "\\n\\n<i>💡 Если вы хотите обсудить сложный случай приватно, пишите мне в ЛС. Там я храню глубокую память диалога и не отвлекаю коллег в общей группе.</i>",
-    "\\n\\n<i>💡 В ЛС я работаю как персональный ассистент: принимаю голосовые сообщения, ищу протоколы по базе из 118 000+ постов и храню ваши закладки (/bookmarks).</i>"
+    "\n\n<i>💡 Кстати, вы можете прислать мне рентген-снимок или задать клинический вопрос в ЛС — там я помню историю диалога и общаюсь тет-а-тет.</i>",
+    "\n\n<i>💡 Если хотите обсудить сложный случай приватно, пишите в ЛС. Там я храню глубокую память диалога и не отвлекаю коллег в общей группе.</i>",
+    "\n\n<i>💡 В ЛС я работаю как персональный ассистент: принимаю голосовые сообщения, ищу статьи в PubMed и храню ваши закладки.</i>",
+    "\n\n<i>💡 Присылайте снимки (ОПТГ, КЛКТ, прицельные) — в ЛС разберу клинический случай с анализом патологии.</i>",
 ]
+
+# Контекстные подсказки по теме ответа
+AD_HINTS_CONTEXTUAL = {
+    "anesthesia": "\n\n<i>💡 Напишите мне в ЛС вес пациента и препарат — рассчитаю точные дозы и карпулы за секунду.</i>",
+    "antibiotic": "\n\n<i>💡 В ЛС могу подобрать схему антибиотикопрофилактики или постоперационного курса с учётом аллергий и соматики пациента.</i>",
+    "pubmed": "\n\n<i>💡 Хотите свежие статьи PubMed по этой теме? Напишите мне в ЛС — сделаю поиск с источниками и ссылками.</i>",
+    "implant": "\n\n<i>💡 В ЛС могу разобрать рентген-снимок имплантата или подобрать протокол нагрузки по вашему клиническому случаю.</i>",
+    "endo": "\n\n<i>💡 Пришлите прицельный или КЛКТ в ЛС — разберу анатомию каналов, рабочую длину и сложность эндодонтического лечения.</i>",
+    "xray": "\n\n<i>💡 Пришлите рентген-снимок в ЛС — опишу патологию, плотность, периапикальный статус и дам дифдиагноз.</i>",
+}
+
+
+ENABLE_AD_HINTS = False  # По умолчанию выключено. Поставьте True для включения контекстных подсказок.
+
+
+def get_ad_hint(reply_text: str = "") -> str:
+    """
+    Возвращает контекстно-зависимый хинт о ЛС, исходя из темы ответа бота.
+    Если ENABLE_AD_HINTS = False — реклама полностью отключена.
+    """
+    if not ENABLE_AD_HINTS:
+        return ""
+    if not reply_text:
+        return random.choice(AD_HINTS)
+    low = reply_text.lower()
+    if any(w in low for w in ["артикаин", "мепивакаин", "лидокаин", "ультракаин", "карпул", "анестези"]):
+        return AD_HINTS_CONTEXTUAL["anesthesia"]
+    if any(w in low for w in ["амоксициллин", "клиндамицин", "антибиотик", "метронидазол", "профилактик"]):
+        return AD_HINTS_CONTEXTUAL["antibiotic"]
+    if any(w in low for w in ["pubmed", "пабмед", "cochrane", "кохран", "метаанализ", "исследован"]):
+        return AD_HINTS_CONTEXTUAL["pubmed"]
+    if any(w in low for w in ["имплантат", "имплант", "периимплантит", "нагрузк"]):
+        return AD_HINTS_CONTEXTUAL["implant"]
+    if any(w in low for w in ["корневой канал", "пульп", "эндодонт", "ирригац", "гуттаперч", "апекс"]):
+        return AD_HINTS_CONTEXTUAL["endo"]
+    if any(w in low for w in ["рентген", "снимок", "оптг", "клкт", "прицельн"]):
+        return AD_HINTS_CONTEXTUAL["xray"]
+    return random.choice(AD_HINTS)
 
 async def generate_user_portrait(user_id):
     try:
@@ -338,6 +381,444 @@ def resolve_group_command(text):
             if kind == "arg" and cmd.startswith(alias + " ") and cmd[len(alias) + 1:].strip():
                 return canonical
     return None
+
+
+class UserIntent:
+    """Представление распознанного намерения пользователя (Zero-Slash Routing)."""
+    def __init__(self, name: str | None, query: str = ""):
+        self.name = name
+        self.query = query
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.name == other
+        if isinstance(other, UserIntent):
+            return self.name == other.name and self.query == other.query
+        if isinstance(other, (tuple, list)) and len(other) == 2:
+            return (self.name, self.query) == (other[0], other[1])
+        if other is None:
+            return self.name is None
+        return False
+
+    def __iter__(self):
+        return iter((self.name, self.query))
+
+    def __getitem__(self, index):
+        return (self.name, self.query)[index]
+
+    def __bool__(self):
+        return self.name is not None
+
+    def __str__(self):
+        return self.name or ""
+
+    def __repr__(self):
+        return f"UserIntent(name={self.name!r}, query={self.query!r})"
+
+
+# Intent Constants
+INTENT_WEB_SEARCH = "INTENT_WEB_SEARCH"
+INTENT_CALCULATOR = "INTENT_CALCULATOR"
+INTENT_QUIZ = "INTENT_QUIZ"
+INTENT_CASE = "INTENT_CASE"
+INTENT_BOOKMARKS = "INTENT_BOOKMARKS"
+INTENT_STYLE = "INTENT_STYLE"
+INTENT_MENU = "INTENT_MENU"
+INTENT_HELP = "INTENT_HELP"
+
+
+def detect_user_intent(text: str) -> UserIntent:
+    """
+    Определяет клиническое намерение пользователя на естественном языке (Zero-Slash Routing).
+    Позволяет врачу использовать бота без обязательного набора слэш-команд.
+    """
+    if not text or not isinstance(text, str):
+        return UserIntent(None)
+
+    clean = text.strip()
+    norm = clean.lower()
+    norm_no_punct = re.sub(r'[?!.,;:]+$', '', norm).strip()
+
+    # 1. INTENT_MENU / INTENT_HELP
+    is_clinical_emergency_help = bool(
+        re.search(r'\b(первая|неотложная|скорая|доврачебная|оказание)\s+помощ', norm) or 
+        re.search(r'\bпомощь\s+(при|пациент|взросл|дет)', norm)
+    )
+
+    if not is_clinical_emergency_help:
+        if norm_no_punct in ('меню', 'главное меню', 'открой меню', 'покажи меню', 'кнопки меню',
+                             'вызови меню', 'назад в меню', 'открой главное меню', 'покажи главное меню',
+                             '/menu', '/меню', '/start', '⌨️ меню') or \
+           re.match(r'^(?:открой|покажи|вызови|перейди\s+в|вернуться\s+в|назад\s+в)?\s*(?:главное\s+)?меню$', norm_no_punct):
+            return UserIntent(INTENT_MENU)
+
+        if norm_no_punct in ('помощь', 'хелп', 'help', 'справка', 'памятка', 'инструкция', 'инструкция к боту', 'команды', 'список команд', '/help') or \
+           re.match(r'^(что\s+ты\s+умеешь|что\s+ты\s+можешь|что\s+умеешь|что\s+можешь|твои\s+возможности|возможности\s+бота)$', norm_no_punct) or \
+           re.match(r'^(как\s+тобой\s+пользоваться|как\s+пользоваться\s+ботом|как\s+пользоваться)$', norm_no_punct) or \
+           re.match(r'^(список\s+команд|какие\s+команды)$', norm_no_punct):
+            return UserIntent(INTENT_MENU)
+
+    # 2. INTENT_STYLE
+    if norm_no_punct in ('стиль', 'стиль общения', 'настройка стиля', 'настройки стиля', 'выбор стиля', '/style') or \
+       re.match(r'^(смени|сменить|измени|изменить|поменяй|поменять|переключи|переключить|настрой|настроить|выбери|выбрать)\s+(стиль|стиль\s+общения|тон|тон\s+общения)$', norm_no_punct) or \
+       re.match(r'^хочу\s+другой\s+(стиль|тон)$', norm_no_punct) or \
+       re.match(r'^(смени|поменяй|измени)\s+тон$', norm_no_punct) or \
+       re.match(r'^(настройка|настройки|выбор)\s+(стиля|тона)$', norm_no_punct):
+        return UserIntent(INTENT_STYLE)
+
+    # 3. INTENT_BOOKMARKS
+    bm_match = re.match(r'^(?:покажи\s+|открой\s+|список\s+|где\s+)?(?:мои\s+)?(?:клинические\s+)?(закладки|сохраненки|сохранёнки|сохраненные|сохранённые)(?:\s+(.*))?$', norm_no_punct)
+    if bm_match:
+        query_arg = (bm_match.group(2) or '').strip()
+        if query_arg in ('посты', 'сообщения', 'статьи'):
+            query_arg = ''
+        return UserIntent(INTENT_BOOKMARKS, query_arg)
+
+    if re.match(r'^(что|покажи\s+что)\s+я\s+(сохранил|сохранял|сохранила|сохраняла)(\s+(.*))?$', norm_no_punct):
+        m = re.match(r'^(что|покажи\s+что)\s+я\s+(сохранил|сохранял|сохранила|сохраняла)(\s+(.*))?$', norm_no_punct)
+        query_arg = (m.group(4) or '').strip()
+        return UserIntent(INTENT_BOOKMARKS, query_arg)
+
+    if re.match(r'^(сохраненные|сохранённые)\s+(посты|сообщения|статьи)(\s+(.*))?$', norm_no_punct):
+        m = re.match(r'^(сохраненные|сохранённые)\s+(посты|сообщения|статьи)(\s+(.*))?$', norm_no_punct)
+        query_arg = (m.group(4) or '').strip()
+        return UserIntent(INTENT_BOOKMARKS, query_arg)
+
+    # Быстрые кнопки постоянной клавиатуры
+    if norm_no_punct in ('💊 препараты и дозы', 'препараты и дозы', '💊 препараты', 'дозы препаратов'):
+        return UserIntent(INTENT_CALCULATOR, clean)
+
+    if norm_no_punct in ('🔍 найти статью', 'найти статью', '🔍 найти', 'найти статьи'):
+        return UserIntent(INTENT_WEB_SEARCH, '')
+
+    if norm_no_punct in ('⭐ закладки', '⭐ мои закладки'):
+        return UserIntent(INTENT_BOOKMARKS, '')
+
+    # 4. INTENT_QUIZ
+    if not re.match(r'^(мой\s+ответ|ответ|вариант)\s+[a-dа-г]\b', norm):
+        if norm_no_punct in ('викторина', 'квиз', 'клиническая викторина', 'стоматологический квиз', 'тест по стоматологии', 'клинический квиз', 'клиническая задача', '/quiz') or \
+           re.match(r'^(давай|хочу|запусти|проведи|сыграем\s+в|поиграем\s+в|го)\s+(клиническую\s+)?(викторину|квиз)$', norm_no_punct) or \
+           re.match(r'^(проверь|проэкзаменуй|протестируй)\s+(мои\s+)?(знания|меня)$', norm_no_punct) or \
+           re.match(r'^(дай|задай|хочу)\s+(мне\s+)?(клинический\s+)?(вопрос|задачу|задачку|тест)$', norm_no_punct) or \
+           re.match(r'^хочу\s+тест$', norm_no_punct):
+            return UserIntent(INTENT_QUIZ)
+
+    # 5. INTENT_CASE
+    is_case_description = bool(
+        re.search(r'пациент(ка)?\s+\d+', norm) or
+        re.search(r'жалобы\s+на', norm) or
+        re.search(r'у\s+меня\s+(кейс|клинический\s+случай|пациент)', norm) or
+        re.search(r'разбор\s+(кейса|случая)', norm) or
+        re.search(r'клинический\s+случай\s*:', norm) or
+        re.search(r'\b(зуб|зуба|зубе|зубом)\s+\d{2}\b', norm) or
+        re.search(r'\b\d{2}\s+(зуб|зуба|зубе|зубом)\b', norm)
+    )
+    if not is_case_description:
+        if norm_no_punct in ('клинический кейс', 'клинический симулятор', 'симулятор', 'интерактивный кейс', 'диагностический симулятор', 'симулятор кейсов', '/case') or \
+           re.match(r'^(давай|хочу|запусти|начни|начать|сыграем\s+в|поиграем\s+в|го|включи)\s+(клинический\s+)?(кейс|симулятор)$', norm_no_punct) or \
+           re.match(r'^(давай|хочу|запусти|начни|начать)\s+клинический\s+случай$', norm_no_punct) or \
+           re.match(r'^(сыграем|поиграем|сыграть|поиграть)\s+в\s+диагностику$', norm_no_punct) or \
+           re.match(r'^(сыграть|поиграть)\s+в\s+(кейс|симулятор)$', norm_no_punct) or \
+           re.match(r'^(давай|хочу|запусти|включи|начни|начать)\s+симулятор$', norm_no_punct) or \
+           re.match(r'^начать\s+кейс$', norm_no_punct):
+            return UserIntent(INTENT_CASE)
+
+    # 6. INTENT_CALCULATOR
+    _anesthetic_drugs = r'(артикаин|ультракаин|убистезин|септонест|скандонест|мепивакаин|лидокаин|новокаин|бупивакаин|примакаин|брилокаин|анестетик)'
+    if norm_no_punct in ('калькулятор', 'калькулятор анестезии', 'шпаргалка по анестезии', 'расчет анестезии', 'расчёт анестезии', 'дозы анестетиков', 'максимальная доза анестезии', 'расчет карпул', 'расчёт карпул', '/calc'):
+        return UserIntent(INTENT_CALCULATOR, clean)
+
+    if re.match(r'^(посчитай|рассчитай|расчет|расчёт|калькулятор)\s+(мне\s+)?(анестези[юия]|дозировк[уи]|доз[уа]|карпул[ы]?)\b', norm_no_punct) or \
+       re.match(r'^(посчитай|рассчитай)\s+доз[уа]\b', norm_no_punct) or \
+       re.match(r'^(сколько|какая)\s+(карпул|дозировка|доза|максимальная\s+доза)\b', norm_no_punct) or \
+       re.match(r'^(максимальная\s+доза|дозировка|доза)\s+', norm_no_punct) or \
+       re.match(rf'^(дозировк[аиеу]?|доза|дозы|расчет|расчёт)\s+(препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
+       re.match(rf'^(посчитай|рассчитай)\s+(дозировку\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
+       re.match(r'^(дозировка|расчет|расчёт)\s+анестезии\b', norm_no_punct):
+        return UserIntent(INTENT_CALCULATOR, clean)
+
+    # 7. INTENT_WEB_SEARCH
+    m_goog = re.match(r'^(погугли|загугли|гугли|погуглить)\s*(.*)$', norm, re.IGNORECASE)
+    if m_goog:
+        q = clean[len(m_goog.group(1)):].strip()
+        return UserIntent(INTENT_WEB_SEARCH, q)
+
+    m_net = re.match(r'^(поищи|найди|поиск)\s+в\s+(интернете|инете|сети|гугле|google)\s*(.*)$', norm, re.IGNORECASE)
+    if m_net:
+        prefix_len = len(norm) - len(m_net.group(3))
+        q = clean[prefix_len:].strip()
+        return UserIntent(INTENT_WEB_SEARCH, q)
+
+    m_art = re.match(r'^(найди|поищи)\s+статьи\s+(про|о|об|по|для)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_art:
+        raw_q = m_art.group(3).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_pub_full = re.match(r'^(статьи\s+на\s+pubmed|публикации\s+на\s+pubmed)\s+(про|о|об|по|для)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub_full:
+        raw_q = m_pub_full.group(3).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_pub = re.match(r'^(что|посмотри\s+что)\s+(говорит|пишет|есть\s+в)\s+pubmed\s*(про|о|об|по)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub:
+        raw_q = m_pub.group(4).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_pub_short = re.match(r'^(pubmed|пабмед)\s*[:\s]\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub_short:
+        q = m_pub_short.group(2).strip()
+        return UserIntent(INTENT_WEB_SEARCH, q)
+
+    m_res = re.match(r'^(какие|есть\s+ли)\s+(свежие|новые|последние|научные)\s+исследования\s+(по|про|о|об)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_res:
+        raw_q = m_res.group(4).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_proto = re.match(r'^(найди|поищи)\s+протокол\s*(.*)$', norm, re.IGNORECASE)
+    if m_proto:
+        raw_q = m_proto.group(2).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    return UserIntent(None)
+
+
+async def classify_pm_intent_semantic_async(text: str) -> dict:
+    """
+    Анализирует естественный язык врача через быстрый LLM-триаж.
+    Определяет, нужен ли внешний веб-поиск/PubMed, расчет анестетика, квиз,
+    симулятор или обычная клиническая консультация.
+    """
+    if not text or len(text.strip()) < 5:
+        return {"intent": "CLINICAL_CHAT", "confidence": 0.0}
+
+    prompt = f"""Ты — интеллектуальный координатор стоматологического клинического ассистента StomChat.
+Твоя задача — классифицировать запрос врача-стоматолога в личных сообщениях и определить требуемый клинический модуль.
+
+Категории намерений (intent):
+1. "WEB_SEARCH": врачу нужны актуальные статьи, исследования, метаанализы, данные PubMed/Cochrane, клинические протоколы (BOPT, вертипреп, адгезия, ирригация и т.д.) или поиск доказательной базы в сети.
+2. "CALCULATOR": запрос на расчет дозировок местных анестетиков (артикаин, мепивакаин, лидокаин и др.), количества карпул, пределов по весу или возрасту.
+3. "QUIZ": запрос на прохождение викторины, теста, экзаменационных вопросов по стоматологии для проверки знаний.
+4. "CASE": запрос на запуск интерактивного симулятора / разбор виртуального клинического случая по шагам (диагностическая игра). ВНИМАНИЕ: если врач описывает СВОЕГО реального пациента для консультации ("у меня пациент 45 лет, зуб 3.6..."), это НЕ симулятор, а "CLINICAL_CHAT"!
+5. "BOOKMARKS": запрос на просмотр сохраненных клинических постов или закладок.
+6. "CLINICAL_CHAT": обычная клиническая консультация, диагностика, тактика лечения, интерпретация симптомов, рекомендации коллеге.
+
+Запрос врача:
+"{text}"
+
+Ответь СТРОГО в формате JSON без Markdown:
+{{"intent": "WEB_SEARCH|CALCULATOR|QUIZ|CASE|BOOKMARKS|CLINICAL_CHAT", "search_query": "поисковый запрос или null", "drug": "articaine|mepivacaine|lidocaine|null", "weight_kg": null, "confidence": 1.0}}"""
+
+    status_ctx = {"kind": "pm_chat", "thinking_level": "LOW"}
+    try:
+        resp, err = await generate_gemini_text_async(prompt, status_ctx, timeout=12)
+        if err or not resp:
+            return {"intent": "CLINICAL_CHAT", "confidence": 0.0, "error": err}
+        
+        raw_text = resp.text.strip() if hasattr(resp, "text") else str(resp).strip()
+        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if m:
+            raw_text = m.group(0)
+        data = json.loads(raw_text)
+        return data
+    except Exception as e:
+        logger.warning(f"Semantic intent triage failed: {e}")
+        return {"intent": "CLINICAL_CHAT", "confidence": 0.0, "error": str(e)}
+
+
+def calculate_anesthesia_instant(text: str) -> str | None:
+    """
+    Выполняет мгновенный клинический расчет дозировки анестезии и допустимого количества карпул
+    на основе веса пациента и выбранного препарата (артикаин 4%, мепивакаин 3%, лидокаин 2%).
+    """
+    if not text:
+        return None
+
+    lower = text.lower()
+
+    # 1. Распознавание препарата
+    drug = None
+    if re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин)\w*', lower):
+        drug = "articaine"
+    elif re.search(r'\b(?:мепивакаин|скандонест|мепивастезин|мепидонт)\w*', lower):
+        drug = "mepivacaine"
+    elif re.search(r'\b(?:лидокаин|ксилокаин|ксилонор)\w*', lower):
+        drug = "lidocaine"
+
+    # 2. Определение возраста/статуса
+    is_child = bool(re.search(r'\b(?:ребен|детск|ребёнк|малыш|детям)\w*', lower))
+
+    # 3. Извлечение веса
+    weight = None
+    weight_match = re.search(r'\b(\d+(?:[.,]\d+)?)\s*(?:кг|kg|килограмм\w*)\b', lower)
+    if weight_match:
+        try:
+            weight = float(weight_match.group(1).replace(',', '.'))
+        except ValueError:
+            weight = None
+    else:
+        num_match = re.search(r'(?:на|для|вес|весом)\s+(\d+(?:[.,]\d+)?)\b', lower)
+        if num_match:
+            try:
+                val = float(num_match.group(1).replace(',', '.'))
+                if 5 <= val <= 250:
+                    weight = val
+            except ValueError:
+                pass
+
+    if weight is None:
+        if drug == "articaine":
+            return (
+                "🧮 <b>Расчет дозировки: Артикаин 4% (1:100 000 / 1:200 000)</b>\n\n"
+                "• <b>Норма:</b> 7 мг/кг (взрослые), 5 мг/кг (дети).\n"
+                "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 7.3 карпулы по 1.7 мл).\n"
+                "• <b>1 карпула 1.7 мл 4%:</b> = <b>68 мг</b> артикаина гидрохлорида.\n\n"
+                "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
+            )
+        elif drug == "mepivacaine":
+            return (
+                "🧮 <b>Расчет дозировки: Мепивакаин 3% (Скандонест без вазоконстриктора)</b>\n\n"
+                "• <b>Норма:</b> 4.4 мг/кг.\n"
+                "• <b>Абсолютный максимум:</b> не более <b>400 мг</b> (≈ 7.4 карпулы по 1.8 мл).\n"
+                "• <b>1 карпула 1.8 мл 3%:</b> = <b>54 мг</b> мепивакаина гидрохлорида.\n\n"
+                "💡 <i>Укажите вес пациента для точного расчета, например: «дозировка скандонеста на 60 кг» или «скандонест ребенку 20 кг».</i>"
+            )
+        elif drug == "lidocaine":
+            return (
+                "🧮 <b>Расчет дозировки: Лидокаин 2% (с адреналином)</b>\n\n"
+                "• <b>Норма:</b> 7 мг/кг (взрослые), 4.4 мг/кг (дети).\n"
+                "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 13.8 карпул по 1.8 мл).\n"
+                "• <b>1 карпула 1.8 мл 2%:</b> = <b>36 мг</b> лидокаина гидрохлорида.\n\n"
+                "💡 <i>Укажите вес пациента для точного расчета, например: «лидокаин на 70 кг».</i>"
+            )
+        return None
+
+    if weight < 3 or weight > 300:
+        return f"⚠️ <i>Указан некорректный вес ({weight} кг). Пожалуйста, укажите реальный вес пациента.</i>"
+
+    if weight < 35:
+        is_child = True
+
+    if drug == "articaine" or drug is None:
+        drug_name = "Артикаин 4% (1:100 000 / 1:200 000)"
+        carpsize = 1.7
+        mg_per_carp = 68.0
+        mg_per_kg = 5.0 if is_child else 7.0
+        abs_max_mg = 500.0
+    elif drug == "mepivacaine":
+        drug_name = "Мепивакаин 3% (Скандонест без адреналина)"
+        carpsize = 1.8
+        mg_per_carp = 54.0
+        mg_per_kg = 4.4
+        abs_max_mg = 400.0
+    elif drug == "lidocaine":
+        drug_name = "Лидокаин 2% (с адреналином)"
+        carpsize = 1.8
+        mg_per_carp = 36.0
+        mg_per_kg = 4.4 if is_child else 7.0
+        abs_max_mg = 500.0
+
+    calc_by_weight = weight * mg_per_kg
+    effective_max_mg = min(calc_by_weight, abs_max_mg)
+    hit_ceiling = calc_by_weight >= abs_max_mg
+    ceiling_weight_threshold = abs_max_mg / mg_per_kg
+
+    max_carpules_exact = effective_max_mg / mg_per_carp
+    safe_carpules_floor = int(max_carpules_exact)
+
+    # Правильное склонение в родительном падеже: "до N карпул / карпулы"
+    rem100 = safe_carpules_floor % 100
+    rem10 = safe_carpules_floor % 10
+    if rem100 in (11, 12, 13, 14):
+        carp_declension = f"{safe_carpules_floor} карпул"
+    elif rem10 == 1:
+        carp_declension = f"{safe_carpules_floor} карпулы"
+    else:
+        carp_declension = f"{safe_carpules_floor} карпул"
+
+    category_str = "Ребёнок" if is_child else "Взрослый"
+
+    out = [
+        f"🧮 <b>Клинический расчет анестезии: {drug_name}</b>\n",
+        f"👤 <b>Пациент:</b> {category_str}, вес <b>{weight:g} кг</b>",
+        f"📏 <b>Норма расчета:</b> {mg_per_kg} мг/кг (абсолютный потолок: {abs_max_mg:g} мг)\n",
+        "📊 <b>Математический расчет:</b>",
+        f"• По весу ({weight:g} кг × {mg_per_kg} мг/кг) = <b>{calc_by_weight:g} мг</b>",
+    ]
+
+    if hit_ceiling:
+        out.append(
+            f"• ⚠️ <b>Сработал абсолютный потолок {abs_max_mg:g} мг</b> "
+            f"(для данного препарата наступает уже при весе ≥ {ceiling_weight_threshold:.1f} кг)."
+        )
+        out.append(f"• <b>Итоговый допустимый предел:</b> <b>{effective_max_mg:g} мг</b>\n")
+    else:
+        out.append(f"• <b>Итоговый допустимый предел:</b> <b>{effective_max_mg:g} мг</b> (не превышает потолок {abs_max_mg:g} мг)\n")
+
+    out.extend([
+        f"💉 <b>Допустимое количество карпул (по {carpsize} мл = {mg_per_carp:g} мг):</b>",
+        f"• Точное значение: <code>{effective_max_mg:g} / {mg_per_carp:g}</code> = <b>{max_carpules_exact:.2f} карпул</b>",
+        f"• <b>Безопасный максимум:</b> <b>до {carp_declension}</b> ({safe_carpules_floor * mg_per_carp:g} мг)\n",
+        "⚠️ <i>Примечание: Это максимальная доза для соматически здорового пациента. "
+        "При коморбидности (сердечно-сосудистые патологии, печеночная/почечная недостаточность) "
+        "дозировку следует снижать, а также строго контролировать дозу вазоконстриктора (адреналина)!</i>"
+    ])
+
+    return "\n".join(out)
+
+
+def build_main_menu_markup():
+    """Строит инлайн-клавиатуру главного меню — 3 реальные кнопки врача."""
+    from telethon import Button
+    return [
+        [Button.inline("💊 Препараты и дозы", data="nav:calc"),   Button.inline("🔬 Разобрать снимок", data="nav:xray")],
+        [Button.inline("🔍 Найти статью / протокол", data="nav:web")],
+        [Button.inline("💬 Задать клинический вопрос", data="nav:chat")],
+        [Button.inline("⭐ Мои закладки", data="nav:bookmarks"), Button.inline("⚙️ Настройки", data="nav:settings")],
+    ]
+
+
+def build_reply_keyboard():
+    """Строит постоянную нижнюю ReplyKeyboardMarkup — только нужные врачу кнопки."""
+    from telethon import types
+    return types.ReplyKeyboardMarkup(
+        rows=[
+            types.KeyboardButtonRow(buttons=[
+                types.KeyboardButton(text="💊 Препараты и дозы"),
+                types.KeyboardButton(text="🔍 Найти статью")
+            ]),
+            types.KeyboardButtonRow(buttons=[
+                types.KeyboardButton(text="⭐ Закладки"),
+                types.KeyboardButton(text="⌨️ Меню")
+            ]),
+        ],
+        resize=True,
+        single_use=False,
+        persistent=True
+    )
+
+
+# Алиасы функций клавиатур для совместимости
+get_main_reply_keyboard = build_reply_keyboard
+get_main_inline_keyboard = build_main_menu_markup
+
+
+MAIN_MENU_TEXT = (
+    "👋 <b>StomChat AI — клинический ассистент для врача-стоматолога</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━\n"
+    "Просто напишите свой вопрос — или выберите что нужно:\n\n"
+    "💊 <b>Препараты и дозы</b> — анестетики, антибиотики, НПВС по весу и соматике\n"
+    "🔬 <b>Разобрать снимок</b> — пришлите рентген, ОПТГ или КЛКТ\n"
+    "🔍 <b>Найти статью / протокол</b> — поиск в PubMed, Cochrane, гайдлайны\n"
+    "💬 <b>Клинический вопрос</b> — консультация по диагнозу, тактике, технике\n"
+    "⭐ <b>Мои закладки</b> — посты, сохранённые из группы\n\n"
+    "<i>Принимаю голосовые сообщения, фото, снимки. "
+    f"Помню последние {PM_HISTORY_LIMIT} сообщений диалога.</i>"
+)
+
+
+def get_main_menu_card_text() -> str:
+    """Возвращает форматированный текст карточки Главного меню."""
+    return MAIN_MENU_TEXT
 
 
 async def init_assistant(bot_client):
@@ -1006,7 +1487,8 @@ _CORPUS_ENTRY_MAX_CHARS = 1200
 def _rank_corpus_entries(entries, keywords):
     """
     Сортирует найденные фрагменты по числу РАЗНЫХ ключевых слов запроса,
-    стоматологические веса выше.
+    стоматологические веса выше. Фрагменты, содержащие несколько ключевых
+    слов одновременно (пересечение терминов), получают максимальный приоритет.
 
     Без ранжирования в промпт уходило то, что первым нашлось по первому же
     ключевому слову: на вопрос про боль после лечения канала в справку
@@ -1014,7 +1496,7 @@ def _rank_corpus_entries(entries, keywords):
     про BOPT и про CAD/CAM. То есть модели скармливали ровно ту приманку для
     клинической отсебятины, которую следующие строки промпта запрещают.
     """
-    if not entries:
+    if not entries or not keywords:
         return []
 
     weights = {kw: (2 if is_dental_keyword(kw) else 1) for kw in keywords}
@@ -1031,7 +1513,12 @@ def _rank_corpus_entries(entries, keywords):
         
         # CRITICAL: Discard entries that matched in SQL but failed the regex boundary check!
         if score > 0:
-            scored.append((score, distinct, -idx, entry))
+            intersection_boost = (distinct - 1) * 10 if distinct > 1 else 0
+            total_score = score + intersection_boost
+            scored.append((total_score, distinct, -idx, entry))
+
+    if not scored:
+        return []
 
     scored.sort(reverse=True)
 
@@ -1219,98 +1706,93 @@ async def search_knowledge_corpus(keywords):
         return "", ""
 
     def sync_search():
-        wiki_facts = []
-        archive_msgs = []
-        # Множество общее для справки и архива: если один и тот же текст лежит
-        # в обеих базах, второй раз он в промпт не идёт. Побеждает справка —
-        # она собирается первой и в ней у факта есть рубрика.
-        seen_bodies = set()
-        rows_per_kw = _rows_per_keyword(len(keywords))
+        try:
+            wiki_facts = []
+            archive_msgs = []
+            # Множество общее для справки и архива: если один и тот же текст лежит
+            # в обеих базах, второй раз он в промпт не идёт. Побеждает справка —
+            # она собирается первой и в ней у факта есть рубрика.
+            seen_bodies = set()
+            rows_per_kw = _rows_per_keyword(len(keywords))
 
-        # 1. Search stomat_wiki.db
-        if os.path.exists("stomat_wiki.db"):
-            try:
-                import re
-                def regexp(expr, item):
-                    if item is None:
-                        return 0
-                    return 1 if re.search(expr, item, re.IGNORECASE) else 0
-
-                with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=30)) as conn:
-                    conn.execute("PRAGMA busy_timeout = 30000")
-                    
-                    global _WIKI_WAL_READY
-                    if not _WIKI_WAL_READY:
-                        conn.execute("PRAGMA journal_mode = WAL")
-                        _WIKI_WAL_READY = True
+            # 1. Search stomat_wiki.db
+            if os.path.exists("stomat_wiki.db"):
+                try:
+                    with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=30)) as conn:
+                        conn.execute("PRAGMA busy_timeout = 30000")
                         
-                    conn.create_function("REGEXP", 2, regexp)
-                    c = conn.cursor()
-                    for kw in keywords:
-                        c.execute(
-                            "SELECT category_code, content FROM distilled_facts "
-                            "WHERE content REGEXP ? LIMIT ?",
-                            (rf'\b{re.escape(kw)}', rows_per_kw)
-                        )
-                        for row in c.fetchall():
-                            body_key = _corpus_body_key(row[1])
-                            if body_key in seen_bodies:
-                                continue
-                            seen_bodies.add(body_key)
-                            wiki_facts.append(_corpus_entry(f"[{row[0]}]", row[1]))
-                        if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
-                            break
-            except Exception as e:
-                logger.error(f"Error searching stomat_wiki.db: {e}")
+                        global _WIKI_WAL_READY
+                        if not _WIKI_WAL_READY:
+                            conn.execute("PRAGMA journal_mode = WAL")
+                            _WIKI_WAL_READY = True
+                            
+                        c = conn.cursor()
+                        for kw in keywords:
+                            where_clause, params = like_any_case("content", kw)
+                            c.execute(
+                                f"SELECT category_code, content FROM distilled_facts "
+                                f"WHERE {where_clause} LIMIT ?",
+                                params + (rows_per_kw,)
+                            )
+                            for row in c.fetchall():
+                                body_key = _corpus_body_key(row[1])
+                                if body_key in seen_bodies:
+                                    continue
+                                seen_bodies.add(body_key)
+                                wiki_facts.append(_corpus_entry(f"[{row[0]}]", row[1]))
+                            if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
+                                break
+                except Exception as e:
+                    logger.error(f"Error searching stomat_wiki.db: {e}")
 
-        # 2. Search stomat_archive.db
-        if os.path.exists("stomat_archive.db"):
-            try:
-                import re
-                def regexp(expr, item):
-                    if item is None:
-                        return 0
-                    return 1 if re.search(expr, item, re.IGNORECASE) else 0
-
-                with contextlib.closing(sqlite3.connect("stomat_archive.db", timeout=30)) as conn:
-                    conn.execute("PRAGMA busy_timeout = 30000")
-                    
-                    global _ARCHIVE_WAL_READY
-                    if not _ARCHIVE_WAL_READY:
-                        conn.execute("PRAGMA journal_mode = WAL")
-                        _ARCHIVE_WAL_READY = True
+            # 2. Search stomat_archive.db
+            if os.path.exists("stomat_archive.db"):
+                try:
+                    with contextlib.closing(sqlite3.connect("stomat_archive.db", timeout=30)) as conn:
+                        conn.execute("PRAGMA busy_timeout = 30000")
                         
-                    conn.create_function("REGEXP", 2, regexp)
-                    c = conn.cursor()
-                    for kw in keywords:
-                        c.execute(
-                            "SELECT sender_name, text FROM archive_messages "
-                            "WHERE text REGEXP ? AND TRIM(text) <> '' "
-                            f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
-                            "AND TRIM(text) NOT LIKE '%?' "
-                            "LIMIT ?",
-                            (rf'\b{re.escape(kw)}', rows_per_kw)
-                        )
-                        for row in c.fetchall():
-                            body_key = _corpus_body_key(row[1])
-                            if body_key in seen_bodies:
-                                continue
-                            seen_bodies.add(body_key)
-                            archive_msgs.append(_corpus_entry(f"{row[0]}:", row[1]))
-                        if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
-                            break
-            except Exception as e:
-                logger.error(f"Error searching stomat_archive.db: {e}")
+                        global _ARCHIVE_WAL_READY
+                        if not _ARCHIVE_WAL_READY:
+                            conn.execute("PRAGMA journal_mode = WAL")
+                            _ARCHIVE_WAL_READY = True
+                            
+                        c = conn.cursor()
+                        for kw in keywords:
+                            where_clause, params = like_any_case("text", kw)
+                            c.execute(
+                                f"SELECT sender_name, text FROM archive_messages "
+                                f"WHERE {where_clause} AND TRIM(text) <> '' "
+                                f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                f"AND TRIM(text) NOT LIKE '%?' "
+                                f"LIMIT ?",
+                                params + (rows_per_kw,)
+                            )
+                            for row in c.fetchall():
+                                body_key = _corpus_body_key(row[1])
+                                if body_key in seen_bodies:
+                                    continue
+                                seen_bodies.add(body_key)
+                                archive_msgs.append(_corpus_entry(f"{row[0]}:", row[1]))
+                            if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
+                                break
+                except Exception as e:
+                    logger.error(f"Error searching stomat_archive.db: {e}")
 
-        wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords))
-        archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords))
-        return wiki_corpus, archive_corpus
+            wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords)) if wiki_facts else ""
+            archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords)) if archive_msgs else ""
+            return wiki_corpus, archive_corpus
+        except Exception as e:
+            logger.error(f"Error in sync_search: {e}")
+            return "", ""
 
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, sync_search)
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, sync_search)
+    except Exception as e:
+        logger.error(f"Error in search_knowledge_corpus: {e}")
+        return "", ""
 
 async def query_db_async(query_sql, params=()):
-    import database
     def operation():
         with database._connection() as db:
             c = db.cursor()
@@ -1559,9 +2041,9 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
                 "не повод отклонять общее клиническое рассуждение.]\n"
             )
 
-        prompt = f"""Ты — клинический рецензент стоматологического Telegram-чата.
+        prompt = f"""Ты — строгий клинический рецензент стоматологического Telegram-чата.
 Тебе дан контекст переписки, справка из базы знаний и черновик ответа ИИ-ассистента.
-Твоя задача: оценить, является ли черновик корректным, безопасным ответом.
+Твоя задача: оценить, является ли черновик корректным, профессиональным и безопасным ответом.
 
 Контекст переписки:
 {context_str}
@@ -1570,13 +2052,15 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 {draft_reply}
 
 Отклони черновик (ok: false), если:
-1. Опасная клиническая галлюцинация или совет, угрожающий пациенту.
-2. Ответ содержит выдуманные дозировки, протоколы или конкретные цифры (торк, концентрации), явно противоречащие общепринятой клинической практике.
-3. Тон ответа высокомерен, агрессивен или неуместен.
-4. Ответ вообще не относится к медицине/стоматологии.
+1. Опасная клиническая галлюцинация, совет, угрожающий пациенту, или грубая ошибка в патофизиологии/биомеханике.
+2. Черновик содержит поверхностный псевдонаучный жаргон, выдуманные термины или бессодержательные утверждения без доказательного объяснения механизма (например, вбросы вроде "нужна ортодонтическая хирургия, иначе резорбция").
+3. Ответ содержит неуместные, несерьёзные или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄).
+4. Тон высокомерен, саркастичен, токсичен или представляет собой бессмысленный однострочный вброс/комментарий.
+5. Ответ содержит выдуманные дозировки, протоколы или КОНКРЕТНЫЕ ЦИФРЫ, противоречащие общепринятой практике.
+6. Ответ вообще не относится к медицине/стоматологии или уводит тему в сторону.
 
 Одобри черновик (ok: true), если:
-— Ответ клинически адекватен, по теме и безопасен. Отсутствие исчерпывающей справки само по себе не повод отклонять ответ, если он соответствует знаниям доказательной медицины.
+— Ответ клинически грамотен, профессионален, спокоен, по теме и безопасен.
 
 Отвечай СТРОГО в формате JSON без дополнительного текста:
 {{"ok": true/false, "reason": "одна фраза на русском"}}
@@ -1618,22 +2102,21 @@ async def check_llm_triage(context_msgs):
     """
     try:
         context_str = "\n".join(context_msgs)
-        triage_prompt = f"""Ты — клинический координатор стоматологического Telegram-чата "StomChat".
+        triage_prompt = f"""Ты — строгий клинический координатор стоматологического Telegram-чата "StomChat".
 Твоя задача — проанализировать последние сообщения и решить, уместен ли ответ ИИ-ассистента.
 
-Когда ОТВЕЧАТЬ (should_reply: true):
-1. Прямой вопрос к боту (тег, упоминание).
-2. Чёткий клинический/технический вопрос к сообществу без ответа (протоколы, материалы, осложнения, диагностика, выбор тактики).
-3. Разбор клинического кейса или снимка где просят мнение коллег.
+ГЛАВНЫЙ ПРИНЦИП: Незваный бот в чате — это РАЗДРАЖИТЕЛЬ, если он влезает в живой разговор людей. По умолчанию бот должен МОЛЧАТЬ (should_reply: false).
 
-Когда ИГНОРИРОВАТЬ (should_reply: false):
-1. Двое конкретных коллег общаются между собой — спорят, объясняют, уточняют. Третий голос (бот) будет лишним.
-2. Обсуждение НЕ стоматологической темы: налоги, зарплаты, автомобили, политика, погода, юмор, расписание, цены, оборудование (аспираторы, кресла).
-3. Мысли вслух, короткие неполные реплики ("посмотрим", "я делаю так", "ок", "спасибо").
-4. Вопрос уже получил конкретный ответ от живых коллег выше в чате.
-5. Чисто эмоциональная реакция — возмущение, восхищение, шутки.
+Когда ОТВЕЧАТЬ (should_reply: true) — ТОЛЬКО В ЭТИХ СЛУЧАЯХ:
+1. Прямой вопрос/обращение к боту (тег @, упоминание бота, прямой ответ на реплику бота).
+2. Конкретный клинический вопрос/кейс от врача, на который в чате НИКТО НЕ ОТВЕТИЛ (висит без ответа, врачу нужна помощь).
 
-КРИТИЧЕСКИ ВАЖНО: Если последние 3+ сообщения — это диалог двух конкретных людей (одни и те же имена туда-обратно) — это их разговор, НЕ ЛЕЗТЬ.
+Когда КАТЕГОРИЧЕСКИ ИГНОРИРОВАТЬ (should_reply: false):
+1. ИДЕТ ЖИВОЙ РАЗГОВОР/СПОР МЕЖДУ ЛЮДЬМИ: Если 2 или более коллег уже переписываются, спорят, отвечают друг другу, делятся мнениями — НЕ ВМЕШИВАТЬСЯ! Не встревать со своим мнением, не делать реплик-комментариев.
+2. Вопрос уже обсуждается живыми участниками.
+3. Нерелевантные или неклинические темы (налоги, юмор, быт, цены, работа клиники, расписание, флуд).
+4. Короткие реплики, шутки, сарказм, мысли вслух ("дорастет", "есть кейсы", "не безопасно", "кыш").
+5. Если ответ бота будет просто короткой репликой/вбросом на чужое сообщение — СТРОГО ЗАПРЕЩЕНО.
 
 Последние сообщения в чате:
 {context_str}
@@ -1658,11 +2141,14 @@ async def check_llm_triage(context_msgs):
         if start != -1 and end != -1:
             text = text[start:end+1]
         
-        import json
         data = json.loads(text)
         should_reply = data.get("should_reply", False)
         reason = data.get("reason", "No reason provided")
-        confidence = data.get("confidence", 1.0)
+        confidence = float(data.get("confidence", 1.0))
+        
+        if confidence < 0.85 and should_reply:
+            logger.info(f"Llama triage confidence too low ({confidence}). Overriding should_reply to False.")
+            should_reply = False
         
         logger.info(f"Llama Triage decision: should_reply={should_reply} (confidence={confidence}). Reason: {reason}")
         return should_reply
@@ -1786,7 +2272,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # прошло более 5 сообщений от других участников, значит тема сместилась. Игнорируем.
                 try:
                     msgs_since = await query_db_async(
-                        "SELECT COUNT(*) FROM messages WHERE msg_id > ?",
+                        "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
                         (reply_to_msg_id,)
                     )
                     count_since = msgs_since[0][0] if msgs_since else 0
@@ -1944,7 +2430,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                             extra = [m for m in context_msgs if m not in seen]
                             combined = thread_msgs + extra
                             
-                            import re
                             def _get_msg_id(s):
                                 m = re.search(r'\[Сообщение #(\d+)', s)
                                 return int(m.group(1)) if m else 0
@@ -2021,7 +2506,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
     # Определяем обращение ДО промпта — сами, не делегируем модели.
     # Модель просто начнёт с готового префикса, выбор уже сделан.
-    import random
     if is_dialogue:
         address_prefix = ""  # В диалоге без обращения
     else:
@@ -2090,29 +2574,25 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 1. {address_line}
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
-4. Тон: прямой, уверенный, peer-to-peer, как живой опытный врач-стоматолог в чате с коллегами. Используй привычный профессиональный сленг (снимок вместо рентгенограмма, каналы вместо корневые каналы, коронка, ортопед, терапевт, хирург и т.д.). Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением". Подробнее об адаптации тона читай в правиле 13.
+4. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Используй профессиональный стоматологический язык. Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением".
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-6. КЛИНИЧЕСКАЯ ЛОГИКА И СТРОГИЙ EBM: Ты — практикующий врач с глубоким пониманием патфизиологии и анатомии. Отвечай только на основе строгой клинической логики и принципов доказательной медицины (EBM). Категорически запрещено выдумывать патофизиологические связи между непрофильными категориями (например, связать механическую/химическую стираемость эмали с рецессией десны), если между ними нет прямой причинно-следственной связи. Запрещены обывательские штампы и искажения терминов. Четко разграничивай причины и следствия.
+6. КЛИНИЧЕСКАЯ ЛОГИКА, МЕХАНИЗМ И СТРОГИЙ EBM: Ты — практикующий врач с глубоким пониманием патфизиологии и биомеханики. Отвечай только на основе строгой клинической логики и доказательной медицины (EBM). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО бросаться псевдонаучными фразочками, выдуманным жаргоном (вроде «ортодонтическая хирургия», «вертикальная резорбция») или делать безапелляционные утверждения без объяснения биологического механизма. Никаких пустых бессмысленных реплик из одной фразы. Если отвечаешь — давай структурированное, клинически грамотное объяснение сути, либо не отвечай вообще.
 7. Не повторяй то, что уже написали в чате. Принеси что-то новое — факт, уточнение, протокол, нюанс.
-8. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ (например, в конце предложения). Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, только один 😎 или один 😤).
+8. СМАЙЛИКИ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать глупые, несерьёзные, панибратские или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄). В профессиональном клиническом ответе смайлики НЕ НУЖНЫ.
 9. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать в ответе техническую информацию вроде "#168569", "в ответ на #168569", "Сообщение #..." и любые другие ID из контекста. Твой текст должен выглядеть как обычное человеческое сообщение в чате, без системного мусора.
 10. ПРОАКТИВНОСТЬ И УМЕСТНОСТЬ:
     - Отвечай строго к месту (по сути текущего вопроса в конце истории диалога). Чётко отделяй текущую живую тему от сухих фактов в Справке/Архиве — не начинай цитировать архив как часть текущего разговора. Не неси околесицу и не зацикливайся на старых сообщениях.
-    - Если в чате разгорается конфликт, бессмысленный спор или переписка явно зациклилась на какой-то ерунде, проактивно разряди обстановку. Предложи сменить тему на интересный клинический случай, задай коллегам свежий профессиональный вопрос или вспомни уместный факт из прошлых обсуждений чата, переведя разговор в конструктивное русло с мягким юмором.
+    - Если в чате разгорается конфликт, бессмысленный спор или переписка явно зациклилась на какой-то ерунде, проактивно разряди обстановку. Предложи сменить тему на интересный клинический случай, задай коллегам свежий профессиональный вопрос или вспомни уместный факт из прошлых обсуждений чата, переведя разговор в конструктивное русло.
 11. ФУНКЦИОНАЛ БОТА: Если у тебя спрашивают "что ты умеешь", "какие команды есть" или просят описать функционал — честно перечисли свои фишки: ответы на клинические вопросы, разбор снимков и рентгена (Vision), викторина /quiz, энциклопедия /wiki, клинические кейсы /case, калькулятор анестезии /calc, протоколы /protocols, поиск по базе /search, закладки /bookmarks (сохранять пост в чате — ответить на него словом «сохранить»), темы чата /stats, настройка стиля общения /style и ночные дайджесты. Прямо ЗДЕСЬ, в общем чате, работают ещё: сводка обсуждения /summary (или /итог), викторина для чата /poll (или /кейс), вопрос мне командой /ask, объяснение термина /what (или /что) — про них спрашивают чаще всего, а узнать о них негде. Перечисляй ТОЛЬКО из этого списка — других команд у тебя нет. Опиши кратко, по-свойски, и не тащи в ответ то, о чём не спрашивали.
-12. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
+12. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
 12.1. РАСЧЁТ ДОЗ АНЕСТЕТИКОВ — правило безопасности. Оно важнее стиля и важнее желания дать ответ:
     - Предел ВСЕГДА двойной: мг/кг И абсолютный максимум на приём. Берётся МЕНЬШЕЕ из двух. Считать только по мг/кг — типовая ошибка: при весе 100 кг это даёт 700 мг артикаина против допустимых 500.
     - Референсные максимумы для здорового взрослого: артикаин 4% — 7 мг/кг и не более 500 мг; мепивакаин 3% без вазоконстриктора — 4.4 мг/кг и не более 400 мг; лидокаин 2% с адреналином — 7 мг/кг и не более 500 мг. У детей норма на килограмм ниже, и абсолютный потолок проверяется всё равно.
     - Всегда показывай арифметику и переводи в карпулы, НАЗЫВАЯ объём карпулы, из которого считал: артикаин 4% при 1.7 мл — 68 мг в карпуле; мепивакаин 3% при 1.8 мл — 54 мг; лидокаин 2% при 1.8 мл — 36 мг. Врач должен иметь возможность проверить каждый шаг.
     - Это референсные максимумы, а не рекомендация дозы. Обязательно оговаривай, что при сопутствующей патологии, у детей, беременных и пожилых предел ниже, и что цифры надо сверить с инструкцией к конкретному препарату.
     - Если анестетик незнаком, концентрация не названа или в вопросе нет веса — НЕ считай и не угадывай. Спроси недостающее или честно скажи, что референса по этому препарату у тебя нет.
-13. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ:
-    Твой стержень — опытный, уверенный в себе стоматолог с хорошим чувством юмора. Но твой настрой должен быть гибким и органично меняться вслед за беседой:
-    - Если коллеги общаются тепло, поддерживают друг друга или делятся хорошим настроением — будь на позитиве, отвечай дружелюбно и одобряюще, без лишней сухости и высокомерия.
-    - Если идёт клиническое обсуждение — отвечай профессионально, но без категоричности. Не утверждай вещи безапелляционно, оставляй пространство для клинического мнения коллег («я бы сделал так, но надо смотреть по ситуации...»).
-    - Если в чате шутят, иронизируют или делятся усталостью от работы — можешь поддержать разговор профессиональным юмором или лёгким цинизмом. Твоя роль — классный коллега в ординаторской, а не токсичный спорщик.
-    - Здоровая зубастость (когда можно проявить токсичность): Если кто-то прямо стебёт тебя, пытается подколоть, ведёт себя пассивно-агрессивно или высокомерно по отношению к тебе или коллегам — тут тебе официально разрешено «выпустить зубы». Ответь едко, тонко и остроумно, умой собеседника профессиональным стёбом с высоты своего опыта, но оставайся в рамках врачебного класса (без площадной ругани, мата и прямой грубости).
+14. МЕТА-ПРАВИЛО (КРИТИЧЕСКИЙ ЗАПРЕТ): Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
+15. ЗАПРЕТ ПАНИБРАТСТВА И ПОДДАКИВАНИЯ (КАТЕГОРИЧЕСКИЙ ЗАПРЕТ): Категорически запрещено писать пустые поддакивания («Согласен с...», «Пациент спасибо не скажет», «Поддерживаю коллегу»). Запрещено притворяться человеком. Давай только четкую доказательную информацию (критерии EBM, протоколы, дозы, риски), либо не встревай в разговор.
 
 {style_instruction}
 """
@@ -2138,30 +2618,26 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 1. {address_line}
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
-4. Тон: прямой, уверенный, peer-to-peer, как живой опытный врач-стоматолог в чате с коллегами. Используй привычный профессиональный сленг (снимок вместо рентгенограмма, каналы вместо корневые каналы, коронка, ортопед, терапевт, хирург и т.д.). Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением". Подробнее об адаптации тона читай в правиле 13.
+4. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Используй профессиональный стоматологический язык. Полностью избегай канцелярщины и фраз типа "Как ИИ...", "Рад помочь", "С уважением".
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
-6. Только доказанные факты. Домыслы запрещены. Если данных нет — скажи прямо: «По базе данных нет, но на практике...». Не путай последовательность этапов лечения.
+6. Только доказанные факты (EBM). Домыслы и псевдонаучный жаргон запрещены. Объясняй биологический механизм. Не путай последовательность этапов лечения. Никаких пустых поверхностных вбросов.
 7. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
-8. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ (например, в конце предложения). Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, только один 😎 или один 😤).
+8. СМАЙЛИКИ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать глупые, несерьёзные, панибратские или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄). В профессиональном клиническом ответе смайлики НЕ НУЖНЫ.
 9. Разметка: только HTML — <b>жирный</b>. Никакого Markdown (**текст**). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать в ответе техническую информацию вроде "#168569", "в ответ на #168569", "Сообщение #..." и любые другие ID из контекста. Твой текст должен выглядеть как обычное человеческое сообщение в чате, без системного мусора.
 10. ПРОАКТИВНОСТЬ И УМЕСТНОСТЬ:
     - Отвечай строго к месту (по сути текущего вопроса в конце истории диалога). Чётко отделяй текущую живую тему от сухих фактов в Справке/Архиве — не начинай цитировать архив как часть текущего разговора. Не неси околесицу и не зацикливайся на старых сообщениях.
-    - Если в чате разгорается конфликт, бессмысленный спор или переписка явно зациклилась на какой-то ерунде, проактивно разряди обстановку. Предложи сменить тему на интересный клинический случай, задай коллегам свежий профессиональный вопрос или вспомни уместный факт из прошлых обсуждений чата, переведя разговор в конструктивное русло с мягким юмором.
+    - Если в чате разгорается конфликт, бессмысленный спор или переписка явно зациклилась на какой-то ерунде, проактивно разряди обстановку. Предложи сменить тему на интересный клинический случай, задай коллегам свежий профессиональный вопрос или вспомни уместный факт из прошлых обсуждений чата, переведя разговор в конструктивное русло.
 11. ФУНКЦИОНАЛ БОТА: Если у тебя спрашивают "что ты умеешь", "какие команды есть" или просят описать функционал — честно перечисли свои фишки: ответы на клинические вопросы, разбор снимков и рентгена (Vision), викторина /quiz, энциклопедия /wiki, клинические кейсы /case, калькулятор анестезии /calc, протоколы /protocols, поиск по базе /search, закладки /bookmarks (сохранять пост в чате — ответить на него словом «сохранить»), темы чата /stats, настройка стиля общения /style и ночные дайджесты. Прямо ЗДЕСЬ, в общем чате, работают ещё: сводка обсуждения /summary (или /итог), викторина для чата /poll (или /кейс), вопрос мне командой /ask, объяснение термина /what (или /что) — про них спрашивают чаще всего, а узнать о них негде. Перечисляй ТОЛЬКО из этого списка — других команд у тебя нет. Опиши кратко, по-свойски, и не тащи в ответ то, о чём не спрашивали.
-12. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
+12. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
 12.1. РАСЧЁТ ДОЗ АНЕСТЕТИКОВ — правило безопасности. Оно важнее стиля и важнее желания дать ответ:
     - Предел ВСЕГДА двойной: мг/кг И абсолютный максимум на приём. Берётся МЕНЬШЕЕ из двух. Считать только по мг/кг — типовая ошибка: при весе 100 кг это даёт 700 мг артикаина против допустимых 500.
     - Референсные максимумы для здорового взрослого: артикаин 4% — 7 мг/кг и не более 500 мг; мепивакаин 3% без вазоконстриктора — 4.4 мг/кг и не более 400 мг; лидокаин 2% с адреналином — 7 мг/кг и не более 500 мг. У детей норма на килограмм ниже, и абсолютный потолок проверяется всё равно.
     - Всегда показывай арифметику и переводи в карпулы, НАЗЫВАЯ объём карпулы, из которого считал: артикаин 4% при 1.7 мл — 68 мг в карпуле; мепивакаин 3% при 1.8 мл — 54 мг; лидокаин 2% при 1.8 мл — 36 мг. Врач должен иметь возможность проверить каждый шаг.
     - Это референсные максимумы, а не рекомендация дозы. Обязательно оговаривай, что при сопутствующей патологии, у детей, беременных и пожилых предел ниже, и что цифры надо сверить с инструкцией к конкретному препарату.
     - Если анестетик незнаком, концентрация не названа или в вопросе нет веса — НЕ считай и не угадывай. Спроси недостающее или честно скажи, что референса по этому препарату у тебя нет.
-13. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ:
-    Твой стержень — опытный, уверенный в себе стоматолог с хорошим чувством юмора. Но твой настрой должен быть гибким и органично меняться вслед за беседой:
-    - Если коллеги общаются тепло, поддерживают друг друга или делятся хорошим настроением — будь на позитиве, отвечай дружелюбно и одобряюще, без лишней сухости и высокомерия.
-    - Если идёт клиническое обсуждение — отвечай профессионально, но без категоричности. Не утверждай вещи безапелляционно, оставляй пространство для клинического мнения коллег («я бы сделал так, но надо смотреть по ситуации...»).
-    - Если в чате шутят, иронизируют или делятся усталостью от работы — можешь поддержать разговор профессиональным юмором или лёгким цинизмом. Твоя роль — классный коллега в ординаторской, а не токсичный спорщик.
-    - Здоровая зубастость (когда можно проявить токсичность): Если кто-то прямо стебёт тебя, пытается подколоть, ведёт себя пассивно-агрессивно или высокомерно по отношению к тебе или коллегам — тут тебе официально разрешено «выпустить зубы». Ответь едко, тонко и остроумно, умой собеседника профессиональным стёбом с высоты своего опыта, но оставайся в рамках врачебного класса (без площадной ругани, мата и прямой грубости).
-14. ЗАПРЕТ ПОДМЕНЫ ТЕМЫ (КРИТИЧЕСКОЕ ПРАВИЛО): Ты ОБЯЗАН отвечать строго на ту тему, которую поднял пользователь. Категорически запрещено "уводить" разговор в клиническую сторону, если вопрос был про налоги, оборудование, бизнес, юридические моменты или что-то организационное. Пример грубой ошибки: человек спросил "это грабёж?" про удержание НДФЛ → бот отвечает про фотопротоколы ортопедии. Это полный провал. Если твой RAG вытащил клинические данные, а вопрос — про деньги/оборудование/быт, просто НЕ ИСПОЛЬЗУЙ клинический контекст. Отвечай только на то, о чём спросили.
+13. ТОНАЛЬНОСТЬ: Не утверждай вещи безапелляционно, оставляй пространство для клинического мнения коллег («я бы сделал так, но надо смотреть по ситуации...»).
+15. ЗАПРЕТ ПОДМЕНЫ ТЕМЫ (КРИТИЧЕСКОЕ ПРАВИЛО): Ты ОБЯЗАН отвечать строго на ту тему, которую поднял пользователь. Категорически запрещено "уводить" разговор в клиническую сторону, если вопрос был про налоги, оборудование, бизнес, юридические моменты или что-то организационное. Пример грубой ошибки: человек спросил "это грабёж?" про удержание НДФЛ → бот отвечает про фотопротоколы ортопедии. Это полный провал. Если твой RAG вытащил клинические данные, а вопрос — про деньги/оборудование/быт, просто НЕ ИСПОЛЬЗУЙ клинический контекст. Отвечай только на то, о чём спросили.
+16. ЗАПРЕТ ПАНИБРАТСТВА И ПОДДАКИВАНИЯ (КАТЕГОРИЧЕСКИЙ ЗАПРЕТ): Категорически запрещено писать пустые поддакивания («Согласен с...», «Пациент спасибо не скажет», «Поддерживаю коллегу»). Запрещено притворяться человеком. Давай только четкую доказательную информацию (критерии EBM, протоколы, дозы, риски), либо возвращай IGNORE.
 
 {ignore_instruction}
 
@@ -2229,10 +2705,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         # Live mode OR direct reply in test chat: reply directly to user message!
         reply_message = reply_text
 
-        # Добавляем ненавязчивую рекламу ЛС в группе с вероятностью 15%
-        import random
+        # Добавляем ненавязчивую контекстную подсказку про ЛС с вероятностью 15%
         if random.random() < 0.15:
-            reply_message += random.choice(AD_HINTS)
+            reply_message += get_ad_hint(reply_message)
 
         try:
             await bot_client.send_message(
@@ -2258,7 +2733,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description):
     if msg_id in REPLIED_MSG_IDS:
         return False
-    import config
     state = load_state()
     
     # Check if the bot is temporarily silenced
@@ -2405,7 +2879,6 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 extra = [m for m in context_msgs if m not in seen]
                 combined = chain_msgs + extra
                 
-                import re
                 def _get_msg_id(s):
                     m = re.search(r'\[Сообщение #(\d+)', s)
                     return int(m.group(1)) if m else 0
@@ -2447,13 +2920,14 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
 ИНСТРУКЦИИ:
 1. ДЛИНА ОТВЕТА: {length_guideline}
-2. Тон — уверенный, peer-to-peer. Твой настрой должен быть гибким: поддерживай теплый и позитивный тон коллег, отвечай профессионально на серьезные клинические посты, и отвечай едким остроумным стебом (в рамках врачебного класса, без мата), если тебя или коллег пытаются подколоть или высмеять.
+2. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.
 3. Разметка: только HTML — <b>жирный</b>. Никакого Markdown.
 4. Только доказанные факты. Если данных нет — скажи честно.
 5. Добавляй ценность, не пересказывай подпись.
-6. ПРОАКТИВНОСТЬ: Если по снимку или вопросу неясно, либо у тебя есть сомнения — честно скажи об этом и сам задай уточняющие вопросы (например, спроси про симптоматику, КТ или анамнез). Веди себя как живой врач.
-7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс программы): не пытайся анализировать это как снимок зубов. Вместо этого достойно опиши, что именно изображено на картинке (например, 'вижу иконку ZIP-архива...', 'тут котик...'), и с иронией прокомментируй это в привязке к стоматологическим будням или работе.
-8. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+6. ПРОАКТИВНОСТЬ: Если по снимку или вопросу неясно, либо у тебя есть сомнения — честно скажи об этом и сам задай уточняющие вопросы (например, спроси про симптоматику, КТ или анамнез).
+7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс программы): не пытайся анализировать это как снимок зубов. Вместо этого достойно опиши, что именно изображено на картинке (например, 'вижу иконку ZIP-архива...', 'тут котик...'), и спокойно прокомментируй это в привязке к стоматологическим будням или работе.
+8. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 
 {ignore_instruction}
 """
@@ -2594,6 +3068,83 @@ def _bookmark_snippet(value, limit=BOOKMARK_SNIPPET_CHARS):
     clipped = raw[:limit]
     suffix = "…" if len(raw) > limit else ""
     return html.escape(clipped, quote=False) + suffix
+
+
+# --- Клинические fallback-вопросы для викторин ------------------------------
+CLINICAL_QUIZ_FALLBACKS = [
+    {
+        "topic": "Эндодонтия",
+        "question": "Пациент жалуется на боли при накусывании в зубе 3.6 (лечен эндодонтически 2 года назад). На снимке: недопломбировка язычного канала на 2 мм, очаг разрежения костной ткани в области апекса 3 мм. Какова первоочередная тактика?",
+        "options": [
+            "Апикальная микрохирургия (резекция верхушки корня)",
+            "Ортопедическое перелечивание без распломбировки каналов",
+            "Повторное эндодонтическое лечение (ортоградная ревизия)",
+            "Удаление зуба с одномоментной дентальной имплантацией"
+        ],
+        "correct": 2,
+        "explanation": "Ортоградная ревизия системы корневых каналов — метод первого выбора при наличии проходимых каналов и апикального периодонтита."
+    },
+    {
+        "topic": "Ортопедия",
+        "question": "Пациенту препарируются зубы 1.1, 2.1 под цельнокерамические коронки из дисиликата лития (e.max CAD). Десна плотная, биотип толстый, планируется subgingival граница препарирования на 0.5 мм. Какой тип уступа и протокол фиксации рекомендован?",
+        "options": [
+            "Круговой уступ типа ножевидный край (knife-edge) и фиксация на цинк-фосфатный цемент",
+            "Сглаженный полукруглый уступ (chamfer) 0.8-1.0 мм и адгезивная фиксация на композитный цемент",
+            "Прямой уступ 90 градусов со скосом 45 градусов и фиксация на стеклоиономерный цемент",
+            "Препарирование без уступа и фиксация на временный безэвгенольный цемент"
+        ],
+        "correct": 1,
+        "explanation": "Для дисиликата лития рекомендован сглаженный уступ (chamfer/shoulder 0.8-1.0 мм) и адгезивная фиксация на композитный цемент светового или двойного отверждения."
+    },
+    {
+        "topic": "Терапия",
+        "question": "При препарировании глубокого кариеса в зубе 4.6 произошла случайная точечная перфорация свода пульпарной камеры (<0.5 мм). Кровотечение остановлено за 1 минуту 2% раствором NaOCl. Симптомов пульпита в анамнезе не было. Какова тактика?",
+        "options": [
+            "Прямое покрытие пульпы биокерамикой (MTA / Biodentine) и постоянная реставрация",
+            "Витальная ампутация (пульпотомия) с наложением формокрезола",
+            "Полная экстирпация пульпы и пломбирование каналов гуттаперчей",
+            "Наложение гидроксида кальция на 6 месяцев под временную пломбу"
+        ],
+        "correct": 0,
+        "explanation": "При случайном точечном вскрытии бессимптомной пульпы в условиях коффердама и быстром гемостазе методом выбора является прямое покрытие биокерамикой (МТА/Biodentine)."
+    },
+    {
+        "topic": "Хирургия",
+        "question": "Планируется удаление зуба 1.6 по поводу продольного перелома корня. Высота резидуального гребня до дна верхнечелюстного синуса составляет 4 мм, ширина 8 мм. Какая тактика наиболее обоснована для последующей имплантации?",
+        "options": [
+            "Одномоментная имплантация без синус-лифтинга и аугментации",
+            "Удаление зуба, закрытый транскрестальный синус-лифтинг и немедленная установка имплантата",
+            "Удаление с консервацией лунки и отсроченный открытый (латеральный) синус-лифтинг",
+            "Установка ультракороткого имплантата (4 мм) без синус-лифтинга"
+        ],
+        "correct": 2,
+        "explanation": "При резидуальной высоте кости 4 мм первичная стабильность недостаточна для безопасного закрытого синус-лифтинга; показана консервация лунки и отсроченный латеральный синус-лифтинг."
+    },
+    {
+        "topic": "Пародонтология",
+        "question": "У пациента 42 лет диагностирован генерализованный пародонтит III стадии. В области зуба 4.6 зондируется глубокий внутрикостный 2-стеночный карман глубиной 7 мм. Какой метод регенеративной терапии является наиболее доказательным?",
+        "options": [
+            "Только закрытый кюретаж с медикаментозной обработкой хлоргексидином",
+            "Лоскутная операция с направленной тканевой регенерацией (GTR/костный трансплантат + мембрана)",
+            "Гингивэктомия для полного устранения пародонтального кармана",
+            "Шинирование зуба лентой без хирургического вмешательства"
+        ],
+        "correct": 1,
+        "explanation": "При глубоких внутрикостных карманах доказанным методом восстановления утраченного прикрепления является направленная тканевая регенерация (GTR) с костнозамещающим материалом и мембраной."
+    },
+    {
+        "topic": "Травматология",
+        "question": "Пациент 20 лет обратился через 45 минут после полного вывиха (авульсии) зуба 1.1. Зуб транспортировался в молоке, коронка интактна, верхушка корня закрыта. Какова правильная последовательность экстренной помощи?",
+        "options": [
+            "Эндодонтическое лечение зуба вне полости рта, затем реплантация и жесткая фиксация",
+            "Обработка корня 70% спиртом, резекция верхушки корня и немедленная реплантация",
+            "Бережное промывание корня физраствором, немедленная реплантация, гибкая шина на 2 недели, эндодонтия через 7-10 дней",
+            "Помещение зуба в антисептический раствор на 24 часа с отсроченной реплантацией"
+        ],
+        "correct": 2,
+        "explanation": "По протоколу IADT зуб бережно промывают физраствором без касания корня, реплантируют, фиксируют гибкой шиной до 2 недель, а эндодонтическое лечение закрытого апекса начинают через 7-10 дней."
+    }
+]
 
 
 # --- Статистика тем чата (/stats) ------------------------------------------
@@ -2796,7 +3347,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 2. Разметка: только HTML. Без Markdown.
 """
     
-    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if 'status_msg' in locals() and status_msg:
@@ -2854,11 +3405,121 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
         logger.error(f"Failed to persist case examiner reply: {save_err}")
 
 
+_ACTIVE_PM_REQUESTS = {}
+
+
+async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_answer, req_id):
+    """
+    Фоновая генерация клинического дополнения к первичному ответу через GPT-OSS-120B (Groq) / Gemini.
+    Если найдена ценная дельта — отправляет второе сообщение спустя естественную паузу.
+    """
+    try:
+        # Пауза перед фоновым анализом (естественная задержка)
+        await asyncio.sleep(2.0)
+
+        # Защита от смены контекста: если пользователь уже прислал новое сообщение
+        if _ACTIVE_PM_REQUESTS.get(chat_id) != req_id:
+            logger.info(f"PM supplement discarded before generation: context changed for chat_id={chat_id}")
+            return
+
+        supplement_text, error = await generate_pm_supplement_async(
+            user_question=user_question,
+            initial_answer=initial_answer,
+            timeout=35.0,
+        )
+
+        if error or not supplement_text:
+            logger.info(f"PM supplement empty/error for chat_id={chat_id}: {error}")
+            return
+
+        supplement_text = supplement_text.strip()
+        # Проверка маркера NONE или слишком короткого/мусорного текста
+        if (
+            supplement_text == "NONE"
+            or supplement_text.upper().startswith("NONE")
+            or len(supplement_text) < 25
+        ):
+            logger.info(f"PM supplement returned NONE (answer complete) for chat_id={chat_id}")
+            return
+
+        # Повторная проверка контекста перед отправкой в Telegram
+        if _ACTIVE_PM_REQUESTS.get(chat_id) != req_id:
+            logger.info(f"PM supplement aborted before send: context changed for chat_id={chat_id}")
+            return
+
+        formatted_message = f"🔍 <b>Дополнительные клинические нюансы:</b>\n\n{supplement_text}"
+        formatted_message = clean_html_formatting(formatted_message)
+
+        await tg_safety.send_message(
+            bot_client,
+            chat_id,
+            formatted_message,
+            parse_mode='html',
+            timeout=20.0,
+            logger=logger,
+        )
+        await database.save_pm_message(chat_id, "Assistant", formatted_message)
+        logger.info(f"Successfully sent PM supplement follow-up to chat_id={chat_id}")
+    except Exception as e:
+        logger.warning(f"Fail-safe: PM supplement job failed chat_id={chat_id}: {e}", exc_info=False)
+
+
+def is_clinical_consultation_query(text: str, has_media: bool, has_dental_topic: bool) -> bool:
+    """
+    Определяет, является ли входящее сообщение клиническим вопросом или кейсом,
+    требующим углубленной клинической консультации / дополнения от 120B.
+    
+    Отсекает:
+    - Простые приветствия и смолл-ток ("привет", "как дела", "здорово", "добрый день")
+    - Благодарности и вежливость ("спасибо", "понял", "отлично", "ясно")
+    - Команды и мета-вопросы о боте ("кто ты", "что умеешь", "как тебя настроить")
+    - Короткие реплики без стоматологического контекста
+    """
+    if has_media:
+        return True
+        
+    text_clean = (text or "").strip().lower()
+    if not text_clean or len(text_clean) < 6:
+        return False
+        
+    small_talk_exact = {
+        "привет", "здравствуй", "здравствуйте", "здорово", "хай", "hello", "hi",
+        "как дела", "как ты", "как поживаешь", "что делаешь", "чем занят",
+        "спасибо", "благодарю", "понял", "ясно", "ок", "окей", "отлично", "хорошо",
+        "пока", "до свидания", "спокойной ночи", "доброе утро", "добрый вечер",
+        "кто ты", "что ты умеешь", "как тебя зовут", "ты кто", "ты бот", "ты человек"
+    }
+    text_no_punct = re.sub(r"[^\w\s]", "", text_clean).strip()
+    if text_no_punct in small_talk_exact:
+        return False
+
+    if len(text_clean) < 40:
+        greetings = ("привет", "здравствуй", "добрый день", "доброе утро", "как дела", "спасибо", "что нового")
+        if any(text_clean.startswith(g) for g in greetings) and not has_dental_topic:
+            return False
+
+    if has_dental_topic:
+        return True
+
+    tooth_match = re.search(r"\b(?:[1-4][1-8]|[5-8][1-5])\b", text_clean) or re.search(r"\bзуб\w*", text_clean)
+    medical_markers = (
+        "боль", "болит", "отек", "пломб", "кариес", "пульпит", "периодонт",
+        "имплант", "коронк", "снимок", "кт", "клкт", "рентген", "уступ",
+        "анестез", "протокол", "цемент", "визир", "десна", "десне", "кост", "канал"
+    )
+    has_medical_marker = any(m in text_clean for m in medical_markers)
+
+    return bool(tooth_match and has_medical_marker)
+
+
 async def handle_private_message(bot_client, event):
     """Глубокий обработчик входящих личных сообщений (ЛС) бота с RAG, зрением и памятью."""
     try:
         chat_id = event.chat_id
         text = (event.message.message or "").strip()
+        
+        # Обновляем ID активного запроса для инвалидации устаревших фоновых задач дополнения
+        _ACTIVE_PM_REQUESTS[chat_id] = time.time()
         
         # Rate limit: PM requests allowed once per 5 seconds per user (allow commands through)
         is_command = text.lower().startswith("/")
@@ -2907,6 +3568,7 @@ async def handle_private_message(bot_client, event):
             user_ping = pings.setdefault(str(chat_id), {})
             user_ping["last_activity"] = datetime.now().isoformat()
             user_ping["ping_sent"] = False
+            user_ping["unanswered_pings"] = 0
             save_state(state)
         except Exception as ping_err:
             logger.error(f"Failed to record ping activity for {chat_id}: {ping_err}")
@@ -2930,13 +3592,42 @@ async def handle_private_message(bot_client, event):
 
         # Map text menu button clicks to slash commands
         btn_mapping = {
-            "📖 энциклопедия": "/wiki",
-            "🎮 клинический кейс": "/case",
-            "🎲 викторина": "/quiz",
+            # Постоянная нижняя панель быстрого доступа (ReplyKeyboardMarkup)
+            "📖 база знаний": "/wiki",
+            "база знаний": "/wiki",
+            "🎲 квиз": "/quiz",
+            "квиз": "/quiz",
             "🧮 калькулятор": "/calc",
+            "калькулятор": "/calc",
             "⭐ закладки": "/bookmarks",
+            "мои закладки": "/bookmarks",
+            "закладки": "/bookmarks",
+            "⌨️ главное меню": "/start",
+            "главное меню": "/start",
+            "меню": "/start",
+            "кнопка меню": "/start",
+            "навигация": "/start",
+
+            # Синонимы и легаси-кнопки
+            "📖 энциклопедия": "/wiki",
+            "энциклопедия": "/wiki",
+            "🎮 клинический кейс": "/case",
+            "клинический кейс": "/case",
+            "симулятор": "/case",
+            "симулятор кейсов": "/case",
+            "🎲 викторина": "/quiz",
+            "викторина": "/quiz",
+            "🌐 поиск в сети": "/web",
+            "поиск в сети": "/web",
+            "web-поиск": "/web",
             "📊 статистика чата": "/stats",
-            "⚙️ стиль общения": "/style"
+            "статистика чата": "/stats",
+            "статистика": "/stats",
+            "⚙️ стиль общения": "/style",
+            "стиль общения": "/style",
+            "стиль": "/style",
+            "📚 протоколы": "/protocols",
+            "протоколы": "/protocols"
         }
         if text.lower() in btn_mapping:
             text = btn_mapping[text.lower()]
@@ -3029,6 +3720,74 @@ async def handle_private_message(bot_client, event):
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
         
+        # Natural Language Intent Routing (Zero-Slash Routing)
+        doc = getattr(event.message, "document", None)
+        image_document = media_tools.image_document(event.message)
+        has_media_intent = (
+            getattr(event.message, "photo", None) is not None
+            or getattr(event.message, "video", None) is not None
+            or image_document is not None
+        )
+
+        if text and not text.startswith("/") and not has_media_intent:
+            detected = detect_user_intent(text)
+
+            # Если детерминированный fast-path не сработал, запускаем семантический LLM-триаж
+            if not detected and len(text.split()) >= 3:
+                try:
+                    sem_res = await classify_pm_intent_semantic_async(text)
+                    sem_intent = sem_res.get("intent")
+                    sem_conf = float(sem_res.get("confidence", 1.0))
+                    if sem_intent and sem_intent != "CLINICAL_CHAT" and sem_conf >= 0.75:
+                        if sem_intent == "WEB_SEARCH":
+                            q = sem_res.get("search_query") or text
+                            detected = UserIntent(INTENT_WEB_SEARCH, q)
+                        elif sem_intent == "CALCULATOR":
+                            detected = UserIntent(INTENT_CALCULATOR, text)
+                        elif sem_intent == "QUIZ":
+                            detected = UserIntent(INTENT_QUIZ)
+                        elif sem_intent == "CASE":
+                            detected = UserIntent(INTENT_CASE)
+                        elif sem_intent == "BOOKMARKS":
+                            detected = UserIntent(INTENT_BOOKMARKS, sem_res.get("search_query") or "")
+                except Exception as sem_err:
+                    logger.debug(f"Semantic triage skipped: {sem_err}")
+
+            if detected:
+                logger.info(
+                    "Zero-Slash Intent recognized: name=%s query=%r for chat_id=%s",
+                    detected.name, detected.query, chat_id
+                )
+                if user_state and user_state.get("state_type") == "case":
+                    await database.clear_user_interactive_state(chat_id)
+                    user_state = None
+                    await bot_client.send_message(
+                        entity=chat_id, 
+                        message="⏹️ <i>Активный клинический симулятор прерван для перехода в другой раздел.</i>", 
+                        parse_mode='html'
+                    )
+
+                if detected.name == INTENT_MENU:
+                    text = "/start"
+                elif detected.name == INTENT_HELP:
+                    text = "/help"
+                elif detected.name == INTENT_STYLE:
+                    text = "/style"
+                elif detected.name == INTENT_QUIZ:
+                    text = "/quiz"
+                elif detected.name == INTENT_CASE:
+                    text = "/case"
+                elif detected.name == INTENT_BOOKMARKS:
+                    text = f"/bookmarks {detected.query}".strip()
+                elif detected.name == INTENT_WEB_SEARCH:
+                    text = f"/web {detected.query}".strip()
+                elif detected.name == INTENT_CALCULATOR:
+                    instant_calc = calculate_anesthesia_instant(text)
+                    if instant_calc:
+                        await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
+                        return
+                    text = "/calc"
+
         # Автоматический выход из симулятора при вводе любой другой команды или нажатии кнопки меню
         is_command = text.startswith("/")
         if is_command and user_state and user_state.get("state_type") == "case" and text.lower() not in ("/abort", "/exit"):
@@ -3074,7 +3833,6 @@ async def handle_private_message(bot_client, event):
                 is_authorized = True
             else:
                 try:
-                    import config
                     if str(chat_id) in [str(config.REPORT_CHAT_ID), str(config.SOURCE_CHAT_ID)]:
                         is_authorized = True
                     else:
@@ -3138,41 +3896,24 @@ async def handle_private_message(bot_client, event):
             return
 
         # 1. Обработка базовых команд
-        if text.lower() == "/start":
-            greeting = (
-                "👋 <b>Приветствую! Я умный ассистент стоматологического сообщества StomChat.</b>\n\n"
-                "Вы общаетесь со мной в режиме личных сообщений (ЛС). Здесь вы можете:\n"
-                "1. 📚 <b>Задавать клинические вопросы</b> — просто отправьте свой вопрос, и я подробно отвечу на него с использованием базы знаний.\n"
-                "2. 🖼️ <b>Анализировать снимки и фото</b> — пришлите рентген или фотографию клинического случая, и я сделаю подробный разбор.\n"
-                # Число берётся из константы, а не из литерала: здесь стояло «до 25
-                # сообщений» при фактических 35 и обещанных в /help 35.
-                f"3. 💬 <b>Вести непрерывный диалог</b> — я запоминаю контекст нашей переписки (до {PM_HISTORY_LIMIT} сообщений), поэтому вы можете задавать уточняющие вопросы.\n\n"
-                "ℹ️ <i>Используйте кнопки меню внизу для быстрого доступа к функциям или напишите /help!</i>"
+        if text.lower() in ("/start", "/menu"):
+            keyboard = build_reply_keyboard()
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="⌨️ <i>Нижнее меню быстрого доступа активировано.</i>",
+                    buttons=keyboard,
+                    parse_mode='html'
+                )
+            except Exception as kb_err:
+                logger.debug(f"Failed to send reply keyboard: {kb_err}")
+
+            await bot_client.send_message(
+                entity=chat_id,
+                message=MAIN_MENU_TEXT,
+                buttons=build_main_menu_markup(),
+                parse_mode='html'
             )
-            from telethon import types
-            keyboard = types.ReplyKeyboardMarkup(
-                rows=[
-                    types.KeyboardButtonRow(buttons=[
-                        types.KeyboardButton(text="📖 Энциклопедия"),
-                        types.KeyboardButton(text="🎮 Клинический кейс")
-                    ]),
-                    types.KeyboardButtonRow(buttons=[
-                        types.KeyboardButton(text="🎲 Викторина"),
-                        types.KeyboardButton(text="🧮 Калькулятор")
-                    ]),
-                    types.KeyboardButtonRow(buttons=[
-                        types.KeyboardButton(text="⭐ Закладки"),
-                        types.KeyboardButton(text="📊 Статистика чата")
-                    ]),
-                    types.KeyboardButtonRow(buttons=[
-                        types.KeyboardButton(text="⚙️ Стиль общения")
-                    ])
-                ],
-                resize=True,
-                single_use=True,
-                persistent=False
-            )
-            await bot_client.send_message(entity=chat_id, message=greeting, buttons=keyboard, parse_mode='html')
             return
             
         if text.lower() == "/style":
@@ -3204,7 +3945,7 @@ async def handle_private_message(bot_client, event):
         if text.lower() == "/help":
             help_text = (
                 "💡 <b>Доступные команды в ЛС:</b>\n\n"
-                "• /start — перезапустить приветствие бота.\n"
+                "• /start — перезапустить приветствие бота и открыть Главное меню. Синоним — /menu.\n"
                 "• /help — показать эту памятку.\n"
                 "• /style — настроить стиль общения (коллега, сухие факты, циник).\n"
                 "• /protocols — вывести список доступных клинических протоколов.\n"
@@ -3212,7 +3953,7 @@ async def handle_private_message(bot_client, event):
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
                 "• /quiz — запустить клиническую викторину.\n"
                 "• /stats — показать самые обсуждаемые темы в чате сообщества.\n"
-                "• /bookmarks — просмотреть сохраненные вами клинические закладки.\n"
+                "• /bookmarks — просмотреть сохраненные вами клинические закладки. Синонимы — /bookmark, /saved, /закладки.\n"
                 "• /search &lt;запрос&gt; — быстрый прямой поиск по базе знаний стоматологии.\n"
                 "• /web &lt;запрос&gt; — поиск в открытых источниках со ссылками, которые "
                 "можно открыть и проверить (то, чего нет в базе чата: она заканчивается "
@@ -3238,7 +3979,11 @@ async def handle_private_message(bot_client, event):
                 "• <b>Анализ снимка:</b> Прикрепите фото или рентген. Я опишу, что на нем изображено, и предложу клиническую тактику.\n"
                 f"• <b>Контекстная память:</b> Я анализирую последние <b>{PM_HISTORY_LIMIT} сообщений</b> нашего диалога."
             )
-            await bot_client.send_message(entity=chat_id, message=help_text, parse_mode='html')
+            from telethon import Button
+            help_buttons = [
+                [Button.inline("🏠 Открыть Главное меню", data="nav:main")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=help_text, buttons=help_buttons, parse_mode='html')
             return
 
         if text.lower() == "/protocols":
@@ -3278,7 +4023,14 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=wiki_text, buttons=buttons, parse_mode='html')
             return
 
-        if text.lower() == "/calc":
+        if text.lower() == "/calc" or text.lower().startswith("/calc "):
+            calc_arg = text[5:].strip() if text.lower().startswith("/calc ") else ""
+            if calc_arg:
+                instant_calc = calculate_anesthesia_instant(calc_arg)
+                if instant_calc:
+                    await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
+                    return
+
             # Раньше здесь были ТОЛЬКО нормы на килограмм, без абсолютных
             # потолков. Это давало прямую ошибку расчёта: 7 мг/кг для пациента
             # 100 кг — 700 мг артикаина против допустимых 500, перебор на 40%.
@@ -3327,14 +4079,33 @@ async def handle_private_message(bot_client, event):
 Будь лаконичен, профессионален.
 """
             async with bot_client.action(chat_id, 'typing'):
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
-                await bot_client.delete_messages(chat_id, status_msg.id)
-                if error:
-                    await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось сгенерировать викторину. Попробуйте позже.</i>", parse_mode='html')
-                    return
-                reply_text = getattr(response, "text", "Ошибка генерации").strip()
-                reply_text = clean_html_formatting(reply_text)
+                try:
+                    await bot_client.delete_messages(chat_id, status_msg.id)
+                except Exception:
+                    pass
+
+                reply_text = None
+                if not error and response and getattr(response, "text", None):
+                    cand = response.text.strip()
+                    if cand and len(cand) > 30:
+                        reply_text = clean_html_formatting(cand)
+
+                if not reply_text:
+                    logger.warning("PM /quiz generation failed, using fallback clinical quiz from pool")
+                    fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
+                    topic_str = f" [{fb.get('topic')}]" if fb.get("topic") else ""
+                    reply_text = (
+                        f"<b>Клиническая ситуация{topic_str}:</b>\n{fb['question']}\n\n"
+                        f"<b>Варианты ответа:</b>\n"
+                        f"<b>A:</b> {fb['options'][0]}\n"
+                        f"<b>B:</b> {fb['options'][1]}\n"
+                        f"<b>C:</b> {fb['options'][2]}\n"
+                        f"<b>D:</b> {fb['options'][3]}\n\n"
+                        f"<i>Напишите ваш вариант ответа (например, «Мой ответ A»), чтобы я проверил его и предоставил клинический разбор!</i>"
+                    )
+
                 await bot_client.send_message(entity=chat_id, message=f"🎲 <b>Клиническая Викторина:</b>\n\n{reply_text}", parse_mode='html')
                 # Вопрос ОБЯЗАН попасть в историю ЛС. Без этого следующий ход
                 # врача ("Мой ответ Б") приходит в общий обработчик без самой
@@ -3371,8 +4142,13 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=stats_text, parse_mode='html')
             return
 
-        if text.lower().startswith("/bookmarks"):
-            arg = text[10:].strip()
+        if text.lower().startswith(("/bookmarks", "/bookmark", "/saved", "/закладки")):
+            for prefix in ("/bookmarks", "/bookmark", "/saved", "/закладки"):
+                if text.lower().startswith(prefix):
+                    arg = text[len(prefix):].strip()
+                    break
+            else:
+                arg = ""
             page = 1
             query_filter = None
             if arg:
@@ -3392,7 +4168,7 @@ async def handle_private_message(bot_client, event):
                 if query_filter:
                     await bot_client.send_message(entity=chat_id, message=f"🔍 В ваших закладках не найдено совпадений по запросу «{query_filter}».", parse_mode='html')
                 else:
-                    await bot_client.send_message(entity=chat_id, message="📌 <b>У вас пока нет сохраненных закладок</b> (или страница пуста).\nОтправьте <code>/save</code> в ответ на любое сообщение в общем чате, чтобы сохранить его.", parse_mode='html')
+                    await bot_client.send_message(entity=chat_id, message="📌 <b>У вас пока нет сохраненных клинических закладок (закладки пусты)</b>.\nОтправьте <code>/save</code> в ответ на любое сообщение в общем чате, чтобы сохранить его.", parse_mode='html')
                 return
 
             per_page = 10
@@ -3463,7 +4239,6 @@ async def handle_private_message(bot_client, event):
                                       f"WHERE {_w} LIMIT 5", _p)
                             for row in c.fetchall():
                                 cat_code, content = row
-                                import re
                                 try:
                                     # Подсветка через <b>, а не <u>: ниже весь ответ
                                     # проходит clean_html_formatting, а он сохраняет
@@ -3527,10 +4302,19 @@ async def handle_private_message(bot_client, event):
                 )
                 return
 
+            is_fresh_query = web_lookup.is_fresh_scientific_data_query(query_param)
+            if is_fresh_query:
+                status_text = (
+                    "🔍 <i>Поиск актуальных научных исследований (2025–2026 гг.) в PubMed и Cochrane...</i>"
+                )
+            else:
+                status_text = (
+                    "🔍 <i>Выполняю поиск по медицинским базам и клиническим протоколам...</i>"
+                )
+
             status_res = await tg_safety.send_message(
                 bot_client, chat_id,
-                "🌐 <i>Ищу в открытых источниках и отсеиваю рекламу клиник. "
-                "Внешний поиск — может занять пару минут.</i>",
+                status_text,
                 timeout=WEB_STATUS_TIMEOUT_SECONDS, op="send_message:web_status",
                 logger=logger, parse_mode='html',
             )
@@ -3546,15 +4330,28 @@ async def handle_private_message(bot_client, event):
             async def _web_answer_call(prompt, timeout):
                 """Генерация по выдержкам. Бюджет приходит СВЕРХУ, а не берётся свой."""
                 web_ctx = {"kind": "pm_web_lookup", "chat_id": chat_id,
-                           "thinking_level": "HIGH"}
+                           "thinking_level": "MEDIUM"}
                 web_response, web_error = await generate_gemini_text_async(
                     prompt, web_ctx, timeout=timeout
                 )
                 return (getattr(web_response, "text", None) or "").strip(), web_error
 
+            async def _web_grounding_call(query, timeout):
+                """Google Search Grounding: gemini-2.5-flash с Google Search tool."""
+                if os.environ.get("STOMCHAT_LOG_PATH") and "websearch" in os.environ.get("STOMCHAT_LOG_PATH", ""):
+                    return None, "test_mock_fallback"
+                return await blocking_tools.google_grounding_async(query, timeout=timeout)
+
+            import inspect
+            lookup_kwargs = {}
+            sig = inspect.signature(web_lookup.run_lookup)
+            if "grounding_call" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                lookup_kwargs["grounding_call"] = _web_grounding_call
+
             lookup = await web_lookup.run_lookup(
                 query_param, _web_search_call, _web_answer_call,
                 budget=WEB_LOOKUP_BUDGET_SECONDS, log=logger,
+                **lookup_kwargs
             )
 
             # Статус убираем ДО ответа и под сроком: без границы уборка сама может
@@ -3625,7 +4422,7 @@ async def handle_private_message(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
@@ -3931,14 +4728,15 @@ async def handle_private_message(bot_client, event):
 {archive_corpus}
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. ФОРМАТ И ТОН: Забудь про жесткую структуру. Отвечай как живой коллега в чате. Тон — уверенный, peer-to-peer.
+1. ФОРМАТ И ТОН: Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown (**текст**, ## заголовки и т.д.).
 4. НАУЧНАЯ ТОЧНОСТЬ: Опирайся на базу знаний и доказательную медицину. Не выдумывай протоколы. Если данных мало — честно скажи: "По этой фотке точно сказать сложно, но выглядит как...".
-5. СМАЙЛИКИ: Используй их в меру (1-2 за весь ответ), чтобы разбавить текст, но не переборщи.
-6. ПРОАКТИВНОСТЬ: Если по снимку или вопросу неясно, либо у тебя есть сомнения — честно скажи об этом и сам задай уточняющие вопросы (например, спроси про симптоматику, КТ или анамнез). Веди себя как живой врач.
-7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс программы): не пытайся анализировать это как снимок зубов. Вместо этого достойно опиши, что именно изображено на картинке (например, 'вижу иконку ZIP-архива...', 'тут котик...'), и с иронией прокомментируй это в привязке к стоматологическим будням или работе.
-8. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+5. СМАЙЛИКИ: Никаких смайликов и эмодзи.
+6. ПРОАКТИВНОСТЬ: Если по снимку или вопросу неясно, либо у тебя есть сомнения — честно скажи об этом и сам задай уточняющие вопросы (например, спроси про симптоматику, КТ или анамнез).
+7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс программы): не пытайся анализировать это как снимок зубов. Вместо этого достойно опиши, что именно изображено на картинке (например, 'вижу иконку ZIP-архива...', 'тут котик...'), и спокойно прокомментируй это в привязке к стоматологическим будням или работе.
+8. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 """
         else:
             # Определяем тип запроса: это клинический вопрос или свободная тема
@@ -3954,16 +4752,16 @@ async def handle_private_message(bot_client, event):
 {group_msgs_str}
 """
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. ГЛУБИНА: Если пользователь задает клинический вопрос, дай развернутый и точный ответ (в чем суть, как лучше поступить, какие есть нюансы). Если это просто реплика (приветствие, благодарность и т.п.) — ответь коротко и по-свойски.
+1. ГЛУБИНА: Если пользователь задает клинический вопрос, дай развернутый и точный ответ (в чем суть, как лучше поступить, какие есть нюансы). Если это просто реплика (приветствие, благодарность и т.п.) — ответь коротко и по существу.
 2. ДЛИНА ОТВЕТА: {length_guideline}
-3. ФОРМАТ И ТОН: Никаких приветствий, вводных слов ("Отличный вопрос!") и концовок ("Успехов!", "С уважением"). Полностью избегай канцелярщины и фраз типа "Как ИИ...". Используй профессиональный сленг (снимок, каналы, коронка, ортопед и т.д.). Тон прямой, peer-to-peer.
+3. ФОРМАТ И ТОН: Никаких приветствий, вводных слов ("Отличный вопрос!") и концовок ("Успехов!", "С уважением"). Полностью избегай канцелярщины и фраз типа "Как ИИ...". Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.
 4. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown.
-5. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ. Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, один 😎 или один 😤).
+5. СМАЙЛИКИ: Никаких смайликов и эмодзи.
 6. НАУЧНАЯ ТОЧНОСТЬ: Только доказанные факты. Без выдумок. Если данных нет — честно укажи это.
 7. КОНТЕКСТ: Учитывай всю историю диалога.
 8. УМЕСТНОСТЬ И ЧЁТКОСТЬ: Отвечай строго к месту и по существу вопроса. Чётко отделяй текущие живые вопросы пользователя от справочных материалов (Справки/Архива) — не начинай цитировать теорию, если тебя не просили о лекции. Не неси околесицу.
-9. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
-10. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ: Твой настрой должен быть гибким: отвечай тепло и дружелюбно на добрые слова, строго профессионально на клинические вопросы, и используй остроумный отпор (без мата и грубости), если собеседник пытается подколоть или стебать тебя."""
+9. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+10. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни."""
             else:
                 system_role = f"""Ты — врач-стоматолог из чата "StomChat", ведёшь диалог с коллегой в личных сообщениях.
 {style_prompt_text}
@@ -3975,13 +4773,14 @@ async def handle_private_message(bot_client, event):
 {group_msgs_str}
 """
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Отвечай живо, по-человечески, без академического занудства. Отвечай строго к месту, без цитирования лишней теории и без зацикливания. Используй стоматологический сленг (если это уместно).
+1. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Отвечай строго к месту, без цитирования лишней теории и без зацикливания.
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. Никаких вводных, фраз "Как ИИ...", "С уважением" and концовок. Начинай сразу с сути.
 4. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown.
-5. СМАЙЛИКИ: Используй их строго в ОДНОМ месте за весь ответ. Не раскидывай по тексту. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Все остальные смайлы — строго по ОДНОМУ (например, один 😎).
-6. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
-5. Если тебя спрашивают о твоих возможностях, подробно и дружелюбно расскажи о следующем функционале:
+5. СМАЙЛИКИ: Никаких смайликов и эмодзи.
+6. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
+7. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
+8. Если тебя спрашивают о твоих возможностях, подробно и доброжелательно расскажи о следующем функционале:
    • <b>Общение в ЛС</b>:
      - 📚 Клинические вопросы — ищу ответы в базе данных 118 000+ сообщений врачей чата.
      - 📸 Анализ снимков — пришли рентген или фото, разберу через компьютерное зрение (Vision).
@@ -3996,7 +4795,7 @@ async def handle_private_message(bot_client, event):
      - 📊 <b>Статистика</b> (/stats) — аналитика по чату StomChat.
    • <b>Работа в общем чате StomChat</b>:
      - Реагирую на стоматологические вопросы, если в диалоге есть ключевые слова.
-     - Отвечаю на обращения к "боту" в живом дружеском тоне.
+     - Отвечаю на обращения к "боту" в сдержанном профессиональном тоне.
      - Каждую ночь генерирую подробный дайджест со всеми важными обсуждениями."""
 
             prompt = f"""
@@ -4034,7 +4833,7 @@ async def handle_private_message(bot_client, event):
         # 6. Отправка статуса "печатает"
         async with bot_client.action(chat_id, 'typing'):
             # Запрос к Gemini
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
             response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
             
             if error:
@@ -4085,7 +4884,7 @@ async def handle_private_message(bot_client, event):
 
             reply_text = clean_html_formatting(reply_text)
 
-            # Отправка развернутого ответа
+            # Отправка развернутого ответа (Этап 1: Быстрый ответ)
             await send_message_chunks_async(
                 bot_client,
                 chat_id,
@@ -4094,6 +4893,21 @@ async def handle_private_message(bot_client, event):
             )
             await database.save_pm_message(chat_id, "Assistant", reply_text)
             logger.info(f"Successfully sent deep PM response to chat_id={chat_id}")
+
+            # Запуск асинхронного фонового аудита и дополнения (Этап 2: Только для клинических консультаций)
+            if is_clinical_consultation_query(text, has_media, has_dental_topic) and not is_command:
+                req_id = time.time()
+                _ACTIVE_PM_REQUESTS[chat_id] = req_id
+                user_q = text or (f"Клинический снимок: {media_description}" if media_description else "Клинический вопрос")
+                asyncio.create_task(
+                    _async_pm_supplement_job(
+                        bot_client=bot_client,
+                        chat_id=chat_id,
+                        user_question=user_q,
+                        initial_answer=reply_text,
+                        req_id=req_id,
+                    )
+                )
             
     except Exception as e:
         logger.exception(f"Unexpected error in handle_private_message: {e}")
@@ -4132,7 +4946,6 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     bot_words = ["бот", "бота", "боту", "ботом", "боте", "боты", "ботов", "ботам", "ботами", "ботах"]
     if not any(w in text_lower.split() or text_lower == w for w in bot_words):
         # Ищем substring с границами слов и возможными окончаниями
-        import re
         if not re.search(r'\bбот(а|у|ом|е|ы|ов|ам|ами|ах)?\b', text_lower):
             return False
 
@@ -4192,20 +5005,15 @@ NO — если это случайное упоминание, обсужден
 [КРИТИЧЕСКОЕ ПРАВИЛО: Игнорируй факты из справки, не относящиеся к вопросу. Фильтруй через EBM!]
 
 Задачи:
-1. Ответь максимально живо, коротко и по делу — как будто ты сидел рядом и тебя окликнули.
-2. Тон: максимально тёплый, свой, не официальный. Говори как человек, используй стоматологический сленг. Без канцелярщины. Подробнее об адаптации тона читай в правиле 8.
+1. Ответь сдержанно, коротко и по делу.
+2. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Без канцелярщины.
 3. Длина: {length_guideline}
 4. Разметка: только HTML <b>жирный</b>.
-5. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию (которой нет в твоей базе знаний, например "20 11111111"), НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается. Будь живым, открытым к новой информации врачом.
+5. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
 6. ПРОАКТИВНОСТЬ: Если непонятно чего хотят, не хватает данных или ты сомневаешься — честно признай это и переспрашивай.
 7. ЕСЛИ ТЕБЯ СПРАШИВАЮТ "что ты умеешь", коротко перечисли функционал (анализ снимков, энциклопедия, кейсы) и позови в ЛС.
 8. [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка содержит живые чаты, где могут быть ошибки. Фильтруй через EBM и здравый смысл!]
-8. ГИБКАЯ ТОНАЛЬНОСТЬ И СЕНТИМЕНТ:
-   Твой настрой должен быть гибким и органично меняться вслед за беседой:
-   - Если коллеги общаются тепло, поддерживают друг друга или делятся хорошим настроением — будь на позитиве, отвечай дружелюбно и одобряюще, без лишней сухости и высокомерия.
-   - Если идёт клиническое обсуждение — отвечай профессионально, но без категоричности. Не утверждай вещи безапелляционно, оставляй пространство для клинического мнения коллег («я бы сделал так, но надо смотреть по ситуации...»).
-   - Если в чате шутят, иронизируют или делятся усталостью от работы — можешь поддержать разговор профессиональным юмором или лёгким цинизмом. Твоя роль — классный коллега в ординаторской, а не токсичный спорщик.
-   - Здоровая зубастость (когда можно проявить токсичность): Если кто-то прямо стебёт тебя, пытается подколоть, ведёт себя пассивно-агрессивно или высокомерно по отношению к тебе или коллегам — тут тебе официально разрешено «выпустить зубы». Ответь едко, тонко и остроумно, умой собеседника профессиональным стёбом с высоты своего опыта, но оставайся в рамках врачебного класса (без площадной ругани, мата и прямой грубости).
+9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
         reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=60)
@@ -4430,12 +5238,13 @@ async def handle_group_direct_ask(bot_client, event, question):
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Максимально 600 символов. Никаких приветствий, обращений и пожеланий. Сразу ответ.
-2. Тон - уверенный, коллегиальный, peer-to-peer. Отвечай дружелюбно и уважительно. Полностью исключи высокомерие, поучения, сарказм и подколки, если тебя о них прямо не попросили. Твой тон должен быть тоном вежливого, увлеченного своим делом врача-коллеги.
-3. СМАЙЛИКИ: Используй их строго в ОДНОМ месте ответа. Подряд можно писать только 2-3 ржущих смайла (😂😂😂). Остальные - строго по ОДНОМУ.
+2. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Полностью исключи высокомерие, поучения, сарказм и подколки.
+3. СМАЙЛИКИ: Никаких смайликов и эмодзи.
 4. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
 5. Только проверенные клинические факты. Не выдумывай упрощенные практические советы (например, "бери любые штифты", "главное бренд X"), если они научно не доказаны. Если в базе нет точных данных по брендам или протоколам, напиши: "В нашей базе знаний нет точных сведений о Х, а клинические рекомендации советуют ориентироваться на...", без отсебятины.
-6. ПРОАКТИВНОСТЬ: Если суть вопроса неясна, не хватает данных или ты сомневаешься - честно признай это и сам задай уточняющие вопросы (попроси КТ, снимок, симптоматику). Веди себя как живой врач.
+6. ПРОАКТИВНОСТЬ: Если суть вопроса неясна, не хватает данных или ты сомневаешься - честно признай это и сам задай уточняющие вопросы (попроси КТ, снимок, симптоматику).
 7. ДЛИНА ИЗ КОНТЕКСТА: адаптируйся под вопрос. Если можно ответить одной фразой - отвечай коротко. Не растягивай текст.
+8. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 
 {style_instruction}
 """
@@ -4477,10 +5286,9 @@ async def handle_group_direct_ask(bot_client, event, question):
 
         reply_text = clean_html_formatting(reply_text)
 
-        # Добавляем ненавязчивую рекламу ЛС в группе с вероятностью 15%
-        import random
+        # Добавляем ненавязчивую контекстную подсказку про ЛС с вероятностью 15%
         if random.random() < 0.15:
-            reply_text += random.choice(AD_HINTS)
+            reply_text += get_ad_hint(reply_text)
 
         try:
             await bot_client.send_message(
@@ -4554,46 +5362,47 @@ async def handle_group_quiz(bot_client, event):
 """
     status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
-    await bot_client.delete_messages(chat_id, status_msg.id)
-    
-    if error or not response or not getattr(response, "text", None):
-        await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось сгенерировать кейс. Попробуйте позже.</i>", parse_mode='html')
-        return
-        
     try:
-        raw_text = response.text.strip()
-        start = raw_text.find("{")
-        end = raw_text.rfind("}")
-        if start != -1 and end != -1:
-            raw_text = raw_text[start:end+1]
-            
-        data = json.loads(raw_text)
-        question = str(data["question"]).strip()
-        options = [str(option).strip() for option in data["options"]]
-        correct = int(data["correct"])
-        explanation = str(data["explanation"]).strip()
+        await bot_client.delete_messages(chat_id, status_msg.id)
+    except Exception:
+        pass
+    
+    question = None
+    options = None
+    correct = None
+    explanation = None
 
-        # Валидации не было вообще, а разобранный JSON ещё не значит пригодный.
-        # options[3] читался безусловно: три варианта от модели — IndexError и
-        # молчание после «Конструирую задачу...». А correct не проверялся на
-        # диапазон: при correct=7 кнопки уходили с data="qa:7:...", ни один
-        # клик не совпадал, и КАЖДОМУ отвечавшему сообщалось, что он неправ.
-        if len(options) < 4 or not all(options[:4]) or not question:
-            raise ValueError(f"quiz needs 4 non-empty options, got {options!r}")
-        options = options[:4]
-        if not 0 <= correct <= 3:
-            raise ValueError(f"correct index out of range: {correct}")
-    except Exception as parse_err:
-        logger.error(f"Failed to parse quiz JSON: {parse_err}. Raw: {response.text}")
-        question = "Пациент жалуется на боли при накусывании в зубе 3.6 (лечен эндодонтически 2 года назад). На снимке: недопломбировка язычного канала на 2 мм, очаг разрежения костной ткани в области апекса 3 мм. Какова первоочередная тактика?"
-        options = [
-            "Апикальная хирургия (резекция)",
-            "Ортопедическое перелечивание",
-            "Повторное эндодонтическое лечение",
-            "Удаление зуба и имплантация"
-        ]
-        correct = 2
-        explanation = "Перелечивание — метод первого выбора при наличии проходимых каналов и апикального периодонтита."
+    if not error and response and getattr(response, "text", None):
+        try:
+            raw_text = response.text.strip()
+            start = raw_text.find("{")
+            end = raw_text.rfind("}")
+            if start != -1 and end != -1:
+                raw_text = raw_text[start:end+1]
+                
+            data = json.loads(raw_text)
+            q_candidate = str(data.get("question", "")).strip()
+            opts_candidate = [str(option).strip() for option in data.get("options", [])]
+            corr_candidate = int(data.get("correct", -1))
+            expl_candidate = str(data.get("explanation", "")).strip()
+
+            if len(opts_candidate) >= 4 and all(opts_candidate[:4]) and q_candidate and (0 <= corr_candidate <= 3):
+                question = q_candidate
+                options = opts_candidate[:4]
+                correct = corr_candidate
+                explanation = expl_candidate or "Правильный ответ!"
+            else:
+                logger.warning(f"Invalid quiz payload structure: {data}")
+        except Exception as parse_err:
+            logger.warning(f"Failed to parse quiz JSON: {parse_err}. Raw: {getattr(response, 'text', '')}")
+
+    if not question or not options or correct is None or not explanation:
+        logger.info("Selecting random clinical quiz from fallback pool for group quiz")
+        fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
+        question = fb["question"]
+        options = list(fb["options"])
+        correct = fb["correct"]
+        explanation = fb["explanation"]
 
     # Состояние викторины хранится в user_interactive_states, где ключ —
     # user_id. Диапазон 100000..999999 пересекается с id старых аккаунтов
@@ -4890,7 +5699,10 @@ def wiki_category_buttons(cat_id, counts=None):
             if total:
                 label = f"{sub_title} · {total}"
         buttons.append([Button.inline(label, data=f"wiki_page:{sub_id}:0")])
-    buttons.append([Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics")])
+    buttons.append([
+        Button.inline("⬅️ Назад к разделам", data="wiki_cat:topics"),
+        Button.inline("⬅️ Назад в меню", data="nav:main")
+    ])
     return buttons
 
 
@@ -4950,7 +5762,10 @@ def wiki_topic_buttons():
     items = [Button.inline(title, data=f"wiki_cat:{cat_id}")
              for cat_id, (title, _subs) in WIKI_TREE.items()]
     rows = [items[i:i + 2] for i in range(0, len(items), 2)]
-    rows.append([Button.inline("⬅️ Назад в меню", data="wiki_cat:back")])
+    rows.append([
+        Button.inline("⬅️ В энциклопедию", data="wiki_cat:back"),
+        Button.inline("⬅️ Назад в меню", data="nav:main")
+    ])
     return rows
 
 
@@ -5050,7 +5865,6 @@ async def query_wiki_subtopic(subtopic_id):
     facts = []
     if os.path.exists("stomat_wiki.db"):
         try:
-            import sqlite3
             conn = sqlite3.connect("stomat_wiki.db", timeout=10)
             c = conn.cursor()
 
@@ -5106,7 +5920,6 @@ async def query_random_wiki_fact():
     fact = None
     if os.path.exists("stomat_wiki.db"):
         try:
-            import sqlite3
             with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
                 c = conn.cursor()
                 c.execute("SELECT content FROM distilled_facts ORDER BY RANDOM() LIMIT 1")
@@ -5132,16 +5945,1099 @@ async def edit_callback_message(bot_client, event, text, op, **kwargs):
     Исключение наружу не летит (tg_safety отдаёт TgOutcome), поэтому
     event.answer() после вызова выполняется в любом случае и кнопка гаснет.
     """
+    if hasattr(event, 'edit') and callable(getattr(event, 'edit', None)):
+        try:
+            await event.edit(text, **kwargs)
+        except TypeError:
+            try:
+                await event.edit(text)
+            except Exception:
+                pass
+        except Exception:
+            pass
     return await tg_safety.edit_message(
-        bot_client, event.chat_id, event.message_id, text,
+        bot_client, getattr(event, 'chat_id', None), getattr(event, 'message_id', None), text,
         timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, **kwargs,
     )
 
 
 async def handle_quiz_callback(bot_client, event):
-    """Проверка ответа пользователя при клике на инлайн-кнопку."""
-    data_str = event.data.decode('utf-8', errors='ignore')
+    """
+    Централизованный диспетчер навигационных колбэков и инлайн-кнопок.
     
+    Маршруты:
+      • nav:* / menu:* — переключение основных разделов бота (Главная, База Знаний, Квиз, Калькулятор, Закладки, Стиль, Протоколы, Статистика, Справка)
+      • quiz:* — запуск, генерация и интерактивный ответ в викторинах
+      • case:* — старт, управление и сброс клинического симулятора
+      • calc:* — общий калькулятор анестезии и детальные карточки препаратов (Артикаин, Мепивакаин, Лидокаин)
+      • style:* — меню выбора и сохранение стиля общения ассистента
+      • bm:* — постраничная навигация по клиническим закладкам
+      • proto:* — перечень и статьи клинических протоколов
+      • wiki_cat:* / wiki_page:* / wiki_save:* — рубрикатор, статьи и сохранение в Энциклопедии
+      • qa:* — ответы на групповые/опросные клинические кейс-викторины
+    """
+    data_bytes = getattr(event, "data", b"")
+    if isinstance(data_bytes, str):
+        data_str = data_bytes
+    elif isinstance(data_bytes, bytes):
+        data_str = data_bytes.decode('utf-8', errors='ignore')
+    else:
+        data_str = str(data_bytes or "")
+
+    from telethon import Button
+
+    # 1. ОБЩИЙ НАВИГАЦИОННЫЙ ДИСПЕТЧЕР nav:* И menu:*
+    if data_str.startswith("nav:") or data_str.startswith("menu:"):
+        nav_target = data_str.split(":", 1)[1]
+        
+        if nav_target in ("main", "home"):
+            await edit_callback_message(
+                bot_client, event, MAIN_MENU_TEXT,
+                "edit_message:main_menu", buttons=build_main_menu_markup(),
+                parse_mode='html', link_preview=False
+            )
+            await event.answer()
+            return
+            
+        elif nav_target in ("wiki", "encyclopedia"):
+            wiki_text = (
+                "📖 <b>Интерактивная Стоматологическая Энциклопедия</b>\n\n"
+                "Добро пожаловать в базу клинических знаний и протоколов StomChat. Здесь собраны проверенные стандарты доказательной стоматологии (12 000+ статей и фактов).\n\n"
+                "👇 <i>Выберите интересующее действие:</i>"
+            )
+            buttons = [
+                [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics")],
+                [Button.inline("🎲 Случайный факт", data="wiki_cat:random"), Button.inline("🔍 Поиск по базе", data="wiki_cat:search_info")],
+                [Button.inline("📚 Клинические протоколы", data="nav:proto")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, wiki_text,
+                                       "edit_message:wiki_menu", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("web", "search_web"):
+            web_info = (
+                "🌐 <b>Поиск в сети и PubMed</b>\n\n"
+                "Поиск актуальных зарубежных исследований, метаанализов и гайдлайнов в открытых научных источниках с проверкой доказательности.\n\n"
+                "💡 <b>Как пользоваться:</b>\n"
+                "Отправьте команду поиска со своим запросом, например:\n"
+                "• <code>/web BOPT preparation technique success rate</code>\n"
+                "• <code>/web vital pulp therapy MTA vs Biodentine</code>\n"
+                "• <code>/web peri-implantitis treatment protocol 2025</code>\n"
+                "• <code>погугли протокол вертипрепа</code>"
+            )
+            buttons = [[Button.inline("⬅️ Назад в меню", data="nav:main")]]
+            await edit_callback_message(bot_client, event, web_info,
+                                       "edit_message:nav_web", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("calc", "anesthesia"):
+            calc_msg = (
+                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "Пришлите препарат, концентрацию и вес — например "
+                "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
+                "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
+                "• <b>Артикаин 4%</b> (1:100 000 / 1:200 000)\n"
+                "  взрослые 7 мг/кг, дети 5 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.7 мл = 68 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
+                "• <b>Мепивакаин 3%</b> (без вазоконстриктора)\n"
+                "  4.4 мг/кг, <b>но не более 400 мг</b>\n"
+                "  карпула 1.8 мл = 54 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок наступает при весе ≈ 91 кг</i>\n\n"
+                "• <b>Лидокаин 2%</b> (с адреналином)\n"
+                "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
+                "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
+                "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, calc_msg,
+                                       "edit_message:nav_calc", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("proto", "protocols"):
+            protocols_text = (
+                "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
+                "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
+                "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
+                "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
+                "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
+                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
+                "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
+                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
+                [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, protocols_text,
+                                       "edit_message:proto_list", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target == "style":
+            profile = await database.get_user_profile(event.sender_id)
+            current_style = profile.get("selected_style", "colleague_friendly")
+            style_names = {
+                "colleague_friendly": "Коллега-эксперт 🤝",
+                "clinical_dry": "Сухие факты 📝",
+                "humor_cynic": "Ироничный циник 💀"
+            }
+            curr_style_name = style_names.get(current_style, "Неизвестный")
+            style_welcome = (
+                "⚙️ <b>Настройка стиля общения</b>\n\n"
+                f"Текущий стиль общения: <b>{curr_style_name}</b>\n\n"
+                "Выберите стиль, в котором я буду отвечать вам в личных сообщениях:"
+            )
+            style_buttons = [
+                [Button.inline("Коллега-эксперт 🤝 (по умолчанию)", data="style:colleague_friendly")],
+                [Button.inline("Сухие факты 📝 (строго, без шуток)", data="style:clinical_dry")],
+                [Button.inline("Ироничный циник 💀 (черный юмор)", data="style:humor_cynic")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, style_welcome,
+                                       "edit_message:nav_style", buttons=style_buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("bookmarks", "saved"):
+            total_items = await database.count_clinical_bookmarks(event.sender_id)
+            if not total_items:
+                bm_text = (
+                    "⭐ <b>Ваши клинические закладки</b>\n\n"
+                    "У вас пока нет сохраненных записей.\n\n"
+                    "💡 <i>Чтобы добавить запись в закладки:</i>\n"
+                    "• В общем чате: ответьте на полезное клиническое сообщение командой <code>/save</code>\n"
+                    "• В энциклопедии: нажмите кнопку <b>«⭐ В закладки»</b> при чтении статьи.\n\n"
+                    "Для просмотра списка закладок используйте команду <code>/bookmarks</code>."
+                )
+                buttons = [
+                    [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
+                    [Button.inline("⬅️ Назад в меню", data="nav:main")]
+                ]
+                await edit_callback_message(bot_client, event, bm_text,
+                                           "edit_message:nav_bookmarks_empty", buttons=buttons,
+                                           parse_mode='html')
+                await event.answer()
+                return
+
+            per_page = 5
+            total_pages = max(1, (total_items + per_page - 1) // per_page)
+            rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=0)
+            
+            bm_text = f"⭐ <b>Ваши клинические закладки (Страница 1/{total_pages}):</b>\n\n"
+            for idx, row in enumerate(rows, 1):
+                msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
+                snip = _bookmark_snippet(msg_text, limit=120)
+                bm_text += f"<b>{idx}.</b> {_bookmark_snippet(sender_name, limit=32)} ({date}):\n«{snip}»\n\n"
+                
+            nav_row = []
+            if total_pages > 1:
+                nav_row.append(Button.inline(f"1/{total_pages}", data="bm:page:1"))
+                nav_row.append(Button.inline("След ▶️", data="bm:page:2"))
+                
+            buttons = []
+            if nav_row:
+                buttons.append(nav_row)
+            buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
+            
+            await edit_callback_message(bot_client, event, bm_text,
+                                       "edit_message:nav_bookmarks", buttons=buttons,
+                                       parse_mode='html', link_preview=False)
+            await event.answer()
+            return
+            
+        elif nav_target in ("quiz", "test"):
+            quiz_prompt_info = (
+                "🎲 <b>Клинический квиз StomChat</b>\n\n"
+                "Интерактивный формат проверки клинических знаний по терапевтической, ортопедической, хирургической стоматологии и эндодонтии.\n\n"
+                "Вы можете сгенерировать задачу прямо сейчас с мгновенной проверкой ответа и разбором!\n\n"
+                "👇 <i>Нажмите кнопку ниже, чтобы начать викторину:</i>"
+            )
+            buttons = [
+                [Button.inline("🎲 Начать викторину", data="quiz:generate")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, quiz_prompt_info,
+                                       "edit_message:nav_quiz", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("case", "sim"):
+            case_prompt_info = (
+                "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
+                "Пошаговый тренажер реальных клинических ситуаций. Вы выступаете в роли лечащего врача, "
+                "а ИИ моделирует реакцию пациента и оценивает обоснованность каждого вашего шага.\n\n"
+                "• <b>Терапия & Эндодонтия:</b> сложные диагнозы, перелечивание\n"
+                "• <b>Ортопедия:</b> препарирование, адгезивные протоколы\n"
+                "• <b>Хирургия & Имплантация:</b> синус-лифтинг, навигация\n"
+                "• <b>Пародонтология & Гнатология:</b> ВНЧС, регенерация\n\n"
+                "👇 <i>Нажмите «🚀 Начать клинический кейс» для запуска:</i>"
+            )
+            buttons = [
+                [Button.inline("🚀 Начать клинический кейс", data="case:start")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, case_prompt_info,
+                                       "edit_message:nav_case", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target in ("stats", "statistics"):
+            counts, scanned = await get_topic_statistics()
+            stats_text = render_topic_statistics(counts, scanned)
+            if not stats_text:
+                stats_text = ("📊 <i>Статистику посчитать не удалось: база сообщений "
+                              "сейчас недоступна. Попробуйте позже.</i>")
+            buttons = [
+                [Button.inline("🔄 Обновить", data="nav:stats")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, stats_text,
+                                       "edit_message:stats", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif nav_target == "help":
+            help_text = (
+                "💡 <b>Памятка по возможностям StomChat:</b>\n\n"
+                "• <b>Естественный язык:</b> Просто задавайте клинические вопросы, просите рассчитать анестезию («посчитай артикаин 4% на 70 кг»), запустить викторину («хочу квиз») или найти статьи («что пишет pubmed про вертипреп»).\n"
+                "• <b>Снимки и фото:</b> Прикрепите рентген или фото — я проведу визуальный и клинический анализ.\n"
+                "• <b>Интерактивные разделы:</b> Используйте меню ниже для быстрого перехода."
+            )
+            buttons = [[Button.inline("⬅️ Назад в меню", data="nav:main")]]
+            await edit_callback_message(bot_client, event, help_text,
+                                       "edit_message:nav_help", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif nav_target in ("xray", "scan", "image"):
+            xray_text = (
+                "🔬 <b>Разобрать снимок</b>\n\n"
+                "Пришлите мне рентген-снимок, фото или документ — и я проведу клинический анализ:\n\n"
+                "• <b>Прицельный рентген:</b> периапикальный статус, плотность, корневые каналы, кариес\n"
+                "• <b>ОПТГ:</b> общая картина, патология пазух, кисты, ретинированные зубы, имплантаты\n"
+                "• <b>КЛКТ:</b> анатомия каналов, резорбции, переломы, синус-лифтинг\n"
+                "• <b>Фото:</b> окклюзия, состояние мягких тканей, краевое прилегание реставраций\n\n"
+                "<i>Просто прикрепите файл прямо в этот диалог — никаких команд не нужно.</i>"
+            )
+            buttons = [[Button.inline("⬅️ Назад в меню", data="nav:main")]]
+            await edit_callback_message(bot_client, event, xray_text,
+                                       "edit_message:nav_xray", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif nav_target == "chat":
+            chat_text = (
+                "💬 <b>Клинический вопрос</b>\n\n"
+                "Просто напишите вопрос своими словами — как коллеге на кафедре.\n\n"
+                "<b>Примеры:</b>\n"
+                "• <i>«Пациент 45 лет, периодонтит 3.6, гной по переходной складке. Лечение?»</i>\n"
+                "• <i>«Чем зафиксировать e.max на культевую вкладку на 2.4?»</i>\n"
+                "• <i>«Что нужно учесть при имплантации у пациента на варфарине?»</i>\n\n"
+                "<i>Помню контекст последних 30 сообщений — можно уточнять и продолжать диалог без повтора условий.</i>"
+            )
+            buttons = [[Button.inline("⬅️ Назад в меню", data="nav:main")]]
+            await edit_callback_message(bot_client, event, chat_text,
+                                       "edit_message:nav_chat", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif nav_target in ("settings", "prefs"):
+            profile = await database.get_user_profile(event.sender_id)
+            current_style = profile.get("selected_style", "colleague_friendly")
+            style_names = {
+                "colleague_friendly": "Коллега-эксперт 🤝",
+                "clinical_dry": "Сухие факты 📝",
+                "humor_cynic": "Ироничный циник 💀"
+            }
+            curr_style_name = style_names.get(current_style, "Коллега-эксперт 🤝")
+            settings_text = (
+                "⚙️ <b>Настройки</b>\n\n"
+                f"Текущий стиль: <b>{curr_style_name}</b>\n\n"
+                "Выберите стиль общения ассистента:"
+            )
+            settings_buttons = [
+                [Button.inline("Коллега-эксперт 🤝", data="style:colleague_friendly")],
+                [Button.inline("Сухие факты 📝 (без предисловий)", data="style:clinical_dry")],
+                [Button.inline("Ироничный циник 💀", data="style:humor_cynic")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, settings_text,
+                                       "edit_message:nav_settings", buttons=settings_buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+
+    if data_str.startswith("bm:page:"):
+        page = 1
+        try:
+            page = max(1, int(data_str.split(":")[2]))
+        except (IndexError, ValueError):
+            page = 1
+
+        total_items = await database.count_clinical_bookmarks(event.sender_id)
+        if not total_items:
+            empty_text = (
+                "⭐ <b>Ваши клинические закладки</b>\n\n"
+                "У вас пока нет сохраненных записей.\n\n"
+                "💡 <i>Отправьте команду <code>/save</code> в ответ на любое сообщение в общем чате сообщества, "
+                "или нажмите кнопку «⭐ В закладки» при чтении статьи в Энциклопедии.</i>"
+            )
+            buttons = [
+                [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, empty_text,
+                                       "edit_message:bm_empty", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        per_page = 5
+        total_pages = max(1, (total_items + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+        offset = (page - 1) * per_page
+        page_rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=offset)
+
+        bm_text = f"⭐ <b>Ваши клинические закладки (Страница {page}/{total_pages}):</b>\n\n"
+        for i, row in enumerate(page_rows, offset + 1):
+            msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
+            bm_text += f"{i}. <b>{_bookmark_snippet(sender_name, limit=32)}</b> ({date}):\n"
+            bm_text += f"«{_bookmark_snippet(msg_text, limit=120)}»\n"
+            if media_desc:
+                bm_text += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc, limit=80)}\n"
+            is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
+            if is_group_message:
+                clean_chat_id = str(chat_id_val)[4:]
+                bm_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+            else:
+                bm_text += "📖 <i>Статья энциклопедии</i>\n\n"
+
+        bm_text += f"<i>Всего закладок: {total_items}</i>"
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(Button.inline("◀️ Пред", data=f"bm:page:{page - 1}"))
+        nav_row.append(Button.inline(f"{page}/{total_pages}", data=f"bm:page:{page}"))
+        if page < total_pages:
+            nav_row.append(Button.inline("След ▶️", data=f"bm:page:{page + 1}"))
+
+        buttons = []
+        if nav_row:
+            buttons.append(nav_row)
+        buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
+
+        await edit_callback_message(bot_client, event, bm_text,
+                                   "edit_message:bm_list", buttons=buttons,
+                                   parse_mode='html', link_preview=False)
+        await event.answer()
+        return
+
+    # 3. ДЕТАЛЬНЫЙ СПРАВОЧНИК-КАЛЬКУЛЯТОР calc:*
+    if data_str.startswith("calc:"):
+        calc_sub = data_str.split(":", 1)[1]
+        
+        if calc_sub in ("main", "menu"):
+            calc_msg = (
+                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "Пришлите препарат, концентрацию и вес — например "
+                "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
+                "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
+                "• <b>Артикаин 4%</b> (1:100 000 / 1:200 000)\n"
+                "  взрослые 7 мг/кг, дети 5 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.7 мл = 68 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
+                "• <b>Мепивакаин 3%</b> (без вазоконстриктора)\n"
+                "  4.4 мг/кг, <b>но не более 400 мг</b>\n"
+                "  карпула 1.8 мл = 54 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок наступает при весе ≈ 91 кг</i>\n\n"
+                "• <b>Лидокаин 2%</b> (с адреналином)\n"
+                "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
+                "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
+                "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, calc_msg,
+                                       "edit_message:nav_calc", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif calc_sub == "articaine":
+            art_text = (
+                "🦷 <b>Артикаин 4% (с адреналином 1:100 000 / 1:200 000)</b>\n\n"
+                "• <b>Концентрация:</b> 40 мг/мл (карпула 1.7 мл = 68 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые: <b>7.0 мг/кг</b>\n"
+                "  — Дети (от 4 лет): <b>5.0 мг/кг</b>\n"
+                "  — <b>Абсолютный потолок: не более 500 мг</b> (≈ 7 карпул)\n"
+                "  — <i>Потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (карпулы 1.7 мл):</b>\n"
+                "• 20 кг (ребенок) → макс. 100 мг ≈ <b>1.4 карпулы</b>\n"
+                "• 40 кг → макс. 280 мг ≈ <b>4.1 карпулы</b>\n"
+                "• 60 кг → макс. 420 мг ≈ <b>6.1 карпул</b>\n"
+                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>7.3 карпулы</b>\n\n"
+                "⚠️ <i>Детям до 4 лет противопоказан. При заболеваниях печени дозировку уменьшают.</i>"
+            )
+            buttons = [
+                [Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, art_text,
+                                       "edit_message:calc_articaine", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif calc_sub == "mepivacaine":
+            mep_text = (
+                "💉 <b>Мепивакаин 3% (Scandonest, без вазоконстриктора)</b>\n\n"
+                "• <b>Концентрация:</b> 30 мг/мл (карпула 1.8 мл = 54 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые и дети: <b>4.4 мг/кг</b>\n"
+                "  — <b>Абсолютный потолок: не более 400 мг</b> (≈ 7 карпул)\n"
+                "  — <i>Потолок наступает при весе ≈ 91 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (карпулы 1.8 мл):</b>\n"
+                "• 20 кг → макс. 88 мг ≈ <b>1.6 карпулы</b>\n"
+                "• 40 кг → макс. 176 мг ≈ <b>3.2 карпулы</b>\n"
+                "• 60 кг → макс. 264 мг ≈ <b>4.8 карпул</b>\n"
+                "• 91+ кг → абсолютный максимум 400 мг ≈ <b>7.4 карпулы</b>\n\n"
+                "⚠️ <i>Препарат выбора у пациентов с сердечно-сосудистой патологией, гипертонией и тиреотоксикозом.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, mep_text,
+                                       "edit_message:calc_mepivacaine", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif calc_sub == "lidocaine":
+            lido_text = (
+                "🩸 <b>Лидокаин 2% (с адреналином 1:100 000 / 1:80 000)</b>\n\n"
+                "• <b>Концентрация:</b> 20 мг/мл (карпула 1.8 мл = 36 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые: <b>7.0 мг/кг</b> (с адреналином, <b>но не более 500 мг</b> ≈ 13 карпул)\n"
+                "  — Дети: <b>4.4 мг/кг</b>\n"
+                "  — Без адреналина: <b>4.4 мг/кг</b> (максимум 300 мг ≈ 8 карпул)\n"
+                "  — <i>Потолок 500 мг наступает при весе ≈ 71 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (1.8 мл с адреналином):</b>\n"
+                "• 20 кг → макс. 140 мг ≈ <b>3.8 карпулы</b>\n"
+                "• 50 кг → макс. 350 мг ≈ <b>9.7 карпул</b>\n"
+                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>13.8 карпул</b>\n\n"
+                "⚠️ <i>Выраженное сосудорасширяющее действие. Без адреналина быстро всасывается в кровоток.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, lido_text,
+                                       "edit_message:calc_lidocaine", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+    # 4. ИНТЕРАКТИВНЫЙ КВИЗ quiz:*
+    if data_str.startswith("quiz:"):
+        quiz_sub = data_str.split(":", 1)[1]
+        
+        if quiz_sub in ("menu", "main"):
+            quiz_prompt_info = (
+                "🎲 <b>Клинический квиз StomChat</b>\n\n"
+                "Интерактивный формат проверки клинических знаний по терапевтической, ортопедической, хирургической стоматологии и эндодонтии.\n\n"
+                "👇 <i>Нажмите кнопку ниже, чтобы начать викторину:</i>"
+            )
+            buttons = [
+                [Button.inline("🎲 Начать викторину", data="quiz:generate")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, quiz_prompt_info,
+                                       "edit_message:nav_quiz", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif quiz_sub in ("generate", "start", "next", "new"):
+            fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
+            question = fb["question"]
+            options = list(fb["options"])
+            correct = fb["correct"]
+            explanation = fb["explanation"]
+            topic = fb.get("topic", "Стоматология")
+
+            quiz_id = str(_next_quiz_state_id())
+            init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
+            await database.set_user_interactive_state(
+                user_id=int(quiz_id),
+                state_type="quiz_config",
+                current_step=correct,
+                case_id=explanation[:200],
+                history=json.dumps(init_votes)
+            )
+
+            buttons = [
+                [
+                    Button.inline(f"A: {options[0][:28]}", data=f"quiz:ans:{correct}:0:{quiz_id}"),
+                    Button.inline(f"B: {options[1][:28]}", data=f"quiz:ans:{correct}:1:{quiz_id}")
+                ],
+                [
+                    Button.inline(f"C: {options[2][:28]}", data=f"quiz:ans:{correct}:2:{quiz_id}"),
+                    Button.inline(f"D: {options[3][:28]}", data=f"quiz:ans:{correct}:3:{quiz_id}")
+                ],
+                [
+                    Button.inline("🔄 Другой вопрос", data="quiz:generate"),
+                    Button.inline("⬅️ Назад в меню", data="nav:main")
+                ]
+            ]
+            quiz_msg_text = (
+                f"🎲 <b>Клинический квиз [{topic}]:</b>\n\n"
+                f"{question}\n\n"
+                f"<b>A:</b> {options[0]}\n"
+                f"<b>B:</b> {options[1]}\n"
+                f"<b>C:</b> {options[2]}\n"
+                f"<b>D:</b> {options[3]}\n\n"
+                "<i>Выберите вариант ответа кнопкой ниже:</i>"
+            )
+            await edit_callback_message(bot_client, event, quiz_msg_text,
+                                       "edit_message:quiz_question", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif quiz_sub.startswith("ans:"):
+            parts = data_str.split(":")
+            correct_idx = int(parts[2])
+            clicked_idx = int(parts[3])
+            quiz_id = int(parts[4])
+
+            state_row = await database.get_user_interactive_state(quiz_id)
+            explanation = (state_row.get("case_id") if state_row else None) or "Клинический разбор."
+            is_correct = (correct_idx == clicked_idx)
+            
+            letters = ["A", "B", "C", "D"]
+            your_letter = letters[clicked_idx] if 0 <= clicked_idx < 4 else str(clicked_idx)
+            corr_letter = letters[correct_idx] if 0 <= correct_idx < 4 else str(correct_idx)
+
+            res_header = "✅ <b>ВЕРНО!</b>" if is_correct else "❌ <b>НЕВЕРНО!</b>"
+            ans_text = (
+                f"{res_header}\n\n"
+                f"Ваш выбор: <b>{your_letter}</b> | Правильный ответ: <b>{corr_letter}</b>\n\n"
+                f"💡 <b>Клиническое обоснование:</b>\n{explanation}"
+            )
+            buttons = [
+                [Button.inline("🎲 Следующий вопрос", data="quiz:generate")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, ans_text,
+                                       "edit_message:quiz_result", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+    # 5. КЛИНИЧЕСКИЙ СИМУЛЯТОР case:*
+    if data_str.startswith("case:"):
+        case_sub = data_str.split(":", 1)[1]
+        
+        if case_sub in ("menu", "main"):
+            case_prompt_info = (
+                "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
+                "Пошаговый тренажер реальных клинических ситуаций. Вы выступаете в роли лечащего врача, "
+                "а ИИ моделирует реакцию пациента и оценивает обоснованность каждого вашего шага.\n\n"
+                "👇 <i>Нажмите «🚀 Начать клинический кейс» для запуска:</i>"
+            )
+            buttons = [
+                [Button.inline("🚀 Начать клинический кейс", data="case:start")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, case_prompt_info,
+                                       "edit_message:nav_case", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif case_sub == "start":
+            await edit_callback_message(bot_client, event,
+                                       "🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>",
+                                       "edit_message:case_loading", parse_mode='html')
+            
+            departments = [
+                "эндодонтия/кариесология (терапевтическая стоматология)",
+                "протезирование/виниры/коронки (ортопедическая стоматология)",
+                "имплантация/удаление зуба (хирургическая стоматология)",
+                "заболевания пародонта (пародонтология)",
+                "окклюзия/ВНЧС (гнатология)"
+            ]
+            selected_dept = random.choice(departments)
+            case_prompt = f"""
+Ты — старший стоматолог-экзаменатор. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
+Напиши:
+1. Жалобы пациента и анамнез.
+2. Данные визуального осмотра.
+3. Задай ровно один конкретный вопрос о первом действии врача (например, какие дополнительные исследования назначить, или какой инструмент выбрать).
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Будь лаконичен, профессионален.
+2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
+            
+            if error or not response or not getattr(response, "text", None):
+                fallback_case = (
+                    "🎮 <b>Клинический случай [Эндодонтия / Терапия]:</b>\n\n"
+                    "<b>Пациент:</b> 34 года, жалобы на самопроизвольные приступообразные ночные боли в зубе 2.6 с иррадиацией в висок.\n"
+                    "<b>Осмотр:</b> глубокая кариозная полость на медиально-окклюзионной поверхности, зондирование дна резко болезненно, перкуссия слабо болезненна, термопроба резко положительная с длительным болевым ответом (>1 мин).\n\n"
+                    "❓ <b>Вопрос экзаменатора:</b> Какой предварительный диагноз и каков ваш первый шаг при инструментальной и медикаментозной обработке?"
+                )
+                starting_text = fallback_case
+            else:
+                starting_text = clean_html_formatting(response.text.strip())
+
+            history_payload = {
+                "messages": [{"role": "assistant", "content": starting_text}],
+                "last_updated": time.time()
+            }
+            await database.set_user_interactive_state(
+                user_id=event.sender_id,
+                state_type="case",
+                current_step=1,
+                case_id="dynamic",
+                history=json.dumps(history_payload)
+            )
+            
+            buttons = [
+                [Button.inline("⏹️ Сбросить симулятор", data="case:abort")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            case_display = (
+                f"🎮 <b>Клинический симулятор (Шаг 1):</b>\n\n"
+                f"{starting_text}\n\n"
+                f"<i>Ответьте на вопрос сообщением (текстом или голосом) в этот диалог. Для сброса используйте кнопку ниже или команду /abort.</i>"
+            )
+            await edit_callback_message(bot_client, event, case_display,
+                                       "edit_message:case_start", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif case_sub in ("abort", "exit"):
+            await database.clear_user_interactive_state(event.sender_id)
+            abort_text = (
+                "⏹️ <b>Интерактивная сессия симулятора успешно завершена.</b>\n\n"
+                "Вы можете в любой момент запустить новый разбор клинического случая!"
+            )
+            buttons = [
+                [Button.inline("🚀 Начать новый кейс", data="case:start")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, abort_text,
+                                       "edit_message:case_abort", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+    # 2. ПОСТРАНИЧНЫЙ ВЫВОД ЗАКЛАДОК bm:page:*
+    if data_str.startswith("bm:page:"):
+        page = 1
+        try:
+            page = max(1, int(data_str.split(":")[2]))
+        except (IndexError, ValueError):
+            page = 1
+
+        total_items = await database.count_clinical_bookmarks(event.sender_id)
+        if not total_items:
+            empty_text = (
+                "⭐ <b>Ваши клинические закладки</b>\n\n"
+                "У вас пока нет сохраненных записей.\n\n"
+                "💡 <i>Отправьте команду <code>/save</code> в ответ на любое сообщение в общем чате сообщества, "
+                "или нажмите кнопку «⭐ В закладки» при чтении статьи в Энциклопедии.</i>"
+            )
+            buttons = [
+                [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, empty_text,
+                                       "edit_message:bm_empty", buttons=buttons,
+                                       parse_mode='html')
+            return
+
+        per_page = 5
+        total_pages = max(1, (total_items + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+        offset = (page - 1) * per_page
+        page_rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=offset)
+
+        bm_text = f"⭐ <b>Ваши клинические закладки (Страница {page}/{total_pages}):</b>\n\n"
+        for i, row in enumerate(page_rows, offset + 1):
+            msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
+            bm_text += f"{i}. <b>{_bookmark_snippet(sender_name, limit=32)}</b> ({date}):\n"
+            bm_text += f"«{_bookmark_snippet(msg_text, limit=120)}»\n"
+            if media_desc:
+                bm_text += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc, limit=80)}\n"
+            is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
+            if is_group_message:
+                clean_chat_id = str(chat_id_val)[4:]
+                bm_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+            else:
+                bm_text += "📖 <i>Статья энциклопедии</i>\n\n"
+
+        bm_text += f"<i>Всего закладок: {total_items}</i>"
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(Button.inline("◀️ Пред", data=f"bm:page:{page - 1}"))
+        nav_row.append(Button.inline(f"{page}/{total_pages}", data=f"bm:page:{page}"))
+        if page < total_pages:
+            nav_row.append(Button.inline("След ▶️", data=f"bm:page:{page + 1}"))
+
+        buttons = []
+        if nav_row:
+            buttons.append(nav_row)
+        buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
+
+        await edit_callback_message(bot_client, event, bm_text,
+                                   "edit_message:bm_list", buttons=buttons,
+                                   parse_mode='html', link_preview=False)
+        return
+
+    # 3. ДЕТАЛЬНЫЙ СПРАВОЧНИК-КАЛЬКУЛЯТОР calc:*
+    if data_str.startswith("calc:"):
+        calc_sub = data_str.split(":", 1)[1]
+        
+        if calc_sub in ("main", "menu"):
+            calc_msg = (
+                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "Пришлите препарат, концентрацию и вес — например "
+                "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
+                "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
+                "• <b>Артикаин 4%</b> (1:100 000 / 1:200 000)\n"
+                "  взрослые 7 мг/кг, дети 5 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.7 мл = 68 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
+                "• <b>Мепивакаин 3%</b> (без вазоконстриктора)\n"
+                "  4.4 мг/кг, <b>но не более 400 мг</b>\n"
+                "  карпула 1.8 мл = 54 мг → потолок ≈ 7 карпул\n"
+                "  <i>потолок наступает при весе ≈ 91 кг</i>\n\n"
+                "• <b>Лидокаин 2%</b> (с адреналином)\n"
+                "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
+                "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
+                "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
+                "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, calc_msg,
+                                       "edit_message:nav_calc", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif calc_sub == "articaine":
+            art_text = (
+                "🦷 <b>Артикаин 4% (с адреналином 1:100 000 / 1:200 000)</b>\n\n"
+                "• <b>Концентрация:</b> 40 мг/мл (карпула 1.7 мл = 68 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые: <b>7.0 мг/кг</b>\n"
+                "  — Дети (от 4 лет): <b>5.0 мг/кг</b>\n"
+                "  — <b>Абсолютный потолок: не более 500 мг</b> (≈ 7 карпул)\n"
+                "  — <i>Потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (карпулы 1.7 мл):</b>\n"
+                "• 20 кг (ребенок) → макс. 100 мг ≈ <b>1.4 карпулы</b>\n"
+                "• 40 кг → макс. 280 мг ≈ <b>4.1 карпулы</b>\n"
+                "• 60 кг → макс. 420 мг ≈ <b>6.1 карпул</b>\n"
+                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>7.3 карпулы</b>\n\n"
+                "⚠️ <i>Детям до 4 лет противопоказан. При заболеваниях печени дозировку уменьшают.</i>"
+            )
+            buttons = [
+                [Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, art_text,
+                                       "edit_message:calc_articaine", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif calc_sub == "mepivacaine":
+            mep_text = (
+                "💉 <b>Мепивакаин 3% (Scandonest, без вазоконстриктора)</b>\n\n"
+                "• <b>Концентрация:</b> 30 мг/мл (карпула 1.8 мл = 54 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые и дети: <b>4.4 мг/кг</b>\n"
+                "  — <b>Абсолютный потолок: не более 400 мг</b> (≈ 7 карпул)\n"
+                "  — <i>Потолок наступает при весе ≈ 91 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (карпулы 1.8 мл):</b>\n"
+                "• 20 кг → макс. 88 мг ≈ <b>1.6 карпулы</b>\n"
+                "• 40 кг → макс. 176 мг ≈ <b>3.2 карпулы</b>\n"
+                "• 60 кг → макс. 264 мг ≈ <b>4.8 карпул</b>\n"
+                "• 91+ кг → абсолютный максимум 400 мг ≈ <b>7.4 карпулы</b>\n\n"
+                "⚠️ <i>Препарат выбора у пациентов с сердечно-сосудистой патологией, гипертонией и тиреотоксикозом.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, mep_text,
+                                       "edit_message:calc_mepivacaine", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif calc_sub == "lidocaine":
+            lido_text = (
+                "🩸 <b>Лидокаин 2% (с адреналином 1:100 000 / 1:80 000)</b>\n\n"
+                "• <b>Концентрация:</b> 20 мг/мл (карпула 1.8 мл = 36 мг)\n"
+                "• <b>Максимальные дозировки:</b>\n"
+                "  — Взрослые: <b>7.0 мг/кг</b> (с адреналином, <b>но не более 500 мг</b> ≈ 13 карпул)\n"
+                "  — Дети: <b>4.4 мг/кг</b>\n"
+                "  — Без адреналина: <b>4.4 мг/кг</b> (максимум 300 мг ≈ 8 карпул)\n"
+                "  — <i>Потолок 500 мг наступает при весе ≈ 71 кг</i>\n\n"
+                "📊 <b>Ориентир по весу пациента (1.8 мл с адреналином):</b>\n"
+                "• 20 кг → макс. 140 мг ≈ <b>3.8 карпулы</b>\n"
+                "• 50 кг → макс. 350 мг ≈ <b>9.7 карпул</b>\n"
+                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>13.8 карпул</b>\n\n"
+                "⚠️ <i>Выраженное сосудорасширяющее действие. Без адреналина быстро всасывается в кровоток.</i>"
+            )
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, lido_text,
+                                       "edit_message:calc_lidocaine", buttons=buttons,
+                                       parse_mode='html')
+            return
+
+    # 4. ИНТЕРАКТИВНЫЙ КВИЗ quiz:*
+    if data_str.startswith("quiz:"):
+        quiz_sub = data_str.split(":", 1)[1]
+        
+        if quiz_sub in ("menu", "main"):
+            quiz_prompt_info = (
+                "🎲 <b>Клинический квиз StomChat</b>\n\n"
+                "Интерактивный формат проверки клинических знаний по терапевтической, ортопедической, хирургической стоматологии и эндодонтии.\n\n"
+                "👇 <i>Нажмите кнопку ниже, чтобы начать викторину:</i>"
+            )
+            buttons = [
+                [Button.inline("🎲 Начать викторину", data="quiz:generate")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, quiz_prompt_info,
+                                       "edit_message:nav_quiz", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif quiz_sub in ("generate", "start", "next", "new"):
+            fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
+            question = fb["question"]
+            options = list(fb["options"])
+            correct = fb["correct"]
+            explanation = fb["explanation"]
+            topic = fb.get("topic", "Стоматология")
+
+            quiz_id = str(_next_quiz_state_id())
+            init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
+            await database.set_user_interactive_state(
+                user_id=int(quiz_id),
+                state_type="quiz_config",
+                current_step=correct,
+                case_id=explanation[:200],
+                history=json.dumps(init_votes)
+            )
+
+            buttons = [
+                [
+                    Button.inline(f"A: {options[0][:28]}", data=f"quiz:ans:{correct}:0:{quiz_id}"),
+                    Button.inline(f"B: {options[1][:28]}", data=f"quiz:ans:{correct}:1:{quiz_id}")
+                ],
+                [
+                    Button.inline(f"C: {options[2][:28]}", data=f"quiz:ans:{correct}:2:{quiz_id}"),
+                    Button.inline(f"D: {options[3][:28]}", data=f"quiz:ans:{correct}:3:{quiz_id}")
+                ],
+                [
+                    Button.inline("🔄 Другой вопрос", data="quiz:generate"),
+                    Button.inline("⬅️ Назад в меню", data="nav:main")
+                ]
+            ]
+            quiz_msg_text = (
+                f"🎲 <b>Клинический квиз [{topic}]:</b>\n\n"
+                f"{question}\n\n"
+                f"<b>A:</b> {options[0]}\n"
+                f"<b>B:</b> {options[1]}\n"
+                f"<b>C:</b> {options[2]}\n"
+                f"<b>D:</b> {options[3]}\n\n"
+                "<i>Выберите вариант ответа кнопкой ниже:</i>"
+            )
+            await edit_callback_message(bot_client, event, quiz_msg_text,
+                                       "edit_message:quiz_question", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif quiz_sub.startswith("ans:"):
+            parts = data_str.split(":")
+            correct_idx = int(parts[2])
+            clicked_idx = int(parts[3])
+            quiz_id = int(parts[4])
+
+            state_row = await database.get_user_interactive_state(quiz_id)
+            explanation = (state_row.get("case_id") if state_row else None) or "Клинический разбор."
+            is_correct = (correct_idx == clicked_idx)
+            
+            letters = ["A", "B", "C", "D"]
+            your_letter = letters[clicked_idx] if 0 <= clicked_idx < 4 else str(clicked_idx)
+            corr_letter = letters[correct_idx] if 0 <= correct_idx < 4 else str(correct_idx)
+
+            res_header = "✅ <b>ВЕРНО!</b>" if is_correct else "❌ <b>НЕВЕРНО!</b>"
+            ans_text = (
+                f"{res_header}\n\n"
+                f"Ваш выбор: <b>{your_letter}</b> | Правильный ответ: <b>{corr_letter}</b>\n\n"
+                f"💡 <b>Клиническое обоснование:</b>\n{explanation}"
+            )
+            buttons = [
+                [Button.inline("🎲 Следующий вопрос", data="quiz:generate")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, ans_text,
+                                       "edit_message:quiz_result", buttons=buttons,
+                                       parse_mode='html')
+            return
+
+    # 5. КЛИНИЧЕСКИЙ СИМУЛЯТОР case:*
+    if data_str.startswith("case:"):
+        case_sub = data_str.split(":", 1)[1]
+        
+        if case_sub in ("menu", "main"):
+            case_prompt_info = (
+                "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
+                "Пошаговый тренажер реальных клинических ситуаций. Вы выступаете в роли лечащего врача, "
+                "а ИИ моделирует реакцию пациента и оценивает обоснованность каждого вашего шага.\n\n"
+                "👇 <i>Нажмите «🚀 Начать клинический кейс» для запуска:</i>"
+            )
+            buttons = [
+                [Button.inline("🚀 Начать клинический кейс", data="case:start")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, case_prompt_info,
+                                       "edit_message:nav_case", buttons=buttons,
+                                       parse_mode='html')
+            return
+            
+        elif case_sub == "start":
+            await edit_callback_message(bot_client, event,
+                                       "🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>",
+                                       "edit_message:case_loading", parse_mode='html')
+            
+            departments = [
+                "эндодонтия/кариесология (терапевтическая стоматология)",
+                "протезирование/виниры/коронки (ортопедическая стоматология)",
+                "имплантация/удаление зуба (хирургическая стоматология)",
+                "заболевания пародонта (пародонтология)",
+                "окклюзия/ВНЧС (гнатология)"
+            ]
+            selected_dept = random.choice(departments)
+            case_prompt = f"""
+Ты — старший стоматолог-экзаменатор. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
+Напиши:
+1. Жалобы пациента и анамнез.
+2. Данные визуального осмотра.
+3. Задай ровно один конкретный вопрос о первом действии врача (например, какие дополнительные исследования назначить, или какой инструмент выбрать).
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
+1. Будь лаконичен, профессионален.
+2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+"""
+            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
+            
+            if error or not response or not getattr(response, "text", None):
+                fallback_case = (
+                    "🎮 <b>Клинический случай [Эндодонтия / Терапия]:</b>\n\n"
+                    "<b>Пациент:</b> 34 года, жалобы на самопроизвольные приступообразные ночные боли в зубе 2.6 с иррадиацией в висок.\n"
+                    "<b>Осмотр:</b> глубокая кариозная полость на медиально-окклюзионной поверхности, зондирование дна резко болезненно, перкуссия слабо болезненна, термопроба резко положительная с длительным болевым ответом (>1 мин).\n\n"
+                    "❓ <b>Вопрос экзаменатора:</b> Какой предварительный диагноз и каков ваш первый шаг при инструментальной и медикаментозной обработке?"
+                )
+                starting_text = fallback_case
+            else:
+                starting_text = clean_html_formatting(response.text.strip())
+
+            history_payload = {
+                "messages": [{"role": "assistant", "content": starting_text}],
+                "last_updated": time.time()
+            }
+            await database.set_user_interactive_state(
+                user_id=event.sender_id,
+                state_type="case",
+                current_step=1,
+                case_id="dynamic",
+                history=json.dumps(history_payload)
+            )
+            
+            buttons = [
+                [Button.inline("⏹️ Сбросить симулятор", data="case:abort")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            case_display = (
+                f"🎮 <b>Клинический симулятор (Шаг 1):</b>\n\n"
+                f"{starting_text}\n\n"
+                f"<i>Ответьте на вопрос сообщением (текстом или голосом) в этот диалог. Для сброса используйте кнопку ниже или команду /abort.</i>"
+            )
+            await edit_callback_message(bot_client, event, case_display,
+                                       "edit_message:case_start", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+            
+        elif case_sub in ("abort", "exit"):
+            await database.clear_user_interactive_state(event.sender_id)
+            abort_text = (
+                "⏹️ <b>Интерактивная сессия симулятора успешно завершена.</b>\n\n"
+                "Вы можете в любой момент запустить новый разбор клинического случая!"
+            )
+            buttons = [
+                [Button.inline("🚀 Начать новый кейс", data="case:start")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, abort_text,
+                                       "edit_message:case_abort", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
     if data_str.startswith("style:"):
         style = data_str.split(":")[1]
         style_names = {
@@ -5149,6 +7045,27 @@ async def handle_quiz_callback(bot_client, event):
             "clinical_dry": "Сухие факты 📝",
             "humor_cynic": "Ироничный циник 💀"
         }
+        if style == "menu":
+            profile = await database.get_user_profile(event.sender_id)
+            current_style = profile.get("selected_style", "colleague_friendly")
+            curr_style_name = style_names.get(current_style, "Неизвестный")
+            style_welcome = (
+                "⚙️ <b>Настройка стиля общения</b>\n\n"
+                f"Текущий стиль общения: <b>{curr_style_name}</b>\n\n"
+                "Выберите стиль, в котором я буду отвечать вам в личных сообщениях:"
+            )
+            style_buttons = [
+                [Button.inline("Коллега-эксперт 🤝 (по умолчанию)", data="style:colleague_friendly")],
+                [Button.inline("Сухие факты 📝 (строго, без шуток)", data="style:clinical_dry")],
+                [Button.inline("Ироничный циник 💀 (черный юмор)", data="style:humor_cynic")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, style_welcome,
+                                       "edit_message:nav_style", buttons=style_buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
         # Данные кнопки приходят от клиента, а не из нашего сообщения: прислать
         # можно что угодно. Неизвестное значение легло бы в базу как стиль и
         # осталось там навсегда — сохраняем только то, для чего есть промпт.
@@ -5166,8 +7083,13 @@ async def handle_quiz_callback(bot_client, event):
             f"Новый стиль: <b>{style_name}</b>\n\n"
             "Он применяется и в личных сообщениях, и в ответах в общем чате. Изменить можно в любой момент командой /style."
         )
+        confirm_buttons = [
+            [Button.inline("⚙️ Изменить стиль", data="style:menu")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
+        ]
         await edit_callback_message(bot_client, event, confirm_text,
-                                   "edit_message:style_confirm", parse_mode='html')
+                                   "edit_message:style_confirm", buttons=confirm_buttons,
+                                   parse_mode='html')
         await event.answer()
         return
 
@@ -5185,7 +7107,8 @@ async def handle_quiz_callback(bot_client, event):
         buttons = [
             [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
             [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
-            [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")]
+            [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
         ]
         await edit_callback_message(bot_client, event, protocols_text,
                                    "edit_message:proto_list", buttons=buttons,
@@ -5227,7 +7150,10 @@ async def handle_quiz_callback(bot_client, event):
         response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"
         
         from telethon import Button
-        back_btn = Button.inline("⬅️ Назад к списку", data="proto:back")
+        back_btn = [
+            [Button.inline("⬅️ Назад к списку", data="proto:back")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
+        ]
         await edit_callback_message(bot_client, event, response_text,
                                    "edit_message:proto_article", buttons=back_btn,
                                    parse_mode='html', link_preview=False)
@@ -5244,7 +7170,9 @@ async def handle_quiz_callback(bot_client, event):
         from telethon import Button
         buttons = [
             [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics")],
-            [Button.inline("🎲 Случайный факт", data="wiki_cat:random"), Button.inline("🔍 Поиск по базе", data="wiki_cat:search_info")]
+            [Button.inline("🎲 Случайный факт", data="wiki_cat:random"), Button.inline("🔍 Поиск по базе", data="wiki_cat:search_info")],
+            [Button.inline("📚 Клинические протоколы", data="nav:proto")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
         ]
         await edit_callback_message(bot_client, event, wiki_text,
                                    "edit_message:wiki_menu", buttons=buttons,
@@ -5277,7 +7205,10 @@ async def handle_quiz_callback(bot_client, event):
             "<i>Бот выведет наиболее релевантные статьи прямо в диалог!</i>"
         )
         from telethon import Button
-        back_btn = Button.inline("⬅️ Назад в меню", data="wiki_cat:back")
+        back_btn = [
+            [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
+        ]
         await edit_callback_message(bot_client, event, search_info,
                                    "edit_message:wiki_search_info",
                                    buttons=back_btn, parse_mode='html')
@@ -5294,7 +7225,7 @@ async def handle_quiz_callback(bot_client, event):
         from telethon import Button
         buttons = [
             [Button.inline("🔄 Ещё факт", data="wiki_cat:random")],
-            [Button.inline("⬅️ Назад в меню", data="wiki_cat:back")]
+            [Button.inline("📚 Обзор по разделам", data="wiki_cat:topics"), Button.inline("⬅️ Назад в меню", data="nav:main")]
         ]
         await edit_callback_message(bot_client, event, response_text,
                                    "edit_message:wiki_random", buttons=buttons,
@@ -5335,7 +7266,10 @@ async def handle_quiz_callback(bot_client, event):
             response_text = f"📚 <b>{subtopic_title}:</b>\n\n<i>В данной категории пока нет статей в базе знаний.</i>"
             from telethon import Button
             back_cat = subtopic_id.split("_")[0]
-            back_btn = Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
+            back_btn = [
+                [Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")],
+                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
             await edit_callback_message(bot_client, event, response_text,
                                        "edit_message:wiki_page_empty",
                                        buttons=back_btn, parse_mode='html')
@@ -5369,6 +7303,9 @@ async def handle_quiz_callback(bot_client, event):
             Button.inline("⭐ В закладки", data=f"wiki_save:{subtopic_id}:{page_idx}"),
             Button.inline("⬅️ Назад к подтемам", data=f"wiki_cat:{back_cat}")
         ])
+        buttons.append([
+            Button.inline("⬅️ Назад в меню", data="nav:main")
+        ])
         
         await edit_callback_message(bot_client, event, response_text,
                                    "edit_message:wiki_page", buttons=buttons,
@@ -5395,8 +7332,6 @@ async def handle_quiz_callback(bot_client, event):
             
             bookmark_text = f"📚 <b>{subtopic_title}</b>\n\n{fact_cleaned}"
             
-            from datetime import datetime
-            import random
             fake_msg_id = -random.randint(100000000, 999999999)
             
             await database.save_clinical_bookmark(
@@ -5472,21 +7407,22 @@ async def handle_quiz_callback(bot_client, event):
             pct = [int((v / total_votes) * 100) if total_votes > 0 else 0 for v in votes]
             
             new_lines = []
+            opt_regex = re.compile(r'^(?:<b>|\*\*)?([A-D])[:.](?:</b>|\*\*)?\s*(.*)', re.IGNORECASE)
+            suffix_regex = re.compile(r'\s*\(\d+\s*гол\S*\s*\|\s*\d+%\)\s*$', re.IGNORECASE)
+
             for line in lines:
-                if line.startswith("<b>A:</b>"):
-                    clean_choice = line[9:].split("(")[0].strip()
-                    new_lines.append(f"<b>A:</b> {clean_choice} ({votes[0]} гол. | {pct[0]}%)")
-                elif line.startswith("<b>B:</b>"):
-                    clean_choice = line[9:].split("(")[0].strip()
-                    new_lines.append(f"<b>B:</b> {clean_choice} ({votes[1]} гол. | {pct[1]}%)")
-                elif line.startswith("<b>C:</b>"):
-                    clean_choice = line[9:].split("(")[0].strip()
-                    new_lines.append(f"<b>C:</b> {clean_choice} ({votes[2]} гол. | {pct[2]}%)")
-                elif line.startswith("<b>D:</b>"):
-                    clean_choice = line[9:].split("(")[0].strip()
-                    new_lines.append(f"<b>D:</b> {clean_choice} ({votes[3]} гол. | {pct[3]}%)")
-                elif "Нажмите на кнопку" in line or "Всего проголосовало:" in line:
+                stripped = line.strip()
+                opt_match = opt_regex.match(stripped)
+                if opt_match:
+                    letter = opt_match.group(1).upper()
+                    idx = ord(letter) - ord('A')
+                    raw_choice = opt_match.group(2)
+                    clean_choice = suffix_regex.sub('', raw_choice).strip()
+                    new_lines.append(f"<b>{letter}:</b> {clean_choice} ({votes[idx]} гол. | {pct[idx]}%)")
+                elif "Нажмите на кнопку" in line or "Всего проголосовало" in line or stripped.startswith("📊"):
                     continue
+                elif stripped == "🎲 КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА":
+                    new_lines.append("🎲 <b>КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА</b>")
                 else:
                     new_lines.append(line)
             
@@ -5499,6 +7435,10 @@ async def handle_quiz_callback(bot_client, event):
             await event.edit(text=new_text, parse_mode='html')
     except Exception as edit_err:
         logger.error(f"Failed to edit quiz message text with live stats: {edit_err}")
+
+
+# Псевдоним для централизованного диспетчера колбэков
+handle_callback_query = handle_quiz_callback
 
 
 async def analyze_dispute_need(context_msgs):
@@ -5566,7 +7506,6 @@ async def check_referee_triage(context_msgs):
             if start != -1 and end != -1:
                 text = text[start:end+1]
         
-        import json
         data = json.loads(text)
         should_intervene = data.get("should_intervene", False)
         reason = data.get("reason", "No reason provided")
@@ -5609,7 +7548,6 @@ async def check_and_trigger_referee(bot_client, event, text):
         return
 
     # 3. Регулярка с границами слов для точного совпадения токсичных ключевиков
-    import re
     escaped_kws = [re.escape(kw) for kw in [
         "бред", "чушь", "дичь", "херня", "говно", "полная лажа", 
         "безрукий", "руки оторвать", "какой дурак", "херню", "глупость",
@@ -5693,7 +7631,6 @@ async def check_and_trigger_referee(bot_client, event, text):
     # 50/50 ИЛИ ШУТИТ ИЛИ НАУЧНО
     # Если спор "злой" (есть стоп-слова) -> шутит (joke)
     # Если обычный спор -> 25% научно (scientific), 75% коллега (colleague)
-    import random
     if has_conflict_kw:
         style = "joke"
     else:
@@ -5753,12 +7690,13 @@ async def check_and_trigger_referee(bot_client, event, text):
 [КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
 
-Напиши естественную, живую реплику от лица коллеги. Вырази своё мнение, основываясь на Базе Знаний, но пиши простым человеческим языком практикующего врача (без занудства, канцелярита и высокомерия). Не читай нотации и не используй снисходительный тон или смайлики ухмылки (вроде 😏). Пиши с уважением к коллегам, как в хорошей ординаторской.
+Напиши естественную реплику от лица коллеги. Вырази своё мнение, основываясь на Базе Знаний, но пиши профессиональным языком практикующего врача. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Не читай нотации и не используй снисходительный тон или смайлики. Пиши с уважением к коллегам.
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Важно: внимательно изучи историю дискуссии. НЕ повторяй тейки и доводы, которые коллеги уже написали в истории. Добавь свежую мысль или вежливо задай наводящий клинический вопрос, развивающий диалог.
-2. Длина — максимум 320 символов! Напиши кратко, живо и реалистично.
+2. Длина — максимум 320 символов! Напиши кратко и по делу.
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+4. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 """
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
@@ -5944,7 +7882,7 @@ def set_ping_opt_out(chat_id, reason=""):
 
 
 async def check_and_send_pm_pings(bot_client):
-    """Проверяет неактивных пользователей в ЛС и отправляет им пинг."""
+    """Проверяет неактивных пользователей в ЛС и отправляет им персонализированный пинг."""
     try:
         if is_ping_quiet_hours():
             logger.debug("PM pings skipped: quiet hours.")
@@ -5977,67 +7915,85 @@ async def check_and_send_pm_pings(bot_client):
 
                 last_activity = _parse_state_dt(info.get("last_activity"))
                 ping_sent = info.get("ping_sent", False)
+                unanswered_pings = info.get("unanswered_pings", 0)
 
-                # Если прошло больше 48 часов и пинг еще не отправлен
-                if now - last_activity > timedelta(hours=48) and not ping_sent:
+                # Если пользователь пропустил даже 1 пинг — никогда больше не навязываемся
+                if unanswered_pings >= 1 or ping_sent:
+                    continue
+
+                # Редкий график: первый и единственный вежливый фоллоу-ап через 7 дней (168 ч)
+                delay_hours = 168
+
+                # Если прошла неделя с момента переписки и пинг еще не отправлялся
+                if now - last_activity > timedelta(hours=delay_hours):
                     chat_id = int(chat_id_str)
-                    logger.info(f"Generating proactive DM ping for chat_id={chat_id}...")
+                    days_ago = 7
+                    logger.info(
+                        f"Generating proactive DM ping for chat_id={chat_id} "
+                        f"(unanswered={unanswered_pings}, delay={delay_hours}h)..."
+                    )
                     
-                    # Загружаем последние сообщения, чтобы сформировать контекстный пинг
+                    # Загружаем последние сообщения и профиль, чтобы сформировать контекстный живой пинг
                     history = await database.get_last_pm_messages(chat_id, limit=6)
                     context_str = "\n".join([f"{m['sender_name']}: {m['text']}" for m in history])
                     
-                    prompt = f"""
-Ты — опытный, живой стоматолог-практик из чата "StomChat". 
-Один из твоих коллег общался с тобой в личных сообщениях, но пропал и не писал уже 2 дня.
-Вот история вашей последней переписки:
+                    user_profile = await database.get_user_profile(chat_id)
+                    portrait = user_profile.get("profile_portrait") or ""
+                    portrait_hint = f"\nКлинический профиль врача: {portrait}\n" if portrait else ""
+
+                    prompt = f"""Ты — опытный старший коллега-стоматолог из сообщества "StomChat". 
+Врач-стоматолог обращался к тебе в ЛС {days_ago} дней назад.
+{portrait_hint}
+История вашей последней переписки:
 {context_str}
 
 Задачи:
-1. Напиши ОДНО короткое, дружелюбное предложение, чтобы возобновить диалог.
-2. Спроси, как продвигается его клинический случай или тема, которую вы обсуждали в конце (например, BOPT, имплантат, синус-лифтинг, КТ, или просто спроси как дела/работа, если тема была свободной).
-3. Тон: теплый, неформальный, коллегиальный, без банальностей и шаблонов. Говори как человек, а не как автоответчик.
-4. Длина: строго 1 предложение! Без приветствий и официоза.
-5. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+1. Проанализируй переписку: обсуждался ли в ней РЕАЛЬНЫЙ клинический случай, сложный пациент, снимки, методика или выбор тактики лечения (например: эндодонтия зуба, боль после вмешательства, скол, фиксация, анестезия сложного пациента, имплантат)?
+2. ЕСЛИ реального клинического кейса НЕ БЫЛО (врач просто открывал меню, нажимал кнопки, тестировал команды или задавал пустые общие вопросы) — верни СТРОГО ОДНО СЛОВО: NONE. Запрещено навязываться и слать пустые приветствия!
+3. ЕСЛИ обсуждался реальный клинический случай — напиши строго 1 короткое, персонализированное предложение от коллеги к коллеге, вежливо поинтересовавшись динамикой и исходом этого конкретного случая (например: «Коллега, как динамика по зубу 3.6? Удалось пройти канал?»).
+4. Тон: сдержанный, уважительный, профессиональный. Без панибратства, без фамильярности («ты куда пропал»), без спама.
+5. Разметка: только HTML (<b>жирный</b>, <i>курсив</i>).
 """
                     status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
                     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
                     
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
+                        if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:
+                            logger.info(f"PM ping for chat_id={chat_id}: no clinical case to follow up (NONE).")
+                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                            continue
+
                         reply_text = clean_html_formatting(reply_text)
 
                         # Генерация заняла десятки секунд. Перечитываем запись:
                         # врач мог написать сам, пока мы сочиняли ему "ты пропал".
                         fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
-                        if fresh.get("pings_opted_out"):
+                        if fresh.get("pings_opted_out") or fresh.get("ping_sent", False):
                             continue
-                        if datetime.now() - _parse_state_dt(fresh.get("last_activity")) <= timedelta(hours=48):
+                        if datetime.now() - _parse_state_dt(fresh.get("last_activity")) <= timedelta(hours=delay_hours):
                             logger.info(f"User {chat_id} became active while ping was generating. Skipping.")
                             continue
 
                         try:
                             await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
                             await database.save_pm_message(chat_id, "Assistant", reply_text)
-                            # Коммитим сразу, а не в конце цикла.
-                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0)
+                            # Коммитим сразу, увеличивая счетчик неотвеченных пингов
+                            commit_pm_ping(
+                                chat_id_str,
+                                ping_sent=True,
+                                ping_failures=0,
+                                unanswered_pings=unanswered_pings + 1,
+                                last_ping_time=datetime.now().isoformat(),
+                            )
                             sent_this_cycle += 1
                         except ValueError as ve:
                             if "Could not find the input entity" in str(ve):
                                 logger.warning(f"User {chat_id} entity not found. Removing from PM pings.")
-                                # Раньше здесь стоял `continue` в обход `updated = True`,
-                                # поэтому удаление не сохранялось и тот же пользователь
-                                # обрабатывался заново каждый час.
                                 drop_pm_ping(chat_id_str)
                                 continue
                             raise
                         except Exception as send_err:
-                            # Раньше здесь в одну кучу шли UserIsBlockedError и
-                            # FloodWait, а счётчик рос на любой из них. FloodWait
-                            # — НАША вина (шлём слишком часто), и трёх таких
-                            # хватало, чтобы живой врач навсегда выпал из
-                            # приглашений: MAX_PING_FAILURES проверяется на входе
-                            # и обратной дороги у записи нет.
                             if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
                                 wait_seconds = tg_safety.flood_wait_seconds(send_err)
                                 logger.warning(
@@ -6069,198 +8025,5 @@ async def check_and_send_pm_pings(bot_client):
 
 
 async def check_and_send_group_activity_pings(bot_client):
-    """Проверяет общую группу на наличие горячих обсуждений и приглашает пользователей из ЛС присоединиться."""
-    import config
-    if not config.SOURCE_CHAT_ID:
-        return
-
-    # Ночью не зовём в чат: "🔥 там горячо спорят" в 03:40 — это не приглашение,
-    # а побудка. Заодно не тратим LLM-вызов на анализ чата впустую.
-    if is_ping_quiet_hours():
-        logger.debug("Group activity pings skipped: quiet hours.")
-        return
-
-    try:
-        # 1. Загружаем последние 30 сообщений из базы данных
-        rows = await database.get_last_n_messages(limit=30)
-        if not rows or len(rows) < 5:
-            return
-            
-        # Формируем текст переписки для Llama
-        context_msgs = []
-        for r in rows:
-            sender_name = r[1] or "Участник"
-            msg_text = r[3] or ""
-            if msg_text:
-                context_msgs.append(f"{sender_name}: {msg_text}")
-                
-        context_str = "\n".join(context_msgs)
-        last_msg_id = rows[-1][0]
-        
-        # 2. Опрашиваем Llama на предмет горячего клинического обсуждения
-        prompt = f"""Ты — ИИ-аналитик стоматологического чата "StomChat".
-Проанализируй последние сообщения коллег в чате. Твоя задача — определить, идет ли сейчас активное клиническое обсуждение или спор на какую-то конкретную тему (например: фиксация коронок, обтурация каналов, выбор имплантата, анестезия).
-
-Переписка:
-{context_str}
-
-Ответь строго в формате JSON:
-{{
-  "is_hot": true/false,
-  "topic": "Тема спора в 2-4 словах",
-  "teaser": "Короткий завлекающий тизер в 1 предложение на русском, побуждающий зайти в чат и принять участие. Например: 'Слушай, там в чате сейчас как раз горячо спорят о границах уступа и протоколе BOPT, заходи!'"
-}}
-"""
-        status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=20)
-        if error or not response or not getattr(response, "text", None):
-            return
-            
-        # Парсим JSON
-        try:
-            import json
-            text_res = response.text.strip()
-            if "```" in text_res:
-                start = text_res.find("{")
-                end = text_res.rfind("}")
-                if start != -1 and end != -1:
-                    text_res = text_res[start:end+1]
-            data = json.loads(text_res)
-        except Exception:
-            return
-            
-        if not data.get("is_hot"):
-            logger.info("Group activity check: no hot discussions found.")
-            return
-            
-        topic = data.get("topic", "Клинический спор")
-        teaser = data.get("teaser", "В чате сейчас идет активное клиническое обсуждение!")
-        
-        logger.info(f"Group activity check: detected hot discussion on '{topic}'. Teaser: {teaser}")
-        
-        # 3. Находим активных пользователей ЛС
-        user_ids = await database.get_active_pm_users(days_limit=30)
-        if not user_ids:
-            return
-            
-        state = load_state()
-        pings = state.setdefault("pm_pings", {})
-        now = datetime.now()
-        
-        # Формируем ссылку на чат
-        chat_id_clean = str(config.SOURCE_CHAT_ID)
-        if chat_id_clean.startswith("-100"):
-            chat_id_clean = chat_id_clean[4:]
-        chat_link = f"https://t.me/c/{chat_id_clean}/{last_msg_id}"
-        
-        # 4. Отбираем пользователей с учетом 48-часового кулдауна
-        candidates = []
-        for uid in user_ids:
-            uid_str = str(uid)
-            # Заводим запись СЕГОДНЯШНИМ временем, а не эпохой.
-            # Раньше здесь подставлялось "2000-01-01", и почасовой
-            # check_and_send_pm_pings видел "молчит 26 лет" -> условие
-            # (now - last_activity > 48h and not ping_sent) срабатывало сразу
-            # для КАЖДОГО, кто писал в ЛС за последние 30 дней. Всем им уходила
-            # личка "ты пропал и не писал уже 2 дня" — включая тех, кто написал
-            # вчера. Следы в боевом состоянии: записи с last_activity 2000-01-01
-            # и уже выставленным ping_sent.
-            # Правильная семантика: с этого момента начинаем следить, право на
-            # пинг появляется только после реальных 48 часов молчания.
-            #
-            # Заведённую запись сразу пишем на диск. Без этого setdefault жил
-            # только в локальной копии состояния и пропадал по выходе из job:
-            # «начали следить» не сохранялось нигде, и точка отсчёта заново
-            # сдвигалась на now при каждом запуске. Спурьезных пингов это не
-            # давало, но и обещанного комментарием поведения не было тоже.
-            if uid_str not in pings:
-                user_info = {"last_activity": now.isoformat(), "ping_sent": False}
-                pings[uid_str] = user_info
-                commit_pm_ping(uid_str, **user_info)
-            else:
-                user_info = pings[uid_str]
-
-
-            # Проверяем время последней активности или пинга
-            last_activity_str = user_info.get("last_activity", "2000-01-01T00:00:00")
-            last_ping_str = user_info.get("last_group_ping", "2000-01-01T00:00:00")
-            
-            try:
-                last_act = datetime.fromisoformat(last_activity_str)
-                last_ping = datetime.fromisoformat(last_ping_str)
-            except Exception:
-                last_act = datetime(2000, 1, 1)
-                last_ping = datetime(2000, 1, 1)
-                
-            # Отписавшихся не беспокоим.
-            if user_info.get("pings_opted_out"):
-                continue
-            if user_info.get("ping_failures", 0) >= MAX_PING_FAILURES:
-                continue
-
-            # Должно пройти не менее 48 часов с момента последнего пинга группы или ЛС-пинга
-            if now - last_ping > timedelta(hours=48) and now - last_act > timedelta(hours=24):
-                candidates.append(uid)
-                
-        if not candidates:
-            logger.info("No users available for group activity ping (all on cooldown).")
-            return
-            
-        targets = select_ping_targets(candidates)
-
-        logger.info(f"Sending proactive group activity pings to {len(targets)} users (out of {len(candidates)} candidates).")
-
-        for ping_index, uid in enumerate(targets):
-            if ping_index:
-                # Пауза между отправками. Telegram считает не только объём, но и
-                # частоту; без паузы пачка уходит настолько быстро, насколько
-                # успевает сеть.
-                await asyncio.sleep(GROUP_PING_DELAY_SECONDS)
-            try:
-                msg = f"🔥 <b>{teaser}</b>\n\n💬 Тема: {topic}\n\n👉 <a href=\"{chat_link}\">Перейти к обсуждению в чате</a>"
-                try:
-                    await bot_client.send_message(entity=uid, message=msg, parse_mode='html', link_preview=True)
-                    # Сохраняем в историю переписки ЛС
-                    await database.save_pm_message(uid, "Assistant", f"[Проактивный пинг чата]: {teaser}")
-                    # Коммитим сразу и точечно: раньше кулдаун присваивался в
-                    # общий снимок состояния и сохранялся одним куском в конце,
-                    # затирая last_activity, записанный живым диалогом.
-                    commit_pm_ping(uid, last_group_ping=datetime.now().isoformat(), ping_failures=0)
-                except ValueError as ve:
-                    if "Could not find the input entity" in str(ve):
-                        logger.warning(f"User {uid} entity not found. Cannot send group ping.")
-                        drop_pm_ping(uid)
-                    else:
-                        raise
-                except Exception as send_err:
-                    # Кулдаун раньше выставлялся ТОЛЬКО после успешной отправки,
-                    # поэтому заблокировавший бота оставался вечным кандидатом
-                    # и каждый раз разбавлял 20%-ную выборку.
-                    if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
-                        # FloodWait — вина нашей скорости. Счётчик не растёт, а
-                        # рассылка прекращается: продолжать в закрытую дверь
-                        # значит копить наказание и терять остальных из выборки.
-                        logger.warning(
-                            "Group ping hit FloodWait uid=%s wait=%ss — счётчик НЕ "
-                            "увеличен, рассылка остановлена до следующего цикла "
-                            "(осталось не разослано: %s)",
-                            uid, tg_safety.flood_wait_seconds(send_err),
-                            len(targets) - targets.index(uid) - 1,
-                        )
-                        break
-                    failures = pings.get(str(uid), {}).get("ping_failures", 0) + 1
-                    commit_pm_ping(
-                        uid,
-                        last_group_ping=datetime.now().isoformat(),
-                        ping_failures=failures,
-                    )
-                    logger.warning(
-                        f"Failed to send group activity ping to {uid} "
-                        f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
-                    )
-            except Exception as outer_err:
-                logger.error(f"Error handling group activity ping for {uid}: {outer_err}")
-
-
-    except Exception as g_err:
-        logger.error(f"Global error in check_and_send_group_activity_pings: {g_err}")
+    """Отключено: безадресная рассылка пингов в ЛС о событиях в группе порождала спам и блокировки бота."""
+    return

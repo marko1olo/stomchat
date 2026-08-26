@@ -570,6 +570,10 @@ async def guard(make_awaitable, op, chat_id=None, timeout=DEFAULT_TIMEOUT_SECOND
 
 async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
                        op="send_message", logger=None, **kwargs):
+    if not text or not (str(text) if text is not None else "").strip():
+        log = logger or _LOG
+        log.warning("tg_safety.send_message: aborted sending empty message to chat_id=%s op=%s", chat_id, op)
+        return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
     return await guard(
         lambda: client.send_message(entity=chat_id, message=text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,
@@ -579,6 +583,10 @@ async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
 async def edit_message(client, chat_id, message_id, text,
                        timeout=DEFAULT_TIMEOUT_SECONDS, op="edit_message",
                        logger=None, **kwargs):
+    if not text or not (str(text) if text is not None else "").strip():
+        log = logger or _LOG
+        log.warning("tg_safety.edit_message: aborted editing empty message for chat_id=%s msg_id=%s op=%s", chat_id, message_id, op)
+        return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
     return await guard(
         lambda: client.edit_message(chat_id, message_id, text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,

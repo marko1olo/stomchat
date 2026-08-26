@@ -642,10 +642,121 @@ EMPTY_QUERY = (
     "запрос словами — например «биодентин перфорация дна полости»."
 )
 
+INTENT_WEB_SEARCH = "INTENT_WEB_SEARCH"
+
 # Из запроса убираем только пунктуацию. Точка, дробь, процент и дефис остаются:
 # «0.5%», «мг/кг» и «синус-лифтинг» без них превращаются в другие слова, а доза,
 # потерявшая дробь, — это уже другая доза.
 _QUERY_JUNK_RE = re.compile(r"[^\w\s./%+-]", re.UNICODE)
+
+# Префиксы и фразы прямого поискового триггера
+_SEARCH_TRIGGER_PREFIXES = [
+    # "найди..."
+    r"^найди(?:\s+(?:мне|пожалуйста|инфу|информацию|данные|публикации|статьи|исследования|материалы))?\s+(?:по|про|о|об|в\s+сети|в\s+интернете|в\s+pubmed|в\s+пабмеде|в\s+гугле)?\s*",
+    r"^найти(?:\s+(?:инфу|информацию|данные|публикации|статьи|исследования))?\s+(?:по|про|о|об)?\s*",
+    r"^отыщи(?:\s+(?:статьи|информацию))?\s+(?:по|про|о|об)?\s*",
+    # "погугли / загугли / поищи..."
+    r"^(?:погугли|загугли|прогугли|погуглить|загуглить)(?:\s+(?:мне|пожалуйста))?\s*(?:что\s+пишут\s+в\s+pubmed\s+про|что\s+пишут\s+про|что\s+известно\s+про|про|по|о|об)?\s*",
+    r"^поищи(?:\s+(?:мне|пожалуйста|инфу|информацию|статьи|исследования|данные))?\s+(?:в\s+интернете|в\s+сети|в\s+гугле|в\s+яндексе|в\s+pubmed|в\s+пабмеде|по|про|о|об)?\s*",
+    r"^поиск(?:\s+(?:в\s+сети|в\s+интернете|в\s+pubmed|статей|информации))?\s+(?:по|про|о|об)?\s*:\s*",
+    # "что пишут / говорит pubmed / пабмед..."
+    r"^что\s+(?:пишут|пишет|говорит|известно|найдено|есть)\s+(?:в\s+)?(?:pubmed|пабмед|пабмеде|cochrane|кокрейн|кохране|научной\s+литературе|исследованиях|науке)\s+(?:про|по|о|об|насчет|относительно)\s*",
+    r"^что\s+(?:пишут|пишет|говорит)\s+наука\s+(?:про|по|о|об)\s*",
+    # "какие исследования / статьи есть..."
+    r"^какие\s+(?:есть\s+)?(?:свежие\s+|новые\s+|актуальные\s+|последние\s+)?(?:исследования|статьи|публикации|данные|мета-?анализы|обзоры)\s+(?:есть\s+)?(?:по|про|о|об)\s*",
+    r"^какие\s+исследования\s+(?:по|про|о|об)\s*",
+    # "покажи / дай статьи / пруфы..."
+    r"^(?:покажи|дай|приведи)\s+(?:мне\s+)?(?:статьи|исследования|ссылки|пруфы|источники|публикации)\s+(?:по|про|о|об)\s*",
+    # English patterns
+    r"^(?:search\s+for|google|look\s+up(?:\s+in\s+pubmed)?|what\s+does\s+pubmed\s+say\s+about|find\s+articles\s+(?:on|about))\s*",
+]
+
+_SEARCH_PREFIX_COMBINED_RE = re.compile(
+    "|".join(f"(?:{p})" for p in _SEARCH_TRIGGER_PREFIXES),
+    re.IGNORECASE | re.UNICODE
+)
+
+_FRESH_YEAR_RE = re.compile(r"\b(?:2025|2026|2027|2028)\b")
+_FRESH_CONTEXT_RE = re.compile(
+    r"\b(?:препарат\w*|материал\w*|протокол\w*|рекомендаци\w*|исследован\w*|стать\w*|"
+    r"одобрен\w*|отзыв\w*|fda|минздрав\w*|клинрек\w*|нов\w+|свеж\w+|актуальн\w+|"
+    r"мета-?анализ\w*|обзор\w*|запрет\w*|разрешен\w*|зарегистрирован\w*)\b",
+    re.IGNORECASE | re.UNICODE
+)
+
+_EXPLICIT_FRESH_PHRASES = (
+    "новый препарат", "новые препараты", "нового препарата", "новых препаратов",
+    "одобрение нового", "одобрен в 20", "одобрена в 20", "одобрены в 20",
+    "отзыв препарата", "отозван", "отозвали", "снят с производства",
+    "новые клинические рекомендации", "свежие клинические рекомендации",
+    "обновление рекомендаций", "обновленный протокол", "обновленные протоколы",
+    "свежие исследования", "свежие статьи", "последние исследования",
+    "новые данные 20", "исследования 2025", "исследования 2026",
+    "fda 2025", "fda 2026", "минздрав 2025", "минздрав 2026",
+)
+
+_DIRECT_SEARCH_KEYWORDS = (
+    "погугли", "загугли", "прогугли", "поищи в сети", "поищи в интернете",
+    "найди в сети", "найди в интернете", "найди статьи", "найди исследования",
+    "что пишут в pubmed", "что пишет pubmed", "что говорит pubmed",
+    "что пишут в пабмед", "что говорит пабмед", "что в pubmed",
+    "pubmed", "пабмед", "cochrane", "кокрейн", "кохран",
+)
+
+
+def strip_search_prefixes(text):
+    """Удаляет поисковые вводные префиксы, оставляя чистый предмет поиска."""
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if (cleaned.startswith(("«", '"', "'")) and cleaned.endswith(("»", '"', "'"))) and len(cleaned) > 2:
+        cleaned = cleaned[1:-1].strip()
+    for _ in range(3):
+        prev = cleaned
+        cleaned = _SEARCH_PREFIX_COMBINED_RE.sub("", cleaned).strip()
+        cleaned = re.sub(r"^[\s:,\-–—]+", "", cleaned).strip()
+        if cleaned == prev:
+            break
+    cleaned = re.sub(r"[\s?!.,;]+$", "", cleaned).strip()
+    return cleaned
+
+
+def is_fresh_scientific_data_query(text):
+    """True, если запрос явно требует свежих научных данных (2025-2026 гг, новые одобрения, отзывы)."""
+    if not text:
+        return False
+    low = text.lower()
+    if any(phrase in low for phrase in _EXPLICIT_FRESH_PHRASES):
+        return True
+    has_year = bool(_FRESH_YEAR_RE.search(low))
+    has_context = bool(_FRESH_CONTEXT_RE.search(low))
+    if has_year and has_context:
+        return True
+    return False
+
+
+def detect_web_search_intent(text):
+    """
+    Классификация интента INTENT_WEB_SEARCH.
+    Возвращает (is_web_search, cleaned_query, is_fresh_data).
+    """
+    if not text or len(text.strip()) < 3:
+        return False, "", False
+
+    raw_text = text.strip()
+    low = raw_text.lower()
+
+    is_direct_search = bool(_SEARCH_PREFIX_COMBINED_RE.search(raw_text)) or any(kw in low for kw in _DIRECT_SEARCH_KEYWORDS)
+    is_fresh = is_fresh_scientific_data_query(raw_text)
+
+    if is_direct_search or is_fresh:
+        cleaned = strip_search_prefixes(raw_text)
+        if not cleaned:
+            cleaned = clean_query(raw_text)
+        if len(cleaned) >= 2:
+            return True, cleaned, is_fresh
+
+    return False, "", False
 
 
 def clean_query(question):
@@ -689,7 +800,8 @@ def _refusal(text, outcome, report=None, sources=None, attempts=0, elapsed=0.0):
 
 
 async def run_lookup(question, search_call, generate_call,
-                     budget=LOOKUP_TOTAL_COST_SECONDS, log=None):
+                     budget=LOOKUP_TOTAL_COST_SECONDS, log=None,
+                     grounding_call=None):
     """
     Полный живой проход. Возвращает словарь; ключ text НИКОГДА не пустой.
 
@@ -697,6 +809,11 @@ async def run_lookup(question, search_call, generate_call,
     timeout)` -> (text, error). Обе передаются параметром, поэтому модуль не
     знает ни про подпроцесс, ни про конфиг, а проверка гоняет проход подставным
     провайдером без единого запроса в сеть.
+
+    Если передан `grounding_call(query, timeout)` -> (grounding_dict, error),
+    сначала пробуется заземленная генерация Google Search Grounding (gemini-2.5-flash
+    с поиском в сети). При сбое или отсутствии ключей автоматически выполняется
+    быстрый откат на связку search_call (Tavily/DDGS) + generate_call.
 
     Молчания здесь нет НИ НА ОДНОЙ ветке. Тишина в этом файле уже стоила
     двухчасовых кулдаунов за вопросы, которые бот просто не разобрал: врач ждёт
@@ -719,6 +836,50 @@ async def run_lookup(question, search_call, generate_call,
         log.warning("web lookup: пустой запрос после очистки (было %d символов)",
                     len(question or ""))
         return _refusal(EMPTY_QUERY, OUTCOME_EMPTY_QUERY)
+
+    # 1. Попытка Google Search Grounding (если передан callable)
+    if grounding_call is not None:
+        try:
+            # Оставляем гарантированный запас на поиск и генерацию при отказе заземления
+            need_fallback = SEARCH_ATTEMPT_COST_SECONDS + ANSWER_MIN_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
+            ground_budget = min(15.0, left() - need_fallback)
+            if ground_budget >= 4.0:
+                ground_res, ground_err = await asyncio.wait_for(
+                    grounding_call(query, ground_budget),
+                    timeout=ground_budget + SUBPROCESS_SLACK_SECONDS,
+                )
+                if ground_res and ground_res.get("text"):
+                    raw_src = ground_res.get("sources") or []
+                    ranked, report = rank_sources(raw_src)
+                    sources, dropped = fit_budget(ranked)
+                    report["budget_dropped"] = dropped
+                    footer = format_sources_footer(sources)
+                    answer_text = compose_answer(ground_res["text"], footer)
+                    log.info(
+                        "web lookup: Google Search Grounding успешно выполнен (источников=%d)",
+                        len(sources),
+                    )
+                    return {
+                        "text": answer_text,
+                        "outcome": OUTCOME_OK,
+                        "sources": sources,
+                        "report": report,
+                        "grounding_provider": "google_search",
+                        "attempts": 1,
+                        "elapsed": time.monotonic() - started,
+                    }
+                elif ground_err:
+                    log.info(
+                        "web lookup: Google Search Grounding недоступен (%s) — переключаюсь на Tavily/DDGS",
+                        str(ground_err)[:100],
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.info(
+                "web lookup: ошибка Google Search Grounding (%s) — переключаюсь на Tavily/DDGS",
+                str(exc)[:100],
+            )
 
     results, error, attempts = [], None, 0
     for variant in query_variants(query):
