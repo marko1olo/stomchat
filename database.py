@@ -1266,6 +1266,7 @@ async def get_unprocessed_group_users(min_new_messages=3, limit=10):
                     "username": r[2] or "",
                     "new_msgs_count": r[3],
                     "max_msg_id": r[4],
+                    "max_id": r[4],
                 }
                 for r in rows
             ]

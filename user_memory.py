@@ -32,8 +32,11 @@ logger = logging.getLogger(__name__)
 PM_USER_MEMORY_LIMIT = 64000     # 64 КБ для ЛС
 GROUP_USER_MEMORY_LIMIT = 8000   # 8 КБ для общей беседы
 
-# Периодичность обновления памяти в ЛС (раз в сколько сообщений просить нейронку актуализировать профиль)
-PM_UPDATE_EVERY_N_MESSAGES = 3
+# Периодичность обновления памяти в ЛС (раз в 4 сообщения диалога просить нейронку актуализировать профиль)
+PM_UPDATE_EVERY_N_MESSAGES = 4
+
+# Интервал работы демона памяти беседы (раз в 4 часа = 14400 секунд, строго если были новые сообщения)
+GROUP_MEMORY_DAEMON_INTERVAL = 14400  # 4 часа
 
 # Cooldown между вызовами нейросети для обновления памяти одного юзера (защита квот)
 _PM_MEMORY_COOLDOWN = 15.0
@@ -346,7 +349,9 @@ async def update_clinician_memory_async(
 async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: int = 5):
     """
     Один такт демона памяти беседы (группового чата) на дешёвой нейросети.
-    Находит активных врачей с новыми сообщениями в группе и актуализирует их group_summary (до 8 КБ).
+    Находит активных врачей, засветившихся в логе/дампе чата с новыми сообщениями,
+    и актуализирует их group_summary (до 8 КБ).
+    Если новых сообщений не было — запросы к нейросети не производятся.
     """
     try:
         users_to_process = await database.get_unprocessed_group_users(
@@ -354,13 +359,16 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             limit=limit
         )
         if not users_to_process:
+            logger.info("Group memory daemon: в чате нет новых сообщений от участников. Пропуск такта (запросы к LLM опущены).")
             return
+
+        logger.info(f"Group memory daemon: обнаружено {len(users_to_process)} активных врачей с новыми сообщениями в чате.")
 
         for u in users_to_process:
             user_id = u["user_id"]
-            max_id = u["max_id"]
-            sender_name = u["sender_name"]
-            sender_username = u["username"]
+            max_id = u.get("max_id") or u.get("max_msg_id") or 0
+            sender_name = u.get("sender_name", "")
+            sender_username = u.get("username", "")
 
             # Загружаем существующую память
             mem = await database.get_user_memory(user_id)
@@ -368,7 +376,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             current_spec = mem.get("specialty", "")
             last_analyzed = mem.get("last_group_analyzed_id", 0)
 
-            # Получаем свежие сообщения пользователя
+            # Получаем свежие сообщения пользователя из лога/дампа чата
             msgs = await database.get_user_messages_since(user_id, since_msg_id=last_analyzed, limit=25)
             if not msgs:
                 continue
@@ -435,19 +443,20 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
                 f"len={len(final_grp_summary)}, max_msg_id={max_id}"
             )
 
-            # Пауза между пользователями (cooldown для бережного отношения к API ключам)
+            # Пауза между пользователями (cooldown 2.5с для бережного отношения к API ключам)
             await asyncio.sleep(2.5)
 
     except Exception as e:
         logger.error(f"Error in process_group_memory_daemon_batch: {e}", exc_info=True)
 
 
-async def group_memory_daemon_loop(interval_seconds: int = 180):
+async def group_memory_daemon_loop(interval_seconds: int = GROUP_MEMORY_DAEMON_INTERVAL):
     """
-    Фоновый долгоживущий цикл демона обновления памяти беседы.
-    Периодически проверяет накопившиеся сообщения и обновляет профили врачей в группе.
+    Фоновый долгоживущий цикл демона обновления памяти беседы (по умолчанию раз в 4 часа).
+    Периодически проверяет накопившиеся сообщения и обновляет профили только тех врачей,
+    которые реально писали сообщения в чат.
     """
-    logger.info("Starting group memory daemon loop...")
+    logger.info(f"Starting group memory daemon loop (interval={interval_seconds}s / {interval_seconds/3600:.1f}h)...")
     while True:
         try:
             await process_group_memory_daemon_batch(min_new_messages=3, limit=5)

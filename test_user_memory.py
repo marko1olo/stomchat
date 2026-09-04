@@ -170,6 +170,16 @@ async def run_tests():
     check("промпт беседы содержит заголовок беседы", "НАКОПЛЕННЫЕ ПРОФИЛИ УЧАСТНИКОВ ОБСУЖДЕНИЯ" in grp_formatted)
     check("промпт беседы содержит системный комментарий", "Справочная информация для ассистента" in grp_formatted)
 
+    print("\n[11] Проверка интервалов: ЛС раз в 4 сообщения, беседа раз в 4 часа (14400 с)")
+    check("интервал ЛС равен 4 сообщениям", user_memory.PM_UPDATE_EVERY_N_MESSAGES == 4)
+    check("интервал демона беседы равен 4 часам (14400 с)", user_memory.GROUP_MEMORY_DAEMON_INTERVAL == 14400)
+    check("демон корректно возвращает max_id и max_msg_id", unprocessed[0].get("max_id") == 1003 and unprocessed[0].get("max_msg_id") == 1003)
+
+    # Проверка: если сообщений не было (last_analyzed = 1003), выборка пустая (нейросеть не дергается)
+    await database.save_user_memory(user_id=777001, last_group_analyzed_id=1003)
+    unprocessed_empty = await database.get_unprocessed_group_users(min_new_messages=3, limit=5)
+    check("если нет новых сообщений, список пуст (нейросеть не вызывается)", len(unprocessed_empty) == 0)
+
     print("\n" + "=" * 62)
     print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
     if FAIL:
