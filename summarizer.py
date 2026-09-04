@@ -296,135 +296,7 @@ def get_russian_date(date_input):
     
 
 
-def clean_markdown_to_html(text):
-    if not text: return ""
-
-    # 1. Сначала превращаем Markdown-жирный в HTML-жирный
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    
-    # 2. Превращаем заголовки ### в жирный
-    text = re.sub(r'^#{1,6}\s+(.*)', r'<b>\1</b>', text, flags=re.MULTILINE)
-
-    # 3. Маркеры списков убираем, но ЗАПОМИНАЕМ, что строка была пунктом.
-    # Два пункта склеивать нельзя: «Совет: убрать под микроскопом» и
-    # «Альтернатива: резекция» превращались в одну фразу и читались как
-    # единое предложение.
-    marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
-    lines = []
-    list_flags = []
-    for raw_line in text.split('\n'):
-        without_marker = marker_re.sub('', raw_line)
-        lines.append(without_marker)
-        list_flags.append(without_marker != raw_line)
-
-    # 4. АЛГОРИТМ СЕМАНТИЧЕСКОЙ СКЛЕЙКИ
-    final_lines = []
-    final_is_list = []
-    # Жесткие терминаторы (конец мысли)
-    hard_stops = ".!?:;" 
-    # Союзы и знаки продолжения
-    conjunctions = r'\b(и|а|но|или|к|в|с|от|до|за|для|на|по)\s*$'
-
-    def looks_like_heading(rendered, plain):
-        """
-        Строка целиком выделена жирным и коротка — это заголовок раздела.
-
-        Проверять надо ИМЕННО текущую строку. Прежний код смотрел только на
-        предыдущую, поэтому заголовок всегда затягивался в конец абзаца перед
-        ним, если тот не оканчивался точкой: врач видел «...резекция
-        <b>Ортопедия</b> Спор о границах уступа...» — название раздела посреди
-        предложения.
-        """
-        stripped = rendered.strip()
-        return (
-            stripped.startswith("<b>")
-            and stripped.endswith("</b>")
-            and "</b>" not in stripped[:-4]
-            and len(plain) < 60
-            and plain[-1:] not in (",", ":", ";")
-        )
-
-    def append(rendered, is_list_item):
-        final_lines.append(rendered)
-        final_is_list.append(is_list_item)
-
-    for line, is_list_item in zip(lines, list_flags):
-        clean_line = line.strip()
-
-        if not clean_line:
-            if final_lines and final_lines[-1] != "":
-                last_txt = re.sub(r'<[^>]+>', '', final_lines[-1]).strip()
-                # Разрыв только если точка/двоеточие в конце
-                if last_txt and last_txt[-1] in hard_stops:
-                    append("", False)
-            continue
-
-        stripped_curr = re.sub(r'<[^>]+>', '', clean_line).strip()
-        current_is_heading = looks_like_heading(clean_line, stripped_curr)
-
-        # Перед заголовком раздела — всегда пустая строка. Без этого разделы
-        # слипались в один абзац, когда предыдущий не оканчивался точкой.
-        if current_is_heading and final_lines and final_lines[-1] != "":
-            append("", False)
-
-        if not final_lines or final_lines[-1] == "":
-            append(clean_line, is_list_item)
-            continue
-
-        prev_line = final_lines[-1]
-        stripped_prev = re.sub(r'<[^>]+>', '', prev_line).strip()
-
-        if not stripped_prev or not stripped_curr:
-            append(clean_line, is_list_item)
-            continue
-
-        # ПРОВЕРКА НА СКЛЕЙКУ
-        should_join = False
-
-        # Условие 1: Предыдущая строка не закончена жестким знаком
-        if stripped_prev[-1] not in hard_stops:
-            should_join = True
-
-        # Условие 2: Предыдущая строка заканчивается на запятую или союз
-        if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
-            should_join = True
-
-        # Условие 3: Текущая строка начинается с маленькой буквы или союза "и"
-        if stripped_curr[0].islower() or stripped_curr.lower().startswith("и "):
-            should_join = True
-
-        # КОРРЕКЦИЯ: Защита заголовков не должна срабатывать, если есть запятая или союз
-        is_header_like = prev_line.startswith('<b>') and len(stripped_prev) < 50
-        if is_header_like:
-            # Если это "заголовок", но он заканчивается на запятую или "и" — это НЕ заголовок, а часть списка/предложения
-            if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
-                should_join = True
-            else:
-                # Если знаков продолжения нет и следующая строка с Большой буквы — считаем заголовком (разрываем)
-                if not stripped_curr[0].islower():
-                    should_join = False
-
-        # Заголовок раздела не приклеивается к предыдущему тексту никогда.
-        if current_is_heading:
-            should_join = False
-
-        # Два пункта списка — две строки. Маркеры уже сняты, поэтому склейка
-        # превращала перечисление в неразборчивую строку.
-        if is_list_item and final_is_list and final_is_list[-1]:
-            should_join = False
-
-        if should_join:
-            final_lines[-1] = f"{prev_line} {clean_line}"
-            final_is_list[-1] = final_is_list[-1] or is_list_item
-        else:
-            append(clean_line, is_list_item)
-
-    # 5. Финальная чистка
-    text = "\n".join(final_lines)
-    text = re.sub(r'[ \t]{2,}', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    return text.strip()
+clean_markdown_to_html = html_safe.clean_markdown_to_html
 
 
 # Околоклиническая лексика, которой в dental_vocab нет и быть не должно:
@@ -859,17 +731,23 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
         final_html = clean_markdown_to_html(raw_summary)
         
-        # Вставка фото (если они есть локально или URL)
+        # Вставка фото (семантический узел Telegraph figure/figcaption)
         for m_id, url in media_map.items():
             placeholder = f"[IMG_{m_id}]"
             if placeholder in final_html:
-                # Если URL, то вставляем img src, если нет - можно вставлять заглушку или локальный путь
-                final_html = final_html.replace(placeholder, f'<img src="{url}">')
+                final_html = final_html.replace(
+                    placeholder,
+                    f'<figure><img src="{url}"><figcaption>Клинический снимок #{m_id}</figcaption></figure>'
+                )
+        final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
 
+        footer = ""
         if msg_count > 0 and "Сообщений за период" not in final_html:
-            final_html += f"\n\n<i>Сообщений за период — {msg_count}</i>"
+            footer = f"\n\n<i>Сообщений за период — {msg_count}</i>"
         
-        final_html = _safe_truncate_html(final_html)
+        # Подвал со счётчиком дописывается ПОСЛЕ обрезки. Порог 11000 позволяет
+        # опубликовать полный дневной выпуск без срезания рубрик и подвала.
+        final_html = _safe_truncate_html(final_html, max_len=11000 - len(footer)) + footer
         
         TELEGRAPH_THRESHOLD = 1500 
         sent_msg = None
@@ -1028,7 +906,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                     f"🎓 <b>Дайджест из чата ({date_str})</b>\n\n"
                     f"{sel_intro}\n\n"
                     f"{sel_bullets}\n\n"
-                    f"{sel_cta}"
+                    f"{sel_cta}\n\n"
+                    f"💬 <i>Есть клинический вопрос или снимок? Напишите мне в ЛС — разберем вместе.</i>"
                 )
             else:
                 msg_to_send = _safe_truncate_html(final_html, max_len=3900)
@@ -1301,11 +1180,15 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
         final_html = clean_markdown_to_html(raw_text)
         
-        # Вставка изображений
+        # Вставка изображений (семантический узел Telegraph figure/figcaption)
         for m_id, url in media_map.items():
             placeholder = f"[IMG_{m_id}]"
             if placeholder in final_html:
-                final_html = final_html.replace(placeholder, f'<img src="{url}">')
+                final_html = final_html.replace(
+                    placeholder,
+                    f'<figure><img src="{url}"><figcaption>Клинический снимок #{m_id}</figcaption></figure>'
+                )
+        final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
         
         # Подвал со счётчиком дописывается ПОСЛЕ обрезки и с запасом под свою
         # длину. Раньше он шёл до неё, а обрезка режет с конца: на статье длиннее
@@ -1396,7 +1279,10 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             f"👉 <b><a href='{page_url}'>ОТКРЫТЬ ЛОНГРИД</a></b>"
         ]
         
-        msg_to_send = random.choice(weekly_teasers)
+        msg_to_send = (
+            f"{random.choice(weekly_teasers)}\n\n"
+            f"💬 <i>Есть клинический вопрос или снимок? Напишите мне в ЛС — разберем вместе.</i>"
+        )
         
         send_params = {'parse_mode': 'HTML', 'link_preview': True}
         if topic_id: send_params['reply_to'] = topic_id

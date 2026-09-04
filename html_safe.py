@@ -290,3 +290,136 @@ def split_html(text, limit=4000):
         position = end
 
     return [chunk for chunk in chunks if chunk]
+
+
+def split_html_for_telegraph(html_str, max_len=11000):
+    """
+    Разделяет лонгрид на части для Telegraph, чтобы избежать ошибки CONTENT_TOO_BIG (64 KB)
+    и не обрезать контент. Каждая часть валидна, со сбалансированными тегами.
+    """
+    html_str = (html_str or "").strip()
+    if not html_str:
+        return []
+    if len(html_str) <= max_len:
+        body, unclosed = balance_html(html_str)
+        return [body + "".join(f"</{tag}>" for tag in reversed(unclosed))]
+    return split_html(html_str, limit=max_len)
+
+
+def clean_markdown_to_html(text):
+    """Преобразует Markdown разметку в безопасный валидный HTML с семантической склейкой строк."""
+    if not text:
+        return ""
+
+    # 1. Сначала превращаем Markdown-жирный в HTML-жирный
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+
+    # 2. Превращаем заголовки ### в жирный
+    text = re.sub(r'^#{1,6}\s+(.*)', r'<b>\1</b>', text, flags=re.MULTILINE)
+
+    # 3. Маркеры списков убираем, но ЗАПОМИНАЕМ, что строка была пунктом.
+    marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
+    lines = []
+    list_flags = []
+    for raw_line in text.split('\n'):
+        without_marker = marker_re.sub('', raw_line)
+        lines.append(without_marker)
+        list_flags.append(without_marker != raw_line)
+
+    # 4. АЛГОРИТМ СЕМАНТИЧЕСКОЙ СКЛЕЙКИ
+    final_lines = []
+    final_is_list = []
+    # Жесткие терминаторы (конец мысли)
+    hard_stops = ".!?:;"
+    # Союзы и знаки продолжения
+    conjunctions = r'\b(и|а|но|или|к|в|с|от|до|за|для|на|по)\s*$'
+
+    def looks_like_heading(rendered, plain):
+        stripped = rendered.strip()
+        return (
+            stripped.startswith("<b>")
+            and stripped.endswith("</b>")
+            and "</b>" not in stripped[:-4]
+            and len(plain) < 60
+            and plain[-1:] not in (",", ":", ";")
+        )
+
+    def append(rendered, is_list_item):
+        final_lines.append(rendered)
+        final_is_list.append(is_list_item)
+
+    for line, is_list_item in zip(lines, list_flags):
+        clean_line = line.strip()
+
+        if not clean_line:
+            if final_lines and final_lines[-1] != "":
+                last_txt = re.sub(r'<[^>]+>', '', final_lines[-1]).strip()
+                # Разрыв только если точка/двоеточие в конце
+                if last_txt and last_txt[-1] in hard_stops:
+                    append("", False)
+            continue
+
+        stripped_curr = re.sub(r'<[^>]+>', '', clean_line).strip()
+        current_is_heading = looks_like_heading(clean_line, stripped_curr)
+
+        # Перед заголовком раздела — всегда пустая строка.
+        if current_is_heading and final_lines and final_lines[-1] != "":
+            append("", False)
+
+        if not final_lines or final_lines[-1] == "":
+            append(clean_line, is_list_item)
+            continue
+
+        prev_line = final_lines[-1]
+        stripped_prev = re.sub(r'<[^>]+>', '', prev_line).strip()
+
+        if not stripped_prev or not stripped_curr:
+            append(clean_line, is_list_item)
+            continue
+
+        # ПРОВЕРКА НА СКЛЕЙКУ
+        should_join = False
+
+        # Условие 1: Предыдущая строка не закончена жестким знаком
+        if stripped_prev[-1] not in hard_stops:
+            should_join = True
+
+        # Условие 2: Предыдущая строка заканчивается на запятую или союз
+        if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
+            should_join = True
+
+        # Условие 3: Текущая строка начинается с маленькой буквы или союза "и"
+        if stripped_curr[0].islower() or stripped_curr.lower().startswith("и "):
+            should_join = True
+
+        # КОРРЕКЦИЯ: Защита заголовков не должна срабатывать, если есть запятая или союз
+        is_header_like = prev_line.startswith('<b>') and len(stripped_prev) < 50
+        if is_header_like:
+            if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
+                should_join = True
+            else:
+                if not stripped_curr[0].islower():
+                    should_join = False
+
+        # Заголовок раздела не приклеивается к предыдущему тексту никогда.
+        if current_is_heading:
+            should_join = False
+
+        # Два пункта списка — две строки.
+        if is_list_item and final_is_list and final_is_list[-1]:
+            should_join = False
+
+        if should_join:
+            final_lines[-1] = f"{prev_line} {clean_line}"
+            final_is_list[-1] = final_is_list[-1] or is_list_item
+        else:
+            append(clean_line, is_list_item)
+
+    # 5. Финальная чистка
+    text = "\n".join(final_lines)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+

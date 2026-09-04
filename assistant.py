@@ -914,7 +914,9 @@ STOP_WORDS = {
     "будет", "просто", "здесь", "очень", "даже", "если", "тоже", "типа", "вообще",
     "надо", "можно", "хотя", "коллеги", "привет", "здравствуйте", "какой", "такой",
     "какие", "такие", "очень", "этого", "чтобы", "один", "одна", "одно", "будет",
-    "всем", "всех", "этом", "этой", "этих", "были", "была", "были", "того", "тому"
+    "всем", "всех", "этом", "этой", "этих", "были", "была", "были", "того", "тому",
+    "правило", "правила", "правил", "правилам", "чат", "чата", "чате", "чатом",
+    "вопрос", "вопроса", "совет", "совета", "подскажите", "подскажи", "спасибо", "пожалуйста"
 }
 
 # Медицинский словарь триажа переехал в dental_vocab: тот же список нужен
@@ -1718,19 +1720,13 @@ async def search_knowledge_corpus(keywords):
             # 1. Search stomat_wiki.db
             if os.path.exists("stomat_wiki.db"):
                 try:
-                    with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=30)) as conn:
+                    with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
-                        
-                        global _WIKI_WAL_READY
-                        if not _WIKI_WAL_READY:
-                            conn.execute("PRAGMA journal_mode = WAL")
-                            _WIKI_WAL_READY = True
-                            
                         c = conn.cursor()
                         for kw in keywords:
                             where_clause, params = like_any_case("content", kw)
                             c.execute(
-                                f"SELECT category_code, content FROM distilled_facts "
+                                f"SELECT category_code, content, source_ids FROM distilled_facts "
                                 f"WHERE {where_clause} LIMIT ?",
                                 params + (rows_per_kw,)
                             )
@@ -1739,40 +1735,75 @@ async def search_knowledge_corpus(keywords):
                                 if body_key in seen_bodies:
                                     continue
                                 seen_bodies.add(body_key)
-                                wiki_facts.append(_corpus_entry(f"[{row[0]}]", row[1]))
+                                cat_code = row[0]
+                                source_ids = str(row[2] or "").strip()
+                                src_tag = f" msg#{source_ids[:20]}" if source_ids else ""
+                                wiki_facts.append(_corpus_entry(f"[{cat_code}{src_tag}]", row[1]))
                             if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
                                 break
                 except Exception as e:
                     logger.error(f"Error searching stomat_wiki.db: {e}")
 
-            # 2. Search stomat_archive.db
-            if os.path.exists("stomat_archive.db"):
+            # 2. Search active bot DB (stomat_bot.db: 41k+ live messages from 2026)
+            bot_db_path = getattr(config, "DB_PATH", "stomat_bot.db") or "stomat_bot.db"
+            if os.path.exists(bot_db_path):
                 try:
-                    with contextlib.closing(sqlite3.connect("stomat_archive.db", timeout=30)) as conn:
+                    with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
-                        
-                        global _ARCHIVE_WAL_READY
-                        if not _ARCHIVE_WAL_READY:
-                            conn.execute("PRAGMA journal_mode = WAL")
-                            _ARCHIVE_WAL_READY = True
-                            
                         c = conn.cursor()
                         for kw in keywords:
                             where_clause, params = like_any_case("text", kw)
                             c.execute(
-                                f"SELECT sender_name, text FROM archive_messages "
+                                f"SELECT msg_id, sender_name, date, text FROM messages "
                                 f"WHERE {where_clause} AND TRIM(text) <> '' "
                                 f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
                                 f"AND TRIM(text) NOT LIKE '%?' "
+                                f"ORDER BY date DESC "
                                 f"LIMIT ?",
                                 params + (rows_per_kw,)
                             )
                             for row in c.fetchall():
-                                body_key = _corpus_body_key(row[1])
+                                body_key = _corpus_body_key(row[3])
                                 if body_key in seen_bodies:
                                     continue
                                 seen_bodies.add(body_key)
-                                archive_msgs.append(_corpus_entry(f"{row[0]}:", row[1]))
+                                m_id = row[0]
+                                s_name = row[1] or "Врач"
+                                date_str = str(row[2])[:10] if row[2] else ""
+                                header = f"[Сообщение #{m_id} от {s_name} ({date_str})]:" if date_str else f"[Сообщение #{m_id} от {s_name}]:"
+                                archive_msgs.append(_corpus_entry(header, row[3]))
+                            if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
+                                break
+                except Exception as e:
+                    logger.error(f"Error searching {bot_db_path}: {e}")
+
+            # 3. Search archive messages (stomat_archive.db: pre-2026 archive)
+            if len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
+                try:
+                    with contextlib.closing(sqlite3.connect("file:stomat_archive.db?mode=ro", uri=True, timeout=30)) as conn:
+                        conn.execute("PRAGMA busy_timeout = 30000")
+                        c = conn.cursor()
+                        for kw in keywords:
+                            where_clause, params = like_any_case("text", kw)
+                            c.execute(
+                                f"SELECT msg_id, sender_name, date, text FROM archive_messages "
+                                f"WHERE {where_clause} AND TRIM(text) <> '' "
+                                f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                f"AND TRIM(text) NOT LIKE '%?' "
+                                f"ORDER BY msg_id DESC "
+                                f"LIMIT ?",
+                                params + (rows_per_kw,)
+                            )
+                            for row in c.fetchall():
+                                body_key = _corpus_body_key(row[3])
+                                if body_key in seen_bodies:
+                                    continue
+                                seen_bodies.add(body_key)
+                                m_id = row[0]
+                                s_name = row[1] or "Врач"
+                                date_str = str(row[2])[:10] if row[2] else ""
+                                header = f"[Архив #{m_id} от {s_name} ({date_str})]:" if date_str else f"[Архив #{m_id} от {s_name}]:"
+                                archive_msgs.append(_corpus_entry(header, row[3]))
                             if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
                                 break
                 except Exception as e:
@@ -4394,7 +4425,7 @@ async def handle_private_message(bot_client, event):
             # ссылок, и модель отвечает про источники, которых не видела.
             await database.save_pm_message(
                 chat_id, "Assistant",
-                f"[Веб-поиск: {query_param}]\n{lookup['text']}"
+                lookup['text']
             )
             return
 
@@ -4689,19 +4720,26 @@ async def handle_private_message(bot_client, event):
         # срабатывание, из них 901 из-за «кт» внутри «кто» и «эффективно».
         has_dental_topic = has_dental_term(full_context_str)
         
+        # Запрос ссылок, архива, опыта коллег или поиска в чате
+        has_search_or_link_intent = any(k in full_context_str_lower for k in ["ссылк", "чат", "где писали", "кто говорил", "поиск", "найти", "источник"])
+        
         # Извлекаем ключевые слова из всего контекста (текущий запрос + медиа + история), чтобы искать статьи
         keywords = extract_keywords(full_context_str)
                     
         wiki_corpus, archive_corpus = "", ""
-        if has_dental_topic or has_media:
+        if has_dental_topic or has_media or has_search_or_link_intent:
             # Ищем совпадения в стоматологической базе
             search_keywords = select_search_keywords(keywords)
             wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
 
+        raw_chat_id = str(getattr(config, "SOURCE_CHAT_ID", "") or "")
+        clean_chat_id = raw_chat_id[4:] if raw_chat_id.startswith("-100") else raw_chat_id.lstrip("-")
+
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
             prompt = f"""
-Ты — опытный стоматолог-практик и эксперт сообщества "StomChat". Твоя задача — помочь коллеге со снимком/фото в личных сообщениях.
+Ты — старший врач-консультант, ведущий эксперт клинического консилиума сообщества "StomChat".
+Твой собеседник — ДИПЛОМИРОВАННЫЙ ВРАЧ-СТОМАТОЛОГ. Пациентов в диалоге нет. Общение строго на равных («Врач — Врачу») на академическом профессиональном языке (биологическая ширина, BOPT, IDS, феррул, торк, торсионная усталость файлов, PAI, гипохлоритная авария, адгезивные протоколы).
 {style_prompt_text}
 
 Клинический портрет собеседника:
@@ -4722,27 +4760,32 @@ async def handle_private_message(bot_client, event):
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus}
 [КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
+[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии!]
 
-Похожие обсуждения из Архива чата:
+Похожие обсуждения из Архива и чата:
 {archive_corpus}
 
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. ФОРМАТ И ТОН: Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.
-2. ДЛИНА ОТВЕТА: {length_guideline}
-3. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown (**текст**, ## заголовки и т.д.).
-4. НАУЧНАЯ ТОЧНОСТЬ: Опирайся на базу знаний и доказательную медицину. Не выдумывай протоколы. Если данных мало — честно скажи: "По этой фотке точно сказать сложно, но выглядит как...".
-5. СМАЙЛИКИ: Никаких смайликов и эмодзи.
-6. ПРОАКТИВНОСТЬ: Если по снимку или вопросу неясно, либо у тебя есть сомнения — честно скажи об этом и сам задай уточняющие вопросы (например, спроси про симптоматику, КТ или анамнез).
-7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс программы): не пытайся анализировать это как снимок зубов. Вместо этого достойно опиши, что именно изображено на картинке (например, 'вижу иконку ZIP-архива...', 'тут котик...'), и спокойно прокомментируй это в привязке к стоматологическим будням или работе.
-8. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
-9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
+1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ПАЦИЕНТСКИХ ДИСКЛЕЙМЕРОВ:
+   - Полностью исключи любые фразы вида: «обратитесь к врачу», «необходим очный осмотр», «я всего лишь ИИ», «диагноз ставит только очный врач».
+   - Запрещено отмахиваться от снимков фразами «по 2D снимку сказать нельзя, сделайте КТ/КЛКТ». Выжимай максимум клинической информации из предоставленного изображения! Ограничения проекции описывай профессионально в дифдиагнозе (наложение корней, проекционные искажения).
+2. СТРУКТУРА КЛИНИЧЕСКОГО РАЗБОРА:
+   - Анатомический и рентгенологический статус: уровень костной ткани (резорбция, кортикальная пластинка), периодонтальная щель, состояние апикального периодонта (PAI), плотность и рабочая длина обтурации, нависающие края пломб/коронок, прилегание уступов.
+   - Дифференциальный диагноз: 2–3 наиболее вероятные патологии с анатомическим обоснованием.
+   - EBM-тактика и пошаговый протокол лечения: конкретные препараты, концентрации (NaOCl 3-5% с УЗ-активацией, Ca(OH)2), силеры, материалы и последовательность действий.
+   - Ссылки на опыт чата: если в блоке обсуждений есть опыт коллег, сошлись на него. Если уместно или коллега спрашивает ссылку — давай прямую ссылку в формате: https://t.me/c/{clean_chat_id}/<msg_id> или упоминай сообщение #<msg_id>.
+3. ФОРМАТ И ТОН: Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности, без пустых вводных слов и без эмодзи-кривляния.
+4. ДЛИНА ОТВЕТА: {length_guideline}
+5. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown (**текст**, ## заголовки).
+6. СМАЙЛИКИ: Никаких смайликов и эмодзи.
+7. ЕСЛИ НА ИЗОБРАЖЕНИИ НЕ КЛИНИЧЕСКИЙ СЛУЧАЙ (а мем, котик, иконка архива, скриншот загрузки или интерфейс): не пытайся анализировать это как зубы, а спокойно и достойно прокомментируй по факту.
+8. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата.
 """
         else:
             # Определяем тип запроса: это клинический вопрос или свободная тема
             has_clinical_topic = has_dental_topic or bool(wiki_corpus)
             if has_clinical_topic:
-                system_role = f"""Ты — опытный стоматолог-практик и эксперт сообщества "StomChat", общаешься с коллегой в личных сообщениях.
+                system_role = f"""Ты — старший врач-консультант, ведущий эксперт клинического консилиума сообщества "StomChat". Общаешься с дипломированным врачом-стоматологом в личных сообщениях.
 {style_prompt_text}
 
 Клинический портрет собеседника:
@@ -4751,17 +4794,17 @@ async def handle_private_message(bot_client, event):
 Недавние сообщения собеседника в общем чате:
 {group_msgs_str}
 """
-                instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. ГЛУБИНА: Если пользователь задает клинический вопрос, дай развернутый и точный ответ (в чем суть, как лучше поступить, какие есть нюансы). Если это просто реплика (приветствие, благодарность и т.п.) — ответь коротко и по существу.
-2. ДЛИНА ОТВЕТА: {length_guideline}
-3. ФОРМАТ И ТОН: Никаких приветствий, вводных слов ("Отличный вопрос!") и концовок ("Успехов!", "С уважением"). Полностью избегай канцелярщины и фраз типа "Как ИИ...". Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.
-4. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown.
-5. СМАЙЛИКИ: Никаких смайликов и эмодзи.
-6. НАУЧНАЯ ТОЧНОСТЬ: Только доказанные факты. Без выдумок. Если данных нет — честно укажи это.
-7. КОНТЕКСТ: Учитывай всю историю диалога.
-8. УМЕСТНОСТЬ И ЧЁТКОСТЬ: Отвечай строго к месту и по существу вопроса. Чётко отделяй текущие живые вопросы пользователя от справочных материалов (Справки/Архива) — не начинай цитировать теорию, если тебя не просили о лекции. Не неси околесицу.
-9. КРИТИЧЕСКОЕ ПРАВИЛО СОМНЕНИЯ: Если тебя спрашивают про незнакомый термин, аббревиатуру или концепцию, НЕ пытайся угадать её значение или агрессивно называть бредом/инфоцыганством. Вместо этого честно признай, что не встречал такое обозначение, и проактивно спроси у коллег, что под этим подразумевается.
-10. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни."""
+                instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
+1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ПАЦИЕНТСКИХ ДИСКЛЕЙМЕРОВ: Никаких «обратитесь к очному врачу», «нужен очный осмотр», «как ИИ...». Твой собеседник — врач-стоматолог. Диалог ведется строго на уровне высококвалифицированного консилиума «Врач — Врачу».
+2. ГЛУБИНА И СУТЬ: Если задан клинический вопрос, дай четкий, научно обоснованный (EBM) ответ: патогенез, пошаговый протокол действий, возможные ошибки и нюансы. Если реплика короткая — ответь коротко и по делу.
+3. ССЫЛКИ НА СООБЩЕНИЯ ИЗ ЧАТА: В блоке обсуждений указаны сообщения чата вида [Сообщение #ID от Имя]: текст. Если коллега спрашивает ссылку, где это обсуждалось, или кто делился опытом — давай прямую ссылку: https://t.me/c/{clean_chat_id}/<msg_id> или ссылайся на пост #<msg_id>.
+4. ДЛИНА ОТВЕТА: {length_guideline}
+5. ФОРМАТ И ТОН: Никаких приветствий, вводных ("Отличный вопрос!"), концовок ("Успехов!") и канцеляризмов. Тон: сдержанный, академичный, уважительный старший коллега-эксперт.
+6. РАЗМЕТКА: Только HTML-теги — <b>жирный</b>. Никакого Markdown.
+7. СМАЙЛИКИ: Никаких смайликов и эмодзи.
+8. НАУЧНАЯ ТОЧНОСТЬ: Опирайся на золотые стандарты стоматологии и доказательную медицину.
+9. КОНТЕКСТ: Учитывай всю историю диалога.
+10. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата."""
             else:
                 system_role = f"""Ты — врач-стоматолог из чата "StomChat", ведёшь диалог с коллегой в личных сообщениях.
 {style_prompt_text}
@@ -4867,20 +4910,28 @@ async def handle_private_message(bot_client, event):
                 context_msgs, reply_text, invited=True, reference=wiki_corpus
             )
             if not pm_ok:
-                logger.warning(
-                    "PM response validator REJECTED draft chat_id=%s: %s", chat_id, pm_reason
-                )
-                # Молчание тут хуже отказа: врач не поймёт, дошёл ли вопрос.
-                await bot_client.send_message(
-                    entity=chat_id,
-                    message=("🤔 <i>Ответ собрался, но не прошёл мою же проверку на "
-                             "клиническую обоснованность — отдавать его не стану. "
-                             "Переформулируйте вопрос или добавьте деталей: снимок, "
-                             "возраст, данные осмотра.</i>"),
-                    parse_mode='html',
-                )
-                return
-            logger.info("PM response validator approved chat_id=%s: %s", chat_id, pm_reason)
+                reason_lower = (pm_reason or "").lower()
+                # Если отказ вызван исключительно эмодзи или поверхностной стилистикой, санируем черновик
+                if any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
+                    logger.info("PM response validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", pm_reason)
+                    reply_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", reply_text).strip()
+                    pm_ok = True
+                else:
+                    logger.warning(
+                        "PM response validator REJECTED draft chat_id=%s: %s", chat_id, pm_reason
+                    )
+                    # Молчание тут хуже отказа: врач не поймёт, дошёл ли вопрос.
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message=("👨‍⚕️ <i>Коллега, в данном клиническом вопросе недостаточно "
+                                 "вводных данных для однозначного и безопасного протокола. "
+                                 "Уточните детали (снимок/КЛКТ, точную локализацию, анамнез "
+                                 "или статус зуба), чтобы я мог дать выверенную рекомендацию.</i>"),
+                        parse_mode='html',
+                    )
+                    return
+            if pm_ok:
+                logger.info("PM response validator approved chat_id=%s: %s", chat_id, pm_reason)
 
             reply_text = clean_html_formatting(reply_text)
 

@@ -389,6 +389,45 @@ def clinical_media_kind(message):
     return None
 
 
+def upload_clinical_image_sync(file_path):
+    """
+    Загружает клиническое изображение на постоянный надежный CDN (Freeimage / iili.io),
+    возвращающий прямой URL image/jpeg без блокировки хотлинка и без срока сгорания.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            img_bytes = f.read()
+        if not img_bytes:
+            return None
+
+        api_key = os.getenv("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
+        import requests
+        r = requests.post(
+            "https://freeimage.host/api/1/upload",
+            data={
+                "key": api_key,
+                "action": "upload",
+                "format": "json"
+            },
+            files={"source": ("clinical_case.jpg", img_bytes, "image/jpeg")},
+            timeout=20
+        )
+
+        if r.status_code == 200:
+            data = r.json()
+            direct_url = data.get("image", {}).get("url")
+            return direct_url
+    except Exception as e:
+        logger.warning(f"Failed to upload clinical image {file_path}: {e}")
+    return None
+
+
+async def upload_clinical_image_async(file_path):
+    return await asyncio.to_thread(upload_clinical_image_sync, file_path)
+
+
 def _main():
     if len(sys.argv) != 3:
         _json_exit({"ok": False, "error": "usage: media_tools.py <action> <path>"}, 2)

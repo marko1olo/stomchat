@@ -680,6 +680,17 @@ async def update_media_description(msg_id, description):
     return await _run_db(operation)
 
 
+async def update_media_remote_url(msg_id, url):
+    def operation():
+        with _connection() as db:
+            db.execute(
+                "UPDATE messages SET media_remote_url = ? WHERE msg_id = ?",
+                (url, msg_id),
+            )
+
+    return await _run_db(operation)
+
+
 async def get_pending_media_message_ids(limit=5):
     """
     Снимки без описания — очередь на разбор для recover_pending_media_analysis.

@@ -112,7 +112,10 @@ def _create_telegraph_page_sync(title, html_content):
     for p in paragraphs:
         p = p.strip()
         if p:
-            formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
+            if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img")):
+                formatted_body += p
+            else:
+                formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
     page = poster.post(
         title=title,
         author="StomatBot AI",

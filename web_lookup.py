@@ -484,8 +484,16 @@ def format_sources_footer(sources):
     lines = ["Источники:"]
     for number, entry in enumerate(sources, 1):
         url = entry.get("url") or ""
-        lines.append(f"{number}. {entry.get('host') or 'источник'} — {url}" if url
-                     else f"{number}. {entry.get('host') or 'источник'}")
+        host = entry.get("host") or "источник"
+        title = (entry.get("title") or "").strip()
+        # Очистка от сырых внутренних редиректов Google Vertex AI Search
+        if "vertexaisearch.cloud.google.com" in url or "vertexaisearch.cloud.google.com" in host:
+            label = title or "Научная публикация / Clinical Evidence"
+            lines.append(f"{number}. 📖 {label}")
+        elif url:
+            lines.append(f"{number}. {host} — {url}")
+        else:
+            lines.append(f"{number}. {host}")
     return "\n".join(lines)
 
 

@@ -569,7 +569,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         models_cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
+            ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("qwen/qwen3.6-27b", "groq"),
@@ -578,18 +578,18 @@ def generate_text(prompt, status_context=None, timeout=None):
     elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         models_cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq")
         ]
     elif is_chatbot:
         models_cascade = [
+            ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.6-27b", "groq"),
@@ -598,9 +598,9 @@ def generate_text(prompt, status_context=None, timeout=None):
     else:
         # Complex tasks (Summaries, analytics, etc)
         models_cascade = [
-            (config.GEMINI_MODEL, "gemini"), # gemini-3.7-flash
+            (config.GEMINI_MODEL, "gemini"), # gemini-3.8-flash
+            ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             (groq_fallback, "groq")
@@ -1174,7 +1174,8 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
 
     cascade = [
         ("openai/gpt-oss-120b", "groq"),
-        ("gemini-3.5-flash", "gemini"),
+        ("gemini-3.8-flash", "gemini"),
+        ("gemini-3.7-flash", "gemini"),
     ]
 
     for model_name, provider in cascade:
@@ -1195,7 +1196,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.5,
-                    max_tokens=600,
+                    max_tokens=2048,
                 )
                 if response and response.choices and len(response.choices) > 0:
                     raw = response.choices[0].message.content or ""
@@ -1243,9 +1244,12 @@ def generate_google_grounding(prompt_or_query, timeout=40.0):
 
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     system_instruction = (
-        "Ты — старший клинический эксперт-стоматолог сообщества StomChat. "
+        "Ты — опытный стоматолог-эксперт сообщества StomChat. "
         "Твоя задача — дать четкий, доказательный медицинский ответ на основе актуальных "
         "научных публикаций, исследований (PubMed, Cochrane, ADA) и клинических протоколов.\n\n"
+        "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
+        "- Начинай ответ СРАЗУ с сути и клинических данных. Категорически ЗАПРЕЩЕНО представляться («Как старший клинический эксперт...»).\n"
+        "- Никаких технических префиксов и саморекламы.\n\n"
         "ФОРМАТ ОТВЕТА:\n"
         "1. Структурируй ответ четкими клиническими тезисами: суть, доказательная база, тактика/протокол, дозировки/сроки при наличии.\n"
         "2. Выделяй ключевые термины тегом <b>жирный</b> (разметка только HTML).\n"
