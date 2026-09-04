@@ -2301,7 +2301,7 @@ async def fetch_dynamic_chat_context(
 
     try:
         if reply_to_msg_id:
-            # --- Путь 1: Reply-цепочка (вверх по дереву ответов) ---
+            # --- Путь 1: Reply-цепочка (вверх по дереву ответов) + консилиум (соседние ответы) ---
             curr_id = msg_id
             while curr_id and len(rows) < max_limit:
                 if curr_id in seen:
@@ -2314,6 +2314,11 @@ async def fetch_dynamic_chat_context(
                     (curr_id,),
                 )
                 if not row:
+                    # Если само текущее сообщение ещё не легло в БД (гонка записи),
+                    # не сбрасываем контекст в 0 — сразу переходим к родителю
+                    if curr_id == msg_id and reply_to_msg_id:
+                        curr_id = reply_to_msg_id
+                        continue
                     break
                 r = row[0]
                 rows.append(r)
@@ -2322,7 +2327,29 @@ async def fetch_dynamic_chat_context(
                     if nearest_bot_msg_id is None:
                         nearest_bot_msg_id = r[0]
                 curr_id = r[1]  # родительский reply_to_msg_id
-            rows = rows[::-1]  # хронологический порядок
+
+            # Подтягиваем соседние ответы в той же ветке (консилиум врачей под постом)
+            # В Telegram-чате врачи часто отвечают на один и тот же корневой кейс,
+            # являясь «братьями» по ветке (sibling replies), а не прямой цепочкой.
+            if len(rows) < max_limit and reply_to_msg_id:
+                rem = max_limit - len(rows)
+                sibling_rows = await query_db_async(
+                    "SELECT msg_id, reply_to_msg_id, sender_id, sender_name, text, date "
+                    "FROM messages WHERE reply_to_msg_id = ? AND msg_id <= ? "
+                    "ORDER BY date DESC, msg_id DESC LIMIT ?",
+                    (reply_to_msg_id, msg_id, rem),
+                )
+                for s in sibling_rows:
+                    if s[0] not in seen:
+                        seen.add(s[0])
+                        rows.append(s)
+                        if s[2] == BOT_ID:
+                            bot_msg_count += 1
+                            if nearest_bot_msg_id is None:
+                                nearest_bot_msg_id = s[0]
+
+            # Сортируем все собранные реплики строго в хронологическом порядке
+            rows.sort(key=lambda r: (_parse_db_date(r[5]), r[0]))
 
         else:
             # --- Путь 2: Общий поток с gap-detection ---
