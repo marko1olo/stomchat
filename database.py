@@ -295,6 +295,40 @@ async def init_db():
                 """
             )
 
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memories (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT DEFAULT '',
+                    first_name TEXT DEFAULT '',
+                    specialty TEXT DEFAULT '',
+                    clinical_summary TEXT DEFAULT '',
+                    group_summary TEXT DEFAULT '',
+                    facts_json TEXT DEFAULT '[]',
+                    message_count INTEGER DEFAULT 0,
+                    pm_message_count INTEGER DEFAULT 0,
+                    group_message_count INTEGER DEFAULT 0,
+                    last_pm_analyzed_id INTEGER DEFAULT 0,
+                    last_group_analyzed_id INTEGER DEFAULT 0,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_updated ON user_memories(last_updated)")
+
+            # Автомиграция колонок для существующих баз данных
+            for col_def in (
+                "group_summary TEXT DEFAULT ''",
+                "pm_message_count INTEGER DEFAULT 0",
+                "group_message_count INTEGER DEFAULT 0",
+                "last_pm_analyzed_id INTEGER DEFAULT 0",
+                "last_group_analyzed_id INTEGER DEFAULT 0",
+            ):
+                try:
+                    db.execute(f"ALTER TABLE user_memories ADD COLUMN {col_def}")
+                except sqlite3.OperationalError:
+                    pass
+
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
                 logger.info("database schema migrated: added media_remote_url")
@@ -1050,4 +1084,208 @@ async def get_active_pm_users(days_limit=30):
             ).fetchall()
             return [r[0] for r in rows]
     return await _run_db(operation)
+
+
+async def get_user_memory(user_id):
+    def operation():
+        with _connection() as db:
+            row = db.execute(
+                """
+                SELECT user_id, username, first_name, specialty, clinical_summary, group_summary,
+                       facts_json, message_count, pm_message_count, group_message_count,
+                       last_pm_analyzed_id, last_group_analyzed_id, last_updated
+                FROM user_memories WHERE user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()
+            if row:
+                return {
+                    "user_id": row[0],
+                    "username": row[1] or "",
+                    "first_name": row[2] or "",
+                    "specialty": row[3] or "",
+                    "clinical_summary": row[4] or "",
+                    "group_summary": row[5] or "",
+                    "facts_json": row[6] or "[]",
+                    "message_count": row[7] or 0,
+                    "pm_message_count": row[8] or 0,
+                    "group_message_count": row[9] or 0,
+                    "last_pm_analyzed_id": row[10] or 0,
+                    "last_group_analyzed_id": row[11] or 0,
+                    "last_updated": row[12],
+                }
+            return {
+                "user_id": user_id,
+                "username": "",
+                "first_name": "",
+                "specialty": "",
+                "clinical_summary": "",
+                "group_summary": "",
+                "facts_json": "[]",
+                "message_count": 0,
+                "pm_message_count": 0,
+                "group_message_count": 0,
+                "last_pm_analyzed_id": 0,
+                "last_group_analyzed_id": 0,
+                "last_updated": None,
+            }
+    return await _run_db(operation)
+
+
+async def save_user_memory(
+    user_id,
+    specialty=None,
+    clinical_summary=None,
+    group_summary=None,
+    facts_json=None,
+    message_count=None,
+    pm_message_count=None,
+    group_message_count=None,
+    last_pm_analyzed_id=None,
+    last_group_analyzed_id=None,
+    username=None,
+    first_name=None
+):
+    # Лимит объема на одного пользователя в БД: строго до 64 КБ для ЛС и до 8 КБ для беседы
+    if clinical_summary and len(clinical_summary) > 64000:
+        clinical_summary = clinical_summary[:64000]
+    if group_summary and len(group_summary) > 8000:
+        group_summary = group_summary[:8000]
+    def operation():
+        with _connection() as db:
+            existing = db.execute(
+                """
+                SELECT specialty, clinical_summary, group_summary, facts_json,
+                       message_count, pm_message_count, group_message_count,
+                       last_pm_analyzed_id, last_group_analyzed_id, username, first_name
+                FROM user_memories WHERE user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()
+            if existing:
+                new_spec = specialty if specialty is not None else (existing[0] or "")
+                new_clin = clinical_summary if clinical_summary is not None else (existing[1] or "")
+                new_grp = group_summary if group_summary is not None else (existing[2] or "")
+                new_facts = facts_json if facts_json is not None else (existing[3] or "[]")
+                new_cnt = message_count if message_count is not None else (existing[4] or 0)
+                new_pm_cnt = pm_message_count if pm_message_count is not None else (existing[5] or 0)
+                new_grp_cnt = group_message_count if group_message_count is not None else (existing[6] or 0)
+                new_pm_id = last_pm_analyzed_id if last_pm_analyzed_id is not None else (existing[7] or 0)
+                new_grp_id = last_group_analyzed_id if last_group_analyzed_id is not None else (existing[8] or 0)
+                new_un = username if username is not None else (existing[9] or "")
+                new_fn = first_name if first_name is not None else (existing[10] or "")
+                db.execute(
+                    """
+                    UPDATE user_memories
+                    SET specialty = ?, clinical_summary = ?, group_summary = ?, facts_json = ?,
+                        message_count = ?, pm_message_count = ?, group_message_count = ?,
+                        last_pm_analyzed_id = ?, last_group_analyzed_id = ?,
+                        username = ?, first_name = ?, last_updated = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                    """,
+                    (new_spec, new_clin, new_grp, new_facts, new_cnt, new_pm_cnt, new_grp_cnt,
+                     new_pm_id, new_grp_id, new_un, new_fn, user_id)
+                )
+            else:
+                db.execute(
+                    """
+                    INSERT INTO user_memories (
+                        user_id, specialty, clinical_summary, group_summary, facts_json,
+                        message_count, pm_message_count, group_message_count,
+                        last_pm_analyzed_id, last_group_analyzed_id, username, first_name, last_updated
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (user_id, specialty or "", clinical_summary or "", group_summary or "", facts_json or "[]",
+                     message_count or 1, pm_message_count or 0, group_message_count or 0,
+                     last_pm_analyzed_id or 0, last_group_analyzed_id or 0, username or "", first_name or "")
+                )
+    return await _run_db(operation)
+
+
+async def get_users_memory_batch(user_ids):
+    if not user_ids:
+        return {}
+    def operation():
+        with _connection() as db:
+            placeholders = ",".join("?" for _ in user_ids)
+            rows = db.execute(
+                f"""
+                SELECT user_id, username, first_name, specialty, clinical_summary, group_summary,
+                       facts_json, message_count, pm_message_count, group_message_count, last_updated
+                FROM user_memories WHERE user_id IN ({placeholders})
+                """,
+                tuple(user_ids)
+            ).fetchall()
+            res = {}
+            for r in rows:
+                res[r[0]] = {
+                    "user_id": r[0],
+                    "username": r[1] or "",
+                    "first_name": r[2] or "",
+                    "specialty": r[3] or "",
+                    "clinical_summary": r[4] or "",
+                    "group_summary": r[5] or "",
+                    "facts_json": r[6] or "[]",
+                    "message_count": r[7] or 0,
+                    "pm_message_count": r[8] or 0,
+                    "group_message_count": r[9] or 0,
+                    "last_updated": r[10],
+                }
+            return res
+    return await _run_db(operation)
+
+
+async def get_unprocessed_group_users(min_new_messages=3, limit=10):
+    """
+    Возвращает список пользователей, у которых в messages накопились новые сообщения
+    для обновления памяти беседы (group_summary).
+    """
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                """
+                SELECT m.sender_id, m.sender_name, m.sender_username,
+                       COUNT(m.msg_id) as cnt, MAX(m.msg_id) as max_id
+                FROM messages m
+                LEFT JOIN user_memories um ON um.user_id = m.sender_id
+                WHERE m.sender_id IS NOT NULL AND m.sender_id != 0
+                  AND m.text IS NOT NULL AND LENGTH(TRIM(m.text)) > 15
+                  AND m.msg_id > COALESCE(um.last_group_analyzed_id, 0)
+                GROUP BY m.sender_id
+                HAVING cnt >= ?
+                ORDER BY max_id DESC
+                LIMIT ?
+                """,
+                (min_new_messages, limit)
+            ).fetchall()
+            return [
+                {
+                    "user_id": r[0],
+                    "sender_name": r[1] or "",
+                    "username": r[2] or "",
+                    "new_msgs_count": r[3],
+                    "max_msg_id": r[4],
+                }
+                for r in rows
+            ]
+    return await _run_db(operation)
+
+
+async def get_user_messages_since(user_id, since_msg_id=0, limit=30):
+    """Возвращает сообщения пользователя из группы, начиная с since_msg_id."""
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                """
+                SELECT msg_id, text, date FROM messages
+                WHERE sender_id = ? AND msg_id > ? AND text IS NOT NULL AND LENGTH(TRIM(text)) > 10
+                ORDER BY msg_id ASC LIMIT ?
+                """,
+                (user_id, since_msg_id, limit)
+            ).fetchall()
+            return [{"msg_id": r[0], "text": r[1], "date": r[2]} for r in rows]
+    return await _run_db(operation)
+
+
 

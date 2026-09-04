@@ -145,6 +145,7 @@ async def run():
     reset({
         "gemini-3.5-flash-lite": Exception("429 Too Many Requests: rate limit"),
         "gemini-3.1-flash-lite": Exception("429 Too Many Requests: rate limit"),
+        "qwen/qwen3.8-27b": Exception("429 Too Many Requests: rate limit"),
         "qwen/qwen3.6-27b": Exception("429 Too Many Requests: rate limit"),
     })
     await vision.describe_image(["/tmp/fake.jpg"])
@@ -169,7 +170,7 @@ async def run():
     # Каскад зрения стартует со случайной модели (random.randint), поэтому
     # ниже ошибку задаём ВСЕМ моделям — проверки не должны зависеть от того,
     # какая выпала первой.
-    ALL_VISION_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b")
+    ALL_VISION_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b")
 
     def for_all(exc_factory):
         return {m: exc_factory() for m in ALL_VISION_MODELS}

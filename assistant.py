@@ -30,6 +30,7 @@ import web_lookup
 # кнопки не было вообще. Импорт ничего не делает: ни базы, ни файлов, ни сети.
 import taxonomy
 import config
+import user_memory
 logger = logging.getLogger("assistant")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -113,7 +114,7 @@ WEB_COOLDOWN_SECONDS = 30
 WEB_ANSWER_HEADER = "🌐 <b>По открытым источникам</b>\n\n"
 
 # Глубина памяти диалога в ЛС
-PM_HISTORY_LIMIT = 35
+PM_HISTORY_LIMIT = 50
 
 STYLE_PROMPTS = {
     "colleague_friendly": "Твой стиль общения — сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния.",
@@ -1478,12 +1479,12 @@ _CORPUS_CANDIDATE_CAP = 60
 _CORPUS_OUTPUT_LIMIT = 20
 # Бюджет справки в символах на КАЖДЫЙ корпус (вики и архив отдельно). 6000 взято
 # по замеру: медиана суммарной справки была 10241 символ и ответы на ней
-# строятся нормально, поэтому 6000 + 6000 оставляют типичный случай нетронутым
+# строятся нормально, поэтому 12000 + 12000 оставляют типичный случай нетронутым
 # и подрезают только хвост, где справка распухала до 52 тысяч.
-_CORPUS_MAX_CHARS = 6000
+_CORPUS_MAX_CHARS = 12000
 # Одна запись не должна съедать бюджет целиком: медиана факта вики 236 символов,
-# максимум 5477. 1200 вмещает даже подробный факт с числами.
-_CORPUS_ENTRY_MAX_CHARS = 1200
+# максимум 5477. 2500 вмещает даже подробный факт с числами.
+_CORPUS_ENTRY_MAX_CHARS = 2500
 
 
 def _rank_corpus_entries(entries, keywords):
@@ -1587,12 +1588,12 @@ _clip_at_sentence = html_safe.clip_at_sentence_text
 # случай: даже на спокойной переписке по 700 символов на реплику 35 сообщений
 # дают 24 500 — вдвое больше всей справки, ради которой выстроены ранжирование
 # (_rank_corpus_entries) и бюджет (_fit_corpus_budget).
-# 6000 = ровно столько же, сколько отдано одному корпусу справки.
-_PM_HISTORY_MAX_CHARS = 6000
+# 12000 = ровно столько же, сколько отдано одному корпусу справки.
+_PM_HISTORY_MAX_CHARS = 12000
 # Одна реплика не должна съесть бюджет целиком: без этого единственный
 # развёрнутый ответ бота на 4000 символов забирает две трети блока истории.
-# 1200 — как у записи справки (_CORPUS_ENTRY_MAX_CHARS).
-_PM_HISTORY_ENTRY_MAX_CHARS = 1200
+# 2500 — как у записи справки (_CORPUS_ENTRY_MAX_CHARS).
+_PM_HISTORY_ENTRY_MAX_CHARS = 2500
 
 
 def _fit_pm_history(lines):
@@ -3063,7 +3064,7 @@ PROTOCOL_EXCERPT_MAX_CHARS = 1500
 # Глубина памяти диалога в ЛС. Держим одним числом: /help обещал 30
 # сообщений, а код брал 35 — расхождение мелкое, но это ровно тот случай,
 # когда обещанное и работающее разъезжаются без единого сигнала.
-PM_HISTORY_LIMIT = 35
+PM_HISTORY_LIMIT = 50
 
 BOOKMARK_SNIPPET_CHARS = 80
 
@@ -4699,20 +4700,23 @@ async def handle_private_message(bot_client, event):
                     )
                 return
 
-        # Получаем стиль и портрет пользователя из БД
+        # Получаем стиль и долговременную клиническую память пользователя из БД (до 64 КБ)
         user_profile = await database.get_user_profile(chat_id)
         selected_style = user_profile.get("selected_style", "colleague_friendly")
         style_prompt_text = STYLE_PROMPTS.get(selected_style, STYLE_PROMPTS["colleague_friendly"])
-        portrait = user_profile.get("profile_portrait")
         
-        # Если портрета еще нет, запускаем его генерацию в фоне
-        if not portrait:
+        clinician_mem = await user_memory.get_clinician_memory(chat_id)
+        portrait = user_memory.format_clinician_memory_prompt(chat_id, clinician_mem)
+        
+        # Если портрета и клинической памяти еще нет, запускаем первичную генерацию в фоне
+        if not clinician_mem.get("clinical_summary") and not user_profile.get("profile_portrait"):
             async def _bg_portrait():
                 try:
                     p_text = await generate_user_portrait(chat_id)
                     last_msg_id = await database.get_last_msg_id()
                     await database.set_user_portrait(chat_id, p_text, last_msg_id)
-                    logger.info(f"Generated and saved portrait for user {chat_id}: {p_text}")
+                    await database.save_user_memory(chat_id, clinical_summary=p_text, message_count=1)
+                    logger.info(f"Generated and saved initial portrait/memory for user {chat_id}: {p_text}")
                 except Exception as p_err:
                     logger.error(f"Error in bg portrait gen: {p_err}")
             
@@ -4966,6 +4970,26 @@ async def handle_private_message(bot_client, event):
             await database.save_pm_message(chat_id, "Assistant", reply_text)
             logger.info(f"Successfully sent deep PM response to chat_id={chat_id}")
 
+            # Асинхронное динамическое обновление клинической памяти о враче в БД (до 64 КБ)
+            try:
+                sender = getattr(event, "sender", None)
+                sender_username = getattr(sender, "username", "") or ""
+                sender_first_name = getattr(sender, "first_name", "") or ""
+                user_msg_summary = text or (f"Снимок: {media_description}" if media_description else "")
+                import runtime_guard
+                runtime_guard.create_task(
+                    user_memory.update_clinician_memory_async(
+                        user_id=chat_id,
+                        user_message=user_msg_summary,
+                        bot_response=reply_text,
+                        username=sender_username,
+                        first_name=sender_first_name,
+                    ),
+                    name=f"update_clinician_memory_{chat_id}"
+                )
+            except Exception as mem_err:
+                logger.debug(f"Could not spawn clinician memory update: {mem_err}")
+
             # Запуск асинхронного фонового аудита и дополнения (Этап 2: Только для клинических консультаций)
             if is_clinical_consultation_query(text, has_media, has_dental_topic) and not is_command:
                 req_id = time.time()
@@ -5026,11 +5050,11 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     try:
         # Берём текущее сообщение + 5 до + 5 после из БД
         context_rows = await query_db_async(
-            "SELECT sender_name, text FROM messages WHERE msg_id <= ? ORDER BY msg_id DESC LIMIT 6",
+            "SELECT sender_id, sender_name, text FROM messages WHERE msg_id <= ? ORDER BY msg_id DESC LIMIT 6",
             (msg_id,)
         )
         context_rows = context_rows[::-1]  # хронологический порядок
-        context_str = "\n".join(f"{r[0]}: {r[1]}" for r in context_rows if r[1])
+        context_str = "\n".join(f"{r[1]}: {r[2]}" for r in context_rows if r[2])
 
         # ЭТАП 1: Спросить LLM — стоит ли отвечать?
         triage_prompt = f"""Ты — ИИ-ассистент в стоматологическом Telegram-чате StomChat.
@@ -5058,8 +5082,12 @@ NO — если это случайное упоминание, обсужден
             return False
 
         # Calculate context-based length guidelines
-        recent_texts = [r[1] for r in context_rows if r[1]]
+        recent_texts = [r[2] for r in context_rows if r[2]]
         length_guideline = calculate_context_length_guidelines(recent_texts)
+
+        # Подгружаем накопленную память беседы об участниках диалога
+        sender_ids = [r[0] for r in context_rows if r[0]]
+        users_chunk_context = await user_memory.format_users_chunk_context(sender_ids)
 
         # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
         mention_keywords = extract_keywords(text or "")
@@ -5071,6 +5099,8 @@ NO — если это случайное упоминание, обсужден
 Тебя только что позвали или упомянули в чате. Вот контекст переписки:
 
 {context_str}
+
+{users_chunk_context}
 
 Справка из Базы Знаний (stomat_wiki):
 {mention_wiki or "(нет данных)"}

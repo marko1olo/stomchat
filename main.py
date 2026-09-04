@@ -30,6 +30,7 @@ import json
 from collections import deque
 import database
 import assistant
+import user_memory
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -2811,6 +2812,7 @@ async def start_bot():
     runtime_guard.create_task(summary_watchdog_task(), "summary_watchdog")
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")
     runtime_guard.create_task(media_recovery_task(), "media_recovery")
+    runtime_guard.create_task(user_memory.group_memory_daemon_loop(), "group_memory_daemon")
     logger.info("bot started, history synchronized, chat listener active")
     try:
         await client.run_until_disconnected()

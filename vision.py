@@ -54,7 +54,7 @@ VISION_MIN_CALL_INTERVAL_SECONDS = 3.0
 # Сколько моделей в пуле каскада зрения. Держим рядом с константами, потому что
 # от этого числа зависит внешний потолок разбора снимка в main.py, а сам пул
 # объявлен внутри describe_image.
-VISION_MODEL_POOL_SIZE = 3
+VISION_MODEL_POOL_SIZE = 4
 
 # Сколько ключей пробовать на ОДНУ модель. Отказ конкретного ключа почти всегда
 # означает квоту или 429, и от этого спасает следующая модель, а не двадцатый
@@ -210,11 +210,12 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать на английском языке, выводить черновики, шаги размышления (Reasoning/Thinking) или теги <think>."
             )
             
-            # 33% / 33% / 33% load balancing pool between Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.6 27B
+            # Load balancing pool: Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.8 27B, Qwen 3.6 27B
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
-                ("qwen/qwen3.6-27b", "groq")
+                ("qwen/qwen3.8-27b", "groq"),
+                ("qwen/qwen3.6-27b", "groq"),
             ]
             # Случайный старт размазывает квоту по пулу, и это правильная цена
             # для фоновых загрузок — их большинство. Но снимок, присланный боту
@@ -346,13 +347,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             err_str = str(e).lower()
                             if _PAYLOAD_TOO_LARGE_RE.search(err_str):
                                 logger.warning(
-                                    "Vision payload too large (413) for %s images. Skipping to next model.",
+                                    "Vision payload too large (413) for %s images. Stopping attempts.",
                                     len(image_urls),
                                 )
-                                # Снимок может быть слишком велик для одной модели (например Groq), но
-                                # пройти в другую (Gemini). Поэтому не сдаёмся целиком, а пробуем
-                                # следующую модель в каскаде.
-                                break
+                                return english_fallback
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель

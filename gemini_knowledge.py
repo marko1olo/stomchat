@@ -43,7 +43,7 @@ _FACTS_SCHEMA = {
 # Gemma осталась последней и без JSON-режима: она единственная проверенно
 # рабочая, и если id выше окажутся недоступны, поведение вырождается в прежнее
 # плюс строка в журнале — но не в тишину.
-_JSON_MODELS_DEFAULT = ["gemini-2.0-flash", "gemini-2.5-flash"]
+_JSON_MODELS_DEFAULT = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
 _LAST_RESORT_MODEL = "models/gemma-3-27b-it"
 
 # Дедлайн на ВЕСЬ вызов. Родительского дедлайна нет: distiller.process_batch

@@ -478,11 +478,11 @@ CHAT_KINDS = frozenset({
 
 # Ниже этого одна попытка бессмысленна: запрос рвётся на генерации. Значение
 # унаследовано от прежнего max(7.0, ...) — нижнюю границу автор уже выбрал.
-MIN_REQUEST_SECONDS = 7.0
+MIN_REQUEST_SECONDS = 8.0
 # Дробить долю модели на несколько попыток по разным ключам стоит только если
 # каждой достанется хотя бы столько: иначе ротация ключей превращается в серию
 # запросов, убитых по таймауту на середине ответа.
-COMFORT_REQUEST_SECONDS = 20.0
+COMFORT_REQUEST_SECONDS = 23.0
 # 15% бюджета не раздаём запросам: это сны между попытками (2-12 с,
 # _retry_sleep_seconds), старт подпроцесса с импортом openai (~1-2 с) и запас,
 # чтобы успеть записать причину провала ДО того, как родитель убьёт процесс.
@@ -560,7 +560,7 @@ def generate_text(prompt, status_context=None, timeout=None):
     # числа попыток, а число попыток — от числа моделей и живых ключей. Здесь
     # стояло req_timeout = timeout/3, и это была ошибка арифметики, а не оценки;
     # разбор — у расчёта бюджета после сборки каскада.
-    req_timeout = 30.0
+    req_timeout = 35.0
 
     # ROUTING BY TASKS: списки видов — TRIAGE_KINDS / CHAT_KINDS выше.
     is_chatbot = kind in CHAT_KINDS
@@ -572,8 +572,9 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq")
         ]
     elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         models_cascade = [
@@ -582,8 +583,9 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
-            ("qwen/qwen3.6-27b", "groq")
+            ("qwen/qwen3.6-27b", "groq"),
         ]
     elif is_chatbot:
         models_cascade = [
@@ -592,8 +594,9 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
-            (groq_fallback, "groq")
         ]
     else:
         # Complex tasks (Summaries, analytics, etc)
@@ -603,7 +606,9 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
-            (groq_fallback, "groq")
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+            ("qwen/qwen3.6-27b", "groq"),
         ]
 
     # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
@@ -1173,7 +1178,9 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
     )
 
     cascade = [
+        ("qwen/qwen3.8-27b", "groq"),
         ("openai/gpt-oss-120b", "groq"),
+        ("qwen/qwen3.6-27b", "groq"),
         ("gemini-3.8-flash", "gemini"),
         ("gemini-3.7-flash", "gemini"),
     ]
@@ -1257,7 +1264,7 @@ def generate_google_grounding(prompt_or_query, timeout=40.0):
         "4. Пиши профессионально и строго по делу, как коллега коллеге, без пустых вводных слов и без рекламы."
     )
 
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    models_to_try = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
     last_err = None
 
     for model_name in models_to_try:

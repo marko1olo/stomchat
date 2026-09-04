@@ -1,4 +1,5 @@
 import asyncio  # Добавлено
+import os
 import database
 import dental_vocab
 import html_safe
