@@ -984,6 +984,63 @@ async def remove_bot_sent_message(msg_id, chat_id=None):
     return await _run_db(operation)
 
 
+async def is_bot_sent_message(msg_id, chat_id=None):
+    """
+    Проверяет, было ли сообщение отправлено ботом.
+    Быстрый локальный поиск в bot_sent_messages без сетевых вызовов в Telegram.
+    """
+    if not msg_id:
+        return False
+    def operation():
+        with _connection() as db:
+            if chat_id is not None:
+                row = db.execute(
+                    "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? AND chat_id = ? LIMIT 1",
+                    (msg_id, chat_id)
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? LIMIT 1",
+                    (msg_id,)
+                ).fetchone()
+            return bool(row)
+    return await _run_db(operation)
+
+
+async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
+    """
+    Проверяет, является ли сообщение сообщением бота:
+    1) По таблице bot_sent_messages (id всех сообщений, отправленных ботом)
+    2) Если передан bot_id, дополнительно сверяет sender_id в messages.
+    """
+    if not msg_id:
+        return False
+    def operation():
+        with _connection() as db:
+            if chat_id is not None:
+                row = db.execute(
+                    "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? AND chat_id = ? LIMIT 1",
+                    (msg_id, chat_id)
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? LIMIT 1",
+                    (msg_id,)
+                ).fetchone()
+            if row:
+                return True
+            if bot_id:
+                m_row = db.execute(
+                    "SELECT 1 FROM messages WHERE msg_id = ? AND sender_id = ? LIMIT 1",
+                    (msg_id, bot_id)
+                ).fetchone()
+                if m_row:
+                    return True
+            return False
+    return await _run_db(operation)
+
+
+
 async def save_pm_message(user_id, sender_name, text):
     def operation():
         with _connection() as db:

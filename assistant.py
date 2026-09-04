@@ -2040,6 +2040,12 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
                 is_about_bot = True
         except Exception:
             pass
+        if not is_about_bot:
+            try:
+                if await database.is_bot_message_or_sender(reply_to_msg_id, BOT_ID, event.chat_id):
+                    is_about_bot = True
+            except Exception:
+                pass
             
     # Слово «бот» ищется как НАЧАЛО слова. Подстрокой оно живёт в «работа»,
     # «суббота», «заботиться», «обработать» — и вместе с детектором негатива
@@ -2311,6 +2317,7 @@ async def fetch_dynamic_chat_context(
     seen = set()
     bot_msg_count = 0
     nearest_bot_msg_id = None
+    bot_msg_ids = set()
 
     event_client = getattr(event, 'client', None)
     event_chat_id = getattr(event, 'chat_id', None)
@@ -2350,7 +2357,14 @@ async def fetch_dynamic_chat_context(
                     break
                 r = _normalize_row(row[0])
                 rows.append(r)
-                if BOT_ID and r[2] == BOT_ID:
+                is_this_bot = (BOT_ID and r[2] == BOT_ID)
+                if not is_this_bot:
+                    try:
+                        is_this_bot = await database.is_bot_message_or_sender(r[0], BOT_ID, event_chat_id)
+                    except Exception:
+                        pass
+                if is_this_bot:
+                    bot_msg_ids.add(r[0])
                     bot_msg_count += 1
                     if nearest_bot_msg_id is None:
                         nearest_bot_msg_id = r[0]
@@ -2372,7 +2386,14 @@ async def fetch_dynamic_chat_context(
                     if s[0] not in seen:
                         seen.add(s[0])
                         rows.append(s)
-                        if BOT_ID and s[2] == BOT_ID:
+                        is_s_bot = (BOT_ID and s[2] == BOT_ID)
+                        if not is_s_bot:
+                            try:
+                                is_s_bot = await database.is_bot_message_or_sender(s[0], BOT_ID, event_chat_id)
+                            except Exception:
+                                pass
+                        if is_s_bot:
+                            bot_msg_ids.add(s[0])
                             bot_msg_count += 1
                             if nearest_bot_msg_id is None:
                                 nearest_bot_msg_id = s[0]
@@ -2400,7 +2421,14 @@ async def fetch_dynamic_chat_context(
                     break
             rows = all_rows[:cut_idx][::-1]  # хронологический
             for r in rows:
-                if BOT_ID and r[2] == BOT_ID:
+                is_this_bot = (BOT_ID and r[2] == BOT_ID)
+                if not is_this_bot:
+                    try:
+                        is_this_bot = await database.is_bot_message_or_sender(r[0], BOT_ID, event_chat_id)
+                    except Exception:
+                        pass
+                if is_this_bot:
+                    bot_msg_ids.add(r[0])
                     bot_msg_count += 1
                     if nearest_bot_msg_id is None:
                         nearest_bot_msg_id = r[0]
@@ -2418,7 +2446,8 @@ async def fetch_dynamic_chat_context(
         trunc_limit = _DCTX_RECENT_FULL_LEN if idx >= N - 4 else _DCTX_DEEP_TRUNC_LEN
         raw_text = r_text or ""
         msg_text = raw_text[:trunc_limit] + ("... [обрезано]" if len(raw_text) > trunc_limit else "")
-        sender_label = "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]" if r_sender_id == BOT_ID else (r_sender_name or "Участник")
+        is_prev_bot = (r_sender_id == BOT_ID) or (r_msg_id in bot_msg_ids)
+        sender_label = "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]" if is_prev_bot else (r_sender_name or "Участник")
         rep_str = f" (в ответ на #{r_reply_to})" if r_reply_to else ""
         line = f"[Сообщение #{r_msg_id}{rep_str}] {sender_label}: {msg_text}"
         if total_chars + len(line) > _DCTX_DIALOG_MAX_CHARS:
@@ -2502,12 +2531,22 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 except Exception:
                     pass
 
+            is_parent_bot = False
+            if direct_parent and getattr(direct_parent, 'sender_id', None) == BOT_ID:
+                is_parent_bot = True
+            else:
+                try:
+                    if await database.is_bot_message_or_sender(reply_to_msg_id, BOT_ID, event.chat_id):
+                        is_parent_bot = True
+                except Exception:
+                    pass
+
             # Используем DB-based fetch вместо Telegram API walk (было: range(6) x get_messages).
             # fetch_dynamic_chat_context возвращает до max_limit=40 реплик по reply-цепочке.
             chain, bot_msg_count, nearest_bot_msg_id = await fetch_dynamic_chat_context(
                 msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
             )
-            if direct_parent and getattr(direct_parent, 'sender_id', None) == BOT_ID:
+            if is_parent_bot:
                 if bot_msg_count == 0:
                     bot_msg_count = 1
                 if not nearest_bot_msg_id:
@@ -3057,6 +3096,16 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 "Не удалось получить сообщение-родитель msg_id=%s для снимка: %s",
                 message.reply_to_msg_id, parent_err,
             )
+        if not is_direct_reply:
+            try:
+                if await database.is_bot_message_or_sender(message.reply_to_msg_id, BOT_ID, message.chat_id):
+                    is_direct_reply = True
+                    logger.info(
+                        "Direct reply identified via local DB for media reply_to_msg_id=%s",
+                        message.reply_to_msg_id,
+                    )
+            except Exception as db_err:
+                logger.warning("Local DB bot check failed for media reply: %s", db_err)
 
     is_mentioned = False
     if text and BOT_USERNAME:
@@ -7026,375 +7075,6 @@ async def handle_quiz_callback(bot_client, event):
                                        "edit_message:nav_case", buttons=buttons,
                                        parse_mode='html')
             await event.answer()
-            return
-            
-        elif case_sub == "start":
-            await edit_callback_message(bot_client, event,
-                                       "🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>",
-                                       "edit_message:case_loading", parse_mode='html')
-            
-            departments = [
-                "эндодонтия/кариесология (терапевтическая стоматология)",
-                "протезирование/виниры/коронки (ортопедическая стоматология)",
-                "имплантация/удаление зуба (хирургическая стоматология)",
-                "заболевания пародонта (пародонтология)",
-                "окклюзия/ВНЧС (гнатология)"
-            ]
-            selected_dept = random.choice(departments)
-            case_prompt = f"""
-Ты — старший стоматолог-экзаменатор. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
-Напиши:
-1. Жалобы пациента и анамнез.
-2. Данные визуального осмотра.
-3. Задай ровно один конкретный вопрос о первом действии врача (например, какие дополнительные исследования назначить, или какой инструмент выбрать).
-
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Будь лаконичен, профессионален.
-2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
-3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
-"""
-            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
-            
-            if error or not response or not getattr(response, "text", None):
-                fallback_case = (
-                    "🎮 <b>Клинический случай [Эндодонтия / Терапия]:</b>\n\n"
-                    "<b>Пациент:</b> 34 года, жалобы на самопроизвольные приступообразные ночные боли в зубе 2.6 с иррадиацией в висок.\n"
-                    "<b>Осмотр:</b> глубокая кариозная полость на медиально-окклюзионной поверхности, зондирование дна резко болезненно, перкуссия слабо болезненна, термопроба резко положительная с длительным болевым ответом (>1 мин).\n\n"
-                    "❓ <b>Вопрос экзаменатора:</b> Какой предварительный диагноз и каков ваш первый шаг при инструментальной и медикаментозной обработке?"
-                )
-                starting_text = fallback_case
-            else:
-                starting_text = clean_html_formatting(response.text.strip())
-
-            history_payload = {
-                "messages": [{"role": "assistant", "content": starting_text}],
-                "last_updated": time.time()
-            }
-            await database.set_user_interactive_state(
-                user_id=event.sender_id,
-                state_type="case",
-                current_step=1,
-                case_id="dynamic",
-                history=json.dumps(history_payload)
-            )
-            
-            buttons = [
-                [Button.inline("⏹️ Сбросить симулятор", data="case:abort")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            case_display = (
-                f"🎮 <b>Клинический симулятор (Шаг 1):</b>\n\n"
-                f"{starting_text}\n\n"
-                f"<i>Ответьте на вопрос сообщением (текстом или голосом) в этот диалог. Для сброса используйте кнопку ниже или команду /abort.</i>"
-            )
-            await edit_callback_message(bot_client, event, case_display,
-                                       "edit_message:case_start", buttons=buttons,
-                                       parse_mode='html')
-            await event.answer()
-            return
-            
-        elif case_sub in ("abort", "exit"):
-            await database.clear_user_interactive_state(event.sender_id)
-            abort_text = (
-                "⏹️ <b>Интерактивная сессия симулятора успешно завершена.</b>\n\n"
-                "Вы можете в любой момент запустить новый разбор клинического случая!"
-            )
-            buttons = [
-                [Button.inline("🚀 Начать новый кейс", data="case:start")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, abort_text,
-                                       "edit_message:case_abort", buttons=buttons,
-                                       parse_mode='html')
-            await event.answer()
-            return
-
-    # 2. ПОСТРАНИЧНЫЙ ВЫВОД ЗАКЛАДОК bm:page:*
-    if data_str.startswith("bm:page:"):
-        page = 1
-        try:
-            page = max(1, int(data_str.split(":")[2]))
-        except (IndexError, ValueError):
-            page = 1
-
-        total_items = await database.count_clinical_bookmarks(event.sender_id)
-        if not total_items:
-            empty_text = (
-                "⭐ <b>Ваши клинические закладки</b>\n\n"
-                "У вас пока нет сохраненных записей.\n\n"
-                "💡 <i>Отправьте команду <code>/save</code> в ответ на любое сообщение в общем чате сообщества, "
-                "или нажмите кнопку «⭐ В закладки» при чтении статьи в Энциклопедии.</i>"
-            )
-            buttons = [
-                [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, empty_text,
-                                       "edit_message:bm_empty", buttons=buttons,
-                                       parse_mode='html')
-            return
-
-        per_page = 5
-        total_pages = max(1, (total_items + per_page - 1) // per_page)
-        if page > total_pages:
-            page = total_pages
-        offset = (page - 1) * per_page
-        page_rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=offset)
-
-        bm_text = f"⭐ <b>Ваши клинические закладки (Страница {page}/{total_pages}):</b>\n\n"
-        for i, row in enumerate(page_rows, offset + 1):
-            msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
-            bm_text += f"{i}. <b>{_bookmark_snippet(sender_name, limit=32)}</b> ({date}):\n"
-            bm_text += f"«{_bookmark_snippet(msg_text, limit=120)}»\n"
-            if media_desc:
-                bm_text += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc, limit=80)}\n"
-            is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
-            if is_group_message:
-                clean_chat_id = str(chat_id_val)[4:]
-                bm_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
-            else:
-                bm_text += "📖 <i>Статья энциклопедии</i>\n\n"
-
-        bm_text += f"<i>Всего закладок: {total_items}</i>"
-
-        nav_row = []
-        if page > 1:
-            nav_row.append(Button.inline("◀️ Пред", data=f"bm:page:{page - 1}"))
-        nav_row.append(Button.inline(f"{page}/{total_pages}", data=f"bm:page:{page}"))
-        if page < total_pages:
-            nav_row.append(Button.inline("След ▶️", data=f"bm:page:{page + 1}"))
-
-        buttons = []
-        if nav_row:
-            buttons.append(nav_row)
-        buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
-
-        await edit_callback_message(bot_client, event, bm_text,
-                                   "edit_message:bm_list", buttons=buttons,
-                                   parse_mode='html', link_preview=False)
-        return
-
-    # 3. ДЕТАЛЬНЫЙ СПРАВОЧНИК-КАЛЬКУЛЯТОР calc:*
-    if data_str.startswith("calc:"):
-        calc_sub = data_str.split(":", 1)[1]
-        
-        if calc_sub in ("main", "menu"):
-            calc_msg = (
-                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
-                "Пришлите препарат, концентрацию и вес — например "
-                "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
-                "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
-                "• <b>Артикаин 4%</b> (1:100 000 / 1:200 000)\n"
-                "  взрослые 7 мг/кг, дети 5 мг/кг, <b>но не более 500 мг</b>\n"
-                "  карпула 1.7 мл = 68 мг → потолок ≈ 7 карпул\n"
-                "  <i>потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
-                "• <b>Мепивакаин 3%</b> (без вазоконстриктора)\n"
-                "  4.4 мг/кг, <b>но не более 400 мг</b>\n"
-                "  карпула 1.8 мл = 54 мг → потолок ≈ 7 карпул\n"
-                "  <i>потолок наступает при весе ≈ 91 кг</i>\n\n"
-                "• <b>Лидокаин 2%</b> (с адреналином)\n"
-                "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
-                "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
-                "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
-                "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
-                "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
-            )
-            buttons = [
-                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, calc_msg,
-                                       "edit_message:nav_calc", buttons=buttons,
-                                       parse_mode='html')
-            return
-            
-        elif calc_sub == "articaine":
-            art_text = (
-                "🦷 <b>Артикаин 4% (с адреналином 1:100 000 / 1:200 000)</b>\n\n"
-                "• <b>Концентрация:</b> 40 мг/мл (карпула 1.7 мл = 68 мг)\n"
-                "• <b>Максимальные дозировки:</b>\n"
-                "  — Взрослые: <b>7.0 мг/кг</b>\n"
-                "  — Дети (от 4 лет): <b>5.0 мг/кг</b>\n"
-                "  — <b>Абсолютный потолок: не более 500 мг</b> (≈ 7 карпул)\n"
-                "  — <i>Потолок 500 мг наступает уже при весе ≈ 71 кг</i>\n\n"
-                "📊 <b>Ориентир по весу пациента (карпулы 1.7 мл):</b>\n"
-                "• 20 кг (ребенок) → макс. 100 мг ≈ <b>1.4 карпулы</b>\n"
-                "• 40 кг → макс. 280 мг ≈ <b>4.1 карпулы</b>\n"
-                "• 60 кг → макс. 420 мг ≈ <b>6.1 карпул</b>\n"
-                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>7.3 карпулы</b>\n\n"
-                "⚠️ <i>Детям до 4 лет противопоказан. При заболеваниях печени дозировку уменьшают.</i>"
-            )
-            buttons = [
-                [Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
-                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, art_text,
-                                       "edit_message:calc_articaine", buttons=buttons,
-                                       parse_mode='html')
-            return
-            
-        elif calc_sub == "mepivacaine":
-            mep_text = (
-                "💉 <b>Мепивакаин 3% (Scandonest, без вазоконстриктора)</b>\n\n"
-                "• <b>Концентрация:</b> 30 мг/мл (карпула 1.8 мл = 54 мг)\n"
-                "• <b>Максимальные дозировки:</b>\n"
-                "  — Взрослые и дети: <b>4.4 мг/кг</b>\n"
-                "  — <b>Абсолютный потолок: не более 400 мг</b> (≈ 7 карпул)\n"
-                "  — <i>Потолок наступает при весе ≈ 91 кг</i>\n\n"
-                "📊 <b>Ориентир по весу пациента (карпулы 1.8 мл):</b>\n"
-                "• 20 кг → макс. 88 мг ≈ <b>1.6 карпулы</b>\n"
-                "• 40 кг → макс. 176 мг ≈ <b>3.2 карпулы</b>\n"
-                "• 60 кг → макс. 264 мг ≈ <b>4.8 карпул</b>\n"
-                "• 91+ кг → абсолютный максимум 400 мг ≈ <b>7.4 карпулы</b>\n\n"
-                "⚠️ <i>Препарат выбора у пациентов с сердечно-сосудистой патологией, гипертонией и тиреотоксикозом.</i>"
-            )
-            buttons = [
-                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
-                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, mep_text,
-                                       "edit_message:calc_mepivacaine", buttons=buttons,
-                                       parse_mode='html')
-            return
-            
-        elif calc_sub == "lidocaine":
-            lido_text = (
-                "🩸 <b>Лидокаин 2% (с адреналином 1:100 000 / 1:80 000)</b>\n\n"
-                "• <b>Концентрация:</b> 20 мг/мл (карпула 1.8 мл = 36 мг)\n"
-                "• <b>Максимальные дозировки:</b>\n"
-                "  — Взрослые: <b>7.0 мг/кг</b> (с адреналином, <b>но не более 500 мг</b> ≈ 13 карпул)\n"
-                "  — Дети: <b>4.4 мг/кг</b>\n"
-                "  — Без адреналина: <b>4.4 мг/кг</b> (максимум 300 мг ≈ 8 карпул)\n"
-                "  — <i>Потолок 500 мг наступает при весе ≈ 71 кг</i>\n\n"
-                "📊 <b>Ориентир по весу пациента (1.8 мл с адреналином):</b>\n"
-                "• 20 кг → макс. 140 мг ≈ <b>3.8 карпулы</b>\n"
-                "• 50 кг → макс. 350 мг ≈ <b>9.7 карпул</b>\n"
-                "• 71+ кг → абсолютный максимум 500 мг ≈ <b>13.8 карпул</b>\n\n"
-                "⚠️ <i>Выраженное сосудорасширяющее действие. Без адреналина быстро всасывается в кровоток.</i>"
-            )
-            buttons = [
-                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, lido_text,
-                                       "edit_message:calc_lidocaine", buttons=buttons,
-                                       parse_mode='html')
-            return
-
-    # 4. ИНТЕРАКТИВНЫЙ КВИЗ quiz:*
-    if data_str.startswith("quiz:"):
-        quiz_sub = data_str.split(":", 1)[1]
-        
-        if quiz_sub in ("menu", "main"):
-            quiz_prompt_info = (
-                "🎲 <b>Клинический квиз StomChat</b>\n\n"
-                "Интерактивный формат проверки клинических знаний по терапевтической, ортопедической, хирургической стоматологии и эндодонтии.\n\n"
-                "👇 <i>Нажмите кнопку ниже, чтобы начать викторину:</i>"
-            )
-            buttons = [
-                [Button.inline("🎲 Начать викторину", data="quiz:generate")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, quiz_prompt_info,
-                                       "edit_message:nav_quiz", buttons=buttons,
-                                       parse_mode='html')
-            return
-            
-        elif quiz_sub in ("generate", "start", "next", "new"):
-            fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
-            question = fb["question"]
-            options = list(fb["options"])
-            correct = fb["correct"]
-            explanation = fb["explanation"]
-            topic = fb.get("topic", "Стоматология")
-
-            quiz_id = str(_next_quiz_state_id())
-            init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
-            await database.set_user_interactive_state(
-                user_id=int(quiz_id),
-                state_type="quiz_config",
-                current_step=correct,
-                case_id=explanation[:200],
-                history=json.dumps(init_votes)
-            )
-
-            buttons = [
-                [
-                    Button.inline(f"A: {options[0][:28]}", data=f"quiz:ans:{correct}:0:{quiz_id}"),
-                    Button.inline(f"B: {options[1][:28]}", data=f"quiz:ans:{correct}:1:{quiz_id}")
-                ],
-                [
-                    Button.inline(f"C: {options[2][:28]}", data=f"quiz:ans:{correct}:2:{quiz_id}"),
-                    Button.inline(f"D: {options[3][:28]}", data=f"quiz:ans:{correct}:3:{quiz_id}")
-                ],
-                [
-                    Button.inline("🔄 Другой вопрос", data="quiz:generate"),
-                    Button.inline("⬅️ Назад в меню", data="nav:main")
-                ]
-            ]
-            quiz_msg_text = (
-                f"🎲 <b>Клинический квиз [{topic}]:</b>\n\n"
-                f"{question}\n\n"
-                f"<b>A:</b> {options[0]}\n"
-                f"<b>B:</b> {options[1]}\n"
-                f"<b>C:</b> {options[2]}\n"
-                f"<b>D:</b> {options[3]}\n\n"
-                "<i>Выберите вариант ответа кнопкой ниже:</i>"
-            )
-            await edit_callback_message(bot_client, event, quiz_msg_text,
-                                       "edit_message:quiz_question", buttons=buttons,
-                                       parse_mode='html')
-            return
-            
-        elif quiz_sub.startswith("ans:"):
-            parts = data_str.split(":")
-            correct_idx = int(parts[2])
-            clicked_idx = int(parts[3])
-            quiz_id = int(parts[4])
-
-            state_row = await database.get_user_interactive_state(quiz_id)
-            explanation = (state_row.get("case_id") if state_row else None) or "Клинический разбор."
-            is_correct = (correct_idx == clicked_idx)
-            
-            letters = ["A", "B", "C", "D"]
-            your_letter = letters[clicked_idx] if 0 <= clicked_idx < 4 else str(clicked_idx)
-            corr_letter = letters[correct_idx] if 0 <= correct_idx < 4 else str(correct_idx)
-
-            res_header = "✅ <b>ВЕРНО!</b>" if is_correct else "❌ <b>НЕВЕРНО!</b>"
-            ans_text = (
-                f"{res_header}\n\n"
-                f"Ваш выбор: <b>{your_letter}</b> | Правильный ответ: <b>{corr_letter}</b>\n\n"
-                f"💡 <b>Клиническое обоснование:</b>\n{explanation}"
-            )
-            buttons = [
-                [Button.inline("🎲 Следующий вопрос", data="quiz:generate")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, ans_text,
-                                       "edit_message:quiz_result", buttons=buttons,
-                                       parse_mode='html')
-            return
-
-    # 5. КЛИНИЧЕСКИЙ СИМУЛЯТОР case:*
-    if data_str.startswith("case:"):
-        case_sub = data_str.split(":", 1)[1]
-        
-        if case_sub in ("menu", "main"):
-            case_prompt_info = (
-                "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
-                "Пошаговый тренажер реальных клинических ситуаций. Вы выступаете в роли лечащего врача, "
-                "а ИИ моделирует реакцию пациента и оценивает обоснованность каждого вашего шага.\n\n"
-                "👇 <i>Нажмите «🚀 Начать клинический кейс» для запуска:</i>"
-            )
-            buttons = [
-                [Button.inline("🚀 Начать клинический кейс", data="case:start")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, case_prompt_info,
-                                       "edit_message:nav_case", buttons=buttons,
-                                       parse_mode='html')
             return
             
         elif case_sub == "start":
