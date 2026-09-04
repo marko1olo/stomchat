@@ -998,11 +998,11 @@ async def get_last_pm_messages(user_id, limit=25):
     def operation():
         with _connection() as db:
             cursor = db.execute(
-                "SELECT sender_name, text FROM pm_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT sender_name, text, date FROM pm_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
                 (user_id, limit)
             )
             rows = cursor.fetchall()
-            return [{"sender_name": row[0], "text": row[1]} for row in reversed(rows)]
+            return [{"sender_name": row[0], "text": row[1], "date": str(row[2]) if row[2] else ""} for row in reversed(rows)]
     return await _run_db(operation)
 
 
