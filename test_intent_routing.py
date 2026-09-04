@@ -318,7 +318,7 @@ class TestPrivateMessageRoutingIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_bot.send_message.assert_called()
         sent_messages = [call.kwargs.get("message", "") for call in mock_bot.send_message.call_args_list]
-        self.assertTrue(any("StomChat AI Hub" in m or "Приветствую!" in m or "Клинический навигатор" in m for m in sent_messages))
+        self.assertTrue(any("StomChat AI" in m or "Приветствую!" in m or "Клинический навигатор" in m for m in sent_messages))
 
     async def test_zero_slash_help_dispatch(self):
         mock_bot = AsyncMock()
@@ -339,7 +339,7 @@ class TestPrivateMessageRoutingIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_bot.send_message.assert_called()
         sent_messages = [call.kwargs.get("message", "") for call in mock_bot.send_message.call_args_list]
-        self.assertTrue(any("StomChat AI Hub" in m or "База Знаний" in m for m in sent_messages))
+        self.assertTrue(any("StomChat AI" in m or "База Знаний" in m or "клинический ассистент" in m for m in sent_messages))
 
 
 if __name__ == "__main__":

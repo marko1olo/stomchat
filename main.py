@@ -1830,13 +1830,15 @@ async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
     try:
         msg_id = event.message.id
-        
+        chat_id = event.chat_id
+
         global PROCESSED_MSG_IDS
-        if msg_id in PROCESSED_MSG_IDS:
-            logger.info(f"Deduplicator: Skipping already processed msg_id={msg_id}")
+        key = (chat_id, msg_id)
+        if key in PROCESSED_MSG_IDS or msg_id in PROCESSED_MSG_IDS:
+            logger.info(f"Deduplicator: Skipping already processed chat_id={chat_id} msg_id={msg_id}")
             return
-        PROCESSED_MSG_IDS.append(msg_id)
-        if len(PROCESSED_MSG_IDS) > 500:
+        PROCESSED_MSG_IDS.append(key)
+        if len(PROCESSED_MSG_IDS) > 1000:
             PROCESSED_MSG_IDS.pop(0)
         sender_id = event.sender_id
         

@@ -309,7 +309,7 @@ async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
     и переоткрываются в начале следующей.
     """
     for chunk in html_safe.split_html(text, limit=TELEGRAM_MESSAGE_LIMIT):
-        await bot_client.send_message(entity=chat_id, message=chunk, **kwargs)
+        await tg_safety.send_message(bot_client, chat_id, chunk, logger=logger, **kwargs)
 
 async def resolve_bot_identity(bot_client):
     """
@@ -1891,7 +1891,12 @@ def clean_html_formatting(text):
     text = text.replace("__B_OPEN__", "<b>").replace("__B_CLOSE__", "</b>")
     text = text.replace("__I_OPEN__", "<i>").replace("__I_CLOSE__", "</i>")
     text = text.replace("__C_OPEN__", "<code>").replace("__C_CLOSE__", "</code>")
-    return text
+
+    # Балансировка тегов: Telegram отклоняет сообщение целиком при любом незакрытом теге
+    balanced, unclosed = html_safe.balance_html(text)
+    if unclosed:
+        balanced += "".join(f"</{tag}>" for tag in reversed(unclosed))
+    return balanced
 
 
 # Требование замолчать, не совпадающее с клинической лексикой. Ищется как
@@ -3673,6 +3678,17 @@ async def handle_private_message(bot_client, event):
         is_audio = is_voice or is_audio_file
         transcribed_text = None
         if is_audio:
+            file_obj = getattr(getattr(event, "message", None), "file", None)
+            file_size = getattr(file_obj, "size", 0) or 0
+            MAX_VOICE_SIZE = 25 * 1024 * 1024  # 25 МБ потолок
+            if file_size > MAX_VOICE_SIZE:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="⚠️ <i>Аудиофайл слишком большой (> 25 МБ). Пришлите более короткую голосовую заметку.</i>",
+                    parse_mode='html'
+                )
+                return
+
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
             temp_path = None
@@ -3918,10 +3934,13 @@ async def handle_private_message(bot_client, event):
                     
                 for c_id, msg_ids in by_chat.items():
                     try:
-                        await bot_client.delete_messages(c_id, msg_ids)
-                        deleted_count += len(msg_ids)
-                        for m_id in msg_ids:
-                            await database.remove_bot_sent_message(m_id)
+                        del_outcome = await tg_safety.delete_messages(bot_client, c_id, msg_ids, logger=logger)
+                        if del_outcome.ok:
+                            deleted_count += len(msg_ids)
+                            for m_id in msg_ids:
+                                await database.remove_bot_sent_message(m_id, chat_id=c_id)
+                        else:
+                            logger.error(f"Failed to delete messages in chat {c_id}: {del_outcome.error}")
                     except Exception as del_err:
                         logger.error(f"Error deleting messages in chat {c_id}: {del_err}")
                         
@@ -4119,6 +4138,15 @@ async def handle_private_message(bot_client, event):
             return
 
         if text.lower() == "/quiz":
+            cooldown_left = check_user_cooldown(chat_id, chat_id, "pm_quiz", seconds=15)
+            if cooldown_left > 0:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=f"⏳ <i>Подождите {cooldown_left} сек перед повторной генерацией викторины.</i>",
+                    parse_mode='html'
+                )
+                return
+
             status_msg = await bot_client.send_message(entity=chat_id, message="🎲 <i>Генерирую клиническую викторину для вас... Подождите.</i>", parse_mode='html')
             prompt = """
 Ты — умный клинический ассистент-преподаватель в чате врачей-стоматологов "StomChat". 
@@ -4454,6 +4482,15 @@ async def handle_private_message(bot_client, event):
             return
 
         if text.lower() == "/case":
+            cooldown_left = check_user_cooldown(chat_id, chat_id, "pm_case", seconds=15)
+            if cooldown_left > 0:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=f"⏳ <i>Подождите {cooldown_left} сек перед запуском нового клинического случая.</i>",
+                    parse_mode='html'
+                )
+                return
+
             status_msg = await bot_client.send_message(entity=chat_id, message="🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>", parse_mode='html')
             
             departments = [
@@ -4610,6 +4647,17 @@ async def handle_private_message(bot_client, event):
             return
         
         if has_media:
+            file_obj = getattr(getattr(event, "message", None), "file", None)
+            file_size = getattr(file_obj, "size", 0) or 0
+            MAX_MEDIA_SIZE = 35 * 1024 * 1024  # 35 МБ потолок
+            if file_size > MAX_MEDIA_SIZE:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="⚠️ <i>Медиафайл превышает 35 МБ. Пожалуйста, сожмите файл или пришлите снимок в формате JPEG/PNG.</i>",
+                    parse_mode='html'
+                )
+                return
+
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             try:
                 # Отправляем статус ожидания
