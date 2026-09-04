@@ -147,6 +147,7 @@ async def init_db():
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_date ON messages(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sender ON messages(sender_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_messages_sender_msg ON messages(sender_id, msg_id)")
             # Ответы в чате читаются по родителю, а не по себе: на КАЖДОЕ
             # сообщение-ответ под медиа-постом assistant.py делает
             # COUNT(*) WHERE reply_to_msg_id = ?, а затем выборку всей ветки
@@ -1168,7 +1169,7 @@ async def save_user_memory(
                 new_grp = group_summary if group_summary is not None else (existing[2] or "")
                 new_facts = facts_json if facts_json is not None else (existing[3] or "[]")
                 new_cnt = message_count if message_count is not None else (existing[4] or 0)
-                new_pm_cnt = pm_message_count if pm_message_count is not None else (existing[5] or 0)
+                new_pm_cnt = max(pm_message_count, existing[5] or 0) if pm_message_count is not None else (existing[5] or 0)
                 new_grp_cnt = group_message_count if group_message_count is not None else (existing[6] or 0)
                 new_pm_id = last_pm_analyzed_id if last_pm_analyzed_id is not None else (existing[7] or 0)
                 new_grp_id = last_group_analyzed_id if last_group_analyzed_id is not None else (existing[8] or 0)
@@ -1236,10 +1237,51 @@ async def get_users_memory_batch(user_ids):
     return await _run_db(operation)
 
 
-async def get_unprocessed_group_users(min_new_messages=3, limit=10):
+async def increment_user_pm_count(user_id: int, username: str = "", first_name: str = "") -> int:
+    """
+    Атомарно инкрементирует pm_message_count для пользователя в БД.
+    Возвращает актуальное значение pm_message_count после инкремента.
+    """
+    def operation():
+        with _connection() as db:
+            existing = db.execute(
+                "SELECT pm_message_count, message_count FROM user_memories WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+            if existing is not None:
+                new_pm_cnt = (existing[0] or 0) + 1
+                new_msg_cnt = (existing[1] or 0) + 1
+                db.execute(
+                    """
+                    UPDATE user_memories
+                    SET pm_message_count = ?, message_count = ?,
+                        username = CASE WHEN ? != '' THEN ? ELSE username END,
+                        first_name = CASE WHEN ? != '' THEN ? ELSE first_name END,
+                        last_updated = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                    """,
+                    (new_pm_cnt, new_msg_cnt, username, username, first_name, first_name, user_id)
+                )
+                return new_pm_cnt
+            else:
+                db.execute(
+                    """
+                    INSERT INTO user_memories (
+                        user_id, username, first_name, pm_message_count, message_count, last_updated
+                    )
+                    VALUES (?, ?, ?, 1, 1, CURRENT_TIMESTAMP)
+                    """,
+                    (user_id, username or "", first_name or "")
+                )
+                return 1
+    return await _run_db(operation)
+
+
+async def get_unprocessed_group_users(min_new_messages=3, limit=20):
     """
     Возвращает список пользователей, у которых в messages накопились новые сообщения
     для обновления памяти беседы (group_summary).
+    Приоритет отдается врачам с наибольшим количеством новых реплик (cnt DESC, max_id DESC).
     """
     def operation():
         with _connection() as db:
@@ -1254,7 +1296,7 @@ async def get_unprocessed_group_users(min_new_messages=3, limit=10):
                   AND m.msg_id > COALESCE(um.last_group_analyzed_id, 0)
                 GROUP BY m.sender_id
                 HAVING cnt >= ?
-                ORDER BY max_id DESC
+                ORDER BY cnt DESC, max_id DESC
                 LIMIT ?
                 """,
                 (min_new_messages, limit)

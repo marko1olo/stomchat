@@ -82,12 +82,76 @@ def _split_into_sentences(text: str) -> List[str]:
     return [s.strip() for s in raw_sentences if s.strip()]
 
 
+def _extract_json_object(text: str) -> Optional[dict]:
+    """
+    Надёжный извлекатель JSON-объекта из произвольного текста LLM.
+
+    Обрабатывает три распространённых формата ответа:
+    1. ```json { ... } ``` — обёртка в code fence
+    2. Текст до/после JSON-объекта
+    3. Вложенные фигурные скобки внутри JSON
+
+    Жадный re.search(r"{.*}", re.DOTALL) ломался, если LLM добавлял текст
+    после JSON или использовал несколько объектов — он захватывал
+    «{"a":1} и ещё {"b":2}» целиком, что невалидный JSON.
+    """
+    if not text:
+        return None
+
+    # Шаг 1: вырезаем ```json ... ``` или ``` ... ```
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        candidate = fence_match.group(1)
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Шаг 2: ищем первый '{' и считаем скобки до закрывающей пары
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start=start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : i + 1]
+                try:
+                    return json.loads(candidate)
+                except (json.JSONDecodeError, ValueError):
+                    # Попробуем продолжить поиск следующего '{'
+                    next_start = text.find("{", i + 1)
+                    if next_start == -1:
+                        return None
+                    # Рекурсивно ищем дальше (без бесконечной рекурсии — один уровень)
+                    return _extract_json_object(text[next_start:])
+    return None
+
+
 def deduplicate_clinical_summary(summary: str) -> str:
     """
     Программная дедупликация предложений и фактов в клиническом досье врача.
     Сохраняет структуру и заголовки разделов (Специализация:, Арсенал и оснащение:,
     Клинические протоколы:, Кейсы:), удаляя повторы одинаковых фактов/предложений
-    как внутри разделов, так и между ними.
+    внутри разделов, не затирая при этом упоминания ключевых брендов/протоколов
+    в разных контекстах (например, в Арсенале и в Кейсах).
     """
     if not summary or not summary.strip():
         return ""
@@ -109,6 +173,9 @@ def deduplicate_clinical_summary(summary: str) -> str:
             header_name = header_match.group(2).lower()
             header_prefix = header_match.group(0).rstrip()
             inline_content = stripped_line[header_match.end():].strip()
+
+            # При переходе к новому разделу сбрасываем локальные дубликаты раздела
+            seen_items = set()
 
             if not inline_content:
                 if header_name in seen_headers:
@@ -376,12 +443,17 @@ async def update_clinician_memory_async(
         logger.debug(f"PM clinician memory update for {user_id} throttled by cooldown.")
         return
     _LAST_PM_UPDATE_TS[user_id] = now
+    if len(_LAST_PM_UPDATE_TS) > 500:
+        cutoff = now - 3600.0
+        stale_uids = [uid for uid, ts in _LAST_PM_UPDATE_TS.items() if ts <= cutoff]
+        for uid in stale_uids:
+            _LAST_PM_UPDATE_TS.pop(uid, None)
 
     try:
         mem = await get_clinician_memory(user_id)
         current_spec = mem.get("specialty", "")
         current_summary = mem.get("clinical_summary", "")
-        current_pm_count = mem.get("pm_message_count", 0) + 1
+        current_pm_count = await database.increment_user_pm_count(user_id, username=username, first_name=first_name)
 
         # Проверяем, наступил ли интервал обновления (раз в PM_UPDATE_EVERY_N_MESSAGES реплик)
         # либо это первое сообщение или объемный клинический кейс
@@ -392,13 +464,7 @@ async def update_clinician_memory_async(
         ))
 
         if not (is_first_time or is_interval or has_rich_case):
-            # Просто инкрементируем счетчик сообщений без вызова дорогой LLM
-            await database.save_user_memory(
-                user_id=user_id,
-                pm_message_count=current_pm_count,
-                username=username,
-                first_name=first_name
-            )
+            # Счетчик сообщений уже атомарно обновлен в БД
             return
 
         current_facts = []
@@ -451,12 +517,11 @@ async def update_clinician_memory_async(
             return
 
         resp_text = response.text.strip()
-        json_match = re.search(r"\{.*\}", resp_text, re.DOTALL)
-        if not json_match:
-            logger.debug(f"Could not parse JSON from memory rewriting: {resp_text[:120]}")
+        parsed = _extract_json_object(resp_text)
+        if not parsed:
+            logger.error(f"Could not parse JSON from memory rewriting for user {user_id}: {resp_text[:150]}")
             return
 
-        parsed = json.loads(json_match.group(0))
         new_spec = parsed.get("specialty", "").strip()
         rewritten_summary = parsed.get("rewritten_summary", "").strip()
         new_facts = parsed.get("new_facts", [])
@@ -504,7 +569,7 @@ async def update_clinician_memory_async(
         logger.error(f"Failed to rewrite clinician memory for {user_id}: {e}", exc_info=True)
 
 
-async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: int = 5):
+async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: int = 20):
     """
     Один такт демона памяти беседы (группового чата) на дешёвой нейросети.
     Находит активных врачей, засветившихся в логе/дампе чата с новыми сообщениями,
@@ -572,11 +637,11 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
                 continue
 
             resp_text = response.text.strip()
-            json_match = re.search(r"\{.*\}", resp_text, re.DOTALL)
-            if not json_match:
+            parsed = _extract_json_object(resp_text)
+            if not parsed:
+                logger.warning(f"Could not parse JSON from group memory daemon for user {user_id}: {resp_text[:150]}")
                 continue
 
-            parsed = json.loads(json_match.group(0))
             new_spec = parsed.get("specialty", "").strip()
             new_grp_summary = parsed.get("group_summary", "").strip()
 
@@ -617,7 +682,7 @@ async def group_memory_daemon_loop(interval_seconds: int = GROUP_MEMORY_DAEMON_I
     logger.info(f"Starting group memory daemon loop (interval={interval_seconds}s / {interval_seconds/3600:.1f}h)...")
     while True:
         try:
-            await process_group_memory_daemon_batch(min_new_messages=3, limit=5)
+            await process_group_memory_daemon_batch(min_new_messages=3, limit=20)
         except Exception as e:
             logger.error(f"Unexpected error in group_memory_daemon_loop: {e}")
         await asyncio.sleep(interval_seconds)

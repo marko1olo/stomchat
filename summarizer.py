@@ -656,8 +656,6 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             users_chunk_context = await user_memory.format_users_chunk_context(
                 active_user_ids, max_chars=MAX_USERS_CONTEXT_CHARS
             )
-            if users_chunk_context and len(users_chunk_context) > MAX_USERS_CONTEXT_CHARS:
-                users_chunk_context = users_chunk_context[:MAX_USERS_CONTEXT_CHARS]
         except Exception as e:
             logger.error(f"Error fetching clinical profiles for daily summary: {e}")
             users_chunk_context = ""
@@ -1115,8 +1113,6 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             users_chunk_context = await user_memory.format_users_chunk_context(
                 active_user_ids, max_chars=MAX_USERS_CONTEXT_CHARS
             )
-            if users_chunk_context and len(users_chunk_context) > MAX_USERS_CONTEXT_CHARS:
-                users_chunk_context = users_chunk_context[:MAX_USERS_CONTEXT_CHARS]
         except Exception as e:
             logger.error(f"Error fetching clinical profiles for weekly summary: {e}")
             users_chunk_context = ""
