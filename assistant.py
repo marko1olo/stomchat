@@ -1,36 +1,43 @@
-import os
-import re
-import copy
-import html
-import json
-import math
-import sqlite3
 import asyncio
 import contextlib
+import copy
+from datetime import datetime, timedelta
+import html
+import json
 import logging
+import math
+import os
 import random
+import re
+import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+
+from cachetools import TTLCache
+
 import blocking_tools
-generate_gemini_text_async = getattr(blocking_tools, "generate_gemini_text_async", None)
-generate_pm_supplement_async = getattr(blocking_tools, "generate_pm_supplement_async", None)
-import vision
+import config
 import database
-import media_tools
+from dental_vocab import (
+    DENTAL_KEYWORDS as DENTAL_KEYWORDS,
+    SHORT_DENTAL_TERMS,
+    has_dental_term,
+    is_dental_keyword,
+)
 import html_safe
+import media_tools
+import taxonomy
 import tg_safety
+import user_memory
+import vision
 # Слой качества веб-поиска: разбор выдачи, отсев рекламы клиник, заземлённый
 # ответ со ссылками. Импорт безвреден — ни сети, ни конфига, ни логирования
 # (это сторожит test_web_lookup.py разбором дерева импортов).
 import web_lookup
-# Единственный источник кодов рубрик и их имён. Навигация энциклопедии держала
-# СВОЙ список из 53 кодов, и он разошёлся с выгрузкой в обе стороны: 51 факт
-# боевой вики не открывался ни одной кнопкой, а под кодами 8.1.1/9.1.1/10.1.1
-# кнопки не было вообще. Импорт ничего не делает: ни базы, ни файлов, ни сети.
-import taxonomy
-import config
-import user_memory
+
+generate_gemini_text_async = getattr(blocking_tools, "generate_gemini_text_async", None)
+generate_pm_supplement_async = getattr(blocking_tools, "generate_pm_supplement_async", None)
+
 logger = logging.getLogger("assistant")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +47,6 @@ TEST_CHAT_ID = -1003735006121
 TEST_TOPIC_ID = 26
 
 SHADOW_TESTING = os.getenv("SHADOW_TESTING", "False").lower() in ("true", "1", "yes")
-from cachetools import TTLCache
 BOT_ID = None
 # @username бота. Резолвится вместе с BOT_ID: в группе к боту обращаются по
 # имени, а не по числовому id, и без этого поля единственным способом узнать
@@ -920,12 +926,8 @@ STOP_WORDS = {
     "вопрос", "вопроса", "совет", "совета", "подскажите", "подскажи", "спасибо", "пожалуйста"
 }
 
-# Медицинский словарь триажа переехал в dental_vocab: тот же список нужен
-# фильтру дайджеста в summarizer, а держать две копии значит, что клинические
-# реплики выпадают из дайджеста молча (замер: 166 сообщений из 4000). Имена
-# оставлены на месте — остальной код обращается к ним как раньше.
-from dental_vocab import DENTAL_KEYWORDS, SHORT_DENTAL_TERMS, has_dental_term, is_dental_keyword
-
+# Медицинский словарь триажа переехал в dental_vocab (импортирован в начале модуля).
+# Имена оставлены на месте — остальной код обращается к ним как раньше.
 _SHORT_DENTAL_TERMS = SHORT_DENTAL_TERMS
 
 
@@ -2363,7 +2365,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if not triggered and reply_to_msg_id:
         # Check if parent has media
         parent_rows = await query_db_async("SELECT has_media, text FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
-        if parent_rows and (parent_rows[0][0] == 1 or parent_rows[0][0] == True):
+        if parent_rows and bool(parent_rows[0][0]):
             # Count replies
             reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
             reply_count = reply_count_rows[0][0] if reply_count_rows else 0
@@ -2417,7 +2419,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         
         if last_msgs:
             last_text = last_msgs[-1][1] or ""
-            last_text_lower = last_text.lower()
             
             # Pre-filter: block only OBVIOUS garbage before paying for LLM triage call
             # Commands, pure emoji, very short messages — don't even bother triaging
@@ -3383,8 +3384,10 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if 'status_msg' in locals() and status_msg:
-        try: await bot_client.delete_messages(chat_id, status_msg.id)
-        except Exception: pass
+        try:
+            await bot_client.delete_messages(chat_id, status_msg.id)
+        except Exception:
+            pass
     
     if error or not response or not getattr(response, "text", None):
         await bot_client.send_message(entity=chat_id, message="❌ <i>Ошибка симулятора при генерации ответа. Пожалуйста, отправьте ваш ответ еще раз.</i>", parse_mode='html')
@@ -3705,11 +3708,15 @@ async def handle_private_message(bot_client, event):
                 logger.error(f"Error handling voice note: {audio_err}")
             finally:
                 if 'status_msg' in locals() and status_msg:
-                    try: await bot_client.delete_messages(chat_id, status_msg.id)
-                    except Exception: pass
+                    try:
+                        await bot_client.delete_messages(chat_id, status_msg.id)
+                    except Exception:
+                        pass
                 if temp_path and os.path.exists(temp_path):
-                    try: os.remove(temp_path)
-                    except Exception: pass
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
             
             if transcribed_text:
                 text = transcribed_text
@@ -5094,7 +5101,6 @@ NO — если это случайное упоминание, обсужден
         mention_wiki, mention_archive = await search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
 
         # ЭТАП 2: Сгенерировать живой ответ
-        address = f"{sender_first_name}, " if sender_first_name else ""
         reply_prompt = f"""Ты — опытный стоматолог-практик и живой участник чата StomChat. 
 Тебя только что позвали или упомянули в чате. Вот контекст переписки:
 

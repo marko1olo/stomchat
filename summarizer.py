@@ -11,6 +11,8 @@ import random
 import re
 import html
 import runtime_guard
+import user_memory
+from collections import Counter
 from blocking_tools import create_telegraph_page_async, generate_gemini_text_async
 from datetime import datetime
 
@@ -51,6 +53,7 @@ DAILY_CHAR_BUDGET = WEEKLY_HTML_LIMIT - 1000
 # промпте и выросло расхождение. Выводим из того же порога: у недельного ещё
 # дописывается подвал со счётчиком, поэтому запас чуть больше.
 WEEKLY_CHAR_BUDGET = WEEKLY_HTML_LIMIT - 1200
+MAX_USERS_CONTEXT_CHARS = 2000
 
 _summary_generation_lock = None
 
@@ -564,7 +567,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
     # --- 1. БЫСТРЫЙ ПУТЬ (КЭШ) ---
     send_params = {'parse_mode': 'HTML', 'link_preview': True}
-    if topic_id: send_params['reply_to'] = topic_id
+    if topic_id:
+        send_params['reply_to'] = topic_id
 
     if cached_message:
         logger.info(f"🚀 Отправка кэша (тизера) в {chat_id}")
@@ -608,10 +612,24 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
     batch_ids = {msg[0] for msg in filtered_messages}
     quoted_context = 0
+    author_counts = Counter()
 
     for msg in filtered_messages:
-        # Распаковка всех полей из БД
-        m_id, name, username, text, m_desc, date, reply_id, m_url = msg
+        # Распаковка полей из БД (обратная совместимость с 8- и 9-элементными кортежами)
+        m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]
+        sender_id = msg[8] if len(msg) > 8 else None
+
+        if sender_id is not None:
+            try:
+                uid = int(sender_id)
+                if uid > 0:
+                    txt = (text or "").strip()
+                    if txt and not user_memory.is_trivial_message(txt):
+                        author_counts[uid] += 2
+                    elif txt:
+                        author_counts[uid] += 1
+            except (ValueError, TypeError):
+                pass
 
         quote_text, was_quoted = _reply_context(reply_id, reply_lookup, batch_ids)
         quoted_context += was_quoted
@@ -629,6 +647,22 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         f"summary build done chat={chat_id} chars={len(full_text)} "
         f"replies={len(reply_lookup)} quoted={quoted_context} media={len(media_map)}"
     )
+
+    # Формирование блока клинических профилей активных авторов (лимит до 2000 символов)
+    active_user_ids = [uid for uid, _ in author_counts.most_common(20)]
+    users_chunk_context = ""
+    if active_user_ids:
+        try:
+            users_chunk_context = await user_memory.format_users_chunk_context(
+                active_user_ids, max_chars=MAX_USERS_CONTEXT_CHARS
+            )
+            if users_chunk_context and len(users_chunk_context) > MAX_USERS_CONTEXT_CHARS:
+                users_chunk_context = users_chunk_context[:MAX_USERS_CONTEXT_CHARS]
+        except Exception as e:
+            logger.error(f"Error fetching clinical profiles for daily summary: {e}")
+            users_chunk_context = ""
+
+    profiles_block = f"\n{users_chunk_context}\n" if users_chunk_context else ""
 
     bonus_variants = BONUS_VARIANTS
     
@@ -714,8 +748,9 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     (1-3 лучшие шутки или цитаты для атмосферы (с контекстом).
 
     9.🌟 ЭКСПЕРТ ДНЯ 
-    Выбери врача из чата, который давал самый полезные советы или протокол. Напиши его имя и за что награжден. При выборе эксперта отдавай приоритет тем, чьи сообщения вызвали одобрение коллег или на чьи советы другие врачи отвечали благодарностью. Эксперт — это тот, чьи слова можно вставить в учебник, или тот, кому коллеги сказали "спасибо" за совет
-
+    Выбери врача из чата, который продемонстрировал наивысшую клиническую экспертизу и помог коллегам.
+    КРИТИЧЕСКИ ВАЖНО: Если в блоке «НАКОПЛЕННЫЕ ПРОФИЛИ УЧАСТНИКОВ ОБСУЖДЕНИЯ» содержатся профили врачей, обязательно сопоставляй советы доктора с его подтвержденной специализацией, клиническим арсеналом (оборудованием, микроскопом) и клиническими протоколами из досье. Приоритет отдавай обоснованным клиническим рекомендациям врачей с подтвержденным статусом в данной области, а не случайным или эмоциональным репликам. Укажи имя/ник эксперта, его подтвержденную специализацию и конкретную пользу, принесенную сообществу.
+{profiles_block}
     ТЕКСТ ПЕРЕПИСКИ:
     {full_text}
 
@@ -814,11 +849,15 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 message_count=len(messages),
                 html_chars=len(final_html),
             )
-            page_url, telegraph_error = await create_telegraph_page_async(
+            telegraph_res = await create_telegraph_page_async(
                 title,
                 final_html,
                 timeout=TELEGRAPH_TIMEOUT_SECONDS,
             )
+            if isinstance(telegraph_res, tuple):
+                page_url, telegraph_error = telegraph_res
+            else:
+                page_url, telegraph_error = telegraph_res, None
             if telegraph_error:
                 logger.error("Telegraph subprocess failed: %s", telegraph_error)
             logger.info(f"summary telegraph done chat={chat_id} ok={bool(page_url)}")
@@ -969,7 +1008,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     msg_count = len(messages)
 
     send_params = {'parse_mode': 'HTML', 'link_preview': True}
-    if topic_id: send_params['reply_to'] = topic_id
+    if topic_id:
+        send_params['reply_to'] = topic_id
 
     # --- БЫСТРЫЙ ПУТЬ (КЭШ) ---
     # Дневная ветка принимает cached_message с первого дня, недельная не
@@ -1026,9 +1066,25 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     )
     batch_ids = {msg[0] for msg in filtered_messages}
     quoted_context = 0
+    author_counts = Counter()
 
     for msg in filtered_messages:
-        m_id, name, username, text, m_desc, date, reply_id, m_url = msg
+        # Распаковка полей из БД (обратная совместимость с 8- и 9-элементными кортежами)
+        m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]
+        sender_id = msg[8] if len(msg) > 8 else None
+
+        if sender_id is not None:
+            try:
+                uid = int(sender_id)
+                if uid > 0:
+                    txt = (text or "").strip()
+                    if txt and not user_memory.is_trivial_message(txt):
+                        author_counts[uid] += 2
+                    elif txt:
+                        author_counts[uid] += 1
+            except (ValueError, TypeError):
+                pass
+
         dt_str = date.strftime('%d.%m') if isinstance(date, datetime) else str(date)[:10]
 
         quote_text, was_quoted = _reply_context(reply_id, reply_lookup, batch_ids)
@@ -1050,6 +1106,22 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         f"weekly build done chat={chat_id} chars={len(full_text)} "
         f"replies={len(reply_lookup)} quoted={quoted_context} media={len(media_map)}"
     )
+
+    # Формирование блока клинических профилей авторов недели (лимит до 2000 символов)
+    active_user_ids = [uid for uid, _ in author_counts.most_common(20)]
+    users_chunk_context = ""
+    if active_user_ids:
+        try:
+            users_chunk_context = await user_memory.format_users_chunk_context(
+                active_user_ids, max_chars=MAX_USERS_CONTEXT_CHARS
+            )
+            if users_chunk_context and len(users_chunk_context) > MAX_USERS_CONTEXT_CHARS:
+                users_chunk_context = users_chunk_context[:MAX_USERS_CONTEXT_CHARS]
+        except Exception as e:
+            logger.error(f"Error fetching clinical profiles for weekly summary: {e}")
+            users_chunk_context = ""
+
+    profiles_block = f"\n{users_chunk_context}\n" if users_chunk_context else ""
 
     # 2. ПРОМПТ "MEDICAL JOURNALIST" (MAXIMUM DETAILS)
     #
@@ -1154,7 +1226,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     (Пациенты, деньги, законы, проверки, зарплаты).
     
     ## 🌟 ДОСКА ПОЧЕТА (ГЕРОИ НЕДЕЛИ)
-    (ЗАПРЕЩЕНО писать просто список имен. Перечисли врачей, которые на этой неделе генерировали контент. Для каждого участника ОБЯЗАТЕЛЬНО укажи его конкретную заслугу или ценный вклад. Пример: "**Доктор Иванов** — за филигранный разбор КЛКТ в сложном кейсе, **Доктор Петров** — за подробный протокол адгезивной фиксации").
+    (ЗАПРЕЩЕНО писать просто список имен. Перечисли врачей, внесших наибольший клинический вклад на этой неделе. Опирайся на накопленные профили участников (при наличии): обязательно указывай подтвержденную специализацию доктора и его реальную клиническую заслугу. Пример: "**Доктор Иванов** (ортопед) — за подробный разбор препарирования под виниры, **Доктор Петров** (эндодонтист) — за протокол распломбировки каналов").
     
     ## 😂 МЕДИЦИНСКИЙ ЮМОР
     (Шутки, мемы, забавные диалоги).
@@ -1164,7 +1236,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     2. БЕЗ ВСТУПЛЕНИЯ И ЗАКЛЮЧЕНИЯ: Сразу начинай со структуры.
     3. Из HTML-тегов используй только <b> и <i>. Тег <br> ЗАПРЕЩЕН: переносы делай настоящими переводами строк, иначе весь текст склеится в одну строку.
     4. Объём статьи: не больше {WEEKLY_CHAR_BUDGET} символов. Всё, что выше, будет обрезано вместе с последними разделами.
-
+{profiles_block}
     ЛОГ НЕДЕЛИ:
     {full_text}
     Инструкция для самопроверки: Напиши максимально подробную, профессиональную, глубокую и развернутую статью в пределах {WEEKLY_CHAR_BUDGET} символов. Это летопись, а не краткое саммари. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, концентрируй пользу без воды.
@@ -1232,11 +1304,15 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             message_count=len(messages),
             html_chars=len(final_html),
         )
-        page_url, telegraph_error = await create_telegraph_page_async(
+        telegraph_res = await create_telegraph_page_async(
             title,
             final_html,
             timeout=TELEGRAPH_TIMEOUT_SECONDS,
         )
+        if isinstance(telegraph_res, tuple):
+            page_url, telegraph_error = telegraph_res
+        else:
+            page_url, telegraph_error = telegraph_res, None
         if telegraph_error:
             logger.error("Telegraph subprocess failed: %s", telegraph_error)
         
@@ -1245,7 +1321,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             # Попробуем отправить напрямую в телеграм, обрезав до 3900 символов
             msg_to_send = _safe_truncate_html(final_html, max_len=3900)
             send_params = {'parse_mode': 'HTML', 'link_preview': False}
-            if topic_id: send_params['reply_to'] = topic_id
+            if topic_id:
+                send_params['reply_to'] = topic_id
             # Стадию обязана обновлять и аварийная ветка. Без этой записи в
             # bot_summary_status.json до самого конца висел «telegraph_create»,
             # хотя Telegraph уже отказал: и оператор, и сторож видели зависание
@@ -1304,7 +1381,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         )
         
         send_params = {'parse_mode': 'HTML', 'link_preview': True}
-        if topic_id: send_params['reply_to'] = topic_id
+        if topic_id:
+            send_params['reply_to'] = topic_id
         
         _write_summary_stage(
             "telegram_send",

@@ -350,7 +350,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
         with _connection() as db:
             period_messages = db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
                 FROM messages
                 WHERE date >= ? AND date <= ?
                 ORDER BY date ASC
@@ -381,7 +381,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
                 needed = min_count - len(total_msgs)
                 old_messages = db.execute(
                     """
-                    SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                    SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
                     FROM messages
                     WHERE date < ? AND is_summarized = 0
                     ORDER BY date DESC, msg_id DESC
@@ -401,7 +401,7 @@ async def get_messages_for_range(start_dt, end_dt):
         with _connection() as db:
             return db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
                 FROM messages
                 WHERE date >= ? AND date <= ?
                 ORDER BY date ASC

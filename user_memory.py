@@ -42,6 +42,120 @@ GROUP_MEMORY_DAEMON_INTERVAL = 14400  # 4 часа
 _PM_MEMORY_COOLDOWN = 15.0
 _LAST_PM_UPDATE_TS: Dict[int, float] = {}
 
+
+def reset_pm_memory_cooldown(user_id: Optional[int] = None) -> None:
+    """
+    Сбрасывает кулдаун обновления памяти в ЛС.
+    Если user_id указан, сбрасывает кулдаун только для этого пользователя.
+    Если user_id is None, очищает кулдаун для всех пользователей.
+    Используется в тестах и симуляциях для обхода 15-секундного ожидания.
+    """
+    global _LAST_PM_UPDATE_TS
+    if user_id is None:
+        _LAST_PM_UPDATE_TS.clear()
+    else:
+        _LAST_PM_UPDATE_TS.pop(user_id, None)
+
+
+_SECTION_HEADER_RE = re.compile(
+    r'^(#{1,6}\s*|\*+\s*|[•\-*]\s*)?'
+    r'(Специализация|Арсенал(?:\s+и\s+(?:оснащение|оборудование))?|Оснащение|Оборудование|'
+    r'Клинические\s+протоколы|Протоколы|Кейсы|Клинические\s+кейсы|Клинический\s+кейс)'
+    r'(\s*:\s*|\s*\*\*:?\s*|\s*:\s*\*\*|\s*$)',
+    re.IGNORECASE,
+)
+
+
+def _normalize_item(text: str) -> str:
+    """Нормализует строку факта или предложения для выявления дубликатов."""
+    t = re.sub(r'^(?:[•\-*]|\d+[\.\)])\s*', '', text.strip())
+    t = t.strip('\'"«» \t')
+    t = re.sub(r'[.,;!?]+$', '', t).strip()
+    return re.sub(r'\s+', ' ', t).lower()
+
+
+def _split_into_sentences(text: str) -> List[str]:
+    """Разбивает текст на отдельные предложения/факты."""
+    if not text:
+        return []
+    raw_sentences = re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z0-9«"—])', text.strip())
+    return [s.strip() for s in raw_sentences if s.strip()]
+
+
+def deduplicate_clinical_summary(summary: str) -> str:
+    """
+    Программная дедупликация предложений и фактов в клиническом досье врача.
+    Сохраняет структуру и заголовки разделов (Специализация:, Арсенал и оснащение:,
+    Клинические протоколы:, Кейсы:), удаляя повторы одинаковых фактов/предложений
+    как внутри разделов, так и между ними.
+    """
+    if not summary or not summary.strip():
+        return ""
+
+    lines = summary.strip().splitlines()
+    seen_items = set()
+    seen_headers = set()
+    result_lines = []
+
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line:
+            if result_lines and result_lines[-1] != "":
+                result_lines.append("")
+            continue
+
+        header_match = _SECTION_HEADER_RE.match(stripped_line)
+        if header_match:
+            header_name = header_match.group(2).lower()
+            header_prefix = header_match.group(0).rstrip()
+            inline_content = stripped_line[header_match.end():].strip()
+
+            if not inline_content:
+                if header_name in seen_headers:
+                    continue
+                seen_headers.add(header_name)
+                result_lines.append(header_prefix)
+            else:
+                sentences = _split_into_sentences(inline_content)
+                kept_sentences = []
+                for s in sentences:
+                    norm = _normalize_item(s)
+                    if norm and norm not in seen_items:
+                        seen_items.add(norm)
+                        kept_sentences.append(s)
+                if kept_sentences:
+                    seen_headers.add(header_name)
+                    result_lines.append(f"{header_prefix} {' '.join(kept_sentences)}")
+                elif header_name not in seen_headers:
+                    seen_headers.add(header_name)
+                    result_lines.append(header_prefix)
+            continue
+
+        bullet_match = re.match(r'^([•\-*]|\d+[\.\)])\s*', stripped_line)
+        bullet_prefix = bullet_match.group(0) if bullet_match else ""
+        content_without_bullet = stripped_line[len(bullet_prefix):].strip()
+
+        sentences = _split_into_sentences(content_without_bullet)
+        kept_sentences = []
+        for s in sentences:
+            norm = _normalize_item(s)
+            if norm and norm not in seen_items:
+                seen_items.add(norm)
+                kept_sentences.append(s)
+
+        if kept_sentences:
+            if bullet_prefix:
+                result_lines.append(f"{bullet_prefix}{' '.join(kept_sentences)}")
+            else:
+                result_lines.append(" ".join(kept_sentences))
+
+    while result_lines and result_lines[-1] == "":
+        result_lines.pop()
+    while result_lines and result_lines[0] == "":
+        result_lines.pop(0)
+
+    return "\n".join(result_lines)
+
 # Паттерны тривиальных сообщений (приветствия, благодарности, команды)
 _TRIVIAL_USER_PATTERNS = {
     "привет", "здравствуйте", "добрый день", "доброе утро", "добрый вечер",
@@ -55,6 +169,9 @@ def is_trivial_message(text: str) -> bool:
     if not text:
         return True
     cleaned = text.strip().lower()
+    # Сообщения без букв (только эмодзи, знаки препинания, цифры) не несут клинических фактов
+    if not any(c.isalpha() for c in cleaned):
+        return True
     if len(cleaned) < 8:
         return True
     if cleaned in _TRIVIAL_USER_PATTERNS:
@@ -62,7 +179,15 @@ def is_trivial_message(text: str) -> bool:
     words = [w.strip("!.,?:;)") for w in cleaned.split()]
     if not words:
         return True
-    if all(w in _TRIVIAL_USER_PATTERNS or w in ("большое", "огромное", "очень", "вам", "тебе", "всем", "бот", "коллега", "день", "утро", "вечер") for w in words):
+    if all(
+        w in _TRIVIAL_USER_PATTERNS
+        or w in (
+            "большое", "огромное", "очень", "вам", "тебе", "всем", "бот",
+            "коллега", "коллеги", "день", "утро", "вечер",
+            "добрый", "доброе", "доброго"
+        )
+        for w in words
+    ):
         return True
     if cleaned.startswith(("/", "!", "спасибо", "привет", "здравствуй")):
         if len(words) <= 3:
@@ -147,10 +272,15 @@ def format_clinician_memory_prompt(user_id: int, memory: Optional[dict] = None) 
 {content}"""
 
 
-async def format_users_chunk_context(user_ids: List[int]) -> str:
+async def format_users_chunk_context(
+    user_ids: List[int],
+    max_chars: Optional[int] = 2000
+) -> str:
     """
     Форматирует накопленные профили авторов реплик в группе (до 8 КБ на врача, до 20 врачей в чанке)
     с комментариями для нейросети при анализе беседы или дайджестов.
+    При max_chars ограничивает суммарную длину контекста, отсекая добавление следующих досье
+    целиком без разрыва предложений (строгое соблюдение бюджета).
     """
     if not user_ids:
         return ""
@@ -161,7 +291,10 @@ async def format_users_chunk_context(user_ids: List[int]) -> str:
             return ""
 
         notes = []
-        for uid, mem in batch.items():
+        for uid in unique_ids:
+            mem = batch.get(uid)
+            if not mem:
+                continue
             name_parts = []
             if mem.get("first_name"):
                 name_parts.append(mem["first_name"])
@@ -194,10 +327,29 @@ async def format_users_chunk_context(user_ids: List[int]) -> str:
         if not notes:
             return ""
 
-        joined_notes = "\n".join(notes)
-        return f"""=== НАКОПЛЕННЫЕ ПРОФИЛИ УЧАСТНИКОВ ОБСУЖДЕНИЯ (ИЗ БЕСЕДЫ) ===
-[Справочная информация для ассистента: это выжимка из накопленной памяти о врачах-участниках текущего обсуждения, составленная ИИ по их сообщениям в чате. Учитывай специализацию и клинический опыт собеседников]:
-{joined_notes}"""
+        header = (
+            "=== НАКОПЛЕННЫЕ ПРОФИЛИ УЧАСТНИКОВ ОБСУЖДЕНИЯ (ИЗ БЕСЕДЫ) ===\n"
+            "[Справочная информация для ассистента: это выжимка из накопленной памяти о врачах-участниках "
+            "текущего обсуждения, составленная ИИ по их сообщениям в чате. Учитывай специализацию и "
+            "клинический опыт собеседников]:"
+        )
+
+        if max_chars is not None and max_chars > 0:
+            if len(header) >= max_chars:
+                return ""
+            selected_notes = []
+            for note in notes:
+                candidate = f"{header}\n" + "\n".join(selected_notes + [note])
+                if len(candidate) > max_chars:
+                    # Достигнут лимит бюджета: останавливаемся без обрезки посреди предложения
+                    break
+                selected_notes.append(note)
+
+            if not selected_notes:
+                return ""
+            return f"{header}\n" + "\n".join(selected_notes)
+        else:
+            return f"{header}\n" + "\n".join(notes)
     except Exception as e:
         logger.error(f"Error formatting users chunk context: {e}")
         return ""
@@ -278,7 +430,12 @@ async def update_clinician_memory_async(
 3. Обнови используемые материалы, бренды, протоколы и аппараты (например: BOPT, микроскоп, ультразвук, бинокуляры, OptiBond FL, силеры, импланты Straumann/Osstem). Если врач сменил предпочтение — отрази это.
 4. Добавь новые разобранные клинические кейсы (с указанием зуба и патологии) и динамику по старым.
 5. Удали пустые фразы, эмоциональные междометия и устаревшие детали.
-6. Верни СТРОГО JSON следующего формата:
+6. В rewritten_summary структурируй клинический профиль строго по разделам:
+Специализация:
+Арсенал и оснащение:
+Клинические протоколы:
+Кейсы:
+7. Верни СТРОГО JSON следующего формата:
 {{
   "specialty": "уточненная специализация",
   "rewritten_summary": "полностью переписанный и актуализированный текст клинического профиля врача (до 64 КБ)",
@@ -315,6 +472,7 @@ async def update_clinician_memory_async(
             current_facts = current_facts[-30:]
 
         final_summary = rewritten_summary if rewritten_summary else current_summary
+        final_summary = deduplicate_clinical_summary(final_summary)
 
         # Жесткий потолок 64 КБ
         if len(final_summary) > PM_USER_MEMORY_LIMIT:
