@@ -755,8 +755,8 @@ def generate_text(prompt, status_context=None, timeout=None):
 
                 try:
                     response = client.chat.completions.create(**create_kwargs)
-                except TypeError as err:
-                    if "reasoning_effort" in str(err):
+                except (TypeError, Exception) as err:
+                    if "reasoning_effort" in str(err).lower():
                         create_kwargs.pop("reasoning_effort", None)
                         response = client.chat.completions.create(**create_kwargs)
                     else:
@@ -1223,8 +1223,8 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
                 }
                 try:
                     response = client.chat.completions.create(**supp_kwargs)
-                except TypeError as err:
-                    if "reasoning_effort" in str(err):
+                except (TypeError, Exception) as err:
+                    if "reasoning_effort" in str(err).lower():
                         supp_kwargs.pop("reasoning_effort", None)
                         response = client.chat.completions.create(**supp_kwargs)
                     else:

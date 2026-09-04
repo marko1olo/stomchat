@@ -5372,12 +5372,15 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
             return False
 
     chat_id = event.chat_id
+    reply_to_msg_id = getattr(getattr(event, 'message', None), 'reply_to_msg_id', None)
+    if reply_to_msg_id is None and getattr(event, 'message', None) and getattr(event.message, 'reply_to', None):
+        reply_to_msg_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
 
     try:
         # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
         # Было: LIMIT 6, плоский формат без структуры ответов.
         _bot_ctx, _, _ = await fetch_dynamic_chat_context(
-            msg_id, reply_to_msg_id, base_limit=12, max_limit=40, max_gap_minutes=15
+            msg_id, reply_to_msg_id, base_limit=12, max_limit=40, max_gap_minutes=15, event=event
         )
         context_rows = await query_db_async(
             "SELECT sender_id, sender_name, text FROM messages WHERE msg_id <= ? ORDER BY msg_id DESC LIMIT 12",
@@ -5425,7 +5428,7 @@ NO — если это случайное упоминание, обсужден
         mention_wiki, mention_archive = await search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
 
         # ЭТАП 2: Сгенерировать живой ответ
-        reply_prompt = f"""Ты — опытный стоматолог-практик и живой участник чата StomChat. 
+        reply_prompt = f"""Ты — клинический консультант и эксперт сообщества "StomChat". 
 Тебя только что позвали или упомянули в чате. Вот контекст переписки:
 
 {context_str}
@@ -8006,30 +8009,32 @@ async def check_and_trigger_referee(bot_client, event, text):
     has_conflict_kw = bool(re.search(pattern, text_lower))
     
     should_intervene = has_conflict_kw
-    chain_msgs = []
-    
-    # Автодетект споров по длинным цепочкам реплаев
-    if not should_intervene and event.message.reply_to:
+    reply_to_msg_id = getattr(getattr(event, 'message', None), 'reply_to_msg_id', None)
+    if reply_to_msg_id is None and getattr(event, 'message', None) and getattr(event.message, 'reply_to', None):
+        reply_to_msg_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
+
+    context_msgs = []
+    if reply_to_msg_id or (getattr(event, 'message', None) and event.message.reply_to):
         try:
-            chain_msgs = await database.get_reply_chain_texts(msg_id, max_depth=5)
-            if len(chain_msgs) >= 4:
-                should_intervene = await analyze_dispute_need(chain_msgs)
-                if should_intervene:
-                    logger.info(f"Dispute auto-detected from reply chain in msg_id={msg_id}.")
+            chain, _, _ = await fetch_dynamic_chat_context(
+                msg_id, reply_to_msg_id, base_limit=10, max_limit=30, event=event
+            )
+            if chain:
+                context_msgs = chain
         except Exception as chain_err:
-            logger.error(f"Error checking reply chain dispute: {chain_err}")
-            
+            logger.error(f"Error fetching dynamic context for referee: {chain_err}")
+
+    # Автодетект споров по длинным цепочкам реплаев
+    if not should_intervene and context_msgs:
+        if len(context_msgs) >= 4:
+            should_intervene = await analyze_dispute_need(context_msgs)
+            if should_intervene:
+                logger.info(f"Dispute auto-detected from reply chain in msg_id={msg_id}.")
+
     if not should_intervene:
         return
-        
-    # 4. Собираем контекст для триажа рефери
-    context_msgs = []
-    if event.message.reply_to:
-        try:
-            context_msgs = await database.get_reply_chain_texts(msg_id, max_depth=5)
-        except Exception:
-            pass
-            
+
+    # 4. Если контекст по реплаям не собрался, берем последние сообщения из базы
     if not context_msgs:
         try:
             db_history = await database.get_last_n_messages(limit=5)
@@ -8041,9 +8046,12 @@ async def check_and_trigger_referee(bot_client, event, text):
                     context_msgs.append(f"{name}: {msg_txt}")
         except Exception as e:
             logger.error(f"Failed to fetch db history for referee triage: {e}")
-            
+
     if not context_msgs:
         context_msgs = [text]
+
+    # Синхронизируем chain_msgs с context_msgs, чтобы промпт и RAG рефери получили полный контекст
+    chain_msgs = context_msgs
 
     # 5. Запускаем Llama-триаж для подтверждения конфликта
     should_reply = await check_referee_triage(context_msgs)
@@ -8116,8 +8124,8 @@ async def check_and_trigger_referee(bot_client, event, text):
         wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
         
         prompt = f"""
-Ты - живой практикующий врач-стоматолог, активный и уважаемый участник чата "StomChat". 
-В чате идет обсуждение клинического вопроса. Твоя задача — вклиниться в беседу как умный, знающий коллега-собеседник.
+Ты — клинический координатор сообщества "StomChat", опытный стоматолог-эксперт. 
+В чате идет обсуждение клинического вопроса. Твоя задача — взвешенно прокомментировать спор как знающий старший коллега.
 История дискуссии:
 {chain_str}
 
