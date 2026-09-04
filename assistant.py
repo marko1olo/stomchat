@@ -3496,7 +3496,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 2. Разметка: только HTML. Без Markdown.
 """
     
-    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if 'status_msg' in locals() and status_msg:
@@ -4283,7 +4283,7 @@ async def handle_private_message(bot_client, event):
 Будь лаконичен, профессионален.
 """
             async with bot_client.action(chat_id, 'typing'):
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
@@ -4534,7 +4534,7 @@ async def handle_private_message(bot_client, event):
             async def _web_answer_call(prompt, timeout):
                 """Генерация по выдержкам. Бюджет приходит СВЕРХУ, а не берётся свой."""
                 web_ctx = {"kind": "pm_web_lookup", "chat_id": chat_id,
-                           "thinking_level": "MEDIUM"}
+                           "thinking_level": "HIGH"}
                 web_response, web_error = await generate_gemini_text_async(
                     prompt, web_ctx, timeout=timeout
                 )
@@ -4635,7 +4635,7 @@ async def handle_private_message(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
@@ -5103,7 +5103,7 @@ async def handle_private_message(bot_client, event):
 {clean_history_str}
 """
 
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=90)
                 
                 if error:
@@ -6924,7 +6924,7 @@ async def handle_quiz_callback(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
+            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "HIGH"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
             
             if error or not response or not getattr(response, "text", None):
@@ -7293,7 +7293,7 @@ async def handle_quiz_callback(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
+            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "HIGH"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
             
             if error or not response or not getattr(response, "text", None):
