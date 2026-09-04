@@ -741,11 +741,26 @@ def generate_text(prompt, status_context=None, timeout=None):
 
                 requests_made += 1
                 # Using OpenAI SDK for BOTH Groq and Gemini now
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.95
-                )
+                create_kwargs = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.95,
+                }
+                # Нативный параметр размышлений для моделей:
+                # ВСЕМ передаем reasoning_effort="high" (кроме легковесных триажей с явным LOW)
+                if is_triage or thinking_level == "LOW":
+                    create_kwargs["reasoning_effort"] = "low"
+                else:
+                    create_kwargs["reasoning_effort"] = "high"
+
+                try:
+                    response = client.chat.completions.create(**create_kwargs)
+                except TypeError as err:
+                    if "reasoning_effort" in str(err):
+                        create_kwargs.pop("reasoning_effort", None)
+                        response = client.chat.completions.create(**create_kwargs)
+                    else:
+                        raise
                 text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
 
                 # Срезаем размышления ДО проверки на непустоту: раньше проверка
@@ -1196,15 +1211,24 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
             try:
                 client = get_provider_client(provider, api_key, timeout=min(25.0, timeout or 25.0))
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                supp_kwargs = {
+                    "model": model_name,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0.5,
-                    max_tokens=2048,
-                )
+                    "temperature": 0.5,
+                    "max_tokens": 2048,
+                    "reasoning_effort": "high",
+                }
+                try:
+                    response = client.chat.completions.create(**supp_kwargs)
+                except TypeError as err:
+                    if "reasoning_effort" in str(err):
+                        supp_kwargs.pop("reasoning_effort", None)
+                        response = client.chat.completions.create(**supp_kwargs)
+                    else:
+                        raise
                 if response and response.choices and len(response.choices) > 0:
                     raw = response.choices[0].message.content or ""
                     cleaned = sanitize_supplement_output(raw)
