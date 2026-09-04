@@ -97,6 +97,18 @@ _safe_cut_index = html_safe.safe_cut_index
 _safe_truncate_html = html_safe.safe_truncate_html
 
 
+def _get_bot_deep_link():
+    try:
+        import assistant
+        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+    except Exception:
+        username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+    if username:
+        return f'<a href="https://t.me/{username}?start=consult">Напишите мне в ЛС</a>'
+    return "Напишите мне в ЛС"
+
+
+
 _HTML_PARSE_MARKERS = (
     "parse entities",
     "unsupported start tag",
@@ -907,7 +919,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                     f"{sel_intro}\n\n"
                     f"{sel_bullets}\n\n"
                     f"{sel_cta}\n\n"
-                    f"💬 <i>Есть клинический вопрос или снимок? Напишите мне в ЛС — разберем вместе.</i>"
+                    f"💬 <i>Есть клинический вопрос или снимок? {_get_bot_deep_link()} — разберем случай вместе.</i>"
                 )
             else:
                 msg_to_send = _safe_truncate_html(final_html, max_len=3900)
@@ -1000,6 +1012,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # Собираем абсолютно всё, чтобы у нейронки была вся фактура
     full_text_parts = ["ПОЛНЫЙ ЛОГ НЕДЕЛИ (Raw Data):\n\n"]
     media_map = {}
+    media_captions = {}
 
     # Ветвление диалогов недельная сборка не учитывала вообще — модель получала
     # плоский лог, и это компенсировалось в промпте указанием «сообщения подряд
@@ -1028,6 +1041,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
 
         if m_url:
             media_map[m_id] = m_url
+            if m_desc:
+                media_captions[m_id] = m_desc
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -1184,9 +1199,12 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         for m_id, url in media_map.items():
             placeholder = f"[IMG_{m_id}]"
             if placeholder in final_html:
+                caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
+                if len(caption) > 140:
+                    caption = caption[:137] + "..."
                 final_html = final_html.replace(
                     placeholder,
-                    f'<figure><img src="{url}"><figcaption>Клинический снимок #{m_id}</figcaption></figure>'
+                    f'<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>'
                 )
         final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
         
@@ -1281,7 +1299,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         
         msg_to_send = (
             f"{random.choice(weekly_teasers)}\n\n"
-            f"💬 <i>Есть клинический вопрос или снимок? Напишите мне в ЛС — разберем вместе.</i>"
+            f"💬 <i>Есть клинический вопрос или снимок? {_get_bot_deep_link()} — разберем случай вместе.</i>"
         )
         
         send_params = {'parse_mode': 'HTML', 'link_preview': True}

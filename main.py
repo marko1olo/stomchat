@@ -35,7 +35,8 @@ from datetime import timedelta
 from datetime import timezone
 import summarizer
 from media_tools import (MEDIA_TEMP_DIR as media_temp_dir, clinical_media_kind,
-                         extract_first_frame_async, image_document)
+                         extract_first_frame_async, image_document,
+                         upload_clinical_image_async)
 try:
     import psutil
 except Exception:
@@ -1679,6 +1680,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
     # Чьи именно снимки дошли до Vision. Нужно потому, что описание одно на
     # вызов, а строк в базе столько же, сколько сообщений в альбоме.
     analyzed_msg_ids = set()
+    msg_file_map = {}
     media_description = None
     temp_paths = []
 
@@ -1696,6 +1698,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                     if message.photo or image_document(message) is not None or media_type_hint == "photo":
                         files_to_analyze.append(temp_path)
                         analyzed_msg_ids.add(message.id)
+                        msg_file_map[message.id] = temp_path
                     elif message.video or media_type_hint == "video":
                         logger.info(f"🎞️ Извлечение первого кадра из видео {message.id}...")
                         frame_path = await extract_first_frame_async(
@@ -1706,6 +1709,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                             files_to_analyze.append(frame_path)
                             temp_paths.append(frame_path)
                             analyzed_msg_ids.add(message.id)
+                            msg_file_map[message.id] = frame_path
             except Exception as e:
                 logger.warning(f"Failed to process a media item in album {msg_id}: {type(e).__name__}: {e}")
 
@@ -1744,6 +1748,16 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                     )
                 logger.info(f"📝 Описание готово: {media_description}")
                 logger.info("message_media_preview msg_id=%s text=%s", msg_id, media_description)
+
+                # Сохранение снимков на постоянный CDN для отображения в Telegraph-дайджестах
+                for analyzed_id, fpath in msg_file_map.items():
+                    try:
+                        cdn_url = await upload_clinical_image_async(fpath)
+                        if cdn_url:
+                            await database.update_media_remote_url(analyzed_id, cdn_url)
+                            logger.info("media_cdn_saved msg_id=%s url=%s", analyzed_id, cdn_url)
+                    except Exception as cdn_err:
+                        logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
                 
                 # Запуск медиа-ассистента
                 async def run_media_assistant_safe():
