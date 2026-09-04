@@ -569,12 +569,12 @@ def generate_text(prompt, status_context=None, timeout=None):
         models_cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
         ]
     elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         models_cascade = [
