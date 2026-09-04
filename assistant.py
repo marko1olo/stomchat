@@ -1337,16 +1337,22 @@ def record_passive_attempt():
     save_state(state)
 
 
-def record_passive_success(thread_id=None):
+def record_passive_success(thread_id=None, author_id=None, msg_id=None):
     """
     Списывает полное окно тишины — вызывается ТОЛЬКО после того, как сообщение
     действительно ушло в Telegram. Здесь же тред помечается обработанным,
-    чтобы неудачная генерация не сжигала его навсегда.
+    чтобы неудачная генерация не сжигала его навсегда, а автор кейса
+    запоминается для поддержки последующего диалога.
     """
     state = load_state()
     now_iso = datetime.now().isoformat()
     state["last_passive_text_run"] = now_iso
     state["last_passive_attempt"] = now_iso
+
+    if author_id is not None:
+        state["last_case_author_id"] = author_id
+        state["last_case_bot_msg_id"] = msg_id
+        state["last_case_time"] = now_iso
 
     if thread_id is not None:
         _prune_processed_threads(state, add=thread_id)
@@ -1927,6 +1933,10 @@ def clean_html_formatting(text):
 
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    # Convert unsupported HTML lists (ul/ol/li) to clean bullet points before tag escaping
+    text = re.sub(r'</?(?:ul|ol)[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', '\n• ', text, flags=re.IGNORECASE)
+    text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
     # Temporarily hide valid HTML tags we want to support
     text = text.replace("<b>", "__B_OPEN__").replace("</b>", "__B_CLOSE__")
     text = text.replace("<i>", "__I_OPEN__").replace("</i>", "__I_CLOSE__")
@@ -2202,6 +2212,8 @@ async def check_llm_triage(context_msgs):
 3. Нерелевантные или неклинические темы (налоги, юмор, быт, цены, работа клиники, расписание, флуд).
 4. Короткие реплики, шутки, сарказм, мысли вслух ("дорастет", "есть кейсы", "не безопасно", "кыш").
 5. Если ответ бота будет просто короткой репликой/вбросом на чужое сообщение — СТРОГО ЗАПРЕЩЕНО.
+6. ОПРОСЫ МНЕНИЙ, ПОКУПКИ И ПОТРЕБИТЕЛЬСКИЙ ОПЫТ: Если участник спрашивает мнение других людей о покупке или девайсе («купили бы вы», «кто пользовался», «как вам новинка», «стоит ли брать за X денег», «поделитесь отзывами») — БОТ ОБЯЗАН МОЛЧАТЬ (should_reply: false). У бота нет кошелька и личного покупательского опыта.
+7. ОБРАЩЕНИЯ К СООБЩЕСТВУ ВО МНОЖЕСТВЕННОМ ЧИСЛЕ («коллеги, вы бы взяли?», «кто из вас сталкивался с браком партии?»): это опрос живых людей, а не вопрос к ИИ.
 
 Последние сообщения в чате:
 {context_str}
@@ -2395,6 +2407,51 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 context_msgs = chain[::-1]
         except Exception as e:
             logger.error(f"Error checking dialogue chain: {e}")
+
+    # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button)
+    if not is_dialogue and not reply_to_msg_id:
+        last_case_author = state.get("last_case_author_id")
+        last_case_bot_msg = state.get("last_case_bot_msg_id")
+        last_case_time = _parse_state_dt(state.get("last_case_time"))
+        
+        if (
+            last_case_author 
+            and event.sender_id == last_case_author 
+            and (datetime.now() - last_case_time) < timedelta(minutes=10)
+        ):
+            try:
+                ref_id = last_case_bot_msg or 0
+                msgs_since = await query_db_async(
+                    "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
+                    (ref_id,)
+                )
+                count_since = msgs_since[0][0] if msgs_since else 0
+            except Exception:
+                count_since = 0
+
+            if count_since <= 5:
+                db_msgs = await database.get_last_n_messages(limit=6)
+                if db_msgs:
+                    db_msgs = db_msgs[::-1]
+                    recent_chain = []
+                    bot_in_chain_count = 0
+                    for m in db_msgs:
+                        if isinstance(m, (list, tuple)) and len(m) > 4:
+                            s_id = m[2]
+                            s_name = m[4] or "Участник"
+                            m_text = m[6] or ""
+                            if s_id == BOT_ID:
+                                bot_in_chain_count += 1
+                            recent_chain.append(f"{s_name}: {m_text}")
+                    
+                    if bot_in_chain_count < 3 and recent_chain:
+                        should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
+                        if should_continue:
+                            logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
+                            is_dialogue = True
+                            triggered = True
+                            trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
+                            context_msgs = recent_chain
             
     # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
     # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
@@ -2812,7 +2869,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             # Полное окно тишины списывается только здесь — после того, как
             # сообщение реально ушло. Тред помечается обработанным тоже здесь.
             if not is_dialogue:
-                record_passive_success(pending_thread_id)
+                record_passive_success(pending_thread_id, author_id=event.sender_id, msg_id=msg_id)
             return True
         except Exception as e:
             logger.error(f"Failed to send direct assistant reply: {e}")
@@ -3109,6 +3166,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             # снимок с упоминанием бота в подписи одновременно уходит и в
             # текстовый обработчик, и в очередь анализа медиа.
             REPLIED_MSG_IDS[msg_id] = True
+            if is_passive:
+                state = load_state()
+                state["last_case_author_id"] = getattr(event.message, "sender_id", None)
+                state["last_case_bot_msg_id"] = msg_id
+                state["last_case_time"] = datetime.now().isoformat()
+                save_state(state)
         except Exception as e:
             logger.error(f"Failed to send direct media assistant reply: {e}")
 
@@ -3539,6 +3602,16 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
 
         formatted_message = f"🔍 <b>Дополнительные клинические нюансы:</b>\n\n{supplement_text}"
         formatted_message = clean_html_formatting(formatted_message)
+
+        # Валидация качества фонового дополнения рецензентом
+        supp_ok, supp_reason = await check_response_quality(
+            [f"Врач: {user_question}", f"Ассистент: {initial_answer}"],
+            supplement_text,
+            invited=False
+        )
+        if not supp_ok:
+            logger.info("PM supplement rejected by reviewer (%s): skipping follow-up", supp_reason)
+            return
 
         await tg_safety.send_message(
             bot_client,
