@@ -2275,29 +2275,45 @@ def _parse_db_date(val):
             return datetime(2000, 1, 1)
 
 
+def _normalize_row(r):
+    """
+    Нормализует кортеж из БД к единому формату:
+    (msg_id, reply_to_msg_id, sender_id, sender_name, text, date)
+    Поддерживает:
+      - 6+ колонок: (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, ...)
+      - 4 колонки: (sender_name, text, msg_id, reply_to_msg_id) — легаси-запросы / тестовые моки
+    """
+    if not isinstance(r, (list, tuple)):
+        return (0, None, None, "Участник", str(r), datetime(2000, 1, 1))
+    if len(r) >= 6:
+        return (r[0], r[1], r[2], r[3], r[4], r[5])
+    elif len(r) == 4:
+        return (r[2], r[3], None, r[0], r[1], datetime(2000, 1, 1))
+    elif len(r) >= 3:
+        return (r[0], None, None, r[1] if len(r) > 1 else "Участник", r[2] if len(r) > 2 else "", datetime(2000, 1, 1))
+    return (0, None, None, "Участник", "", datetime(2000, 1, 1))
+
+
 async def fetch_dynamic_chat_context(
     msg_id,
     reply_to_msg_id,
     base_limit=12,
     max_limit=40,
     max_gap_minutes=15,
+    event=None,
 ):
     """
-    Динамически собирает историю дискуссии из локальной БД.
+    Динамически собирает историю дискуссии из локальной БД (с fallback на Telegram API при необходимости).
 
     Возвращает (context_lines: list[str], bot_msg_count: int, nearest_bot_msg_id: int|None).
-
-    Два режима:
-      reply_to_msg_id задан  -> reply-цепочка вверх по дереву ответов (до max_limit).
-      reply_to_msg_id = None -> последние сообщения с gap-detection по паузе > max_gap_minutes.
-
-    Последние 4 реплики сохраняют до 1000 символов, глубокие — до 600.
-    Общий лимит блока — 25 000 символов.
     """
     rows = []   # [(msg_id, reply_to_msg_id, sender_id, sender_name, text, date)]
     seen = set()
     bot_msg_count = 0
     nearest_bot_msg_id = None
+
+    event_client = getattr(event, 'client', None)
+    event_chat_id = getattr(event, 'chat_id', None)
 
     try:
         if reply_to_msg_id:
@@ -2313,6 +2329,18 @@ async def fetch_dynamic_chat_context(
                     "FROM messages WHERE msg_id = ?",
                     (curr_id,),
                 )
+                if not row and event_client and event_chat_id:
+                    # Fallback на Telegram API, если сообщение старше БД или из внешнего контекста
+                    try:
+                        tg_msg = await event_client.get_messages(event_chat_id, ids=curr_id)
+                        if tg_msg:
+                            s_sender = getattr(tg_msg, 'sender', None)
+                            s_name = getattr(s_sender, 'first_name', '') or getattr(s_sender, 'title', '') or 'Участник'
+                            s_reply = getattr(getattr(tg_msg, 'reply_to', None), 'reply_to_msg_id', None)
+                            row = [(tg_msg.id, s_reply, getattr(tg_msg, 'sender_id', None), s_name, getattr(tg_msg, 'message', '') or '', getattr(tg_msg, 'date', None) or datetime(2000, 1, 1))]
+                    except Exception:
+                        pass
+
                 if not row:
                     # Если само текущее сообщение ещё не легло в БД (гонка записи),
                     # не сбрасываем контекст в 0 — сразу переходим к родителю
@@ -2320,9 +2348,9 @@ async def fetch_dynamic_chat_context(
                         curr_id = reply_to_msg_id
                         continue
                     break
-                r = row[0]
+                r = _normalize_row(row[0])
                 rows.append(r)
-                if r[2] == BOT_ID:
+                if BOT_ID and r[2] == BOT_ID:
                     bot_msg_count += 1
                     if nearest_bot_msg_id is None:
                         nearest_bot_msg_id = r[0]
@@ -2339,11 +2367,12 @@ async def fetch_dynamic_chat_context(
                     "ORDER BY date DESC, msg_id DESC LIMIT ?",
                     (reply_to_msg_id, msg_id, rem),
                 )
-                for s in sibling_rows:
+                for item in sibling_rows:
+                    s = _normalize_row(item)
                     if s[0] not in seen:
                         seen.add(s[0])
                         rows.append(s)
-                        if s[2] == BOT_ID:
+                        if BOT_ID and s[2] == BOT_ID:
                             bot_msg_count += 1
                             if nearest_bot_msg_id is None:
                                 nearest_bot_msg_id = s[0]
@@ -2353,11 +2382,12 @@ async def fetch_dynamic_chat_context(
 
         else:
             # --- Путь 2: Общий поток с gap-detection ---
-            all_rows = await query_db_async(
+            raw_rows = await query_db_async(
                 "SELECT msg_id, reply_to_msg_id, sender_id, sender_name, text, date "
                 "FROM messages WHERE msg_id <= ? ORDER BY date DESC, msg_id DESC LIMIT ?",
                 (msg_id, max_limit),
             )
+            all_rows = [_normalize_row(x) for x in raw_rows]
             # Отсечка по первой паузе > max_gap_minutes,
             # но берём не меньше base_limit если данные есть
             cut_idx = len(all_rows)
@@ -2370,7 +2400,7 @@ async def fetch_dynamic_chat_context(
                     break
             rows = all_rows[:cut_idx][::-1]  # хронологический
             for r in rows:
-                if r[2] == BOT_ID:
+                if BOT_ID and r[2] == BOT_ID:
                     bot_msg_count += 1
                     if nearest_bot_msg_id is None:
                         nearest_bot_msg_id = r[0]
@@ -2464,11 +2494,25 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     # 1. Check Dialogue Reaction or Thread Continuation with Bot
     if reply_to_msg_id and BOT_ID:
         try:
+            # Проверяем прямого родителя через Telegram client, если доступен
+            direct_parent = None
+            if hasattr(event, 'client') and event.client:
+                try:
+                    direct_parent = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+                except Exception:
+                    pass
+
             # Используем DB-based fetch вместо Telegram API walk (было: range(6) x get_messages).
             # fetch_dynamic_chat_context возвращает до max_limit=40 реплик по reply-цепочке.
             chain, bot_msg_count, nearest_bot_msg_id = await fetch_dynamic_chat_context(
-                msg_id, reply_to_msg_id, base_limit=12, max_limit=40
+                msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
             )
+            if direct_parent and getattr(direct_parent, 'sender_id', None) == BOT_ID:
+                if bot_msg_count == 0:
+                    bot_msg_count = 1
+                if not nearest_bot_msg_id:
+                    nearest_bot_msg_id = reply_to_msg_id
+
             found_bot_in_chain = bot_msg_count > 0
 
             if found_bot_in_chain and bot_msg_count < 3:
@@ -2546,28 +2590,18 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 count_since = 0
 
             if count_since <= 5:
-                db_msgs = await database.get_last_n_messages(limit=12)
-                if db_msgs:
-                    db_msgs = db_msgs[::-1]
-                    recent_chain = []
-                    bot_in_chain_count = 0
-                    for m in db_msgs:
-                        if isinstance(m, (list, tuple)) and len(m) > 4:
-                            s_id = m[2]
-                            s_name = m[4] or "Участник"
-                            m_text = m[6] or ""
-                            if s_id == BOT_ID:
-                                bot_in_chain_count += 1
-                            recent_chain.append(f"{s_name}: {m_text}")
-                    
-                    if bot_in_chain_count < 3 and recent_chain:
-                        should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
-                        if should_continue:
-                            logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
-                            is_dialogue = True
-                            triggered = True
-                            trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
-                            context_msgs = recent_chain
+                # Используем fetch_dynamic_chat_context: единый формат, корректные имена и тексты
+                recent_chain, bot_in_chain_count, _ = await fetch_dynamic_chat_context(
+                    msg_id, None, base_limit=12, max_limit=12, event=event
+                )
+                if bot_in_chain_count < 3 and recent_chain:
+                    should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
+                    if should_continue:
+                        logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
+                        is_dialogue = True
+                        triggered = True
+                        trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
+                        context_msgs = recent_chain
             
     # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
     # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
@@ -2640,7 +2674,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
         # Это заменяет: LIMIT 20 + ручное форматирование + thread-merge блок.
         _passive_ctx, _, _ = await fetch_dynamic_chat_context(
-            msg_id, None, base_limit=12, max_limit=40, max_gap_minutes=15
+            msg_id, None, base_limit=12, max_limit=40, max_gap_minutes=15, event=event
         )
         
         if _passive_ctx:
@@ -3098,38 +3132,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         state["last_passive_media_run"] = datetime.now().isoformat()
         save_state(state)
 
-    # Fetch recent messages and reply chain for context
-    context_msgs = []
-    try:
-        last_msgs = await query_db_async(
-            "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages ORDER BY date DESC LIMIT 15"
-        )
-        if last_msgs:
-            last_msgs = last_msgs[::-1]
-            for r in last_msgs:
-                rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
-                context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
-    except Exception as ctx_err:
-        logger.warning(f"Failed to fetch context for media: {ctx_err}")
-
+    # Fetch recent messages and reply chain for context via fetch_dynamic_chat_context
     reply_to_msg_id = getattr(message, 'reply_to_msg_id', None)
-    if reply_to_msg_id:
-        try:
-            chain = await database.get_reply_chain_texts(reply_to_msg_id, max_depth=7)
-            if chain:
-                chain_msgs = [f"[Сообщение #{r[0]}] {r[1]}: {r[2]}" for r in chain]
-                seen = set(chain_msgs)
-                extra = [m for m in context_msgs if m not in seen]
-                combined = chain_msgs + extra
-                
-                def _get_msg_id(s):
-                    m = re.search(r'\[Сообщение #(\d+)', s)
-                    return int(m.group(1)) if m else 0
-                    
-                context_msgs = sorted(combined, key=_get_msg_id)
-        except Exception as chain_err:
-            logger.warning(f"Failed to fetch reply chain for media: {chain_err}")
-
+    context_msgs, _, _ = await fetch_dynamic_chat_context(
+        msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
+    )
     context_str = "\n".join(context_msgs) if context_msgs else "Нет предыдущего контекста."
 
     is_dialogue = is_direct_reply or is_mentioned
@@ -3173,6 +3180,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
 
 {ignore_instruction}
+
+ВАЖНОЕ ПРАВИЛО ФОКУСА — ОТВЕТ СТРОГО НА ПРИСЛАННОЕ ИЗОБРАЖЕНИЕ:
+Вся переписка выше дана исключительно для понимания клинического контекста!
+Твой ответ должен быть направлен СТРОГО на разбор присланного снимка/изображения и вопроса к сообщению #{msg_id}.
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: отвечать по очереди на старые реплики истории или пересказывать переписку.
 """
     else:
         prompt = f"""
@@ -3195,6 +3207,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 4. Юмор: цинизм, ирония, усталость стоматолога, кассовый аппарат, пациент-должник, сломанный файл, бормашина.
 5. Разметка: <b>жирный</b> только если реально нужно.
 6. Тон: гибкий. Если картинка/мем добрые — отвечай с хорошим настроением; если циничные — поддержи иронию; если тебя пытаются задеть или подколоть — ответь едким, остроумным троллингом без грубости.
+
+ВАЖНОЕ ПРАВИЛО ФОКУСА — ОТВЕТ СТРОГО НА ПРИСЛАННОЕ ИЗОБРАЖЕНИЕ:
+Твой ответ должен быть направлен СТРОГО на присланную картинку/мем к сообщению #{msg_id}!
 """
 
     logger.info(f"Triggered media assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
@@ -8020,8 +8035,8 @@ async def check_and_trigger_referee(bot_client, event, text):
             db_history = await database.get_last_n_messages(limit=5)
             db_history = db_history[::-1]
             for m in db_history:
-                name = m[4] if (isinstance(m, (list, tuple)) and len(m) > 4) else "Участник"
-                msg_txt = m[6] if (isinstance(m, (list, tuple)) and len(m) > 6) else ""
+                name = m[1] if (isinstance(m, (list, tuple)) and len(m) > 1) else "Участник"
+                msg_txt = m[3] if (isinstance(m, (list, tuple)) and len(m) > 3) else ""
                 if msg_txt:
                     context_msgs.append(f"{name}: {msg_txt}")
         except Exception as e:
