@@ -2588,7 +2588,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 recent_group_db = await database.get_last_n_messages(limit=5)
                 recent_group_texts = []
                 if recent_group_db:
-                    recent_group_db = recent_group_db[::-1]
                     for r in recent_group_db:
                         if isinstance(r, (list, tuple)) and len(r) > 3:
                             sender_name = r[1] or "Участник"
@@ -7718,7 +7717,6 @@ async def check_and_trigger_referee(bot_client, event, text):
     if not context_msgs:
         try:
             db_history = await database.get_last_n_messages(limit=5)
-            db_history = db_history[::-1]
             for m in db_history:
                 name = m[1] if (isinstance(m, (list, tuple)) and len(m) > 1) else "Участник"
                 msg_txt = m[3] if (isinstance(m, (list, tuple)) and len(m) > 3) else ""

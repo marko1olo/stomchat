@@ -404,6 +404,9 @@ def upload_clinical_image_sync(file_path):
 
         api_key = os.getenv("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
         import requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         r = requests.post(
             "https://freeimage.host/api/1/upload",
             data={
@@ -412,13 +415,18 @@ def upload_clinical_image_sync(file_path):
                 "format": "json"
             },
             files={"source": ("clinical_case.jpg", img_bytes, "image/jpeg")},
+            headers=headers,
             timeout=20
         )
 
         if r.status_code == 200:
             data = r.json()
-            direct_url = data.get("image", {}).get("url")
-            return direct_url
+            direct_url = data.get("image", {}).get("url") or data.get("image", {}).get("display_url")
+            if direct_url:
+                return direct_url
+            logger.warning(f"Freeimage returned 200 but no image url: {data}")
+        else:
+            logger.warning(f"Freeimage upload failed HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         logger.warning(f"Failed to upload clinical image {file_path}: {e}")
     return None

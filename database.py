@@ -425,7 +425,7 @@ async def get_messages_from(start_msg_id, limit=60):
         with _connection() as db:
             return db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
                 FROM messages
                 WHERE msg_id >= ?
                 ORDER BY msg_id ASC
@@ -459,7 +459,7 @@ async def get_last_n_messages(limit=300):
         with _connection() as db:
             rows = db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
                 FROM messages
                 ORDER BY date DESC, msg_id DESC
                 LIMIT ?
