@@ -7834,7 +7834,7 @@ async def check_referee_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=20)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
         
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
@@ -8040,7 +8040,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 """
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if error or not response or not getattr(response, "text", None):
         return
@@ -8105,7 +8105,7 @@ async def handle_term_explainer(bot_client, event, term):
 5. ЕСЛИ справка пуста и термин тебе незнаком — честно напиши: «Точных данных по этому термину нет в нашей базе. Уточни у коллег!» — и ничего не выдумывай.
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
     
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.
@@ -8301,7 +8301,7 @@ async def check_and_send_pm_pings(bot_client):
 5. Разметка: только HTML (<b>жирный</b>, <i>курсив</i>).
 """
                     status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
-                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
                     
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
