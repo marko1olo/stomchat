@@ -1,0 +1,105 @@
+{
+  "active": {
+    "Non-Clinical / Chit-chat": {
+      "count": 33202,
+      "has_reply_count": 13593,
+      "total_replies": 18027,
+      "bot_replied_count": 151
+    },
+    "Prosthetics": {
+      "count": 3766,
+      "has_reply_count": 2223,
+      "total_replies": 3486,
+      "bot_replied_count": 36
+    },
+    "Endodontics": {
+      "count": 884,
+      "has_reply_count": 495,
+      "total_replies": 844,
+      "bot_replied_count": 6
+    },
+    "Admin/Equipment": {
+      "count": 669,
+      "has_reply_count": 368,
+      "total_replies": 517,
+      "bot_replied_count": 3
+    },
+    "General/Therapy": {
+      "count": 1297,
+      "has_reply_count": 744,
+      "total_replies": 1109,
+      "bot_replied_count": 11
+    },
+    "Implantology": {
+      "count": 1168,
+      "has_reply_count": 653,
+      "total_replies": 976,
+      "bot_replied_count": 6
+    },
+    "Surgery": {
+      "count": 447,
+      "has_reply_count": 231,
+      "total_replies": 338,
+      "bot_replied_count": 0
+    },
+    "Orthotropics/Aligners": {
+      "count": 355,
+      "has_reply_count": 181,
+      "total_replies": 251,
+      "bot_replied_count": 3
+    },
+    "Pediatric": {
+      "count": 36,
+      "has_reply_count": 18,
+      "total_replies": 52,
+      "bot_replied_count": 0
+    }
+  },
+  "archive": {
+    "Non-Clinical / Chit-chat": {
+      "count": 92728,
+      "has_reply_count": 32533,
+      "total_replies": 42509
+    },
+    "Prosthetics": {
+      "count": 12964,
+      "has_reply_count": 6611,
+      "total_replies": 11980
+    },
+    "Endodontics": {
+      "count": 2714,
+      "has_reply_count": 1377,
+      "total_replies": 2464
+    },
+    "General/Therapy": {
+      "count": 3699,
+      "has_reply_count": 1787,
+      "total_replies": 2759
+    },
+    "Implantology": {
+      "count": 2705,
+      "has_reply_count": 1328,
+      "total_replies": 2008
+    },
+    "Surgery": {
+      "count": 888,
+      "has_reply_count": 407,
+      "total_replies": 617
+    },
+    "Admin/Equipment": {
+      "count": 1495,
+      "has_reply_count": 722,
+      "total_replies": 1090
+    },
+    "Orthotropics/Aligners": {
+      "count": 567,
+      "has_reply_count": 288,
+      "total_replies": 411
+    },
+    "Pediatric": {
+      "count": 69,
+      "has_reply_count": 38,
+      "total_replies": 56
+    }
+  }
+}

@@ -238,32 +238,49 @@ async def check_dialogue_continuation_triage(dialogue_chain, recent_chat=None):
         context_str = "\n".join(dialogue_chain)
         recent_chat_str = "\n".join(recent_chat) if recent_chat else "(нет недавних сообщений)"
         
-        triage_prompt = f"""Ты — ИИ-координатор профессионального стоматологического чата "StomChat".
-В чате идет дискуссия с участием нашего ИИ-ассистента (Бота). 
-Бот собирается ответить на сообщение из цепочки диалога:
+        triage_prompt = f"""Ты — клинический координатор профессионального врачебного сообщества "StomChat".
+В чате идет клинический диалог/консилиум с участием нашего ИИ-ассистента (Бота).
+Бот собирается ответить на реплику врача из цепочки диалога:
 {context_str}
 
-Текущее живое обсуждение в группе (последние сообщения чата прямо сейчас):
+Текущие последние сообщения в группе:
 {recent_chat_str}
 
-Задачи анализа:
-1. Проверь, не сместилась ли тема обсуждения в группе. Если в последних сообщениях чата люди уже активно обсуждают другую тему, совершенно не связанную с цепочкой диалога бота, выведи NO (встревать со старой темой — это спам).
-2. Оцени характер реплики пользователя. Если пользователь просто спорит с Ботом, иронизирует, троллит, выражает недовольство Ботом (например, пишет "да ладно", "чушь", "все понятно", "хватит спамить") — выведи NO.
-3. Бот должен продолжить диалог (YES) только если пользователь задает конкретный содержательный клинический или технический вопрос по делу, и эта тема все еще актуальна в последних сообщениях чата.
+Правила принятия решения:
+1. КЛИНИЧЕСКИЙ КОНСИЛИУМ (СТРОГО YES):
+   - Если врач просит клиническое обоснование, аргументацию или ставит под сомнение тактику ("Почему так решили?", "На каком основании?", "А как быть с...", "Почему именно этот материал/бор?", "Разве не лучше X?", "А если корень искривлен?").
+   - Вопросы-сомнения и профессиональная дискуссия — это нормальная медицинская практика консилиума, а НЕ спор или троллинг.
+   - Если врач задает уточняющий вопрос по протоколу, дозировке, анатомии, осложнениям или дополняет анамнез/симптомы.
+   На любые такие вопросы ВСЕГДА отвечай YES.
+
+2. КОГДА ОТВЕЧАТЬ NO (МОЛЧАТЬ):
+   - Врач прямо требует замолчать или выражает резкое раздражение ботом ("заткнись", "хватит спамить", "бот отвали", "не лезь", "хватит").
+   - Бессодержательный троллинг или мат без какого-либо клинического контекста ("бот дурак", "чушь" без дальнейшего вопроса).
+   - Ветка обсуждения в группе кардинально сменилась, и с момента реплики бота прошло много времени, а текущие сообщения чата посвящены совершенно другой посторонней теме.
 
 Выведи строго одно слово:
-YES — если Боту уместно ответить прямо сейчас.
-NO — если Боту лучше промолчать (тема сменилась или идет пустой спор/троллинг).
+YES — если вопрос содержит клинический интерес, обоснование тактики или консилиумную дискуссию.
+NO — если это явный отказ от общения, нецензурная брань/троллинг или нерелевантный оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=8)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
         if error or not response or not getattr(response, "text", None):
-            return False
+            # Fail-open: сетевой таймаут или сбой модели триажа НЕ должны
+            # обрывать живой диалог с врачом на полуслове (как было у Фомичева).
+            # Оскорбления и требования замолчать уже отфильтрованы через is_negative_feedback().
+            logger.warning(
+                "Dialogue continuation triage error or timeout (%s). Failing open to avoid abandoning doctor mid-dialogue.",
+                error,
+            )
+            return True
         res = response.text.strip().upper()
-        return res.startswith("YES")
+        if res.startswith("NO"):
+            logger.info("Dialogue continuation triage explicitly rejected continuation: NO")
+            return False
+        return res.startswith("YES") or "YES" in res
     except Exception as e:
-        logger.error(f"Error in dialogue continuation triage: {e}")
-        return False
+        logger.error(f"Error in dialogue continuation triage: {e}. Failing open to protect dialogue.")
+        return True
 
 def check_user_cooldown(chat_id, user_id, command, seconds=30):
     """
@@ -964,6 +981,11 @@ STATE_DEFAULTS = {
 PASSIVE_COOLDOWN_MINUTES = 120  # после РЕАЛЬНО отправленного пассивного ответа
 PASSIVE_RETRY_MINUTES = 10      # после попытки, не давшей сообщения
 
+# Максимальное количество ответов бота в одной диалоговой ветке / последовательном треде.
+# Раньше стояло жесткое ограничение в 3 ответа, из-за чего содержательные клинические
+# дискуссии с врачами обрывались. Повышено до 6.
+MAX_DIALOGUE_BOT_REPLIES = getattr(config, "MAX_DIALOGUE_BOT_REPLIES", 6)
+
 # Сколько держать ветку в processed_threads. Граница была по ДЛИНЕ — последние
 # 100 записей, `del threads[:-100]`, молча. Замер по архиву (117 847 реплик,
 # 1016 суток): при 0.88 вторжения в сутки запись жила в среднем 115 суток, в
@@ -1152,9 +1174,12 @@ def is_silenced(state, where=""):
             logger.info("Bot is silenced until %s. Skipping %s.",
                         silenced_until_str, where or "trigger check")
             return True
+        else:
+            state.pop("silenced_until", None)
     except Exception as parse_err:
         # Битая метка не должна глушить бота навсегда: считаем, что тишины нет.
         logger.error("Error parsing silenced_until (%r): %s", silenced_until_str, parse_err)
+        state.pop("silenced_until", None)
     return False
 
 
@@ -1163,6 +1188,7 @@ def passive_gate_block_reason(state):
     Причина, по которой пассивный текстовый триггер сейчас запрещён, иначе None.
     Учитывает оба окна: полный кулдаун за отправленный ответ и короткий
     backoff за уже сделанную попытку.
+    Синхронный вариант (сохраняет обратную совместимость с тестами).
     """
     now = datetime.now()
 
@@ -1175,6 +1201,98 @@ def passive_gate_block_reason(state):
     backoff = timedelta(minutes=PASSIVE_RETRY_MINUTES)
     if since_try < backoff:
         return f"retry backoff after failed attempt, {int((backoff - since_try).total_seconds() // 60) + 1} min left"
+
+    return None
+
+
+async def get_recent_message_velocity(hours: int = 1) -> int:
+    try:
+        since_time = (datetime.utcnow() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+        rows = await query_db_async(
+            "SELECT COUNT(*) FROM messages WHERE date >= ? AND msg_id < 90000000",
+            (since_time,)
+        )
+        return rows[0][0] if rows else 0
+    except Exception as e:
+        logger.error(f"Error computing message velocity: {e}")
+        return 25
+
+
+async def calculate_dynamic_passive_cooldown(state: dict) -> tuple[int, str]:
+    """
+    Динамический расчёт пассивного кулдауна:
+    cd = PASSIVE_COOLDOWN_BASE_MINUTES * (30 / v_eff)^0.40 * f_time
+    """
+    velocity = await get_recent_message_velocity(hours=1)
+    msk_hour = (datetime.utcnow().hour + 3) % 24
+
+    v_eff = max(velocity, 5)
+    f_vel = (30.0 / v_eff) ** 0.40
+
+    if 10 <= msk_hour <= 18:
+        f_time = 0.85
+        time_desc = "clinical_workday"
+    elif 18 < msk_hour <= 23:
+        f_time = 0.90
+        time_desc = "evening_cases"
+    else:
+        f_time = 1.60
+        time_desc = "night_rest"
+
+    base_mins = getattr(config, "PASSIVE_COOLDOWN_BASE_MINUTES", 75)
+    min_mins = getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45)
+    max_mins = getattr(config, "PASSIVE_COOLDOWN_MAX_MINUTES", 180)
+
+    raw_cd = base_mins * f_vel * f_time
+    cd_minutes = int(max(min_mins, min(raw_cd, max_mins)))
+
+    diag = f"{cd_minutes}m (vel={velocity} m/h, time={time_desc} [MSK {msk_hour:02d}:00])"
+    return cd_minutes, diag
+
+
+async def passive_gate_block_reason_async(state: dict) -> str | None:
+    """
+    Асинхронная проверка пассивного гейта с адаптивным кулдауном и volume bypass.
+    """
+    now = datetime.now()
+    last_sent = _parse_state_dt(state.get("last_passive_text_run"))
+    since_sent = now - last_sent
+
+    min_floor = timedelta(minutes=getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45))
+    if since_sent < min_floor:
+        mins_left = int((min_floor - since_sent).total_seconds() // 60) + 1
+        return f"passive cooldown, at least {mins_left} min left (hard floor {min_floor.seconds // 60}m)"
+
+    dynamic_cd, diag = await calculate_dynamic_passive_cooldown(state)
+    full = timedelta(minutes=dynamic_cd)
+
+    if since_sent < full:
+        # Volume gate bypass: если с момента прошлого ответа прошло много сообщений
+        # (по умолчанию 20 сообщений — достаточно для смены клинической темы)
+        volume_gate = getattr(config, "PASSIVE_VOLUME_GATE_MSGS", 20)
+        if since_sent >= min_floor and since_sent < timedelta(hours=12):
+            ref_msg_id = state.get("last_passive_bot_msg_id") or state.get("last_case_bot_msg_id") or 0
+            if ref_msg_id:
+                try:
+                    msgs_since = await query_db_async(
+                        "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
+                        (ref_msg_id,)
+                    )
+                    cnt = msgs_since[0][0] if msgs_since else 0
+                    if cnt >= volume_gate:
+                        logger.info(f"Volume gate bypassed cooldown: {cnt} msgs passed since last bot reply.")
+                        return None
+                except Exception as vol_err:
+                    logger.error(f"Error checking volume gate: {vol_err}")
+
+        mins_left = int((full - since_sent).total_seconds() // 60) + 1
+        return f"passive cooldown, {mins_left} min left [{diag}]"
+
+    since_try = now - _parse_state_dt(state.get("last_passive_attempt"))
+    backoff = timedelta(minutes=PASSIVE_RETRY_MINUTES)
+    if since_try < backoff:
+        mins_try = int((backoff - since_try).total_seconds() // 60) + 1
+        return f"retry backoff after failed attempt, {mins_try} min left"
 
     return None
 
@@ -1858,15 +1976,36 @@ _ARTICLE_SHOWN_MAX_CHARS = _ARTICLE_PLAIN_MAX_CHARS - 96
 
 
 _NEGATION_TERMS = re.compile(
-    r'(?i)\b(?:отсутству\w*|не\s+обнаружен\w*|не\s+содержит\w*|не\s+представлен\w*|'
-    r'не\s+найден\w*|не\s+выявлен\w*|нет\s+признаков|без\s+признаков|'
-    r'не\s+является\s+стоматологическ\w*|не\s+относит\w*\s+к\s+стоматолог\w*|'
-    r'не\s+имеет\s+отношения\s+к\s+стоматолог\w*)\b'
+    r'(?i)\b(?:не\s+является|не\s+относит\w*|не\s+имеет\s+отношения|'
+    r'не\s+связан\w*|не\s+содержит\w*|не\s+представлен\w*|не\s+обнаружен\w*|'
+    r'не\s+найден\w*|не\s+выявлен\w*|не\s+видим\w*|не\s+различим\w*|'
+    r'отсутству\w*|нет\s+признаков|без\s+признаков)\b'
 )
 
 _DENTAL_MARKERS = re.compile(
-    r'(?i)\b(?:стоматолог\w*|зуб\w*|дентальн\w*|клиническ\w*|патолог\w*|челюст\w*|десн\w*|рентген\w*|ортодонт\w*)\b'
+    r'(?i)\b(?:стоматолог\w*|зуб\w*|дентальн\w*|клиническ\w*|медицинск\w*|патолог\w*|'
+    r'челюст\w*|десн\w*|рентген\w*|ортодонт\w*|снимк\w*|диагностик\w*|полост\w*|канал\w*)\b'
 )
+
+_EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
+    r'(?i)\b(?:'
+    r'не\s+является\s+(?:\w+\s+){0,4}(?:медицинск\w*|стоматолог\w*|клиническ\w*|диагностик\w*|снимк\w*)|'
+    r'не\s+относит\w*\s+к\s+(?:\w+\s+){0,3}(?:медицин\w*|стоматолог\w*)|'
+    r'не\s+имеет\s+отношения\s+к\s+(?:\w+\s+){0,3}(?:медицин\w*|стоматолог\w*)|'
+    r'картинк\w*\s+не\s+медицинск\w*|изображение\s+не\s+медицинск\w*'
+    r')\b'
+)
+
+_UI_HOMONYMS_RE = re.compile(
+    r'(?i)\b(?:вкладк\w*\s+(?:«[^»]+»\s+|"[^"]+"\s+)?(?:меню|браузер\w*|приложен\w*|настро\w*|профил\w*|окн\w*|раздел\w*)|'
+    r'(?:пункт|раздел|список|каталог|папк\w*|переименован\w*)\s+(?:«[^»]+»\s+|"[^"]+"\s+)?файл\w*)\b'
+)
+
+def is_explicitly_non_dental_media(description: str) -> bool:
+    """Проверяет, заявила ли модель зрения прямо, что снимок не медицинский/не стоматологический."""
+    if not description:
+        return False
+    return bool(_EXPLICIT_NON_DENTAL_MEDIA_RE.search(description))
 
 def strip_vision_negations(text: str) -> str:
     """
@@ -1877,7 +2016,9 @@ def strip_vision_negations(text: str) -> str:
     """
     if not text:
         return ""
-    sentences = re.split(r'([.!?\n]+)', text)
+    # Очищаем UI-омонимы ("вкладка меню", "пункт файлы"), чтобы они не триггерили клинический словарь
+    cleaned_text = _UI_HOMONYMS_RE.sub(" ", text)
+    sentences = re.split(r'([.!?\n]+)', cleaned_text)
     filtered = []
     i = 0
     while i < len(sentences):
@@ -2167,19 +2308,14 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 {{"ok": true/false, "reason": "одна фраза на русском"}}
 """
         ctx = {"kind": "response_validator", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(prompt, ctx, timeout=15)
+        response, error = await generate_gemini_text_async(prompt, ctx, timeout=30)
         if error or not response:
             return _unavailable(error or "empty response")
 
         text = (getattr(response, "text", None) or "").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
+        data = user_memory._extract_json_object(text)
+        if data is None:
             return _unavailable(f"no JSON object in verdict: {text[:120]!r}")
-
-        try:
-            data = json.loads(text[start:end + 1])
-        except json.JSONDecodeError as parse_err:
-            return _unavailable(f"unparseable verdict: {parse_err}")
         if not isinstance(data, dict) or "ok" not in data:
             # Нет вердикта — это НЕ одобрение. Раньше отсутствующий ключ
             # молча превращался в ok=True и пропускал черновик.
@@ -2211,10 +2347,11 @@ async def check_llm_triage(context_msgs):
 Когда ОТВЕЧАТЬ (should_reply: true) — ТОЛЬКО В ЭТИХ СЛУЧАЯХ:
 1. Прямой вопрос/обращение к боту (тег @, упоминание бота, прямой ответ на реплику бота).
 2. Конкретный клинический вопрос/кейс от врача, на который в чате НИКТО НЕ ОТВЕТИЛ (висит без ответа, врачу нужна помощь).
+3. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения, бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True).
 
 Когда КАТЕГОРИЧЕСКИ ИГНОРИРОВАТЬ (should_reply: false):
-1. ИДЕТ ЖИВОЙ РАЗГОВОР/СПОР МЕЖДУ ЛЮДЬМИ: Если 2 или более коллег уже переписываются, спорят, отвечают друг другу, делятся мнениями — НЕ ВМЕШИВАТЬСЯ! Не встревать со своим мнением, не делать реплик-комментариев.
-2. Вопрос уже обсуждается живыми участниками.
+1. ИДЕТ ЖИВОЙ РАЗГОВОР/СПОР МЕЖДУ ЛЮДЬМИ: Запрет на вмешательство действует только если коллеги УЖЕ ведут содержательный клинический консилиум и дали полный протокол. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения, бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True). Не вмешиваться, если 2 или более коллег УЖЕ ведут содержательный клинический консилиум и дали исчерпывающий клинический протокол.
+2. Вопрос уже обсуждается живыми участниками (коллеги УЖЕ ведут содержательный клинический консилиум и дали полный протокол).
 3. Нерелевантные или неклинические темы (налоги, юмор, быт, цены, работа клиники, расписание, флуд).
 4. Короткие реплики, шутки, сарказм, мысли вслух ("дорастет", "есть кейсы", "не безопасно", "кыш").
 5. Если ответ бота будет просто короткой репликой/вбросом на чужое сообщение — СТРОГО ЗАПРЕЩЕНО.
@@ -2230,19 +2367,20 @@ async def check_llm_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=8)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
         
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
             return False
             
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            text = text[start:end+1]
-        
-        data = json.loads(text)
+        # Robust JSON extraction: handles markdown fences (```json ... ```),
+        # truncated responses, and unescaped quotes inside values — all of which
+        # caused json.loads to throw and silently suppress valid clinical triggers.
+        data = user_memory._extract_json_object(text)
+        if data is None:
+            logger.warning(f"Llama triage: could not extract JSON from response: {text[:200]!r}. Defaulting to False.")
+            return False
         should_reply = data.get("should_reply", False)
         reason = data.get("reason", "No reason provided")
         confidence = float(data.get("confidence", 1.0))
@@ -2551,10 +2689,16 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     bot_msg_count = 1
                 if not nearest_bot_msg_id:
                     nearest_bot_msg_id = reply_to_msg_id
+                found_bot_in_chain = True
+            else:
+                # Прямой родитель — не бот (врач отвечает человеку, а не боту).
+                # Нельзя признавать ветку диалогом с ботом только потому, что бот когда-то
+                # ответил в этой ветке 40 сообщений назад.
+                # В чужой ветке между людьми found_bot_in_chain сбрасываем, чтобы
+                # не порождать ложные 'Dialogue reply is stale' и не перехватывать треды.
+                found_bot_in_chain = False
 
-            found_bot_in_chain = bot_msg_count > 0
-
-            if found_bot_in_chain and bot_msg_count < 3:
+            if found_bot_in_chain and bot_msg_count < MAX_DIALOGUE_BOT_REPLIES:
                 is_dialogue = True
                 
                 # Check for criticism / negative feedback from user
@@ -2567,9 +2711,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     REPLIED_MSG_IDS[msg_id] = True
                     return True
 
-                # Проверяем "свежесть" диалога. Если с момента отправки сообщения бота в группе
-                # прошло более 5 сообщений от других участников, значит тема сместилась. Игнорируем.
+                # Проверяем "свежесть" диалога.
+                # Для прямого Reply на сообщение бота (is_parent_bot) даем врачу широкое окно:
+                # до 25 сообщений в чате (или до 45 минут на обдумывание и формулировку клинического вопроса).
+                # Для косвенных ответов в чужой ветке сохраняем строгий лимит (5 сообщений / 15 минут).
                 ref_id = nearest_bot_msg_id or reply_to_msg_id
+                max_allowed_msgs = 25 if is_parent_bot else 5
+                max_allowed_minutes = 45.0 if is_parent_bot else 15.0
+
                 try:
                     msgs_since = await query_db_async(
                         "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
@@ -2580,9 +2729,30 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     logger.error(f"Error checking message distance: {db_err}")
                     count_since = 0
 
-                if count_since > 5:
-                    logger.info(f"Dialogue reply is stale. {count_since} messages have passed since bot message {ref_id}. Skipping to avoid thread hijacking.")
+                if count_since > max_allowed_msgs:
+                    logger.info(
+                        f"Dialogue reply is stale by message count ({count_since} > {max_allowed_msgs}) "
+                        f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping to avoid thread hijacking."
+                    )
                     return False
+
+                # Проверка по времени исходного сообщения
+                try:
+                    ref_date_row = await query_db_async(
+                        "SELECT date FROM messages WHERE msg_id = ?",
+                        (ref_id,)
+                    )
+                    if ref_date_row and ref_date_row[0][0]:
+                        ref_dt = _parse_db_date(ref_date_row[0][0])
+                        elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
+                        if elapsed_min > max_allowed_minutes:
+                            logger.info(
+                                f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
+                                f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
+                            )
+                            return False
+                except Exception as time_err:
+                    logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
 
                 # Умный анализ продолжения диалога через триаж
                 recent_group_db = await database.get_last_n_messages(limit=5)
@@ -2632,7 +2802,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 recent_chain, bot_in_chain_count, _ = await fetch_dynamic_chat_context(
                     msg_id, None, base_limit=12, max_limit=12, event=event
                 )
-                if bot_in_chain_count < 3 and recent_chain:
+                if bot_in_chain_count < MAX_DIALOGUE_BOT_REPLIES and recent_chain:
                     should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
                     if should_continue:
                         logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
@@ -2645,7 +2815,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
     # ронял весь обработчик сообщения.
     if not is_dialogue:
-        block_reason = passive_gate_block_reason(state)
+        block_reason = await passive_gate_block_reason_async(state)
         if block_reason:
             # info, а не debug: корневой уровень журнала — INFO, поэтому debug не
             # эмитится НИКОГДА. Замер по всем журналам на диске (126 340 строк):
@@ -2725,7 +2895,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 not any(c.isalpha() for c in last_text)
             )
             
-            passive_cooldown_active = passive_gate_block_reason(load_state()) is not None
+            passive_cooldown_active = (await passive_gate_block_reason_async(load_state())) is not None
 
             if not is_obviously_junk and not passive_cooldown_active:
                 if not claim_passive_slot(("passive_text",)):
@@ -2774,6 +2944,17 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if not triggered:
         return False
 
+    # Per-user group flood gate: защита от исчерпания токенов при спаме тегами @bot.
+    # Ограничивает одного пользователя 1 триггером в 8 секунд (не затрагивает активный диалог).
+    sender_id = getattr(event, "sender_id", None)
+    if sender_id and not is_dialogue:
+        sender_flood_cd = check_user_cooldown(event.chat_id, sender_id, "group_trigger", seconds=8)
+        if sender_flood_cd > 0:
+            logger.warning(
+                f"Group trigger flood limit: user {sender_id} triggered too quickly ({sender_flood_cd}s left). Skipping."
+            )
+            return False
+
     # EXTRACT KEYWORDS & SEARCH DB
     # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
     if is_dialogue:
@@ -2796,9 +2977,15 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
     
     if not is_dialogue and not wiki_corpus and not archive_corpus:
-        # If corpus is empty, do not output anything (avoid generic AI fluff)
-        logger.info("No matching knowledge corpus found. Skipping assistant run.")
-        return False
+        # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
+        # Но если врача привлекло прямое упоминание бота (@bot) или прямой вопрос — отвечаем
+        # на базе фундаментальных медицинских знаний модели, не бросая врача в тишине.
+        is_direct_call = any(k in trigger_reason.lower() for k in ("mention", "direct", "обращение"))
+        if is_direct_call:
+            logger.info("No matching knowledge corpus found, but direct call detected (%s). Proceeding with LLM knowledge.", trigger_reason)
+        else:
+            logger.info("No matching knowledge corpus found. Skipping assistant run.")
+            return False
 
     # Определяем обращение ДО промпта — сами, не делегируем модели.
     # Модель просто начнёт с готового префикса, выбор уже сделан.
@@ -2835,6 +3022,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
     style_instruction = style_instruction_block(selected_style)
 
+    user_memory_context = ""
+    try:
+        user_memory_context = await user_memory.format_users_chunk_context([event.sender_id], max_chars=1200)
+    except Exception as mem_err:
+        logger.warning(f"Failed to fetch user_memory for sender {event.sender_id}: {mem_err}")
+
     # BUILD PROMPT
     ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
     if is_dialogue:
@@ -2855,6 +3048,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 <user_dialogue>
 {chr(10).join(context_msgs)}
 </user_dialogue>
+
+{user_memory_context}
 
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос! Если ты видишь свои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и не соглашаться с самим собой!
 
@@ -2909,6 +3104,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Текущая переписка в чате (последние сообщения со структурой ответов):
 {chr(10).join(context_msgs)}
 
+{user_memory_context}
+
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sender_first_name or "коллеги"}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения! Если в переписке есть твои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и ни в коем случае не соглашаться с самим собой от третьего лица!
 
 Справка из Базы Знаний (stomat_wiki):
@@ -2962,7 +3159,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     
     # CALL GEMINI
     status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
     if error:
         logger.error(f"Assistant Gemini generation error: {error}")
@@ -3133,7 +3330,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # 1. Parse keywords
     caption_text = text or ""
-    sanitized_media_desc = strip_vision_negations(media_description)
+    # Если зрение прямо установило, что изображение не медицинское (скриншот соцсети, мем и т.д.),
+    # описание снимка полностью исключается из поиска клинической темы.
+    is_non_dental_img = is_explicitly_non_dental_media(media_description)
+    sanitized_media_desc = "" if is_non_dental_img else strip_vision_negations(media_description)
     full_context_str = caption_text + " " + sanitized_media_desc
     keywords = extract_keywords(full_context_str)
     
@@ -3264,7 +3464,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
     if error:
         logger.error(f"Media Assistant Gemini generation error: {error}")
@@ -3660,7 +3860,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 """
     
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
     if 'status_msg' in locals() and status_msg:
         try:
@@ -4048,14 +4248,16 @@ async def handle_private_message(bot_client, event):
                 history_raw = json.loads(user_state.get("history") or "[]")
                 if isinstance(history_raw, dict) and "last_updated" in history_raw:
                     last_updated = history_raw["last_updated"]
-                    if time.time() - last_updated > 3600:
+                    inactivity_sec = time.time() - last_updated
+                    if inactivity_sec > 3600:
                         await database.clear_user_interactive_state(chat_id)
                         user_state = None
-                        await bot_client.send_message(
-                            entity=chat_id, 
-                            message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>", 
-                            parse_mode='html'
-                        )
+                        if inactivity_sec < 86400:
+                            await bot_client.send_message(
+                                entity=chat_id, 
+                                message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>", 
+                                parse_mode='html'
+                            )
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
         
@@ -4447,7 +4649,7 @@ async def handle_private_message(bot_client, event):
 """
             async with bot_client.action(chat_id, 'typing'):
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
                 except Exception:
@@ -4799,7 +5001,7 @@ async def handle_private_message(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
@@ -5267,7 +5469,7 @@ async def handle_private_message(bot_client, event):
 """
 
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=90)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
                 
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -5451,7 +5653,7 @@ YES — если человек обращается к боту, задаёт �
 NO — если это случайное упоминание, обсуждение другого бота, ругательство, или контекст никак не требует реакции бота.
 """
         triage_ctx = {"kind": "bot_mention_triage", "chat_id": chat_id, "thinking_level": "LOW"}
-        triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=8)
+        triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
 
         if triage_err or not triage_resp:
             logger.warning(f"Bot mention triage failed: {triage_err}")
@@ -5505,7 +5707,7 @@ NO — если это случайное упоминание, обсужден
 Твой ответ — это естественная реакция именно на сообщение #{msg_id}!
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
-        reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=60)
+        reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=90)
 
         if reply_err or not reply_resp:
             logger.warning(f"Bot mention reply generation failed: {reply_err}")
@@ -5631,7 +5833,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
         status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
         
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
@@ -5738,7 +5940,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 {style_instruction}
 """
         status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
         
         if error or not response or not getattr(response, "text", None):
             logger.warning("group direct ask generation failed chat=%s: %s", chat_id, error)
@@ -5765,8 +5967,12 @@ async def handle_group_direct_ask(bot_client, event, question):
             logger.warning("Group ask validator REJECTED draft msg_id=%s: %s", msg_id, ask_reason)
             await bot_client.send_message(
                 entity=chat_id,
-                message=("🤔 <i>Ответ собрался, но не прошёл мою же проверку на клиническую "
-                         "обоснованность. Уточните вопрос или добавьте деталей.</i>"),
+                message=(
+                    "👨‍⚕️ <i>Коллега, в описании клинического случая недостаточно вводных данных "
+                    "для безопасного и доказательного протокола. Пожалуйста, уточните детали: "
+                    "номер зуба, витальность/ЭОД, данные перкуссии/зондирования или прикрепите рентгеновский снимок/КЛКТ, "
+                    "чтобы разобрать случай доказательно.</i>"
+                ),
                 reply_to=msg_id,
                 parse_mode='html',
             )
@@ -5850,7 +6056,7 @@ async def handle_group_quiz(bot_client, event):
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
     status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     try:
         await bot_client.delete_messages(chat_id, status_msg.id)
     except Exception:
@@ -6434,20 +6640,26 @@ async def edit_callback_message(bot_client, event, text, op, **kwargs):
     Исключение наружу не летит (tg_safety отдаёт TgOutcome), поэтому
     event.answer() после вызова выполняется в любом случае и кнопка гаснет.
     """
+    chat_id = getattr(event, 'chat_id', None)
+    message_id = getattr(event, 'message_id', None)
+    if bot_client and chat_id is not None and message_id is not None:
+        outcome = await tg_safety.edit_message(
+            bot_client, chat_id, message_id, text,
+            timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, **kwargs,
+        )
+        if getattr(outcome, 'ok', False):
+            return outcome
     if hasattr(event, 'edit') and callable(getattr(event, 'edit', None)):
         try:
-            await event.edit(text, **kwargs)
+            return await asyncio.wait_for(event.edit(text, **kwargs), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
         except TypeError:
             try:
-                await event.edit(text)
+                return await asyncio.wait_for(event.edit(text), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
             except Exception:
                 pass
         except Exception:
             pass
-    return await tg_safety.edit_message(
-        bot_client, getattr(event, 'chat_id', None), getattr(event, 'message_id', None), text,
-        timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, **kwargs,
-    )
+    return None
 
 
 async def handle_quiz_callback(bot_client, event):
@@ -7102,7 +7314,7 @@ async def handle_quiz_callback(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=90)
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
             
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
@@ -7516,6 +7728,8 @@ async def handle_quiz_callback(bot_client, event):
     is_correct = (correct_idx == clicked_idx)
     prefix = "✅ Верно! " if is_correct else "❌ Неверно! "
     alert_text = f"{prefix}\n\n{explanation}"
+    if len(alert_text) > 200:
+        alert_text = alert_text[:197] + "..."
     await event.answer(alert_text, alert=True)
     
     # Update message text with stats
@@ -7538,7 +7752,10 @@ async def handle_quiz_callback(bot_client, event):
                     idx = ord(letter) - ord('A')
                     raw_choice = opt_match.group(2)
                     clean_choice = suffix_regex.sub('', raw_choice).strip()
-                    new_lines.append(f"<b>{letter}:</b> {clean_choice} ({votes[idx]} гол. | {pct[idx]}%)")
+                    if 0 <= idx < len(votes):
+                        new_lines.append(f"<b>{letter}:</b> {clean_choice} ({votes[idx]} гол. | {pct[idx]}%)")
+                    else:
+                        new_lines.append(line)
                 elif "Нажмите на кнопку" in line or "Всего проголосовало" in line or stripped.startswith("📊"):
                     continue
                 elif stripped == "🎲 КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА":
@@ -7552,7 +7769,11 @@ async def handle_quiz_callback(bot_client, event):
             new_lines.append(f"\n📊 <b>Всего проголосовало: {total_votes}</b>\n\n<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>")
             
             new_text = "\n".join(new_lines)
-            await event.edit(text=new_text, parse_mode='html')
+            quiz_buttons = getattr(original_msg, 'reply_markup', None)
+            await edit_callback_message(
+                bot_client, event, new_text, "edit_message:quiz_stats",
+                buttons=quiz_buttons, parse_mode='html'
+            )
     except Exception as edit_err:
         logger.error(f"Failed to edit quiz message text with live stats: {edit_err}")
 
@@ -7613,20 +7834,17 @@ async def check_referee_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=8)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=20)
         
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
             return False
             
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
-        if "```" in text:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1:
-                text = text[start:end+1]
-        
-        data = json.loads(text)
+        data = user_memory._extract_json_object(text)
+        if data is None:
+            logger.warning("Llama referee triage: unparseable JSON response: %s. Defaulting to False.", text[:120])
+            return False
         should_intervene = data.get("should_intervene", False)
         reason = data.get("reason", "No reason provided")
         confidence = data.get("confidence", 1.0)
@@ -8008,6 +8226,9 @@ def set_ping_opt_out(chat_id, reason=""):
 
 async def check_and_send_pm_pings(bot_client):
     """Проверяет неактивных пользователей в ЛС и отправляет им персонализированный пинг."""
+    if not getattr(config, "ENABLE_PM_PROACTIVE_PINGS", False):
+        logger.debug("check_and_send_pm_pings skipped: PM proactive broadcast disabled in config.")
+        return
     try:
         if is_ping_quiet_hours():
             logger.debug("PM pings skipped: quiet hours.")
@@ -8151,4 +8372,7 @@ async def check_and_send_pm_pings(bot_client):
 
 async def check_and_send_group_activity_pings(bot_client):
     """Отключено: безадресная рассылка пингов в ЛС о событиях в группе порождала спам и блокировки бота."""
+    error = None
+    if error:
+        return
     return

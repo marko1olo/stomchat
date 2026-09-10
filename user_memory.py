@@ -142,6 +142,20 @@ def _extract_json_object(text: str) -> Optional[dict]:
                         return None
                     # Рекурсивно ищем дальше (без бесконечной рекурсии — один уровень)
                     return _extract_json_object(text[next_start:])
+
+    # Truncation Guard: если ответ оборвался на середине (depth > 0)
+    if depth > 0:
+        repaired = text[start:]
+        if in_string:
+            if repaired.endswith("\\"):
+                repaired = repaired[:-1]
+            repaired += '"'
+        repaired += "}" * depth
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     return None
 
 
@@ -512,7 +526,7 @@ async def update_clinician_memory_async(
 }}
 """
 
-        status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+        status_ctx = {"kind": "daemon_memory", "thinking_level": "LOW", "max_tokens": 2048}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
 
         if error or not response or not getattr(response, "text", None):
@@ -587,9 +601,17 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
     Если новых сообщений не было — запросы к нейросети не производятся.
     """
     try:
+        bot_id = 7971556097
+        try:
+            import config
+            bot_id = getattr(config, "BOT_ID", bot_id) or bot_id
+        except Exception:
+            pass
+
         users_to_process = await database.get_unprocessed_group_users(
             min_new_messages=min_new_messages,
-            limit=limit
+            limit=limit,
+            bot_id=bot_id
         )
         if not users_to_process:
             logger.info("Group memory daemon: в чате нет новых сообщений от участников. Пропуск такта (запросы к LLM опущены).")
@@ -599,6 +621,8 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 
         for u in users_to_process:
             user_id = u["user_id"]
+            if not user_id or user_id <= 0 or user_id == bot_id:
+                continue
             max_id = u.get("max_id") or u.get("max_msg_id") or 0
             sender_name = u.get("sender_name", "")
             sender_username = u.get("username", "")
@@ -642,7 +666,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 }}
 """
 
-            status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
+            status_ctx = {"kind": "daemon_memory", "thinking_level": "LOW", "max_tokens": 2048}
             response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
 
             if error or not response or not getattr(response, "text", None):

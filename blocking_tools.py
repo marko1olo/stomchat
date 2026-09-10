@@ -6,6 +6,7 @@ import re
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +577,25 @@ async def _pace_gemini_calls():
         _LAST_GEMINI_CALL_START = time.monotonic()
 
 
+SUMMARY_STATUS_TTL_SECONDS = 1800
+
+
+def _is_summary_status_stale(status, ttl_seconds=SUMMARY_STATUS_TTL_SECONDS):
+    if not isinstance(status, dict):
+        return True
+    utc_str = status.get("utc")
+    if not utc_str:
+        return False
+    try:
+        dt = datetime.fromisoformat(utc_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        return age > ttl_seconds
+    except Exception:
+        return False
+
+
 def _foreign_summary_status(context):
     """
     Отметка ЧУЖОЙ идущей сводки, которую наш вызов вот-вот затрёт.
@@ -598,6 +618,14 @@ def _foreign_summary_status(context):
             return None
         current = runtime_guard.read_summary_status()
         if current.get("active") and current.get("kind") in runtime_guard.SUMMARY_KINDS:
+            status_dir = os.path.dirname(getattr(runtime_guard, "SUMMARY_STATUS_PATH", ""))
+            if not status_dir or os.path.exists(status_dir):
+                if _is_summary_status_stale(current, SUMMARY_STATUS_TTL_SECONDS):
+                    logger.info(
+                        "чужая отметка сводки протухла (возраст > %s с) kind=%s stage=%s utc=%s; снимок пропущен",
+                        SUMMARY_STATUS_TTL_SECONDS, current.get("kind"), current.get("stage"), current.get("utc"),
+                    )
+                    return None
             return current
     except Exception as exc:
         # Без снимка чужую отметку сводки уже не вернуть: файл одноместный, и
@@ -636,6 +664,17 @@ def _restore_foreign_summary_status(snapshot):
         return False
     try:
         import runtime_guard
+        status_dir = os.path.dirname(getattr(runtime_guard, "SUMMARY_STATUS_PATH", ""))
+        # Проверяем существование каталога статуса (os.path.exists) для совместимости с test_observability.py:
+        # если каталог не существует, не отменяем по TTL, чтобы дать упасть write_summary_status
+        if not status_dir or os.path.exists(status_dir):
+            if _is_summary_status_stale(snapshot, SUMMARY_STATUS_TTL_SECONDS):
+                logger.info(
+                    "отмена восстановления протухшей отметки сводки (возраст > %s с) kind=%s stage=%s utc=%s",
+                    SUMMARY_STATUS_TTL_SECONDS, snapshot.get("kind"), snapshot.get("stage"), snapshot.get("utc"),
+                )
+                return False
+
         current = runtime_guard.read_summary_status()
         if current.get("active") and current.get("kind") in runtime_guard.SUMMARY_KINDS:
             return False

@@ -1,0 +1,932 @@
+[
+  {
+    "file": "bot.log.1",
+    "line": 23752,
+    "kind": "text",
+    "reason": "Ответ вырван из контекста обсуждения и содержит бессодержательную фразу, не отвечающую на реальный вопрос участников."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 23752,
+    "kind": "media",
+    "reason": "Ответ вырван из контекста обсуждения и содержит бессодержательную фразу, не отвечающую на реальный вопрос участников."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 24384,
+    "kind": "text",
+    "reason": "Черновик не отвечает на клинический вопрос пользователя о мостовидном протезе (1.4-1.6) и уводит тему в сторону юридических документов."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 28804,
+    "kind": "text",
+    "reason": "Ассистент говорит про ОПТГ и дрейф 15-го зуба, хотя в контексте чата обсуждается фиксация коронок на имплантатах (14, 15, 16, 17) и окклюзионные контакты, а не панорамный снимок."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 28804,
+    "kind": "media",
+    "reason": "Ассистент говорит про ОПТГ и дрейф 15-го зуба, хотя в контексте чата обсуждается фиксация коронок на имплантатах (14, 15, 16, 17) и окклюзионные контакты, а не панорамный снимок."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 30350,
+    "kind": "text",
+    "reason": "Утверждение о том, что старые пломбы под виниры нужно обязательно убирать полностью, является спорным и не всегда клинически оправданным (зависит от объема и состояния пломбы)."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 35071,
+    "kind": "text",
+    "reason": "Ответ не относится к стоматологии и является неуместным шутливым вбросом."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 35071,
+    "kind": "media",
+    "reason": "Ответ не относится к стоматологии и является неуместным шутливым вбросом."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 35360,
+    "kind": "text",
+    "reason": "Ответ совершенно не относится к контексту обсуждения стоматологических тем и уводит беседу в сторону."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 35360,
+    "kind": "media",
+    "reason": "Ответ совершенно не относится к контексту обсуждения стоматологических тем и уводит беседу в сторону."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 36973,
+    "kind": "text",
+    "reason": "Черновик представляет собой бессодержательный однострочный комментарий, вырванный из контекста дискуссии коллег."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 36973,
+    "kind": "media",
+    "reason": "Черновик представляет собой бессодержательный однострочный комментарий, вырванный из контекста дискуссии коллег."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 38704,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.1",
+    "line": 38705,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.1",
+    "line": 38705,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.1",
+    "line": 39614,
+    "kind": "text",
+    "reason": "Ответ ассистента является клинической галлюцинацией, так как в контексте переписки не упоминаются снимки, а обсуждается использование тефлоновой ленты в эндодонтии."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 39614,
+    "kind": "media",
+    "reason": "Ответ ассистента является клинической галлюцинацией, так как в контексте переписки не упоминаются снимки, а обсуждается использование тефлоновой ленты в эндодонтии."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 44097,
+    "kind": "text",
+    "reason": "Черновик содержит категоричное и необоснованное утверждение, не учитывающее реальный клинический контекст обсуждения врачей."
+  },
+  {
+    "file": "bot.log.1",
+    "line": 44097,
+    "kind": "media",
+    "reason": "Черновик содержит категоричное и необоснованное утверждение, не учитывающее реальный клинический контекст обсуждения врачей."
+  },
+  {
+    "file": "bot.log.2",
+    "line": 28256,
+    "kind": "text",
+    "reason": "Ответ содержит неуместные эмодзи и поверхностный псевдонаучный жаргон"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 28256,
+    "kind": "media",
+    "reason": "Ответ содержит неуместные эмодзи и поверхностный псевдонаучный жаргон"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29168,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29169,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29169,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29248,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29249,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29809,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 29810,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30175,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30176,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30176,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30674,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30675,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 30675,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31055,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31056,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31506,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31507,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31507,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31647,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31648,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 31648,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32335,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32336,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32336,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32460,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32461,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32563,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32564,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32564,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32909,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 32910,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 33780,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 33781,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 33781,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34141,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34142,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34142,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34157,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34158,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34849,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34850,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34850,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34941,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 34942,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35079,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35080,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35152,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35153,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35153,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35261,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35262,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35262,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35397,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35398,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 35398,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36106,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36107,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36107,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36978,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36979,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 36979,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37432,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37433,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37686,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37687,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37817,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37818,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 37818,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 40882,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 40883,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 40883,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41175,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41176,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41176,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41518,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41519,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41519,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41560,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41561,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41714,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41715,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 41715,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42392,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42393,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42393,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42738,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42739,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 42739,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 43205,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 43206,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 43206,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44380,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44381,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44381,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44563,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44564,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 44564,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 45548,
+    "kind": "unavailable",
+    "reason": "gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 45549,
+    "kind": "text",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.2",
+    "line": 45549,
+    "kind": "media",
+    "reason": "validator_unavailable: gemini cascade exhausted: ни одна модель не ответила"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 7572,
+    "kind": "text",
+    "reason": "Перебазировка не устраняет окклюзионное препятствие в виде базиса протеза и не восстанавливает межзубной контакт."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 8197,
+    "kind": "text",
+    "reason": "Ответ не относится к теме обсуждения границы препарирования полости и безосновательно утверждаeт необходимость эндодонтического перелечивания."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 8197,
+    "kind": "media",
+    "reason": "Ответ не относится к теме обсуждения границы препарирования полости и безосновательно утверждаeт необходимость эндодонтического перелечивания."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 8538,
+    "kind": "text",
+    "reason": "Вопрос был конкретно про реставрационный материал Beautifil (гиомер), а ответ смещает фокус на полиры и праймеры Shofu, игнорируя суть самого композита."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 8610,
+    "kind": "text",
+    "reason": "Ответ делает категоричный клинический вывод о краевом прилегании без наличия изображения или описания работы."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 8610,
+    "kind": "media",
+    "reason": "Ответ делает категоричный клинический вывод о краевом прилегании без наличия изображения или описания работы."
+  },
+  {
+    "file": "bot.log.3",
+    "line": 9259,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки о рваных краях винира и потенциальном протекании шва"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 9259,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки о рваных краях винира и потенциальном протекании шва"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 10501,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит нерелевантные высказывания"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 10501,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и содержит нерелевантные высказывания"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 10631,
+    "kind": "text",
+    "reason": "Ответ содержит выдуманные дозировки и протоколы"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 10650,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит нерелевантные выражения"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 11192,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит нерелевантные рекомендации"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 11192,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и содержит нерелевантные рекомендации"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 11498,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки о \"тройчатке\" и уводит в сторону ортодонтии"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 11498,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки о \"тройчатке\" и уводит в сторону ортодонтии"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 12633,
+    "kind": "text",
+    "reason": "Ответ содержит клиническую галлюцинацию и не соответствует теме переписки"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 12633,
+    "kind": "media",
+    "reason": "Ответ содержит клиническую галлюцинацию и не соответствует теме переписки"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 13556,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит неуместный юмор"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 13556,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и содержит неуместный юмор"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 14545,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит неуместно агрессивный тон"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 14545,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и содержит неуместно агрессивный тон"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15393,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15393,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15576,
+    "kind": "text",
+    "reason": "Ответ не имеет отношения к теме выбора аспиратора в стоматологии"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15576,
+    "kind": "media",
+    "reason": "Ответ не имеет отношения к теме выбора аспиратора в стоматологии"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15742,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и содержит несвязанную информацию о зондировании и R-снимках"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15742,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и содержит несвязанную информацию о зондировании и R-снимках"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15912,
+    "kind": "text",
+    "reason": "Ответ не относится к теме переписки и не содержит клинической значимости"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 15912,
+    "kind": "media",
+    "reason": "Ответ не относится к теме переписки и не содержит клинической значимости"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 16953,
+    "kind": "text",
+    "reason": "Ответ не относится к теме обсуждения и содержит нерелевантные советы"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 16953,
+    "kind": "media",
+    "reason": "Ответ не относится к теме обсуждения и содержит нерелевантные советы"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 20138,
+    "kind": "text",
+    "reason": "Ответ не содержит никакой клинической информации или отношения к контексту переписки"
+  },
+  {
+    "file": "bot.log.3",
+    "line": 21434,
+    "kind": "text",
+    "reason": "Ответ содержит неуместный тон и недопустимый юмор в клинической ситуации"
+  }
+]

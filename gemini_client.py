@@ -568,10 +568,10 @@ def generate_text(prompt, status_context=None, timeout=None):
     if is_triage:
         models_cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -582,10 +582,10 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
         ]
     elif is_chatbot:
         models_cascade = [
@@ -593,10 +593,10 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
             ("qwen/qwen3.6-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
         ]
     else:
         # Complex tasks (Summaries, analytics, etc)
@@ -641,13 +641,16 @@ def generate_text(prompt, status_context=None, timeout=None):
         # весь бюджет, чем ноль запросов и гарантированный None.
         usable = max(min(budget, MIN_REQUEST_SECONDS), budget * BUDGET_RESERVE_SHARE)
         models_fit = max(1, min(len(active_cascade), int(usable // MIN_REQUEST_SECONDS)))
+        # НЕ обрезаем каскад: быстрые резервные модели (Groq/Qwen) отвечают за 0.8-1.5с.
+        # Если ранние модели Google сбоят (503/400/timeout), Groq должен получить попытку.
+        # Дедлайн (deadline) динамически страхует от вылета за общий бюджет.
         if models_fit < len(active_cascade):
             logger.info(
-                "Budget %.0fs fits %s of %s cascade models; dropping the tail (it was never reached anyway).",
+                "Budget %.0fs nominally fits %s of %s cascade models; tail preserved for fast fallbacks.",
                 budget, models_fit, len(active_cascade)
             )
-            active_cascade = active_cascade[:models_fit]
-        model_share = usable / len(active_cascade)
+        share_divisor = min(models_fit, len(active_cascade))
+        model_share = usable / share_divisor
         max_attempts = max(1, min(max_attempts, int(model_share // COMFORT_REQUEST_SECONDS)))
         req_timeout = model_share / max_attempts
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
@@ -713,12 +716,13 @@ def generate_text(prompt, status_context=None, timeout=None):
             # него влез, а ноль запросов — это гарантированное молчание бота.
             if deadline is not None and requests_made:
                 remaining = deadline - time.monotonic()
-                if remaining < MIN_REQUEST_SECONDS:
+                min_needed = 7.0 if provider == "groq" else MIN_REQUEST_SECONDS
+                if remaining < min_needed:
                     # Запрос, который не успеет закончиться до убийства процесса,
                     # начинать нечего: его ответ никто не прочитает.
                     logger.warning(
-                        "Budget spent (%.1fs left) before %s; stopping cascade.",
-                        max(0.0, remaining), model_name
+                        "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
+                        max(0.0, remaining), min_needed, model_name
                     )
                     _record_failure(
                         "budget_exhausted",

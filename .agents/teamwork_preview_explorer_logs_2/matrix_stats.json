@@ -1,0 +1,142 @@
+{
+  "Direct Reply (Dialogue Continuation)": {
+    "bot.log": 6,
+    "bot.log.1": 3,
+    "bot.log.2": 0,
+    "bot.log.3": 0,
+    "TOTAL": 9
+  },
+  "Mentions (@bot / name)": {
+    "bot.log": 0,
+    "bot.log.1": 1,
+    "bot.log.2": 2,
+    "bot.log.3": 4,
+    "TOTAL": 7
+  },
+  "Sequential Follow-ups": {
+    "bot.log": 1,
+    "bot.log.1": 0,
+    "bot.log.2": 0,
+    "bot.log.3": 0,
+    "TOTAL": 1
+  },
+  "Passive Clinical Triggers": {
+    "bot.log": 3,
+    "bot.log.1": 15,
+    "bot.log.2": 11,
+    "bot.log.3": 57,
+    "TOTAL": 86
+  },
+  "Media Triggers (Images/Docs)": {
+    "bot.log": 3,
+    "bot.log.1": 36,
+    "bot.log.2": 32,
+    "bot.log.3": 57,
+    "TOTAL": 128
+  },
+  "Clinical Referee Triggers": {
+    "bot.log": 0,
+    "bot.log.1": 2,
+    "bot.log.2": 0,
+    "bot.log.3": 17,
+    "TOTAL": 19
+  },
+  "Total Triggers": {
+    "bot.log": 13,
+    "bot.log.1": 57,
+    "bot.log.2": 45,
+    "bot.log.3": 135,
+    "TOTAL": 250
+  },
+  "passive_cooldown (120m)": {
+    "bot.log": 31,
+    "bot.log.1": 343,
+    "bot.log.2": 0,
+    "bot.log.3": 288,
+    "TOTAL": 662
+  },
+  "retry_backoff (10m)": {
+    "bot.log": 0,
+    "bot.log.1": 25,
+    "bot.log.2": 89,
+    "bot.log.3": 626,
+    "TOTAL": 740
+  },
+  "dialogue_stale (count_since > 5)": {
+    "bot.log": 7,
+    "bot.log.1": 6,
+    "bot.log.2": 0,
+    "bot.log.3": 47,
+    "TOTAL": 60
+  },
+  "dialogue_triage_rejected (triage NO)": {
+    "bot.log": 7,
+    "bot.log.1": 7,
+    "bot.log.2": 1,
+    "bot.log.3": 1,
+    "TOTAL": 16
+  },
+  "passive_triage_rejected (Llama NO)": {
+    "bot.log": 25,
+    "bot.log.1": 681,
+    "bot.log.2": 516,
+    "bot.log.3": 508,
+    "TOTAL": 1730
+  },
+  "negative_feedback_silenced (4h penalty)": {
+    "bot.log": 0,
+    "bot.log.1": 1,
+    "bot.log.2": 0,
+    "bot.log.3": 1,
+    "TOTAL": 2
+  },
+  "bot_is_silenced (active penalty skips)": {
+    "bot.log": 0,
+    "bot.log.1": 19,
+    "bot.log.2": 0,
+    "bot.log.3": 0,
+    "TOTAL": 19
+  },
+  "validator_rejected (Text Drafts)": {
+    "bot.log": 0,
+    "bot.log.1": 10,
+    "bot.log.2": 38,
+    "bot.log.3": 20,
+    "TOTAL": 68
+  },
+  "media_validator_rejected (Media Drafts)": {
+    "bot.log": 0,
+    "bot.log.1": 8,
+    "bot.log.2": 27,
+    "bot.log.3": 14,
+    "TOTAL": 49
+  },
+  "validator_unavailable (Cascade failure)": {
+    "bot.log": 0,
+    "bot.log.1": 1,
+    "bot.log.2": 37,
+    "bot.log.3": 0,
+    "TOTAL": 38
+  },
+  "llm_cascade_exhausted (Fatal API drop)": {
+    "bot.log": 6,
+    "bot.log.1": 117,
+    "bot.log.2": 375,
+    "bot.log.3": 0,
+    "TOTAL": 498
+  },
+  "rate_limit_or_503 (Provider throttling)": {
+    "bot.log": 199,
+    "bot.log.1": 925,
+    "bot.log.2": 392,
+    "bot.log.3": 180,
+    "TOTAL": 1696
+  },
+  "Total Silence / Suppression Events": {
+    "bot.log": 275,
+    "bot.log.1": 2143,
+    "bot.log.2": 1475,
+    "bot.log.3": 1685,
+    "TOTAL": 5578
+  }
+}

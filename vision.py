@@ -316,7 +316,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         "content": content_arr
                                     }
                                 ],
-                                max_tokens=600
+                                max_tokens=1200
                             )
                             content = resp.choices[0].message.content
                             if content:

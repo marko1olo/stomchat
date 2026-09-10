@@ -42,6 +42,19 @@ def _default_log_path():
 LOG_PATH = _default_log_path()
 HEARTBEAT_PATH = "bot_heartbeat.json"
 SUMMARY_STATUS_PATH = "bot_summary_status.json"
+
+def _default_startup_state_path():
+    try:
+        import sys
+        entry = os.path.basename(sys.argv[0] or "")
+    except Exception:
+        entry = ""
+    if entry.startswith("test_") and entry.endswith(".py"):
+        return "bot_test_startup_state.json"
+    return "bot_startup_state.json"
+
+STARTUP_STATE_PATH = _default_startup_state_path()
+TELEGRAM_CONNECT_BACKOFF_STEPS = (10, 30, 60, 120, 300)
 WATCHDOG_DUMP_PATH = "bot_watchdog_dump.txt"
 HEARTBEAT_INTERVAL_SECONDS = 30
 WATCHDOG_STALE_SECONDS = 300
@@ -182,6 +195,80 @@ def write_summary_status(status):
             if attempt == 4:
                 raise
             time.sleep(0.1)
+
+
+def read_startup_state() -> dict:
+    """Читает персистентное состояние запусков и бэкоффа подключения."""
+    try:
+        with open(STARTUP_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_startup_state(state: dict):
+    """Атомарно сохраняет состояние бэкоффа на диск."""
+    payload = dict(state)
+    payload["utc"] = utc_now_text()
+    payload["pid"] = os.getpid()
+    tmp_path = STARTUP_STATE_PATH + ".tmp"
+    for attempt in range(5):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, STARTUP_STATE_PATH)
+            break
+        except OSError:
+            if attempt == 4:
+                break
+            time.sleep(0.1)
+
+
+def get_connect_backoff_delay(consecutive_failures: int) -> int:
+    """Возвращает задержку в секундах: 10s -> 30s -> 60s -> 120s -> 300s."""
+    idx = max(0, min(consecutive_failures - 1, len(TELEGRAM_CONNECT_BACKOFF_STEPS) - 1))
+    return TELEGRAM_CONNECT_BACKOFF_STEPS[idx]
+
+
+def record_connection_failure(error_msg: str) -> int:
+    """Фиксирует сбой подключения к Telegram, увеличивает счетчик серии и возвращает задержку."""
+    state = read_startup_state()
+    now_ts = time.time()
+    last_ts = state.get("last_failure_timestamp", 0)
+    # Если с момента прошлого сбоя прошло более 30 минут, начинаем серию заново
+    if now_ts - last_ts > 1800:
+        failures = 1
+    else:
+        failures = state.get("consecutive_failures", 0) + 1
+
+    delay = get_connect_backoff_delay(failures)
+    state["consecutive_failures"] = failures
+    state["last_failure_timestamp"] = now_ts
+    state["last_failure_error"] = str(error_msg)[:300]
+    state["next_allowed_connect_timestamp"] = now_ts + delay
+    write_startup_state(state)
+    return delay
+
+
+def record_connection_success():
+    """Сбрасывает счетчик сбоев подключения при успешном коннекте обоих клиентов."""
+    state = read_startup_state()
+    if state.get("consecutive_failures", 0) > 0:
+        state["consecutive_failures"] = 0
+        state["last_success_timestamp"] = time.time()
+        state.pop("next_allowed_connect_timestamp", None)
+        write_startup_state(state)
+
+
+def get_consecutive_connect_failures() -> int:
+    return read_startup_state().get("consecutive_failures", 0)
+
+
+def get_startup_connect_wait() -> float:
+    """Возвращает оставшееся время ожидания бэкоффа в секундах (0.0 если ждать не нужно)."""
+    state = read_startup_state()
+    next_ts = state.get("next_allowed_connect_timestamp", 0)
+    return max(0.0, next_ts - time.time())
 
 
 def clear_summary_status(reason="idle"):

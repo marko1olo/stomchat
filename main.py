@@ -851,6 +851,20 @@ async def pm_ping_scheduler_task(bot_client):
             )
         except Exception as e:
             logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
+
+        try:
+            await asyncio.wait_for(
+                assistant.check_and_send_group_activity_pings(bot_client),
+                timeout=PING_PHASE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Group activity pings timed out after %ss — проход прерван, цикл продолжается",
+                PING_PHASE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            logger.error(f"Error in pm_ping_scheduler_task (group pings): {e}")
+
         await asyncio.sleep(3600)  # Проверка каждый час
 
 # Порог, после которого telethon перестаёт спать на FloodWait и поднимает
@@ -2707,19 +2721,33 @@ async def sync_history():
         logger.info("✅ Пропущенных сообщений не обнаружено.")
 
 async def health_watchdog_task():
-    """Контролирует, что Telethon реально получает новые сообщения, а не просто живит процесс."""
-    failure_count = 0
+    """Контролирует, что Telethon реально получает новые сообщения, а не просто живит процесс.
+
+    Различает «мягкие» сбои (таймауты, кратковременные сетевые задержки)
+    и «жёсткие» (client.is_connected() == False после ожидания авто-реконнекта).
+
+    Мягкий сбой добавляет 0.5 к счётчику, жёсткий — 1.0.  При сумме >= HEALTH_FAILURE_LIMIT (3)
+    принимается решение о рестарте.  Итого: нужно 6 подряд таймаутов (30 мин) или
+    3 подряд реальных дисконнекта (15 мин) для перезапуска.
+    """
+    failure_score = 0.0
 
     while True:
         await asyncio.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
 
         try:
+            # Даём Telethon 20 с на авто-реконнект MTProto, прежде чем считать
+            # клиент потерянным. Без этого health_check ловил is_connected()==False
+            # посреди нормального переподключения и стрелял рестартом.
             if not client.is_connected():
-                raise ConnectionError("Telethon user client disconnected")
+                logger.warning("health_check: client disconnected, waiting 20s for auto-reconnect…")
+                await asyncio.sleep(20)
+                if not client.is_connected():
+                    raise ConnectionError("Telethon user client disconnected after 20s wait")
 
             if config.SOURCE_CHAT_ID is None:
                 logger.warning("health_check пропущен: SOURCE_CHAT_ID не задан")
-                failure_count = 0
+                failure_score = 0.0
                 continue
 
             latest_messages = await asyncio.wait_for(
@@ -2738,9 +2766,20 @@ async def health_watchdog_task():
                     )
                     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
 
-            failure_count = 0
+            failure_score = 0.0
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Мягкий сбой: таймаут на get_messages или sync_history.
+            # Может быть вызван временной задержкой MTProto, перегрузкой DC,
+            # или тяжёлой синхронизацией. Считаем как полу-сбой.
+            failure_score += 0.5
+            logger.warning(
+                "health_check soft timeout %s (score %.1f/%s): %s: %s",
+                "⚠️", failure_score, HEALTH_FAILURE_LIMIT,
+                type(exc).__name__, exc,
+            )
         except Exception as exc:
-            failure_count += 1
+            # Жёсткий сбой: реальный дисконнект, ошибка протокола и т.д.
+            failure_score += 1.0
             # Тип обязателен: у asyncio.TimeoutError пустой str(), и в журнале
             # оставалось «health_check failed 1/3: » — четыре записи из четырёх
             # без единого слова о причине, притом что это путь к принудительному
@@ -2748,20 +2787,21 @@ async def health_watchdog_task():
             # обращения к Telegram, и синхронизацию истории, и разбор ответа, а
             # различить их по тексту исключения нельзя.
             logger.error(
-                "health_check failed %s/%s: %s: %s",
-                failure_count,
+                "health_check hard failure (score %.1f/%s): %s: %s",
+                failure_score,
                 HEALTH_FAILURE_LIMIT,
                 type(exc).__name__,
                 exc,
                 exc_info=True,
             )
 
-            if failure_count >= HEALTH_FAILURE_LIMIT:
-                logger.error("health_check forcing restart: отключаю client, start.bat перезапустит процесс")
-                runtime_guard.dump_runtime_state("health_check_failure_limit")
-                await bot_client.disconnect()
-                await client.disconnect()
-                return
+        if failure_score >= HEALTH_FAILURE_LIMIT:
+            logger.error("health_check forcing restart: отключаю client, start.bat перезапустит процесс")
+            runtime_guard.record_connection_failure("health_check_failure_limit")
+            runtime_guard.dump_runtime_state("health_check_failure_limit")
+            await bot_client.disconnect()
+            await client.disconnect()
+            return
 
 # --- ОБНОВЛЕННЫЙ START_BOT ---
 async def start_bot():
@@ -2789,17 +2829,50 @@ async def start_bot():
     logger.info("🚀 Инициализация базы данных...")
     await asyncio.wait_for(database.init_db(), timeout=30)
     
+    # Нарастающий бэкофф подключения к Telegram (10s -> 30s -> 60s -> 120s -> 300s).
+    # Предотвращает бан по IP при падении серверов Telegram или сбоях сети.
+    connect_wait = runtime_guard.get_startup_connect_wait()
+    if connect_wait > 0:
+        failures = runtime_guard.get_consecutive_connect_failures()
+        logger.warning(
+            "⏳ Задержка бэкоффа подключения к Telegram: серия сбоев=%d, пауза %.1f с перед коннектом...",
+            failures,
+            connect_wait,
+        )
+        slept = 0.0
+        while slept < connect_wait:
+            chunk = min(15.0, connect_wait - slept)
+            await asyncio.sleep(chunk)
+            slept += chunk
+            runtime_guard.write_heartbeat("connect_backoff_wait")
+
     logger.info("🔗 Подключение к Telegram...")
-    await asyncio.wait_for(client.start(), timeout=START_TIMEOUT_SECONDS)
+    try:
+        await asyncio.wait_for(client.start(), timeout=START_TIMEOUT_SECONDS)
+    except Exception as client_err:
+        delay = runtime_guard.record_connection_failure(f"client.start: {type(client_err).__name__}: {client_err}")
+        logger.error(
+            "❌ User client не подключился (%s: %s). Пауза следующего запуска: %d с.",
+            type(client_err).__name__, client_err, delay
+        )
+        raise
+
     start_media_analysis_workers()
     logger.info("🤖 Подключение bot client...")
     try:
         await asyncio.wait_for(bot_client.start(bot_token=config.BOT_TOKEN), timeout=START_TIMEOUT_SECONDS)
-    except Exception:
-        logger.exception("❌ Bot client не подключился. Выход для перезапуска через start.bat.")
+    except Exception as bot_err:
+        delay = runtime_guard.record_connection_failure(f"bot_client.start: {type(bot_err).__name__}: {bot_err}")
+        logger.exception(
+            "❌ Bot client не подключился (%s: %s). Пауза следующего запуска: %d с.",
+            type(bot_err).__name__, bot_err, delay
+        )
         await stop_media_analysis_workers()
         await client.disconnect()
         raise
+
+    # Оба клиента подключены успешно — сбрасываем серию сбоев
+    runtime_guard.record_connection_success()
     await asyncio.wait_for(get_my_id(), timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS)
     logger.info("🤖 Инициализация авто-ассистента...")
     await assistant.init_assistant(bot_client)

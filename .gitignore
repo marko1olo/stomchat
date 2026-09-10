@@ -13,6 +13,8 @@ id.py
 bot_heartbeat.json
 bot_state.json
 bot_summary_status.json
+bot_startup_state.json
+bot_test_startup_state*.json
 bot_watchdog_dump.txt
 temp_media/
 uploaded_media/

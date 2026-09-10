@@ -175,18 +175,51 @@ def _message_matches_topic(message, topic_id):
     )
 
 
+class _LocalMessage:
+    def __init__(self, msg_id, text="", reply_to_msg_id=None):
+        self.id = msg_id
+        self.text = text
+        self.message = text
+        self.raw_text = text
+        self.reply_to = type("ReplyTo", (), {
+            "reply_to_msg_id": reply_to_msg_id,
+            "reply_to_top_id": reply_to_msg_id,
+        })()
+
+
 async def _find_recent_matching_message(client, chat_id, topic_id, text):
     wanted = _normalize_delivery_text(text)
     if not wanted:
         return None
 
+    # 1. Локальная проверка по SQLite (bot_sent_messages + messages) перед сетевым вызовом,
+    # устраняющая ошибку MTProto 'GetHistoryRequest restricted for bot users'
+    try:
+        if hasattr(database, "get_recent_messages_for_dedup"):
+            db_messages = await database.get_recent_messages_for_dedup(
+                chat_id=chat_id, limit=RECENT_DELIVERY_SCAN_LIMIT
+            )
+            for msg_id, msg_text, reply_to_id in db_messages or []:
+                local_msg = _LocalMessage(msg_id, msg_text or "", reply_to_id)
+                if not _message_matches_topic(local_msg, topic_id):
+                    continue
+                if _normalize_delivery_text(msg_text or "") == wanted:
+                    return local_msg
+    except Exception as exc:
+        logger.debug("local db recent message check failed chat=%s topic=%s: %s", chat_id, topic_id, exc)
+
+    # 2. Сетевой fallback через client.get_messages (для тестов с FakeClient)
     try:
         recent_messages = await asyncio.wait_for(
             client.get_messages(chat_id, limit=RECENT_DELIVERY_SCAN_LIMIT),
             timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        logger.warning("recent delivery scan failed chat=%s topic=%s: %s", chat_id, topic_id, exc)
+        err_msg = str(exc).lower()
+        if "gethistoryrequest" in err_msg or "bot users" in err_msg or "restricted" in err_msg:
+            logger.debug("recent delivery scan skipped (bot restricted) chat=%s topic=%s: %s", chat_id, topic_id, exc)
+        else:
+            logger.warning("recent delivery scan failed chat=%s topic=%s: %s", chat_id, topic_id, exc)
         return None
 
     for message in recent_messages or []:

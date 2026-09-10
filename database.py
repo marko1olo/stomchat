@@ -327,8 +327,10 @@ async def init_db():
             ):
                 try:
                     db.execute(f"ALTER TABLE user_memories ADD COLUMN {col_def}")
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        logger.warning("user_memories migration %s НЕ применена: %s: %s",
+                                       col_def, type(exc).__name__, exc)
 
             try:
                 db.execute("ALTER TABLE messages ADD COLUMN media_remote_url TEXT")
@@ -1040,6 +1042,48 @@ async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
     return await _run_db(operation)
 
 
+async def get_recent_messages_for_dedup(chat_id=None, limit=50):
+    """
+    Выборка последних сообщений из bot_sent_messages + messages для быстрой локальной
+    дедупликации без сетевых запросов get_messages в Telegram.
+    """
+    def operation():
+        with _connection() as db:
+            seen_ids = set()
+            result = []
+            if chat_id is not None:
+                rows = db.execute(
+                    """
+                    SELECT b.msg_id, m.text, m.reply_to_msg_id
+                    FROM bot_sent_messages b
+                    JOIN messages m ON b.msg_id = m.msg_id
+                    WHERE b.chat_id = ?
+                    ORDER BY b.id DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, limit),
+                ).fetchall()
+                for r in rows:
+                    if r[0] not in seen_ids:
+                        seen_ids.add(r[0])
+                        result.append((r[0], r[1], r[2]))
+
+            rows_m = db.execute(
+                """
+                SELECT msg_id, text, reply_to_msg_id
+                FROM messages
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            for r in rows_m:
+                if r[0] not in seen_ids:
+                    seen_ids.add(r[0])
+                    result.append((r[0], r[1], r[2]))
+            return result
+    return await _run_db(operation)
+
 
 async def save_pm_message(user_id, sender_name, text):
     def operation():
@@ -1334,11 +1378,12 @@ async def increment_user_pm_count(user_id: int, username: str = "", first_name: 
     return await _run_db(operation)
 
 
-async def get_unprocessed_group_users(min_new_messages=3, limit=20):
+async def get_unprocessed_group_users(min_new_messages=3, limit=20, bot_id=None):
     """
     Возвращает список пользователей, у которых в messages накопились новые сообщения
     для обновления памяти беседы (group_summary).
     Приоритет отдается врачам с наибольшим количеством новых реплик (cnt DESC, max_id DESC).
+    Исключает самого бота (bot_id) и отрицательные sender_id (каналы/группы).
     """
     def operation():
         with _connection() as db:
@@ -1348,7 +1393,8 @@ async def get_unprocessed_group_users(min_new_messages=3, limit=20):
                        COUNT(m.msg_id) as cnt, MAX(m.msg_id) as max_id
                 FROM messages m
                 LEFT JOIN user_memories um ON um.user_id = m.sender_id
-                WHERE m.sender_id IS NOT NULL AND m.sender_id != 0
+                WHERE m.sender_id IS NOT NULL AND m.sender_id > 0
+                  AND (? IS NULL OR m.sender_id != ?)
                   AND m.text IS NOT NULL AND LENGTH(TRIM(m.text)) > 15
                   AND m.msg_id > COALESCE(um.last_group_analyzed_id, 0)
                 GROUP BY m.sender_id
@@ -1356,7 +1402,7 @@ async def get_unprocessed_group_users(min_new_messages=3, limit=20):
                 ORDER BY cnt DESC, max_id DESC
                 LIMIT ?
                 """,
-                (min_new_messages, limit)
+                (bot_id, bot_id, min_new_messages, limit)
             ).fetchall()
             return [
                 {
