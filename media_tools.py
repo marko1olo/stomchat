@@ -51,7 +51,7 @@ def _prepare_image_sync(file_path):
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
         with io.BytesIO() as buffer:
-            img.save(buffer, format="JPEG", quality=70, optimize=True)
+            img.save(buffer, format="JPEG", quality=85, optimize=True)
             return buffer.getvalue(), None
     except Exception as exc:
         return None, f"Ошибка CPU обработки: {exc}"
