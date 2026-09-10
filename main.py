@@ -1778,7 +1778,8 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                 async def run_media_assistant_safe():
                     try:
                         await assistant.check_and_trigger_assistant_media(
-                            bot_client, messages[0], msg_id, text, media_description
+                            bot_client, messages[0], msg_id, text, media_description,
+                            image_urls=getattr(media_description, "image_urls", None),
                         )
                     except Exception as e:
                         logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")

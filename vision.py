@@ -162,6 +162,32 @@ async def _pace_vision_calls():
         _LAST_VISION_CALL_TIME = time.time()
 
 
+class VisionDescription(str):
+    """
+    Строковое описание снимка с сохранением подготовленных image_urls (data:image/jpeg;base64,...).
+    Полностью совместимо с обычным str для базы данных, логирования и строковых операций,
+    но позволяет вызывающему коду извлечь оригинальные изображения для мультимодального вызова Gemini.
+    """
+    image_urls: list[str]
+
+    def __new__(cls, content, image_urls=None):
+        instance = super().__new__(cls, content)
+        instance.image_urls = list(image_urls) if image_urls else []
+        return instance
+
+
+_RECENT_IMAGE_URLS: dict[str, list[str]] = {}
+
+
+def get_recent_image_urls(key=None) -> list[str]:
+    """Возвращает последние сохраненные image_urls."""
+    if key and key in _RECENT_IMAGE_URLS:
+        return _RECENT_IMAGE_URLS[key]
+    if _RECENT_IMAGE_URLS:
+        return next(reversed(_RECENT_IMAGE_URLS.values()))
+    return []
+
+
 async def describe_image(file_paths, caption: str = None, is_passive: bool = False) -> str:
     """Анализирует изображение(я) через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
     if isinstance(file_paths, str):
@@ -326,7 +352,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     # а не надеемся на послушание модели.
                                     if _is_mostly_cyrillic(text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
-                                        return text
+                                        _RECENT_IMAGE_URLS[text[:60]] = image_urls
+                                        if len(_RECENT_IMAGE_URLS) > 50:
+                                            _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
+                                        return VisionDescription(text, image_urls=image_urls)
                                     if english_fallback is None:
                                         english_fallback = text
                                     logger.warning(
@@ -342,7 +371,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     "Vision payload too large (413) for %s images. Stopping attempts.",
                                     len(image_urls),
                                 )
-                                return english_fallback
+                                if english_fallback:
+                                    _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
+                                    return VisionDescription(english_fallback, image_urls=image_urls)
+                                return None
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель
@@ -367,7 +399,8 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 # описание всё же лучше, чем ничего: без него врач получит
                 # ответ, в котором снимок вообще не упомянут.
                 logger.warning("Vision: no Russian answer from cascade, using non-Russian description")
-                return english_fallback
+                _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
+                return VisionDescription(english_fallback, image_urls=image_urls)
             return None
 
         except Exception as e:

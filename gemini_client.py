@@ -744,12 +744,30 @@ def generate_text(prompt, status_context=None, timeout=None):
                 logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
                 requests_made += 1
+                # Поддержка мультимодальности: если переданы image_urls, прикрепляем их для Gemini
+                image_urls = status_context.get("image_urls") if isinstance(status_context, dict) else None
+                can_vision = (provider == "gemini") or ("vision" in model_name.lower())
+
+                if can_vision and image_urls:
+                    user_content = [{"type": "text", "text": prompt}]
+                    for iu in image_urls[:3]:
+                        user_content.append({"type": "image_url", "image_url": {"url": iu}})
+                    messages_payload = [{"role": "user", "content": user_content}]
+                else:
+                    messages_payload = [{"role": "user", "content": prompt}]
+
                 # Using OpenAI SDK for BOTH Groq and Gemini now
                 create_kwargs = {
                     "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages_payload,
                     "temperature": 0.95,
                 }
+                ctx_max_tokens = status_context.get("max_tokens") if isinstance(status_context, dict) else None
+                if ctx_max_tokens:
+                    create_kwargs["max_tokens"] = int(ctx_max_tokens)
+                elif kind == "daemon_memory":
+                    create_kwargs["max_tokens"] = 2048
+
                 # Нативный параметр размышлений для моделей:
                 # ВСЕМ передаем reasoning_effort="high" (кроме легковесных триажей с явным LOW)
                 if is_triage or thinking_level == "LOW":
@@ -760,8 +778,16 @@ def generate_text(prompt, status_context=None, timeout=None):
                 try:
                     response = client.chat.completions.create(**create_kwargs)
                 except (TypeError, Exception) as err:
-                    if "reasoning_effort" in str(err).lower():
+                    err_str = str(err).lower()
+                    retry_needed = False
+                    if "reasoning_effort" in err_str and "reasoning_effort" in create_kwargs:
                         create_kwargs.pop("reasoning_effort", None)
+                        retry_needed = True
+                    if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
+                        logger.warning("Model %s rejected multimodal payload; retrying with text only", model_name)
+                        create_kwargs["messages"] = [{"role": "user", "content": prompt}]
+                        retry_needed = True
+                    if retry_needed:
                         response = client.chat.completions.create(**create_kwargs)
                     else:
                         raise

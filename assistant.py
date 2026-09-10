@@ -3242,7 +3242,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         except Exception as e:
             logger.error(f"Failed to send direct assistant reply: {e}")
             return False
-async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description):
+async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description, image_urls=None):
+    if image_urls is None and media_description:
+        image_urls = getattr(media_description, "image_urls", None)
     if msg_id in REPLIED_MSG_IDS:
         return False
     state = load_state()
@@ -3394,6 +3396,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
 
     # BUILD PROMPT
+    multimodal_notice = ""
+    if image_urls:
+        multimodal_notice = """
+[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К твоему запросу прикреплено оригинальное изображение в высоком разрешении. Внимательно сопоставь описание модели зрения с реальным снимком, деталями рентгенограммы, анатомией зубов и клинической картиной. Опирайся в первую очередь на то, что ты реально видишь на прикрепленном снимке.]
+"""
+
     if is_dental:
         prompt = f"""
 Ты — опытный стоматолог-практик, читаешь чат коллег "StomChat". Тебе прислали изображение по стоматологической теме.
@@ -3402,6 +3410,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Описание изображения (распознано моделью зрения — это НЕ факт, а прочтение снимка машиной):
 {media_description}
 [ДОСТОВЕРНОСТЬ ОПИСАНИЯ: модель зрения способна «увидеть» на снимке то, чего там нет. Не повторяй её формулировки как установленный факт и не строй на одной такой детали категоричный вывод. Если ключевая для ответа находка держится только на описании — так и скажи, что судишь по снимку в чате, и назови, что стоило бы проверить (прицельный, КТ, зондирование, анамнез).]
+{multimodal_notice}
 
 История диалога (цепочка ответов):
 {context_str}
@@ -3469,6 +3478,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
+    if image_urls:
+        status_ctx["image_urls"] = image_urls
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
     if error:
@@ -5303,6 +5314,12 @@ async def handle_private_message(bot_client, event):
 
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
+            pm_multimodal_notice = ""
+            pm_image_urls = getattr(media_description, "image_urls", None)
+            if pm_image_urls:
+                pm_multimodal_notice = """
+[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К запросу прикреплено оригинальное изображение в высоком разрешении. Тщательно изучи детали снимка (костную ткань, корни, каналы, прилегание реставраций) напрямую по прикрепленному изображению.]
+"""
             prompt = f"""
 Ты — старший врач-консультант, ведущий эксперт клинического консилиума сообщества "StomChat".
 Твой собеседник — ДИПЛОМИРОВАННЫЙ ВРАЧ-СТОМАТОЛОГ. Пациентов в диалоге нет. Общение строго на равных («Врач — Врачу») на академическом профессиональном языке (биологическая ширина, BOPT, IDS, феррул, торк, торсионная усталость файлов, PAI, гипохлоритная авария, адгезивные протоколы).
@@ -5320,6 +5337,7 @@ async def handle_private_message(bot_client, event):
 Описание изображения (распознано моделью зрения — предварительная гипотеза):
 {media_description}
 [ДОСТОВЕРНОСТЬ: Машинное описание снимка может содержать артефакты и ложные достройки. Оценивай клиническую картину критически, опираясь на объективные анатомические и рентгенологические ориентиры.]
+{pm_multimodal_notice}
 
 Вопрос или подпись пользователя:
 {text or "(без подписи)"}
@@ -5475,6 +5493,9 @@ async def handle_private_message(bot_client, event):
 """
 
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                pm_image_urls = getattr(media_description, "image_urls", None)
+                if pm_image_urls:
+                    status_ctx["image_urls"] = pm_image_urls
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
                 
                 if error:
