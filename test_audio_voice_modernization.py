@@ -129,6 +129,63 @@ class TestAudioVoiceModernization(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_transcribe_audio_gemini_multimodal_cascade(self):
+        """Verify transcribe_audio_gemini_multimodal uses current models cascade."""
+        import asyncio
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(b"OggS\x00\x02" + b"\x00" * 64)
+            tmp_path = f.name
+
+        try:
+            fake_resp = MagicMock()
+            fake_resp.status_code = 200
+            fake_resp.json.return_value = {
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "Препарирование под оксид циркония"}]
+                    }
+                }]
+            }
+
+            class FakeAsyncClient:
+                def __init__(self, *args, **kwargs):
+                    pass
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *args):
+                    pass
+                async def post(self, url, json=None):
+                    self.last_url = url
+                    return fake_resp
+
+            with patch("gemini_client._httpx.AsyncClient", FakeAsyncClient), \
+                 patch.object(config, "GOOGLE_KEYS", ["test_gkey_12345"]):
+                text, err = asyncio.run(
+                    gemini_client.transcribe_audio_gemini_multimodal(tmp_path, duration_secs=5)
+                )
+                self.assertEqual(text, "Препарирование под оксид циркония")
+                self.assertIsNone(err)
+
+            # Test silence recognition
+            fake_resp.json.return_value = {
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "[тишина]"}]
+                    }
+                }]
+            }
+            with patch("gemini_client._httpx.AsyncClient", FakeAsyncClient), \
+                 patch.object(config, "GOOGLE_KEYS", ["test_gkey_12345"]):
+                text, err = asyncio.run(
+                    gemini_client.transcribe_audio_gemini_multimodal(tmp_path, duration_secs=5)
+                )
+                self.assertEqual(text, "")
+                self.assertIsNone(err)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
+

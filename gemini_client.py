@@ -14,6 +14,7 @@ for proxy_var in ["HTTP_PROXY", "HTTPS_PROXY", "PROXY_URL"]:
         os.environ[proxy_var.lower()] = val
         os.environ[proxy_var.upper()] = val
 import runtime_guard
+import httpx as _httpx
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -1210,7 +1211,6 @@ async def transcribe_audio_gemini_multimodal(
     Модели: от самой лёгкой к более тяжёлой (flash-lite справляется на расшифровке).
     """
     import base64
-    import httpx as _httpx
 
     keys = list(getattr(config, "GOOGLE_KEYS", []))
     if not keys:
@@ -1243,11 +1243,13 @@ async def transcribe_audio_gemini_multimodal(
 
     gemini_timeout = max(30.0, min(120.0, duration_secs * 0.6 + 20.0))
     models_to_try = [
-        "gemini-2.5-flash-lite-preview-06-17",
+        "gemini-3.1-flash-lite",
         "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
     ]
+    proxy_url = os.getenv("PROXY_URL") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None
+    proxies_to_try = [None, proxy_url] if proxy_url else [None]
 
     payload = {
         "contents": [{
@@ -1257,6 +1259,12 @@ async def transcribe_audio_gemini_multimodal(
             ]
         }],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1024},
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ],
     }
 
     last_error = "all attempts failed"
@@ -1266,51 +1274,52 @@ async def transcribe_audio_gemini_multimodal(
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model_name}:generateContent?key={gkey}"
             )
-            try:
-                async with _httpx.AsyncClient(verify=False, timeout=gemini_timeout) as hc:
-                    resp = await hc.post(url, json=payload)
-                    if resp.status_code == 200:
-                        gdata = resp.json()
-                        parts = (
-                            gdata.get("candidates", [{}])[0]
-                            .get("content", {})
-                            .get("parts", [])
-                        )
-                        if parts and "text" in parts[0]:
-                            raw = parts[0]["text"].strip()
-                            if not raw or re.match(
-                                r"^\[?(тишина|silence|тишина\.+)\]?\.?$",
-                                raw.strip().lower(),
-                            ):
-                                logger.info(
-                                    "Gemini multimodal STT: silence via %s", model_name
-                                )
-                                return "", None
-                            logger.info(
-                                "Gemini multimodal STT: success via %s (%d chars)",
-                                model_name, len(raw),
+            for proxy in proxies_to_try:
+                try:
+                    async with _httpx.AsyncClient(proxy=proxy, verify=False, timeout=gemini_timeout) as hc:
+                        resp = await hc.post(url, json=payload)
+                        if resp.status_code == 200:
+                            gdata = resp.json()
+                            parts = (
+                                gdata.get("candidates", [{}])[0]
+                                .get("content", {})
+                                .get("parts", [])
                             )
-                            return raw, None
-                        last_error = f"{model_name}: empty response"
-                    elif resp.status_code == 429:
-                        logger.info(
-                            "Gemini multimodal STT: 429 key=...%s model=%s",
-                            gkey[-4:], model_name,
-                        )
-                        last_error = f"429 on {model_name}"
-                        break  # следующий ключ
-                    else:
-                        last_error = f"{model_name}: HTTP {resp.status_code}"
-                        logger.debug(
-                            "Gemini multimodal STT HTTP %s model=%s",
-                            resp.status_code, model_name,
-                        )
-            except Exception as exc:
-                last_error = f"{model_name}: {exc}"
-                logger.debug(
-                    "Gemini multimodal STT exception model=%s: %s", model_name, exc
-                )
-                continue
+                            if parts and "text" in parts[0]:
+                                raw = parts[0]["text"].strip()
+                                if not raw or re.match(
+                                    r"^\[?(тишина|silence|тишина\.+)\]?\.?$",
+                                    raw.strip().lower(),
+                                ):
+                                    logger.info(
+                                        "Gemini multimodal STT: silence via %s", model_name
+                                    )
+                                    return "", None
+                                logger.info(
+                                    "Gemini multimodal STT: success via %s (%d chars)",
+                                    model_name, len(raw),
+                                )
+                                return raw, None
+                            last_error = f"{model_name}: empty response"
+                        elif resp.status_code == 429:
+                            logger.info(
+                                "Gemini multimodal STT: 429 key=...%s model=%s",
+                                gkey[-4:], model_name,
+                            )
+                            last_error = f"429 on {model_name}"
+                            break  # следующий ключ
+                        else:
+                            last_error = f"{model_name}: HTTP {resp.status_code}"
+                            logger.debug(
+                                "Gemini multimodal STT HTTP %s model=%s",
+                                resp.status_code, model_name,
+                            )
+                except Exception as exc:
+                    last_error = f"{model_name}: {exc}"
+                    logger.debug(
+                        "Gemini multimodal STT exception model=%s: %s", model_name, exc
+                    )
+                    continue
 
     return None, last_error
 
