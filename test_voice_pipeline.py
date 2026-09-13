@@ -134,6 +134,12 @@ def set_whisper(text, error=None, corrected=None):
     blocking_tools.transcribe_audio_async = fake_transcribe
     blocking_tools.correct_dental_transcription_async = fake_correct
 
+    import gemini_client
+    async def _fake_gemini_audio(*a, **kw):
+        return None, "pipeline_test_skip_gemini"
+    gemini_client.transcribe_audio_gemini_multimodal = _fake_gemini_audio
+
+
 
 async def stored_text(msg_id):
     row = await database.get_text_by_id(msg_id)

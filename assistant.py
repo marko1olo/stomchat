@@ -2359,10 +2359,10 @@ async def check_llm_triage(context_msgs):
 Когда ОТВЕЧАТЬ (should_reply: true) — ТОЛЬКО В ЭТИХ СЛУЧАЯХ:
 1. Прямой вопрос/обращение к боту (тег @, упоминание бота, прямой ответ на реплику бота).
 2. Конкретный клинический вопрос/кейс от врача, на который в чате никто не ответил (висит без ответа, врачу нужна помощь).
-3. Клинический вопрос остался без содержательного ответа (коллеги ответили односложно или неполно, а ситуация требует развернутого доказательного протокола лечения).
+3. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения — бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True).
 
 Когда КАТЕГОРИЧЕСКИ ИГНОРИРОВАТЬ (should_reply: false):
-1. ИДЕТ ЖИВОЙ КОНСИЛИУМ: двое или более врачей уже ведут содержательное клиническое обсуждение и дали исчерпывающий ответ по протоколу.
+1. ИДЕТ ЖИВОЙ КОНСИЛИУМ: Запрет на вмешательство действует ТОЛЬКО если коллеги УЖЕ ведут содержательный клинический консилиум и дали полный протокол. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения, бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True). Не вмешиваться, если двое или более врачей уже ведут содержательный клинический консилиум и дали исчерпывающий клинический протокол.
 2. Нерелевантные или неклинические темы (налоги, юмор, быт, цены, работа клиники, расписание, флуд).
 3. Короткие эмоциональные реплики, шутки, сарказм, мысли вслух, междометия.
 4. Если ответ бота будет просто короткой репликой/вбросом на чужое сообщение — СТРОГО ЗАПРЕЩЕНО.
@@ -4647,25 +4647,32 @@ async def handle_private_message(bot_client, event):
                 logger.error(f"Failed to send adversarial refusal in PM: {adv_err}")
                 return
 
-        # 0. Voice Note / Audio processing
+        # 0. Voice Note / Audio / Video Note processing
         is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
         is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
-        is_audio = is_voice or is_audio_file
+        is_video_note = hasattr(event.message, "video_note") and event.message.video_note is not None and type(event.message.video_note).__name__ != "MagicMock"
+        is_audio = is_voice or is_audio_file or is_video_note
         transcribed_text = None
         if is_audio:
             file_obj = getattr(getattr(event, "message", None), "file", None)
             file_size = getattr(file_obj, "size", 0) or 0
             MAX_VOICE_SIZE = 25 * 1024 * 1024  # 25 МБ потолок
             if file_size > MAX_VOICE_SIZE:
+                warn_text = (
+                    "⚠️ <i>Видеосообщение слишком большое (> 25 МБ). Пришлите более короткий кружочек.</i>"
+                    if is_video_note else
+                    "⚠️ <i>Аудиофайл слишком большой (> 25 МБ). Пришлите более короткую голосовую заметку.</i>"
+                )
                 await bot_client.send_message(
                     entity=chat_id,
-                    message="⚠️ <i>Аудиофайл слишком большой (> 25 МБ). Пришлите более короткую голосовую заметку.</i>",
+                    message=warn_text,
                     parse_mode='html'
                 )
                 return
 
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
-            status_msg = await bot_client.send_message(entity=chat_id, message="🎤 <i>Распознаю аудиосообщение... Подождите.</i>", parse_mode='html')
+            status_text = "📹 <i>Распознаю видеосообщение... Подождите.</i>" if is_video_note else "🎤 <i>Распознаю аудиосообщение... Подождите.</i>"
+            status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
             temp_path = None
             try:
                 # download_media собственного таймаута НЕ имеет. Это было
@@ -4689,7 +4696,41 @@ async def handle_private_message(bot_client, event):
                 )
                 if temp_path and os.path.exists(temp_path):
                     import blocking_tools
-                    transcribed, error = await blocking_tools.transcribe_audio_async(temp_path, timeout=60)
+                    import gemini_client as _gc
+
+                    # Attempt 1: Gemini multimodal primary STT
+                    _dur = 0.0
+                    try:
+                        _ma = (
+                            getattr(event.message, "video_note", None)
+                            or getattr(event.message, "voice", None)
+                            or getattr(event.message, "audio", None)
+                        )
+                        _dur = float(getattr(_ma, "duration", 0) or 0)
+                    except Exception:
+                        pass
+
+                    gemini_text, gemini_err = await _gc.transcribe_audio_gemini_multimodal(
+                        temp_path,
+                        duration_secs=_dur,
+                        is_video_note=is_video_note,
+                    )
+                    if gemini_err is None:
+                        transcribed = gemini_text
+                        error = None
+                        if transcribed:
+                            logger.info("PM STT: Gemini multimodal success (%d chars)", len(transcribed))
+                        else:
+                            logger.info("PM STT: Gemini multimodal -> silence")
+                    else:
+                        logger.info(
+                            "PM STT: Gemini failed (%s), falling back to Groq Whisper",
+                            gemini_err,
+                        )
+                        transcribed, error = await blocking_tools.transcribe_audio_async(
+                            temp_path, timeout=60
+                        )
+
                     if error:
                         logger.error(f"Audio transcription error: {error}")
                     elif transcribed:
@@ -4715,16 +4756,32 @@ async def handle_private_message(bot_client, event):
                 silence_hallucinations = {
                     "you", "thank you", "bye", "подпишитесь", 
                     "продолжение следует", "редактор субтитров", "субтитры", 
-                    "youtube", "собачья чушь", "спасибо"
+                    "youtube", "собачья чушь", "спасибо",
+                    "дима торжок", "dimatorzhok", "dima torzhok",
+                    "субтитры сделал", "синецкая", "перевод субтитров",
+                    "переведено", "озвучено", "тишина", "[тишина]", "тишина.", "тишина...",
                 }
                 clean_transcribed = text.strip().lower().rstrip(".").rstrip(",")
-                if clean_transcribed in silence_hallucinations:
+                if clean_transcribed in silence_hallucinations or (
+                    len(clean_transcribed) < 45 and any(h in clean_transcribed for h in ("дима торжок", "dimatorzhok", "субтитры сделал", "редактор субтитров", "синецкая"))
+                ):
                     logger.info(f"Filtered suspected Whisper silence hallucination: '{text}'")
-                    await bot_client.send_message(entity=chat_id, message="🎤 <i>(Тишина или фоновый шум) Пожалуйста, говорите громче или пишите текстом.</i>", parse_mode='html')
+                    silence_reply = (
+                        "📹 <i>(Тишина или фоновый шум в видео) Пожалуйста, говорите громче или напишите текстом.</i>"
+                        if is_video_note else
+                        "🎤 <i>(Тишина или фоновый шум) Пожалуйста, говорите громче или пишите текстом.</i>"
+                    )
+                    await bot_client.send_message(entity=chat_id, message=silence_reply, parse_mode='html')
                     return
-                await bot_client.send_message(entity=chat_id, message=f"🎤 <b>Распознано:</b> «{text}»", parse_mode='html')
+                header_icon = "📹 <b>Распознано из видео:</b>" if is_video_note else "🎤 <b>Распознано:</b>"
+                await bot_client.send_message(entity=chat_id, message=f"{header_icon} «{text}»", parse_mode='html')
             else:
-                await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось распознать аудио. Пожалуйста, повторите или напишите текстом.</i>", parse_mode='html')
+                fail_reply = (
+                    "❌ <i>Не удалось распознать речь в видеосообщении. Пожалуйста, повторите или напишите текстом.</i>"
+                    if is_video_note else
+                    "❌ <i>Не удалось распознать аудио. Пожалуйста, повторите или напишите текстом.</i>"
+                )
+                await bot_client.send_message(entity=chat_id, message=fail_reply, parse_mode='html')
                 return
 
         if text and not text.startswith("/"):

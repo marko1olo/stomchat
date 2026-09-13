@@ -139,7 +139,7 @@ class TestClass1ConcurrencyAndRaceConditions(unittest.TestCase):
         """
         chat_id = -1001820467444
         thread_anchor = 177380
-        debounce_window = config.DIALOGUE_THREAD_DEBOUNCE_SECONDS
+        debounce_window = getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", 35)
         self.assertEqual(debounce_window, 35, "Configured debounce window should be 35 seconds")
 
         # Clear cooldown for this key

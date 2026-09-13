@@ -1045,7 +1045,10 @@ def _main():
             text = _transcribe_audio_sync(
                 payload.get("file_path") or "", timeout=payload.get("timeout")
             )
-            _json_exit({"ok": bool(text), "text": text})
+            if text is not None:
+                _json_exit({"ok": True, "text": text})
+            else:
+                _json_exit({"ok": False, "error": "whisper transcription failed (all keys exhausted or timed out)"})
 
         if action == "pm-supplement":
             import gemini_client

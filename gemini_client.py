@@ -538,6 +538,7 @@ CHAT_KINDS = frozenset({
     # config.GEMINI_MODEL, а бюджет брался сводочный (2100 с) вместо диалогового.
     # Поймано test_fix_cascade сразу после подключения команды.
     "pm_web_lookup",
+    "daemon_memory",
 })
 # Всё остальное — daily, weekly, group_summary и любой незнакомый вид — идёт в
 # тяжёлый каскад: там качество важнее задержки, и бюджет там 2100 с.
@@ -1126,6 +1127,194 @@ def convert_to_wav(file_path):
     return wav or file_path
 
 
+def is_audio_silent_or_empty(file_path: str) -> bool:
+    """
+    Проверяет аудиофайл на тишину/пустоту через ffmpeg volumedetect.
+    Возвращает True, если max_volume <= -40.0 dB или -inf, либо если в файле нет аудиопотока.
+    При отсутствии ffmpeg, исключениях или ошибках декодирования (включая синтетические
+    байты в тестах) возвращает False (безопасный fallback, чтобы не отсечь реальное аудио).
+    """
+    if not getattr(config, "ENABLE_AUDIO_VOLUMEDETECT", True):
+        return False
+    if not file_path or not os.path.exists(file_path):
+        return False
+    try:
+        size = os.path.getsize(file_path)
+        if size < 32:
+            return True
+    except OSError:
+        return False
+
+    binary = ffmpeg_binary()
+    if not binary:
+        return False
+
+    import subprocess
+    cmd = [binary, "-y", "-i", file_path, "-af", "volumedetect", "-f", "null", "-"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8.0,
+        )
+        if proc.returncode != 0:
+            return False
+
+        err_out = (proc.stderr or b"").decode("utf-8", errors="ignore")
+        if "does not contain any audio stream" in err_out or "Output file is empty" in err_out:
+            return True
+
+        m_max = re.search(r'max_volume:\s*([-\d\.]+|-inf)\s*dB', err_out)
+        m_mean = re.search(r'mean_volume:\s*([-\d\.]+|-inf)\s*dB', err_out)
+        if m_max:
+            val_str = m_max.group(1)
+            if val_str == "-inf":
+                return True
+            try:
+                max_vol = float(val_str)
+                if max_vol <= -40.0:
+                    return True
+                if m_mean:
+                    mean_str = m_mean.group(1)
+                    if mean_str == "-inf":
+                        return True
+                    mean_vol = float(mean_str)
+                    if max_vol <= -35.0 and mean_vol <= -45.0:
+                        return True
+                    if mean_vol <= -50.0:
+                        return True
+            except ValueError:
+                pass
+    except Exception as e:
+        logger.debug("volumedetect check failed: %s", e)
+        return False
+
+    return False
+
+
+async def transcribe_audio_gemini_multimodal(
+    file_path: str,
+    duration_secs: float = 0.0,
+    is_video_note: bool = False,
+) -> tuple:
+    """
+    Первичный путь STT: Gemini принимает аудио/видео как base64 inlineData и
+    возвращает дословную транскрипцию за один мультимодальный вызов.
+
+    Возвращает (text, None) при успехе (text='' означает тишину) или
+    (None, error_str) при полном отказе. Вызывающий при (None, ...) переходит
+    к Groq Whisper как запасному пути.
+
+    429 -> следующий ключ; иная ошибка HTTP -> следующая модель.
+    Модели: от самой лёгкой к более тяжёлой (flash-lite справляется на расшифровке).
+    """
+    import base64
+    import httpx as _httpx
+
+    keys = list(getattr(config, "GOOGLE_KEYS", []))
+    if not keys:
+        return None, "no Google keys"
+
+    if not file_path or not os.path.exists(file_path):
+        return None, f"file not found: {file_path}"
+
+    try:
+        with open(file_path, "rb") as fh:
+            raw_bytes = fh.read()
+    except OSError as exc:
+        return None, f"file read error: {exc}"
+
+    if len(raw_bytes) < 32:
+        return None, "file too small"
+
+    b64_audio = base64.b64encode(raw_bytes).decode("utf-8")
+    mime_type = "video/mp4" if is_video_note else "audio/ogg"
+
+    dental_prompt = (
+        "Ты — медицинский транскрибатор для врача-стоматолога.\n"
+        "Расшифруй ДОСЛОВНО всю речь на языке оригинала: русский, английский или смешанный.\n"
+        "Клинические термины: зубы, каналы, имплантаты, коронки, эндодонтия, "
+        "дентальные препараты, протоколы лечения — пиши точно как произнесено.\n"
+        "Если в записи тишина, шум, нечленораздельные звуки или пустота — "
+        "пиши только: [тишина]\n"
+        "ВЫВЕДИ ТОЛЬКО расшифровку, без комментариев, пояснений и предисловий."
+    )
+
+    gemini_timeout = max(30.0, min(120.0, duration_secs * 0.6 + 20.0))
+    models_to_try = [
+        "gemini-2.5-flash-lite-preview-06-17",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ]
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": mime_type, "data": b64_audio}},
+                {"text": dental_prompt},
+            ]
+        }],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1024},
+    }
+
+    last_error = "all attempts failed"
+    for gkey in keys:
+        for model_name in models_to_try:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model_name}:generateContent?key={gkey}"
+            )
+            try:
+                async with _httpx.AsyncClient(verify=False, timeout=gemini_timeout) as hc:
+                    resp = await hc.post(url, json=payload)
+                    if resp.status_code == 200:
+                        gdata = resp.json()
+                        parts = (
+                            gdata.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [])
+                        )
+                        if parts and "text" in parts[0]:
+                            raw = parts[0]["text"].strip()
+                            if not raw or re.match(
+                                r"^\[?(тишина|silence|тишина\.+)\]?\.?$",
+                                raw.strip().lower(),
+                            ):
+                                logger.info(
+                                    "Gemini multimodal STT: silence via %s", model_name
+                                )
+                                return "", None
+                            logger.info(
+                                "Gemini multimodal STT: success via %s (%d chars)",
+                                model_name, len(raw),
+                            )
+                            return raw, None
+                        last_error = f"{model_name}: empty response"
+                    elif resp.status_code == 429:
+                        logger.info(
+                            "Gemini multimodal STT: 429 key=...%s model=%s",
+                            gkey[-4:], model_name,
+                        )
+                        last_error = f"429 on {model_name}"
+                        break  # следующий ключ
+                    else:
+                        last_error = f"{model_name}: HTTP {resp.status_code}"
+                        logger.debug(
+                            "Gemini multimodal STT HTTP %s model=%s",
+                            resp.status_code, model_name,
+                        )
+            except Exception as exc:
+                last_error = f"{model_name}: {exc}"
+                logger.debug(
+                    "Gemini multimodal STT exception model=%s: %s", model_name, exc
+                )
+                continue
+
+    return None, last_error
+
+
 def transcribe_audio_bytes_or_file(file_path, timeout=None):
     """
     Расшифровка голосового через Groq Whisper с ротацией ключей.
@@ -1179,6 +1368,16 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
 
     actual_file_path = convert_to_wav(file_path)
 
+    # Pre-flight проверка тишины: если звук пустой или тишина, не тратим квоты Groq Whisper
+    if is_audio_silent_or_empty(actual_file_path):
+        logger.info("Audio detected as silence/empty via volumedetect: %s", actual_file_path)
+        if actual_file_path != file_path and os.path.exists(actual_file_path):
+            try:
+                os.remove(actual_file_path)
+            except Exception:
+                pass
+        return ""
+
     random.shuffle(keys)
     # Живые ключи вперёд, остывающие в хвост (порядок внутри половин уже случаен).
     # Так бюджет тратится на ключи, у которых есть шанс, и при истечении бюджета
@@ -1206,12 +1405,26 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
         try:
             logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
             client = get_provider_client("groq", api_key, timeout=per_attempt)
+            whisper_model = getattr(config, "GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+            whisper_prompt = getattr(config, "WHISPER_PROMPT", "Разговорная речь врача-стоматолога. Стоматологическая терминология, препараты, протоколы, без субтитров.")
+            create_kwargs = {
+                "model": whisper_model,
+                "response_format": "text",
+            }
+            if whisper_prompt:
+                create_kwargs["prompt"] = whisper_prompt
+
             with open(actual_file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model="whisper-large-v3",
-                    file=audio_file,
-                    response_format="text"
-                )
+                create_kwargs["file"] = audio_file
+                try:
+                    transcription = client.audio.transcriptions.create(**create_kwargs)
+                except TypeError as te:
+                    # Fallback для тестовых моков (FakeTranscriptions), не принимающих prompt
+                    if "prompt" in str(te):
+                        create_kwargs.pop("prompt", None)
+                        transcription = client.audio.transcriptions.create(**create_kwargs)
+                    else:
+                        raise
             if transcription:
                 result_text = transcription.strip()
                 # Ключ ответил — снимаем с него пометку и для текстового каскада.

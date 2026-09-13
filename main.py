@@ -1275,12 +1275,16 @@ SILENCE_HALLUCINATIONS = {
     "you", "thank you", "bye", "подпишитесь",
     "продолжение следует", "редактор субтитров", "субтитры",
     "youtube", "собачья чушь", "спасибо",
+    "дима торжок", "dimatorzhok", "dima torzhok",
+    "субтитры сделал", "синецкая", "перевод субтитров",
+    "переведено", "озвучено", "тишина", "[тишина]", "тишина.", "тишина...",
 }
 
 
 def is_voice_message(message):
     """
-    Голосовое или присланный аудиофайл. Правило ОДНО на все места пути.
+    Голосовое, присланный аудиофайл или видео-сообщение (кружочек).
+    Правило ОДНО на все места пути.
 
     Догоняющая синхронизация про голосовые не знала вообще, а живой обработчик
     решал сам двумя строками у себя внутри. clinical_media_kind сюда не годится:
@@ -1291,7 +1295,7 @@ def is_voice_message(message):
     Проверка на MagicMock сохранена: у мока «есть» любой атрибут, и подставное
     текстовое сообщение в тестах иначе считалось бы голосовым.
     """
-    for attribute in ("voice", "audio"):
+    for attribute in ("voice", "audio", "video_note"):
         value = getattr(message, attribute, None)
         if value is not None and type(value).__name__ != "MagicMock":
             return True
@@ -1333,9 +1337,43 @@ async def transcribe_group_voice(message):
             return None, "скачивание не дало файла"
 
         import blocking_tools
-        transcribed, error = await blocking_tools.transcribe_audio_async(
-            temp_path, timeout=VOICE_TRANSCRIBE_TIMEOUT_SECONDS
+        import gemini_client as _gc
+
+        # Attempt 1: Gemini multimodal (audio bytes -> transcript in one API call).
+        # Определяем длительность для adaptive timeout.
+        _duration = 0.0
+        try:
+            _media_attr = (
+                getattr(message, "video_note", None)
+                or getattr(message, "voice", None)
+                or getattr(message, "audio", None)
+            )
+            _duration = float(getattr(_media_attr, "duration", 0) or 0)
+        except Exception:
+            pass
+        _is_video_note = (
+            getattr(message, "video_note", None) is not None
+            and type(getattr(message, "video_note", None)).__name__ != "MagicMock"
         )
+
+        gemini_text, gemini_err = await _gc.transcribe_audio_gemini_multimodal(
+            temp_path,
+            duration_secs=_duration,
+            is_video_note=_is_video_note,
+        )
+        if gemini_err is None:
+            # Gemini succeeded (gemini_text may be "" for silence)
+            transcribed = gemini_text
+            error = None
+        else:
+            logger.info(
+                "Gemini multimodal STT failed (%s), falling back to Groq Whisper msg_id=%s",
+                gemini_err, msg_id,
+            )
+            transcribed, error = await blocking_tools.transcribe_audio_async(
+                temp_path, timeout=VOICE_TRANSCRIBE_TIMEOUT_SECONDS
+            )
+
         if error:
             logger.warning("voice transcription failed msg_id=%s: %s", msg_id, error)
             return None, f"whisper: {error}"
@@ -1349,7 +1387,10 @@ async def transcribe_group_voice(message):
         if not text:
             return None, VOICE_FAILURE_SILENCE
 
-        if text.lower().rstrip(".").rstrip(",").strip() in SILENCE_HALLUCINATIONS:
+        clean_transcribed = text.lower().rstrip(".").rstrip(",").strip()
+        if clean_transcribed in SILENCE_HALLUCINATIONS or (
+            len(clean_transcribed) < 45 and any(h in clean_transcribed for h in ("дима торжок", "dimatorzhok", "субтитры сделал", "редактор субтитров", "синецкая"))
+        ):
             logger.info("voice transcription discarded as silence hallucination msg_id=%s", msg_id)
             return None, VOICE_FAILURE_SILENCE
         return text, None

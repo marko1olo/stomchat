@@ -126,6 +126,12 @@ async def fake_correct(raw):
 blocking_tools.transcribe_audio_async = fake_transcribe
 blocking_tools.correct_dental_transcription_async = fake_correct
 
+import gemini_client
+async def _fake_gemini_audio(*a, **kw):
+    return None, "offline_test_skip_gemini"
+gemini_client.transcribe_audio_gemini_multimodal = _fake_gemini_audio
+
+
 
 def reset_whisper(error=None, text=None, delay=0.0):
     WHISPER["error"] = error
