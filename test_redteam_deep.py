@@ -20,10 +20,11 @@ class TestRedTeamDeep(unittest.TestCase):
         """
         Red Team Test 2: Double-reply race condition in active dialogue.
         When a user sends 2 messages in rapid succession (<25s apart),
-        the thread debounce must prevent duplicate parallel answers.
+        both the thread debounce and sender debounce must prevent duplicate parallel answers.
         """
         chat_id = -1001820467444
         thread_id = 177388
+        sender_id = 448838231
         
         # Check dialogue_thread cooldown mechanism
         cd1 = assistant.check_user_cooldown(chat_id, thread_id, "dialogue_thread", seconds=25)
@@ -32,6 +33,12 @@ class TestRedTeamDeep(unittest.TestCase):
         # Immediate follow-up 2 seconds later in the same thread
         cd2 = assistant.check_user_cooldown(chat_id, thread_id, "dialogue_thread", seconds=25)
         self.assertGreater(cd2, 0, "Second reply within 25s in same thread must be debounced")
+
+        # Check dialogue_sender cooldown mechanism (for rapid messages without Reply)
+        cd_sender1 = assistant.check_user_cooldown(chat_id, sender_id, "dialogue_sender", seconds=25)
+        self.assertEqual(cd_sender1, 0, "First reply for sender should proceed")
+        cd_sender2 = assistant.check_user_cooldown(chat_id, sender_id, "dialogue_sender", seconds=25)
+        self.assertGreater(cd_sender2, 0, "Second reply from same sender within 25s must be debounced")
 
     def test_prompt_injection_and_prescription_guard(self):
         """

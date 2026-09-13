@@ -2972,13 +2972,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
     # Dialogue thread debounce & race condition guard:
     # Защита от дублирования ответов (как в инциденте сообщений 177390 & 177392 с интервалом 18 с),
-    # когда один и тот же автор отправляет 2-3 коротких сообщения подряд в одну ветку.
+    # когда один и тот же автор отправляет 2-3 коротких сообщения подряд в одну ветку без Reply.
     if is_dialogue and sender_id:
-        thread_root_id = reply_to_msg_id or msg_id
+        thread_root_id = reply_to_msg_id or state.get("last_case_bot_msg_id") or msg_id
         dialogue_cd = check_user_cooldown(event.chat_id, thread_root_id, "dialogue_thread", seconds=25)
-        if dialogue_cd > 0:
+        user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=25)
+        if dialogue_cd > 0 or user_dialogue_cd > 0:
             logger.info(
-                f"Dialogue thread debounce: thread {thread_root_id} (sender {sender_id}) triggered too quickly ({dialogue_cd}s left). Skipping to prevent double-reply race condition."
+                f"Dialogue debounce: thread {thread_root_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
             )
             return False
 
