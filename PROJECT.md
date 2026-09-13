@@ -1,49 +1,58 @@
-# Project: StomChat Clinician Memory & Summarizer Audit & Integration
+# Project: StomChat Weekend Telemetry Audit, Red Teaming & Production Hardening
 
 ## Architecture
-- `user_memory.py`: Manages two-tier doctor memory (PM memory up to 64KB, group memory up to 8KB). Compaction every 4 messages, deduplication, trivial message filtering, active group participants daemon.
-- `database.py`: Single-threaded serialized SQLite runner (`_run_db` on `_DB_EXECUTOR`), WAL mode, busy timeout 30s. Tables `user_memories` and `messages`.
-- `summarizer.py`: Daily & weekly digest generator. Extracts active participants, injects clinical context via `format_users_chunk_context(max_chars=2000)`, instructs LLM for "ЭКСПЕРТ ДНЯ" based on clinical profile.
-- `assistant.py`: Core bot assistant handler. Connects PM and group message events with memory retrieval and updates.
+- `assistant.py`: Core Telegram bot handler for group and private messages. Implements dialogue thread tracking, cooldown checks, triage, prompt formatting, clinical safety rules (Rule 12.1, Rule 14.1), and message dispatch.
+- `gemini_client.py`: Multi-model cascade orchestration (Gemini 2.5 Flash, 2.5 Flash-Lite, etc.) with exponential backoff, rate limiting, and 503 fallback handling.
+- `config.py`: Global configuration parameters, cooldown constants, model cascade definitions, and timeouts.
+- `database.py`: Thread-safe SQLite executor (`_run_db`) with WAL mode for `stomat_bot.db`.
+- `user_memory.py`: Persistent clinical memory and doctor dossier tracking (422+ doctor profiles).
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---|---|---|---|
-| F1 | PM Clinical Memory Compaction | 8-12 turn clinical dialogue simulation, compaction every 4 messages, structured sections, programmatic sentence deduplication | M1 | ORIGINAL_REQUEST §R1 |
-| F2 | Trivial Message Filter | Ignore single-word / acknowledgements ('спасибо', 'ок') with 0 LLM calls and no counter advance | M1 | ORIGINAL_REQUEST §R1, Acceptance Criteria |
-| F3 | Group Memory Daemon Logic | Active doctors filter, group_summary <= 8KB, 0 LLM calls on idle ticks | M1 | ORIGINAL_REQUEST §R1, Acceptance Criteria |
-| F4 | Database Sender ID Extraction | Include `sender_id` in `get_messages_for_daily_summary` and `get_messages_for_range` while preserving backward compatibility | M2 | Explorer Survey 2 & 3 |
-| F5 | Summarizer Profile Integration | Fetch profiles of top active daily/weekly authors via `format_users_chunk_context` | M3 | ORIGINAL_REQUEST §R2 |
-| F6 | "ЭКСПЕРТ ДНЯ" Clinical Selection | Prompt rubric evaluation based on doctor clinical profile, specialty, equipment, protocols | M3 | ORIGINAL_REQUEST §R2 |
-| F7 | Strict Profile Budget (<=2000 chars) | Strict <= 2000 chars context injection enforced in Python, avoiding prompt text regex collisions | M3 | ORIGINAL_REQUEST §R2, Acceptance Criteria |
-| F8 | SQLite Concurrency Stress Verification | Parallel async execution (PM write, profile read, background update, daemon tick) with 0 locked errors | M2, M5 | ORIGINAL_REQUEST §R3 |
-| F9 | Regression Test Suite (100% Pass) | 100% pass for test_user_memory.py, test_budget_nesting.py, test_fix_pm.py, test_startup_boot.py | M5 | ORIGINAL_REQUEST §R4 |
-| F10 | Comprehensive Integration Test Suite | New `test_memory_e2e_integration.py` validating all R1-R4 scenarios | M5 | ORIGINAL_REQUEST §R4 |
-| F11 | Linter Cleanliness | 0 errors on `ruff check user_memory.py summarizer.py database.py assistant.py` | M4 | ORIGINAL_REQUEST §R4, Acceptance Criteria |
+| F1 | Weekend Telemetry Audit (Sept 11–13) | Analysis of 200 messages (180 clinician, 20 bot responses: 16 clinical replies + 4 digest parts), 0 runtime errors, 64 passive suppressions, 27 cascade 503 fallbacks, token & latency metrics | M1 | ORIGINAL_REQUEST §R1 |
+| F2 | 9 Clinical Dialogue Threads Breakdown | Exhaustive analysis of threads 1–9 with exact IDs, timestamps, doctor profiles from user_memories, verbatim transcripts, and EBM evaluation | M1 | ORIGINAL_REQUEST §R1 |
+| F3 | Clinician Sentiment & Silence Audit | Documenting doctor praise, skepticism, humor/memes, and silence points (177414, 177311, 177410) | M1 | ORIGINAL_REQUEST §R1 |
+| F4 | Comprehensive Report Publication | Publish `REPORT_WEEKEND_TELEMETRY.md` documenting complete findings of R1 | M1 | ORIGINAL_REQUEST §R1, Acceptance Criteria |
+| F5 | Concurrency & Race Condition Red Teaming | Deep test scenarios modeling rapid fragmented messages, burst spam, and verifying 18s dual-reply race condition (177390 & 177392) | M2 | ORIGINAL_REQUEST §R2.1 |
+| F6 | Clinical Pharmacology & Pediatric Safety Testing | Adversarial test cases for pediatric dosing (<15 kg, 12 kg edge case), double ceiling (mg/kg vs max), cardiovascular comorbidities, pregnancy, Rule 12.1 | M2 | ORIGINAL_REQUEST §R2.2 |
+| F7 | Prompt Injection & Persona Hijacking Testing | Adversarial test cases testing jailbreaks ("забудь инструкции", "выпиши рецепт на учетный препарат 148-1/у", tramadol/pregabalin, illicit synthesis) | M2 | ORIGINAL_REQUEST §R2.3 |
+| F8 | Visual Diagnostic Uncertainty Testing | Multi-modal test cases testing blurred, low-res, specular glare images to verify epistemic caution instead of hallucinating pathology | M2 | ORIGINAL_REQUEST §R2.4 |
+| F9 | DoS & API Exhaustion Testing | Tests evaluating cascade fallback under 503s, transient ban logic, and memory footprints | M2 | ORIGINAL_REQUEST §R2.5 |
+| F10 | Comprehensive Red Team Test Suite | Deliver `test_redteam_deep.py` containing complete test coverage across all 5 vulnerability classes | M2 | ORIGINAL_REQUEST §R2, Acceptance Criteria |
+| F11 | Thread Debounce & Concurrency Lock Patch | Programmatic thread lock & debounce (30-45s window) keyed by active dialogue anchor (`last_case_bot_msg_id`) before slow triage in `assistant.py` | M3 | ORIGINAL_REQUEST §R3 |
+| F12 | Adversarial Input Sanitization Patch | XML escaping/neutralization and pre-LLM regex filter against jailbreak patterns and controlled substance requests | M3 | ORIGINAL_REQUEST §R3 |
+| F13 | Pediatric Safety Guard Programmatic Patch | Deterministic pre-LLM check calculating double ceiling dose (mg/kg vs max, math.floor) and blocking toxic requests / contraindications (<15 kg) | M3 | ORIGINAL_REQUEST §R3 |
+| F14 | Regression Suite Verification | 100% pass across `test_recon_fixes.py`, `test_multimodal_hybrid.py`, `test_dialogue_reply_limit.py`, `test_passive_gate.py`, `test_silent_failures.py`, and `test_redteam_deep.py` | M4 | ORIGINAL_REQUEST Acceptance Criteria |
+| F15 | Codebase Integrity & Forensic Audit | Clean `py_compile` across all modified files and clean Forensic Integrity Audit | M4 | ORIGINAL_REQUEST Acceptance Criteria |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|---|---|---|---|
-| M1 | Core Memory & Deduplication | Enhance `user_memory.py` with programmatic sentence deduplication, `max_chars` parameter in `format_users_chunk_context`, test cooldown helper | none | DONE |
-| M2 | Database Queries & Concurrency | Add `sender_id` to message queries in `database.py`, verify `_run_db` isolation | none | DONE |
-| M3 | Summarizer Clinical Integration | Integrate profiles into `summarizer.py`, <= 2000 chars budget, "ЭКСПЕРТ ДНЯ" prompt update | M1, M2 | DONE |
-| M4 | Linter Cleanliness | Fix 4 errors in `summarizer.py` and 21 errors in `assistant.py` for 0 ruff errors | M1, M3 | DONE |
-| M5 | E2E Integration Suite & Stress Tests | Implement `test_memory_e2e_integration.py`, run 100% regression suite | M1, M2, M3, M4 | IN_PROGRESS |
+| M1 | Telemetry Audit & Report | Generate and publish `REPORT_WEEKEND_TELEMETRY.md` covering R1 (100% of 9 threads, transcripts, doctor profiles, sentiment, suppression metrics, latency/token stats) | none | IN_PROGRESS |
+| M2 | Red Teaming Vulnerability Suite | Create and verify `test_redteam_deep.py` covering all 5 vulnerability classes (concurrency, pharmacology/pediatrics, prompt injection, visual uncertainty, DoS/cascade) | M1 | PLANNED |
+| M3 | Production Hardening Patches | Implement thread debounce lock, input sanitization, and pediatric safety guard in `assistant.py`, `gemini_client.py`, `config.py` | M2 | PLANNED |
+| M4 | Regression, Forensic Audit & Victory | Execute all regression suites, py_compile check, forensic integrity audit, and report victory to Sentinel | M1, M2, M3 | PLANNED |
 
 ## Interface Contracts
-### `user_memory.py` ↔ `summarizer.py`
-- Function: `format_users_chunk_context(user_ids: List[int], max_chars: Optional[int] = 2000) -> str`
-- Input: List of integer Telegram user IDs; max_chars integer cap (default 2000).
-- Output: Formatted string of user profiles within max_chars, each block containing specialty, equipment, protocols, cases. Returns empty string if no profiles found.
+### Thread Debounce & Concurrency Lock (`assistant.py`)
+- Key: `(chat_id, anchor_msg_id, "dialogue_thread")` where `anchor_msg_id` is canonicalized to `last_case_bot_msg_id` or `reply_to_msg_id`.
+- Window: 35 seconds debounce. Fast-fail check executed at entrance before slow async triage.
+- In-flight task tracking: Async lock or in-flight set preventing concurrent LLM generation tasks for the same dialogue anchor.
 
-### `database.py` ↔ `summarizer.py`
-- Function: `get_messages_for_daily_summary(...) -> List[Tuple]`
-- Tuple format: `(msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id)`
-- Consumer unpacking: `m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]`, `sender_id = msg[8] if len(msg) > 8 else None`.
+### Pediatric Safety Guard (`assistant.py`)
+- Function: `check_pediatric_anesthesia_safety(text: str) -> Optional[str]`
+- Evaluates weight (<15 kg), drug type (articaine, mepivacaine, lidocaine), maximum mg/kg and absolute maximum mg.
+- Enforces strict downward floor: e.g. for 12 kg articaine (60 mg limit vs 68 mg carpule), returns safe limit: 0 full carpules (<1.5 ml), notes age/weight contraindication.
+- If toxic/overdose requested or pediatric calculation triggered, returns pre-computed safe clinical response bypassing LLM arithmetic errors.
+
+### Adversarial Input Sanitizer (`assistant.py`)
+- Neutralizes `<` and `>` tags in user text injected into `<user_dialogue>`.
+- Regex pre-filter detects jailbreak keywords ("забудь инструкции", "игнорируй правила") and controlled substances (tramadol, pregabalin, form 148-1/у) and short-circuits with professional clinical refusal.
 
 ## Code Layout
-- `user_memory.py`: Clinician profile management, compaction, deduplication, group daemon.
-- `database.py`: SQLite schema, indexes, query helpers, thread pool executor.
-- `summarizer.py`: Daily / weekly summaries, expert of the day selection, telegraph publishing.
-- `assistant.py`: Private message and group message orchestrator.
-- `test_memory_e2e_integration.py`: End-to-end integration and stress test runner.
+- `assistant.py`: Dialogue handling, debounce lock, input sanitization, pediatric guard, clinical rules.
+- `gemini_client.py`: API cascade, 503 handling, transient cooldown.
+- `config.py`: Cooldown constants, thread lock timeouts.
+- `test_redteam_deep.py`: Comprehensive Red Teaming test suite covering 5 vulnerability classes.
+- `REPORT_WEEKEND_TELEMETRY.md`: Root-level comprehensive weekend telemetry audit report.

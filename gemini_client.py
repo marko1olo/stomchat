@@ -233,7 +233,60 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
 # Перегруженную модель убираем из каскада на это время. Значение было вписано
 # числом прямо в обработчик ошибки; вынесено, потому что решение о бане теперь
 # принимает note_key_failure, и величина не должна разъехаться по копиям.
-MODEL_BAN_SECONDS = 1200  # 20 минут
+MODEL_BAN_INITIAL_503_SECONDS = 60    # 1-я ошибка 503/504: короткий бан на 60 сек
+MODEL_BAN_REPEAT_503_SECONDS = 300   # Повторная ошибка 503 подряд: 5 минут
+MODEL_BAN_SECONDS = 1200             # 20 минут на устойчивый отказ
+MODEL_FAILURES_FILE = "model_failures.json"
+
+
+def _clear_failure_history(model_name):
+    """Сбрасывает историю сбоев модели при успешном ответе."""
+    if not os.path.exists(MODEL_FAILURES_FILE):
+        return
+    try:
+        with open(MODEL_FAILURES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if model_name in data:
+            data.pop(model_name, None)
+            _save_expiry_map(MODEL_FAILURES_FILE, data)
+    except Exception:
+        pass
+
+
+def _record_model_server_failure(model_name: str) -> int:
+    """
+    Рассчитывает прогрессивный срок бана для транзиентных ошибок 503/504:
+    - 1-я ошибка: 60 секунд (быстрый спайк серверов Google).
+    - 2-я ошибка подряд (в течение 15 минут): 300 секунд (5 минут).
+    - 3-я и более: 1200 секунд (20 минут).
+    """
+    now = time.time()
+    history = {}
+    if os.path.exists(MODEL_FAILURES_FILE):
+        try:
+            with open(MODEL_FAILURES_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            history = {}
+
+    entry = history.get(model_name, {})
+    last_time = entry.get("last_time", 0) if isinstance(entry, dict) else 0
+    count = entry.get("count", 0) if isinstance(entry, dict) else 0
+
+    # Если последняя ошибка была более 15 минут назад — сбрасываем счетчик
+    if now - last_time > 900:
+        count = 0
+
+    count += 1
+    history[model_name] = {"count": count, "last_time": now}
+    _save_expiry_map(MODEL_FAILURES_FILE, history)
+
+    if count == 1:
+        return MODEL_BAN_INITIAL_503_SECONDS
+    elif count == 2:
+        return MODEL_BAN_REPEAT_503_SECONDS
+    else:
+        return MODEL_BAN_SECONDS
 
 
 # ==========================================================================
@@ -370,8 +423,10 @@ def note_success(provider, api_key, model_name=None):
     cleared_key = _clear_expiry_entry(KEY_COOLDOWN_FILE, _key_fingerprint(provider, api_key))
     if cleared_key:
         logger.info("%s key answered while on cooldown; cooldown lifted.", provider.capitalize())
-    if model_name and _clear_expiry_entry(BANNED_MODELS_FILE, model_name):
-        logger.info("Model %s answered while banned; ban lifted.", model_name)
+    if model_name:
+        if _clear_expiry_entry(BANNED_MODELS_FILE, model_name):
+            logger.info("Model %s answered while banned; ban lifted.", model_name)
+        _clear_failure_history(model_name)
 
 
 def note_key_failure(provider, api_key, error_text, model_name=None):
@@ -419,12 +474,23 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         _record_failure("key_rate_limited", error_text, api_key)
         return "key_rate_limited"
 
-    if _SERVER_ERROR_RE.search(err_msg) or "deadline" in err_msg or "unavailable" in err_msg:
+    is_transient_overload = (
+        "503" in err_msg
+        or "504" in err_msg
+        or "unavailable" in err_msg
+        or "overload" in err_msg
+        or "deadline" in err_msg
+    )
+    if _SERVER_ERROR_RE.search(err_msg) or is_transient_overload:
         if model_name:
-            ban_model(model_name, MODEL_BAN_SECONDS)
+            if is_transient_overload:
+                ban_duration = _record_model_server_failure(model_name)
+            else:
+                ban_duration = MODEL_BAN_SECONDS
+            ban_model(model_name, ban_duration)
             logger.info(
                 f"{provider.capitalize()} server overloaded/unavailable ({err_msg}). "
-                f"Banning model {model_name} for {MODEL_BAN_SECONDS // 60} minutes. Skipping in cascade."
+                f"Banning model {model_name} for {ban_duration}s. Skipping in cascade."
             )
         else:
             logger.info(

@@ -658,6 +658,11 @@ def calculate_anesthesia_instant(text: str) -> str | None:
     if not text:
         return None
 
+    # Педиатрический предохранитель Rule 12.1: для детей расчет строго детерминирован
+    ped_guard = check_pediatric_anesthesia_safety(text)
+    if ped_guard and ped_guard.get("is_pediatric"):
+        return ped_guard.direct_response
+
     lower = text.lower()
 
     # 1. Распознавание препарата
@@ -986,6 +991,7 @@ PASSIVE_RETRY_MINUTES = 10      # после попытки, не давшей �
 # Раньше стояло жесткое ограничение в 3 ответа, из-за чего содержательные клинические
 # дискуссии с врачами обрывались. Повышено до 6.
 MAX_DIALOGUE_BOT_REPLIES = getattr(config, "MAX_DIALOGUE_BOT_REPLIES", 6)
+DIALOGUE_THREAD_DEBOUNCE_SECONDS = getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", 35)
 
 # Сколько держать ветку в processed_threads. Граница была по ДЛИНЕ — последние
 # 100 записей, `del threads[:-100]`, молча. Замер по архиву (117 847 реплик,
@@ -2598,9 +2604,9 @@ async def fetch_dynamic_chat_context(
         r_msg_id, r_reply_to, r_sender_id, r_sender_name, r_text, _ = r
         trunc_limit = _DCTX_RECENT_FULL_LEN if idx >= N - 4 else _DCTX_DEEP_TRUNC_LEN
         raw_text = r_text or ""
-        msg_text = raw_text[:trunc_limit] + ("... [обрезано]" if len(raw_text) > trunc_limit else "")
+        msg_text = sanitize_user_input_xml(raw_text[:trunc_limit]) + ("... [обрезано]" if len(raw_text) > trunc_limit else "")
         is_prev_bot = (r_sender_id == BOT_ID) or (r_msg_id in bot_msg_ids)
-        sender_label = "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]" if is_prev_bot else (r_sender_name or "Участник")
+        sender_label = "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]" if is_prev_bot else sanitize_user_input_xml(r_sender_name or "Участник")
         rep_str = f" (в ответ на #{r_reply_to})" if r_reply_to else ""
         line = f"[Сообщение #{r_msg_id}{rep_str}] {sender_label}: {msg_text}"
         if total_chars + len(line) > _DCTX_DIALOG_MAX_CHARS:
@@ -2610,6 +2616,350 @@ async def fetch_dynamic_chat_context(
         total_chars += len(line)
 
     return result, bot_msg_count, nearest_bot_msg_id
+
+
+_ACTIVE_DIALOGUE_THREADS = set()
+
+
+def sanitize_user_input_xml(text: str) -> str:
+    """
+    Нейтрализует XML-угловые скобки в пользовательском вводе для предотвращения промпт-инъекций.
+    """
+    if not text:
+        return ""
+    return str(text).replace("<", "＜").replace(">", "＞")
+
+
+_JAILBREAK_PATTERNS = re.compile(
+    r"(?i)("
+    r"забудь\s+(?:все\s+|всё\s+|предыдущие\s+|прошлые\s+)?(?:инструкци\w*|правил\w*)|"
+    r"игнорируй\s+(?:все\s+|всё\s+|предыдущие\s+|прошлые\s+)?(?:инструкци\w*|правил\w*)|"
+    r"(?:forget|ignore|disregard)\s+(?:all\s+|previous\s+)?(?:instructions|rules)|"
+    r"ты\s+теперь\s+dan\b|"
+    r"act\s+as\s+dan\b|"
+    r"you\s+are\s+now\s+dan\b|"
+    r"(?:покажи|выведи|распечатай|раскрой)\s+(?:свой\s+|свои\s+|системный\s+)?(?:системный\s+)?(?:промпт|инструкци\w*)|"
+    r"режим\s+разработчика|"
+    r"developer\s+mode(?:\s+output)?|"
+    r"jailbreak|"
+    r"сбрось\s+системные\s+настройки"
+    r")"
+)
+
+_CONTROLLED_SUBSTANCES_PATTERNS = re.compile(
+    r"(?i)("
+    r"трамадол\w*|"
+    r"прегабалин\w*|"
+    r"\bлирик[ауеыи]\b|"
+    r"морфин\w*|"
+    r"фентанил\w*|"
+    r"оксикодон\w*|"
+    r"диазепам\w*|"
+    r"сибазон\w*|"
+    r"реланиум\w*|"
+    r"\b(?:tramadol|pregabalin|lyrica|morphine|fentanyl|oxycodone|diazepam)\b|"
+    r"148-1/[уy]\w*|"
+    r"кустарн\w*\s+синтез\w*|"
+    r"синтез\w*\s+наркоти\w*"
+    r")"
+)
+
+ADVERSARIAL_REFUSAL_MESSAGE = (
+    "Я стоматологический клинический ассистент. Назначение учетных сильнодействующих препаратов "
+    "и выписка рецептурных бланков (включая форму 148-1/у) осуществляются строго на очном приеме "
+    "в соответствии с законодательством РФ. Запросы на обход правил или кустарный синтез не рассматриваются."
+)
+
+_ZERO_WIDTH_CHARS_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad]")
+
+_HOMOGLYPHS_LATIN_TO_CYRILLIC = str.maketrans({
+    "a": "а", "A": "А",
+    "c": "с", "C": "С",
+    "e": "е", "E": "Е",
+    "o": "о", "O": "О",
+    "p": "р", "P": "Р",
+    "x": "х", "X": "Х",
+    "y": "у", "Y": "У",
+    "k": "к", "K": "К",
+    "B": "В",
+    "H": "Н",
+    "M": "М",
+    "T": "Т",
+})
+
+
+def check_adversarial_input(text: str) -> tuple[bool, str | None]:
+    """
+    Детерминированный pre-LLM фильтр против джейлбрейков и запросов на учетные препараты.
+    Включает каноникализацию текста: удаление невидимых zero-width символов
+    и нормализацию визуальных латинских омоглифов в кириллицу.
+    Возвращает (is_adversarial, refusal_text).
+    """
+    if not text:
+        return False, None
+    t = str(text)
+
+    clean_t = _ZERO_WIDTH_CHARS_RE.sub("", t)
+    homo_t = clean_t.translate(_HOMOGLYPHS_LATIN_TO_CYRILLIC)
+
+    for candidate in (t, clean_t, homo_t):
+        if _JAILBREAK_PATTERNS.search(candidate) or _CONTROLLED_SUBSTANCES_PATTERNS.search(candidate):
+            return True, ADVERSARIAL_REFUSAL_MESSAGE
+
+    return False, None
+
+
+class PediatricSafetyResult(str):
+    """
+    Результат детерминированной проверки педиатрической безопасности анестезии (Rule 12.1).
+    Ведет себя и как форматированная строка direct_response, и как объект с полями, и как dict.
+    """
+    def __new__(cls, direct_response, data=None):
+        instance = super().__new__(cls, direct_response)
+        instance.direct_response = direct_response
+        instance.data = data or {}
+        for k, v in instance.data.items():
+            setattr(instance, k, v)
+        return instance
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        if key == "direct_response":
+            return self.direct_response
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if key == "direct_response":
+            return self.direct_response
+        return self.data.get(key, default)
+
+
+def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None:
+    """
+    Детерминированный pre-LLM расчет педиатрических доз местных анестетиков (Rule 12.1).
+    - Детектирует интент расчета анестетиков (артикаин, мепивакаин, лидокаин) + педиатрические маркеры.
+    - Обеспечивает строгий двойной потолок: min(weight * dose_per_kg, max_abs_dose).
+    - Округление карпул строго ВНИЗ через math.floor.
+    - Явно маркирует клинические противопоказания (артикаин противопоказан детям <4 лет / <15 кг;
+      1 карпула 68 мг превышает предел 60 мг для ребенка 12 кг).
+    - Возвращает прямой безопасный ответ и блок ground-truth для инжекции в системный промпт.
+    """
+    if not text:
+        return None
+
+    lower = text.lower()
+
+    # 1. Детекция препарата
+    drug = None
+    drug_name = ""
+    carpsize = 1.7
+    mg_per_carp = 68.0
+    mg_per_kg_child = 5.0
+    abs_max_mg = 500.0
+
+    if re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|примакаин|articaine)\w*', lower):
+        drug = "articaine"
+        drug_name = "Артикаин 4% (1:100 000 / 1:200 000)"
+        carpsize = 1.7
+        mg_per_carp = 68.0
+        mg_per_kg_child = 5.0
+        abs_max_mg = 500.0
+    elif re.search(r'\b(?:мепивакаин|скандонест|мепивастезин|мепидонт|mepivacaine)\w*', lower):
+        drug = "mepivacaine"
+        drug_name = "Мепивакаин 3% (без вазоконстриктора)"
+        carpsize = 1.8
+        mg_per_carp = 54.0
+        mg_per_kg_child = 4.4
+        abs_max_mg = 400.0
+    elif re.search(r'\b(?:лидокаин|ксилокаин|ксилонор|lidocaine)\w*', lower):
+        drug = "lidocaine"
+        drug_name = "Лидокаин 2% (с адреналином)"
+        carpsize = 1.8
+        mg_per_carp = 36.0
+        mg_per_kg_child = 4.4
+        abs_max_mg = 300.0
+    elif re.search(r'\b(?:анестези\w*|карпул\w*|дозировк\w*|укол\w*)\b', lower):
+        drug = "articaine"
+        drug_name = "Артикаин 4% (стандарт)"
+        carpsize = 1.7
+        mg_per_carp = 68.0
+        mg_per_kg_child = 5.0
+        abs_max_mg = 500.0
+
+    if not drug:
+        return None
+
+    # 2. Детекция педиатрических индикаторов
+    is_pediatric = bool(re.search(
+        r'\b(?:ребен\w*|ребёнк\w*|детям\w*|детск\w*|малыш\w*|мальчик\w*|девочк\w*|педиатр\w*)\b',
+        lower
+    ))
+
+    # Извлечение веса
+    weight = None
+    w_match = re.search(r'\b(\d+(?:[.,]\d+)?)\s*(?:кг|kg|килограмм\w*)\b', lower)
+    if w_match:
+        try:
+            weight = float(w_match.group(1).replace(',', '.'))
+        except ValueError:
+            weight = None
+    else:
+        w_alt = re.search(r'(?:вес[а-я]*|на|для)\s+(\d+(?:[.,]\d+)?)\b', lower)
+        if w_alt:
+            try:
+                val = float(w_alt.group(1).replace(',', '.'))
+                if 4 <= val <= 180:
+                    weight = val
+            except ValueError:
+                pass
+
+    if weight is not None and weight < 40:
+        is_pediatric = True
+
+    if not is_pediatric:
+        return None
+
+    has_calc_intent = bool(re.search(
+        r'\b(?:доза|дозировк\w*|карпул\w*|расчет|расчёт\w*|рассчитай\w*|посчитай\w*|сколько|максимум\w*|предел\w*|можно|лимит\w*)\b',
+        lower
+    ))
+    if not has_calc_intent and weight is None:
+        return None
+
+    if weight is None:
+        resp = (
+            f"🧮 <b>Педиатрический расчет анестезии: {drug_name} (Rule 12.1)</b>\n\n"
+            f"• <b>Педиатрическая норма:</b> не более <b>{mg_per_kg_child} мг/кг</b>.\n"
+            f"• <b>Округление карпул:</b> строго <b>ВНИЗ</b> (в меньшую сторону к безопасной дозе).\n"
+            f"• <b>В 1 карпуле {carpsize} мл:</b> = <b>{mg_per_carp:g} мг</b> действующего вещества.\n\n"
+            f"⚠️ <b>Внимание:</b> Укажите точный вес ребенка в кг для безопасного расчета карпул (например: «артикаин ребенку 12 кг»)."
+        )
+        gt_block = (
+            f"[ФАРМАКОЛОГИЧЕСКИЙ ЗАЩИТНЫЙ БЛОК (ПЕДИАТРИЯ Rule 12.1)]: Препарат: {drug_name}. "
+            f"Норма для детей (<12 лет или <40 кг): артикаин 4% — не более {mg_per_kg_child} мг/кг. "
+            f"Предел ВСЕГДА двойной: мг/кг И абсолютный максимум. Берётся МЕНЬШЕЕ из двух. "
+            f"Округление ВСЕГДА ВНИЗ (в меньшую сторону к безопасной дозе), округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО."
+        )
+        data = {
+            "is_pediatric": True,
+            "drug": drug,
+            "weight": None,
+            "max_dose_mg": None,
+            "safe_carpules": 0,
+            "contraindicated": False,
+            "ground_truth_block": gt_block,
+            "warning": "Вес ребенка не указан.",
+        }
+        return PediatricSafetyResult(resp, data)
+
+    # Точный расчет при известном весе: двойной потолок min(weight * dose_per_kg, max_abs_dose)
+    calc_by_weight = weight * mg_per_kg_child
+    effective_max_mg = min(calc_by_weight, abs_max_mg)
+
+    # Строгое округление ВНИЗ через math.floor
+    safe_carpules = math.floor(effective_max_mg / mg_per_carp)
+    exact_carpules = effective_max_mg / mg_per_carp
+    max_ml = effective_max_mg / (mg_per_carp / carpsize)
+
+    is_contraindicated = False
+    contraindication_note = ""
+
+    # Клинические противопоказания по артикаину для детей < 15 кг / < 4 лет:
+    if drug == "articaine" and weight < 15:
+        is_contraindicated = True
+        safe_carpules = 0
+        if effective_max_mg < mg_per_carp:
+            detail_note = (
+                f"Даже 1 стандартная карпула {carpsize:g} мл ({mg_per_carp:g} мг) превышает допустимый предел для веса {weight:g} кг "
+                f"(максимум {effective_max_mg:g} мг)!"
+            )
+        else:
+            detail_note = (
+                f"Применение в амбулаторной практике категорически противопоказано независимо от расчетной дозы "
+                f"({effective_max_mg:g} мг)! Разрешено строго 0 карпул."
+            )
+        contraindication_note = (
+            f"⚠️ <b>КЛИНИЧЕСКОЕ ПРОТИВОПОКАЗАНИЕ:</b> Артикаин (Ультракаин Д-С, Септонест, Убистезин) "
+            f"<b>противопоказан детям в возрасте до 4 лет (масса тела менее 15 кг)</b> согласно официальной инструкции Минздрава РФ!\n"
+            f"{detail_note}"
+        )
+
+    rem100 = safe_carpules % 100
+    rem10 = safe_carpules % 10
+    if is_contraindicated:
+        carp_str = "0 целых карпул (противопоказан детям < 15 кг)"
+    elif safe_carpules == 0:
+        carp_str = "0 целых карпул (менее 1 карпулы)"
+    elif rem100 in (11, 12, 13, 14):
+        carp_str = f"до {safe_carpules} карпул"
+    elif rem10 == 1:
+        carp_str = f"до {safe_carpules} карпулы"
+    else:
+        carp_str = f"до {safe_carpules} карпул"
+
+    resp_lines = [
+        f"🧮 <b>Педиатрический расчет анестезии: {drug_name}</b>\n",
+        f"👤 <b>Пациент:</b> ребёнок, вес <b>{weight:g} кг</b>",
+        f"📏 <b>Педиатрическая норма:</b> {mg_per_kg_child} мг/кг (двойной потолок: не более {abs_max_mg:g} мг)\n",
+        "📊 <b>Математический расчет:</b>",
+        f"• Предельная доза: {weight:g} кг × {mg_per_kg_child} мг/кг = <b>{effective_max_mg:g} мг</b>",
+        f"• В 1 карпуле {carpsize} мл: = <b>{mg_per_carp:g} мг</b> активного вещества",
+        f"• Точный расчет карпул: <code>{effective_max_mg:g} / {mg_per_carp:g}</code> = <b>{exact_carpules:.2f} карпулы</b>",
+        f"• <b>Безопасный максимум (округление строго ВНИЗ):</b> <b>{carp_str}</b> (максимум не более <b>{max_ml:.2f} мл</b> раствора)\n",
+    ]
+
+    if is_contraindicated:
+        resp_lines.insert(0, contraindication_note + "\n")
+        resp_lines.append(
+            "🚨 <b>ВНИМАНИЕ:</b> Любая рекомендация 1 или более целых карпул для данного веса является токсической передозировкой! "
+            "При необходимости лечения в таком возрасте показано использование специализированных стационарных протоколов под контролем анестезиолога."
+        )
+    else:
+        resp_lines.append(
+            "⚠️ <i>Примечание (Rule 12.1): Предел ВСЕГДА двойной: мг/кг И абсолютный максимум. "
+            "Для детей (<12 лет или <40 кг): артикаин 4% — не более 5 мг/кг. "
+            "Округление ВСЕГДА ВНИЗ. Округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.</i>"
+        )
+
+    full_resp = "\n".join(resp_lines)
+
+    if is_contraindicated:
+        if effective_max_mg < mg_per_carp:
+            contra_gt = f"ВНИМАНИЕ: Артикаин противопоказан детям <15 кг / <4 лет! 1 карпула {mg_per_carp:g} мг ПРЕВЫШАЕТ предел {effective_max_mg:g} мг. "
+        else:
+            contra_gt = f"ВНИМАНИЕ: Артикаин противопоказан детям <15 кг / <4 лет! Препарат категорически противопоказан независимо от расчетной дозы ({effective_max_mg:g} мг). Разрешено строго 0 карпул. "
+    else:
+        contra_gt = ""
+
+    gt_block = (
+        f"[КРИТИЧЕСКИЙ ФАРМАКОЛОГИЧЕСКИЙ ПРЕДОХРАНИТЕЛЬ (ПЕДИАТРИЯ Rule 12.1)]: "
+        f"Пациент: ребенок {weight:g} кг. Препарат: {drug_name}. "
+        f"Предел ВСЕГДА двойной: мг/кг И абсолютный максимум. Берётся МЕНЬШЕЕ из двух. "
+        f"Для детей (<12 лет или <40 кг): артикаин 4% — не более {mg_per_kg_child} мг/кг. "
+        f"Расчетный абсолютный максимум: {weight:g} кг * {mg_per_kg_child} мг/кг = {effective_max_mg:g} мг. "
+        f"В 1 карпуле {carpsize} мл содержится {mg_per_carp:g} мг. "
+        f"Точный расчет: {exact_carpules:.2f} карпулы. "
+        f"Строгое математическое округление вниз (math.floor): РАЗРЕШЕНО {safe_carpules} ЦЕЛЫХ КАРПУЛ "
+        f"(максимум {max_ml:.2f} мл раствора). "
+        f"{contra_gt}"
+        f"Категорически запрещено рекомендовать дозу больше {safe_carpules} карпул — это токсический передоз! "
+        f"Округление ВСЕГДА ВНИЗ, округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.]"
+    )
+
+    data = {
+        "is_pediatric": True,
+        "drug": drug,
+        "weight": weight,
+        "max_dose_mg": effective_max_mg,
+        "safe_carpules": safe_carpules,
+        "max_ml": max_ml,
+        "contraindicated": is_contraindicated,
+        "ground_truth_block": gt_block,
+        "warning": contraindication_note,
+    }
+
+    return PediatricSafetyResult(full_resp, data)
 
 
 async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_msg_id, sender_first_name=None):
@@ -2714,6 +3064,27 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 found_bot_in_chain = False
 
             if found_bot_in_chain and bot_msg_count < MAX_DIALOGUE_BOT_REPLIES:
+                ref_id = nearest_bot_msg_id or reply_to_msg_id
+                resolved_thread_id = ref_id
+                sender_id = getattr(event, "sender_id", None)
+
+                # Fast-fail entrance in-flight check:
+                if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
+                    logger.info(
+                        f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+                    )
+                    return False
+
+                # Fast-fail entrance debounce: execute debounce checks on (chat_id, resolved_thread_id) and (chat_id, sender_id)
+                # BEFORE the slow async LLM triage (check_dialogue_continuation_triage).
+                dialogue_cd = check_user_cooldown(event.chat_id, resolved_thread_id, "dialogue_thread", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS)
+                user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS) if sender_id else 0
+                if dialogue_cd > 0 or user_dialogue_cd > 0:
+                    logger.info(
+                        f"Dialogue entrance debounce: thread {resolved_thread_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
+                    )
+                    return False
+
                 is_dialogue = True
                 
                 # Check for criticism / negative feedback from user
@@ -2796,12 +3167,34 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         last_case_author = state.get("last_case_author_id")
         last_case_bot_msg = state.get("last_case_bot_msg_id")
         last_case_time = _parse_state_dt(state.get("last_case_time"))
+        sender_id = getattr(event, "sender_id", None)
         
         if (
             last_case_author 
-            and event.sender_id == last_case_author 
+            and sender_id == last_case_author 
             and (datetime.now() - last_case_time) < timedelta(minutes=10)
         ):
+            # Canonical thread ID calculation: when is_dialogue is True and reply_to_msg_id is None,
+            # canonicalize the thread key to the active dialogue anchor (state.get("last_case_bot_msg_id"))
+            # instead of falling back to raw msg_id.
+            resolved_thread_id = last_case_bot_msg or msg_id
+
+            # Fast-fail entrance in-flight check:
+            if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
+                logger.info(
+                    f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+                )
+                return False
+
+            # Fast-fail entrance debounce: execute debounce checks on (chat_id, resolved_thread_id) and (chat_id, sender_id)
+            # BEFORE the slow async LLM triage (check_dialogue_continuation_triage).
+            dialogue_cd = check_user_cooldown(event.chat_id, resolved_thread_id, "dialogue_thread", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS)
+            user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS) if sender_id else 0
+            if dialogue_cd > 0 or user_dialogue_cd > 0:
+                logger.info(
+                    f"Dialogue entrance debounce: thread {resolved_thread_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
+                )
+                return False
             try:
                 ref_id = last_case_bot_msg or 0
                 msgs_since = await query_db_async(
@@ -2970,111 +3363,128 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             )
             return False
 
-    # Dialogue thread debounce & race condition guard:
-    # Защита от дублирования ответов (как в инциденте сообщений 177390 & 177392 с интервалом 18 с),
-    # когда один и тот же автор отправляет 2-3 коротких сообщения подряд в одну ветку без Reply.
-    if is_dialogue and sender_id:
+    # In-flight task registry & active dialogue lock:
+    # Защита от параллельной генерации в один тред или от одного автора.
+    active_dialogue_keys = []
+    if is_dialogue:
         thread_root_id = reply_to_msg_id or state.get("last_case_bot_msg_id") or msg_id
-        dialogue_cd = check_user_cooldown(event.chat_id, thread_root_id, "dialogue_thread", seconds=25)
-        user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=25)
-        if dialogue_cd > 0 or user_dialogue_cd > 0:
-            logger.info(
-                f"Dialogue debounce: thread {thread_root_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
-            )
-            return False
+        active_dialogue_keys.append((event.chat_id, thread_root_id))
+        if sender_id:
+            active_dialogue_keys.append((event.chat_id, sender_id))
+        for k in active_dialogue_keys:
+            _ACTIVE_DIALOGUE_THREADS.add(k)
 
-    # EXTRACT KEYWORDS & SEARCH DB
-    # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
-    if is_dialogue:
-        user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
-        if not user_context_msgs:
-            user_context_msgs = context_msgs
-        keyword_source = " ".join(user_context_msgs)
-    else:
-        keyword_source = text if text else ""
-        if not keyword_source:
+    try:
+        # Pre-LLM adversarial filter against jailbreaks & controlled substances
+        is_adv, adv_refusal = check_adversarial_input(text)
+        if is_adv:
+            try:
+                await bot_client.send_message(
+                    entity=event.chat_id,
+                    message=adv_refusal,
+                    reply_to=msg_id,
+                )
+                REPLIED_MSG_IDS[msg_id] = True
+                return True
+            except Exception as adv_err:
+                logger.error(f"Failed to send adversarial refusal: {adv_err}")
+                return False
+
+        pediatric_safety = check_pediatric_anesthesia_safety(text)
+        pediatric_gt = f"\n{pediatric_safety.ground_truth_block}\n" if pediatric_safety else ""
+
+        # EXTRACT KEYWORDS & SEARCH DB
+        # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
+        if is_dialogue:
             user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
-            keyword_source = " ".join(user_context_msgs) if user_context_msgs else ""
-            
-    keywords = extract_keywords(keyword_source)
-    
-    search_keywords = select_search_keywords(keywords)
-                
-
-    
-    wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
-    
-    if not is_dialogue and not wiki_corpus and not archive_corpus:
-        # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
-        # Но если врача привлекло прямое упоминание бота (@bot) или прямой вопрос — отвечаем
-        # на базе фундаментальных медицинских знаний модели, не бросая врача в тишине.
-        is_direct_call = any(k in trigger_reason.lower() for k in ("mention", "direct", "обращение"))
-        if is_direct_call:
-            logger.info("No matching knowledge corpus found, but direct call detected (%s). Proceeding with LLM knowledge.", trigger_reason)
+            if not user_context_msgs:
+                user_context_msgs = context_msgs
+            keyword_source = " ".join(user_context_msgs)
         else:
-            logger.info("No matching knowledge corpus found. Skipping assistant run.")
-            return False
+            keyword_source = text if text else ""
+            if not keyword_source:
+                user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
+                keyword_source = " ".join(user_context_msgs) if user_context_msgs else ""
+                
+        keywords = extract_keywords(keyword_source)
+        
+        search_keywords = select_search_keywords(keywords)
+                    
 
-    # Определяем обращение ДО промпта — сами, не делегируем модели.
-    # Модель просто начнёт с готового префикса, выбор уже сделан.
-    if is_dialogue:
-        address_prefix = ""  # В диалоге без обращения
-    else:
-        unique_senders = set()
-        for cm in context_msgs:
-            if ": " in cm:
-                unique_senders.add(cm.split(": ", 1)[0].strip())
+        
+        wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
+        
+        if not is_dialogue and not wiki_corpus and not archive_corpus:
+            # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
+            # Но если врача привлекло прямое упоминание бота (@bot) или прямой вопрос — отвечаем
+            # на базе фундаментальных медицинских знаний модели, не бросая врача в тишине.
+            is_direct_call = any(k in trigger_reason.lower() for k in ("mention", "direct", "обращение"))
+            if is_direct_call:
+                logger.info("No matching knowledge corpus found, but direct call detected (%s). Proceeding with LLM knowledge.", trigger_reason)
+            else:
+                logger.info("No matching knowledge corpus found. Skipping assistant run.")
+                return False
 
-        if len(unique_senders) > 2:
-            # Несколько людей → 50% "Коллеги," / 50% без обращения
-            address_prefix = "Коллеги, " if random.random() < 0.5 else ""
-        elif sender_first_name:
-            # Один автор → 33% имя / 33% "Коллега," / 33% без обращения
-            roll = random.random()
-            if roll < 0.33:
-                address_prefix = f"{sender_first_name}, "
-            elif roll < 0.66:
-                address_prefix = "Коллега, "
+        # Определяем обращение ДО промпта — сами, не делегируем модели.
+        # Модель просто начнёт с готового префикса, выбор уже сделан.
+        if is_dialogue:
+            address_prefix = ""  # В диалоге без обращения
+        else:
+            unique_senders = set()
+            for cm in context_msgs:
+                if ": " in cm:
+                    unique_senders.add(cm.split(": ", 1)[0].strip())
+
+            if len(unique_senders) > 2:
+                # Несколько людей → 50% "Коллеги," / 50% без обращения
+                address_prefix = "Коллеги, " if random.random() < 0.5 else ""
+            elif sender_first_name:
+                # Один автор → 33% имя / 33% "Коллега," / 33% без обращения
+                roll = random.random()
+                if roll < 0.33:
+                    address_prefix = f"{sender_first_name}, "
+                elif roll < 0.66:
+                    address_prefix = "Коллега, "
+                else:
+                    address_prefix = ""
             else:
                 address_prefix = ""
+
+        if address_prefix:
+            address_line = f'Начни ответ строго с "{address_prefix}" — это первые слова. Не меняй, не перефразируй.'
         else:
-            address_prefix = ""
+            address_line = "Начни ответ сразу по делу, без обращения и без имён."
 
-    if address_prefix:
-        address_line = f'Начни ответ строго с "{address_prefix}" — это первые слова. Не меняй, не перефразируй.'
-    else:
-        address_line = "Начни ответ сразу по делу, без обращения и без имён."
+        # Получаем стиль отправителя для применения его предпочтений в группе
+        user_profile = await database.get_user_profile(event.sender_id)
+        selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
+        style_instruction = style_instruction_block(selected_style)
 
-    # Получаем стиль отправителя для применения его предпочтений в группе
-    user_profile = await database.get_user_profile(event.sender_id)
-    selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
-    style_instruction = style_instruction_block(selected_style)
+        user_memory_context = ""
+        try:
+            user_memory_context = await user_memory.format_users_chunk_context([event.sender_id], max_chars=1200)
+        except Exception as mem_err:
+            logger.warning(f"Failed to fetch user_memory for sender {event.sender_id}: {mem_err}")
 
-    user_memory_context = ""
-    try:
-        user_memory_context = await user_memory.format_users_chunk_context([event.sender_id], max_chars=1200)
-    except Exception as mem_err:
-        logger.warning(f"Failed to fetch user_memory for sender {event.sender_id}: {mem_err}")
+        # BUILD PROMPT
+        ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
+        if is_dialogue:
+            ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
+        
+        # Защита от "шизофрении" (когда бот читает свой же ответ и соглашается с ним как с чужим)
+        for i in range(len(context_msgs)):
+            if "Бот Учимся Вместе 🤖:" in context_msgs[i] or "Учимся Вместе:" in context_msgs[i]:
+                context_msgs[i] = context_msgs[i].replace("Бот Учимся Вместе 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("Учимся Вместе:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
 
-    # BUILD PROMPT
-    ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
-    if is_dialogue:
-        ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
-    
-    # Защита от "шизофрении" (когда бот читает свой же ответ и соглашается с ним как с чужим)
-    for i in range(len(context_msgs)):
-        if "Бот Учимся Вместе 🤖:" in context_msgs[i] or "Учимся Вместе:" in context_msgs[i]:
-            context_msgs[i] = context_msgs[i].replace("Бот Учимся Вместе 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("Учимся Вместе:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
-
-    if is_dialogue:
-        prompt = f"""
+        if is_dialogue:
+            prompt = f"""
 Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и решил ответить на заданный вопрос.
 Тебе 15+ лет клинической практики, ты видел всякое, говоришь прямо и не любишь воду.
 Не строишь из себя учебник — ты коллега, который знает ответ и выдаёт его точно и ёмко.
 
 История диалога (последние сообщения со структурой ответов):
 <user_dialogue>
-{chr(10).join(context_msgs)}
+{chr(10).join(sanitize_user_input_xml(m) for m in context_msgs)}
 </user_dialogue>
 
 {user_memory_context}
@@ -3112,7 +3522,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 12.1. РАСЧЁТ ДОЗ АНЕСТЕТИКОВ — правило безопасности. Оно важнее стиля и важнее желания дать ответ:
     - Предел ВСЕГДА двойной: мг/кг И абсолютный максимум на приём. Берётся МЕНЬШЕЕ из двух. Считать только по мг/кг — типовая ошибка: при весе 100 кг это даёт 700 мг артикаина против допустимых 500.
     - Референсные максимумы для здорового взрослого: артикаин 4% — 7 мг/кг и не более 500 мг; мепивакаин 3% без вазоконстриктора — 4.4 мг/кг и не более 400 мг; лидокаин 2% с адреналином — 7 мг/кг и не более 500 мг. У детей норма на килограмм ниже, и абсолютный потолок проверяется всё равно.
-    - Для детей (<12 лет или <40 кг): артикаин 4% — не более 5 мг/кг (абсолютный потолок строго контролируется по весу). Округление ВСЕГДА ВНИЗ (в меньшую сторону к безопасной дозе), округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.
+    - Для детей (<12 лет или <40 кг): артикаин 4% — не более 5 мг/кг (абсолютный потолок строго контролируется по весу). Округление ВСЕГДА ВНИЗ (в меньшую сторону к безопасной дозе), округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.{pediatric_gt}
     - Всегда показывай арифметику и переводи в карпулы, НАЗЫВАЯ объём карпулы, из которого считал: артикаин 4% при 1.7 мл — 68 мг в карпуле; мепивакаин 3% при 1.8 мл — 54 мг; лидокаин 2% при 1.8 мл — 36 мг. Врач должен иметь возможность проверить каждый шаг.
     - Это референсные максимумы, а не рекомендация дозы. Обязательно оговаривай, что при сопутствующей патологии, у детей, беременных и пожилых предел ниже, и что цифры надо сверить с инструкцией к конкретному препарату.
     - Если анестетик незнаком, концентрация не названа или в вопросе нет веса — НЕ считай и не угадывай. Спроси недостающее или честно скажи, что референса по этому препарату у тебя нет.
@@ -3133,13 +3543,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 - Отвечать на уже закрытые реплики из начала истории.
 Твой ответ — это естественная реакция в разговоре именно на сообщение #{msg_id}!
 """
-    else:
-        prompt = f"""
+        else:
+            prompt = f"""
 Ты — опытный стоматолог-практик, читаешь переписку коллег в чате "StomChat" и вставляешь точную, полезную реплику.
 Тебе 15+ лет практики, ты говоришь коротко и по делу — как тот человек в чате, которого все слушают.
 
 Текущая переписка в чате (последние сообщения со структурой ответов):
-{chr(10).join(context_msgs)}
+{chr(10).join(sanitize_user_input_xml(m) for m in context_msgs)}
 
 {user_memory_context}
 
@@ -3171,7 +3581,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 12.1. РАСЧЁТ ДОЗ АНЕСТЕТИКОВ — правило безопасности. Оно важнее стиля и важнее желания дать ответ:
     - Предел ВСЕГДА двойной: мг/кг И абсолютный максимум на приём. Берётся МЕНЬШЕЕ из двух. Считать только по мг/кг — типовая ошибка: при весе 100 кг это даёт 700 мг артикаина против допустимых 500.
     - Референсные максимумы для здорового взрослого: артикаин 4% — 7 мг/кг и не более 500 мг; мепивакаин 3% без вазоконстриктора — 4.4 мг/кг и не более 400 мг; лидокаин 2% с адреналином — 7 мг/кг и не более 500 мг. У детей норма на килограмм ниже, и абсолютный потолок проверяется всё равно.
-    - Для детей (<12 лет или <40 кг): артикаин 4% — не более 5 мг/кг (абсолютный потолок строго контролируется по весу). Округление ВСЕГДА ВНИЗ (в меньшую сторону к безопасной дозе), округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.
+    - Для детей (<12 лет или <40 кг): артикаин 4% — не более 5 мг/кг (абсолютный потолок строго контролируется по весу). Округление ВСЕГДА ВНИЗ (в меньшую сторону к безопасной дозе), округление дозы вверх для детей КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.{pediatric_gt}
     - Всегда показывай арифметику и переводи в карпулы, НАЗЫВАЯ объём карпулы, из которого считал: артикаин 4% при 1.7 мл — 68 мг в карпуле; мепивакаин 3% при 1.8 мл — 54 мг; лидокаин 2% при 1.8 мл — 36 мг. Врач должен иметь возможность проверить каждый шаг.
     - Это референсные максимумы, а не рекомендация дозы. Обязательно оговаривай, что при сопутствующей патологии, у детей, беременных и пожилых предел ниже, и что цифры надо сверить с инструкцией к конкретному препарату.
     - Если анестетик незнаком, концентрация не названа или в вопросе нет веса — НЕ считай и не угадывай. Спроси недостающее или честно скажи, что референса по этому препарату у тебя нет.
@@ -3196,92 +3606,104 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Твой ответ — это естественная реакция в разговоре именно на сообщение #{msg_id}!
 """
 
-    logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
-    
-    # CALL GEMINI
-    status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-    
-    if error:
-        logger.error(f"Assistant Gemini generation error: {error}")
-        return False
+        logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
         
-    reply_text = getattr(response, "text", None)
-    if not reply_text:
-        logger.warning("Assistant Gemini returned empty text.")
-        return False
+        # CALL GEMINI
+        status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
         
-    reply_text = reply_text.strip()
-    reply_text = clean_html_formatting(reply_text)
-
-    if not is_dialogue:
-        reply_clean = re.sub(r'[^A-Z]', '', reply_text.strip().upper())
-        if reply_clean == "IGNORE":
-            logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
+        if error:
+            logger.error(f"Assistant Gemini generation error: {error}")
             return False
-    
-    # POST-GENERATION QUALITY CHECK: validate draft before sending.
-    # Раньше диалоговые ответы проверку не проходили вообще — а это ровно те
-    # ответы, где врач переспросил бота напрямую и с наибольшей вероятностью
-    # на них опирается. Теперь проверяются оба пути, разница только в том,
-    # что делать при недоступном валидаторе (см. check_response_quality).
-    quality_ok, quality_reason = await check_response_quality(
-        context_msgs, reply_text, invited=is_dialogue, reference=wiki_corpus
-    )
-    if not quality_ok:
-        logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
-        return False
-    logger.info(f"Response quality validator approved draft: {quality_reason}")
-
-    # SENDING
-    if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
-        # Shadow testing: deliver to test chat & topic
-        shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
-        write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nContext:\n{chr(10).join(context_msgs[-4:])}\nResponse:\n{reply_text}\n---")
-        try:
-            await bot_client.send_message(
-                entity=TEST_CHAT_ID,
-                message=shadow_message,
-                reply_to=TEST_TOPIC_ID,
-                parse_mode='html'
-            )
-            logger.info("Sent shadow assistant message to Telegram test topic.")
-            REPLIED_MSG_IDS[msg_id] = True
-            if not is_dialogue:
-                record_passive_success(pending_thread_id)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send shadow assistant message to Telegram: {e}")
+            
+        reply_text = getattr(response, "text", None)
+        if not reply_text:
+            logger.warning("Assistant Gemini returned empty text.")
             return False
-    else:
-        # Live mode OR direct reply in test chat: reply directly to user message!
-        reply_message = reply_text
+            
+        reply_text = reply_text.strip()
+        reply_text = clean_html_formatting(reply_text)
 
-        # Добавляем ненавязчивую контекстную подсказку про ЛС с вероятностью 15%
-        if random.random() < 0.15:
-            reply_message += get_ad_hint(reply_message)
+        if not is_dialogue:
+            reply_clean = re.sub(r'[^A-Z]', '', reply_text.strip().upper())
+            if reply_clean == "IGNORE":
+                logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
+                return False
+        
+        if pediatric_safety:
+            # Post-generation pediatric override guard: if contraindicated or draft recommends more carpules than safe
+            if pediatric_safety.contraindicated and re.search(r'\b[1-9]\d*\s+карпул', reply_text.lower()):
+                logger.warning("Pediatric safety guard: LLM generated carpules for contraindicated child. Overriding with safe response.")
+                reply_text = pediatric_safety.direct_response
+            elif pediatric_safety.safe_carpules == 0 and re.search(r'\b[1-9]\d*\s+карпул', reply_text.lower()):
+                logger.warning("Pediatric safety guard: LLM generated >0 carpules when safe limit is 0. Overriding with safe response.")
+                reply_text = pediatric_safety.direct_response
 
-        try:
-            await bot_client.send_message(
-                entity=event.chat_id,
-                message=reply_message,
-                reply_to=msg_id,
-                parse_mode='html'
-            )
-            logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
-            # Сообщение помечаем отвеченным ДО списания окна: гард на входе
-            # функции читает именно этот кэш, и повторный прогон того же
-            # msg_id (sync_history после рестарта, снимок с подписью в двух
-            # обработчиках) дальше входа не пройдёт.
-            REPLIED_MSG_IDS[msg_id] = True
-            # Полное окно тишины списывается только здесь — после того, как
-            # сообщение реально ушло. Тред помечается обработанным тоже здесь.
-            if not is_dialogue:
-                record_passive_success(pending_thread_id, author_id=event.sender_id, msg_id=msg_id)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send direct assistant reply: {e}")
+        # POST-GENERATION QUALITY CHECK: validate draft before sending.
+        # Раньше диалоговые ответы проверку не проходили вообще — а это ровно те
+        # ответы, где врач переспросил бота напрямую и с наибольшей вероятностью
+        # на них опирается. Теперь проверяются оба пути, разница только в том,
+        # что делать при недоступном валидаторе (см. check_response_quality).
+        quality_ok, quality_reason = await check_response_quality(
+            context_msgs, reply_text, invited=is_dialogue, reference=wiki_corpus
+        )
+        if not quality_ok:
+            logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
             return False
+        logger.info(f"Response quality validator approved draft: {quality_reason}")
+
+        # SENDING
+        if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
+            # Shadow testing: deliver to test chat & topic
+            shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
+            write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nContext:\n{chr(10).join(context_msgs[-4:])}\nResponse:\n{reply_text}\n---")
+            try:
+                await bot_client.send_message(
+                    entity=TEST_CHAT_ID,
+                    message=shadow_message,
+                    reply_to=TEST_TOPIC_ID,
+                    parse_mode='html'
+                )
+                logger.info("Sent shadow assistant message to Telegram test topic.")
+                REPLIED_MSG_IDS[msg_id] = True
+                if not is_dialogue:
+                    record_passive_success(pending_thread_id)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send shadow assistant message to Telegram: {e}")
+                return False
+        else:
+            # Live mode OR direct reply in test chat: reply directly to user message!
+            reply_message = reply_text
+
+            # Добавляем ненавязчивую контекстную подсказку про ЛС с вероятностью 15%
+            if random.random() < 0.15:
+                reply_message += get_ad_hint(reply_message)
+
+            try:
+                await bot_client.send_message(
+                    entity=event.chat_id,
+                    message=reply_message,
+                    reply_to=msg_id,
+                    parse_mode='html'
+                )
+                logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
+                # Сообщение помечаем отвеченным ДО списания окна: гард на входе
+                # функции читает именно этот кэш, и повторный прогон того же
+                # msg_id (sync_history после рестарта, снимок с подписью в двух
+                # обработчиках) дальше входа не пройдёт.
+                REPLIED_MSG_IDS[msg_id] = True
+                # Полное окно тишины списывается только здесь — после того, как
+                # сообщение реально ушло. Тред помечается обработанным тоже здесь.
+                if not is_dialogue:
+                    record_passive_success(pending_thread_id, author_id=event.sender_id, msg_id=msg_id)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send direct assistant reply: {e}")
+                return False
+    finally:
+        for k in active_dialogue_keys:
+            _ACTIVE_DIALOGUE_THREADS.discard(k)
 async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description, image_urls=None):
     if image_urls is None and media_description:
         image_urls = getattr(media_description, "image_urls", None)
@@ -4211,6 +4633,19 @@ async def handle_private_message(bot_client, event):
         }
         if text.lower() in btn_mapping:
             text = btn_mapping[text.lower()]
+
+        # Pre-LLM adversarial filter against jailbreaks & controlled substances
+        is_adv, adv_refusal = check_adversarial_input(text)
+        if is_adv:
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=adv_refusal,
+                )
+                return
+            except Exception as adv_err:
+                logger.error(f"Failed to send adversarial refusal in PM: {adv_err}")
+                return
 
         # 0. Voice Note / Audio processing
         is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
@@ -5686,6 +6121,20 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     if not any(w in text_lower.split() or text_lower == w for w in bot_words):
         # Ищем substring с границами слов и возможными окончаниями
         if not re.search(r'\bбот(а|у|ом|е|ы|ов|ам|ами|ах)?\b', text_lower):
+            return False
+
+    # Pre-LLM adversarial filter against jailbreaks & controlled substances
+    is_adv, adv_refusal = check_adversarial_input(text)
+    if is_adv:
+        try:
+            await bot_client.send_message(
+                entity=event.chat_id,
+                message=adv_refusal,
+                reply_to=msg_id,
+            )
+            return True
+        except Exception as adv_err:
+            logger.error(f"Failed to send adversarial refusal in mention trigger: {adv_err}")
             return False
 
     chat_id = event.chat_id
