@@ -540,6 +540,8 @@ CHAT_KINDS = frozenset({
     # Поймано test_fix_cascade сразу после подключения команды.
     "pm_web_lookup",
     "daemon_memory",
+    "dialogue_fallback",
+    "media_fallback",
 })
 # Всё остальное — daily, weekly, group_summary и любой незнакомый вид — идёт в
 # тяжёлый каскад: там качество важнее задержки, и бюджет там 2100 с.

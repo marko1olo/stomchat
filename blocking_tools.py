@@ -102,11 +102,16 @@ def _read_stdin_json():
 
 def _create_telegraph_page_sync(title, html_content):
     import config
+    import json
+    import requests
     from html_telegraph_poster import TelegraphPoster
+    from html_telegraph_poster.converter import convert_html_to_telegraph_format, OutputFormat
 
-    poster = TelegraphPoster(use_api=True, access_token=config.TELEGRAPH_TOKEN)
-    if not config.TELEGRAPH_TOKEN:
-        poster.create_api_token("StomatBot_Reporter")
+    token = config.TELEGRAPH_TOKEN
+    if not token:
+        poster = TelegraphPoster(use_api=True)
+        acc = poster.create_api_token("StomatBot_Reporter")
+        token = acc["access_token"]
 
     paragraphs = html_content.split('\n\n')
     formatted_body = ''
@@ -117,12 +122,40 @@ def _create_telegraph_page_sync(title, html_content):
                 formatted_body += p
             else:
                 formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
-    page = poster.post(
-        title=title,
-        author="StomatBot AI",
-        text=formatted_body,
-    )
-    return page["url"]
+
+    # Прямой UTF-8 транспорт через application/x-www-form-urlencoded:
+    # Сервер Telegraph API валидирует сырую UTF-8 строку (2 байта на русский символ)
+    # вместо экранированного JSON \uXXXX (6 байт на символ), поднимая лимит страницы
+    # с 10 500 до 28 000+ символов кириллицы!
+    try:
+        nodes = convert_html_to_telegraph_format(formatted_body, clean_html=True, output_format=OutputFormat.PYTHON_LIST)
+        content_str = json.dumps(nodes, ensure_ascii=False)
+        resp = requests.post(
+            "https://api.telegra.ph/createPage",
+            data={
+                "access_token": token,
+                "title": title[:256],
+                "author_name": "StomatBot AI",
+                "content": content_str,
+                "return_content": False,
+            },
+            timeout=30,
+        ).json()
+        if resp.get("ok"):
+            return resp["result"]["url"]
+        api_err = resp.get("error", "Unknown")
+        if "CONTENT_TOO_BIG" in str(api_err):
+            raise RuntimeError(f"Telegraph API error: {api_err}")
+        # При других ошибках API делаем fallback на библиотечный метод
+        poster = TelegraphPoster(use_api=True, access_token=token)
+        page = poster.post(title=title, author="StomatBot AI", text=formatted_body)
+        return page["url"]
+    except Exception as e:
+        if "CONTENT_TOO_BIG" in str(e):
+            raise
+        poster = TelegraphPoster(use_api=True, access_token=token)
+        page = poster.post(title=title, author="StomatBot AI", text=formatted_body)
+        return page["url"]
 
 
 def _generate_gemini_text_sync(prompt, context, timeout=None):

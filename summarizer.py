@@ -22,36 +22,16 @@ GEMINI_GENERATION_TIMEOUT_SECONDS = 2100
 TELEGRAM_SEND_TIMEOUT_SECONDS = 90
 PIN_TIMEOUT_SECONDS = 30
 RECENT_DELIVERY_SCAN_LIMIT = 20
-# Предел, на котором конвейер режет статью перед публикацией в Telegraph, — то
-# же значение, что по умолчанию у html_safe.safe_truncate_html. Нужен здесь,
-# чтобы зарезервировать место под подвал со счётчиком: он дописывается ПОСЛЕ
-# обрезки, а не до неё.
-WEEKLY_HTML_LIMIT = 9500
+# Порог безопасного объема HTML для Telegraph.
+# Замер DOM-дерева показал: лимит JSON-структуры дает CONTENT_TOO_BIG при 14 000+ символов.
+# Безопасный потолок с запасом под узлы DOM, картинки figure и подвал со ссылками: 11 500 символов.
+TELEGRAPH_SAFE_HTML_LIMIT = 11500
+WEEKLY_HTML_LIMIT = TELEGRAPH_SAFE_HTML_LIMIT
 
-# Сколько символов просить у модели для ДНЕВНОГО дайджеста.
-#
-# Цифра выведена из порога обрезки, а не выбрана отдельно. В промпте их было ДВЕ
-# и взаимоисключающих: правило оформления требовало «жёсткий лимит 4000-5000
-# символов», а последняя строка задания — «в пределах 7000-9000». Модель слушается
-# последней и самой конкретной.
-#
-# Замер по bot.log, 23 РЕАЛЬНЫЕ дневные генерации: длина ответа модели от 1822 до
-# 11264, в среднем 8968. Лимит «4000-5000» нарушен в 22 случаях из 23. После
-# clean_markdown_to_html разметка добавляет около 2% (11264 -> 11466), и статья
-# упиралась в обрезку на 9500: превышение в 10 случаях из 23, то есть 43%
-# дайджестов уходили сообществу с обрубленным хвостом и припиской о сокращении.
-#
-# Режется именно хвост структуры: «ЮМОР/ЦИТАТЫ», «ЭКСПЕРТ ДНЯ» и бонусные блоки
-# с пометкой «(В конец)». Хуже всех доставалось «МИКРО-ЛАЙФХАКАМ ДНЯ»: они лежат
-# в BONUS_ALWAYS, то есть применимы всегда и выбираются чаще прочих.
-#
-# Запас 1000 символов покрывает разметку и подвал со счётчиком сообщений.
+# Бюджет символов для ДНЕВНОГО отчета (обзор за 1 день переписки)
 DAILY_CHAR_BUDGET = WEEKLY_HTML_LIMIT - 1000
 
-# То же для НЕДЕЛЬНОГО отчёта. Цифра там была согласована сама с собой, но зашита
-# в трёх местах промпта руками — ровно та конструкция, из которой в дневном
-# промпте и выросло расхождение. Выводим из того же порога: у недельного ещё
-# дописывается подвал со счётчиком, поэтому запас чуть больше.
+# Бюджет символов для НЕДЕЛЬНОГО отчета (масштабный клинический лонгрид за 7 дней).
 WEEKLY_CHAR_BUDGET = WEEKLY_HTML_LIMIT - 1200
 MAX_USERS_CONTEXT_CHARS = 2000
 
@@ -107,9 +87,44 @@ def _get_bot_deep_link():
         username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
     except Exception:
         username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    if username:
-        return f'<a href="https://t.me/{username}?start=consult">Напишите мне в ЛС</a>'
-    return "Напишите мне в ЛС"
+    if not username:
+        username = "docendobot"
+    return f'<a href="https://t.me/{username}?start=consult">@{username}</a>'
+
+
+def build_clinical_assistant_cta(format_type: str = "telegraph") -> str:
+    """
+    Генерирует продающий клинический призыв к действию (CTA) с подробным описанием
+    возможностей бота в личных сообщениях:
+    - Мульти-анализ снимков и фото (Vision, серии/альбомы);
+    - Точный расчет дозировок анестезии и антибиотиков по весу и соматике (ASA);
+    - Каталог клинических протоколов (/protocols);
+    - Клиническая память доктора (/profile);
+    - Симулятор клинических кейсов.
+    """
+    try:
+        import assistant
+        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+    except Exception:
+        username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+    if not username:
+        username = "docendobot"
+
+    if format_type == "telegraph":
+        return (
+            "<hr/>\n"
+            f"<p>🤖 <b>Клинический ассистент <a href=\"https://t.me/{username}?start=consult\">@{username}</a> в Telegram:</b> "
+            f"анализ снимков и КЛКТ (Vision), расчет анестезии и антибиотиков по весу и соматике (ASA), "
+            f"доказательные протоколы (/protocols) и клиническая память врача (/profile).</p>\n"
+            f"<p>👉 <b><a href=\"https://t.me/{username}?start=consult\">Открыть ассистента в ЛС (@{username})</a></b> "
+            f"— мгновенный разбор кейса или снимка прямо на приеме.</p>"
+        )
+    elif format_type == "telegram":
+        return (
+            f"💬 <b>Клинический ассистент в ЛС:</b> <a href=\"https://t.me/{username}?start=consult\">@{username}</a>\n"
+            f"<i>(Анализ снимков/КЛКТ, расчет анестезии по весу и соматике, клинические протоколы /protocols, память врача /profile)</i>"
+        )
+    return ""
 
 
 
@@ -190,8 +205,10 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
             caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
             if len(caption) > 140:
                 caption = caption[:137] + "..."
-            fig_node = f'<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>'
-            final_html = final_html.replace(placeholder, fig_node)
+            fig_node = f'\n\n<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>\n\n'
+            # Заменяем плейсхолдер вместе с возможной пунктуацией встык
+            pattern = re.compile(rf'[.,;:—\-]?\s*\[IMG_{m_id}\]\s*[.,;:—\-]?', re.IGNORECASE)
+            final_html = pattern.sub(fig_node, final_html)
             placed_ids.add(m_id)
             llm_placed_count += 1
 
@@ -244,6 +261,11 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
                 end_header_p = final_html.find("\n\n", target_header_pos)
                 if end_header_p != -1:
                     final_html = final_html[:end_header_p] + f"\n\n{fig_node}" + final_html[end_header_p:]
+                    # Продвигаем позицию за вставленный снимок и следующий абзац текста,
+                    # чтобы последующие снимки не склеивались встык
+                    next_scan_pos = end_header_p + len(fig_node) + 4
+                    next_p = final_html.find("\n\n", next_scan_pos)
+                    target_header_pos = (next_p + 2) if next_p != -1 else next_scan_pos
                 else:
                     final_html += f"\n\n{fig_node}"
                 placed_ids.add(m_id)
@@ -337,6 +359,16 @@ async def _send_message_once(client, chat_id, topic_id, text, send_params, label
         )
         return existing
 
+    # ХАРД-ГАРД: Защита от случайной отправки неструктурированных простыней текста (>1800 символов)
+    # Ни при каких сбоях бот не должен спамить в чат сырыми кусками HTML-статьи.
+    if len(text) > 1800 and not text.startswith(("<pre>", "```")):
+        logger.error(
+            "CRITICAL SAFEGUARD TRIGGERED: Attempted to send raw long text (%d chars) to chat=%s label=%s! "
+            "Truncating to emergency teaser format to protect chat from text dump.",
+            len(text), chat_id, label
+        )
+        text = _safe_truncate_html(text, max_len=1200) + "\n\n⚠️ <i>(Сообщение сокращено системой безопасности от переполнения чата)</i>"
+
     try:
         return await asyncio.wait_for(
             client.send_message(chat_id, text, **send_params),
@@ -394,6 +426,84 @@ async def _notify_delivery(delivery_hook, message):
     result = delivery_hook(message)
     if asyncio.iscoroutine(result):
         await result
+
+
+async def _create_telegraph_page_resilient(title: str, telegraph_html: str, full_html: str, footer: str, timeout: float = TELEGRAPH_TIMEOUT_SECONDS):
+    """
+    Публикует страницу в Telegraph с каскадным авто-даунсайзингом при ошибке CONTENT_TOO_BIG.
+    Гарантирует, что Telegraph не упадет из-за превышения размера узлов DOM.
+    Возвращает (page_url, error_message).
+    """
+    res = await create_telegraph_page_async(title, telegraph_html, timeout=timeout)
+    url, err = res if isinstance(res, tuple) else (res, None)
+    if url:
+        return url, None
+
+    # Каскад 1: если ошибка CONTENT_TOO_BIG, сначала пробуем РАЗДЕЛИТЬ НА ЧАСТИ (multipart)
+    # без потери клинического контента
+    if err and "CONTENT_TOO_BIG" in str(err):
+        logger.warning(
+            "Telegraph CONTENT_TOO_BIG on attempt 1 (chars=%d). Splitting into multipart pages...",
+            len(telegraph_html)
+        )
+        try:
+            from html_safe import split_html_for_telegraph
+            chunks = split_html_for_telegraph(full_html, max_len=18000)
+            if len(chunks) <= 1:
+                chunks = split_html_for_telegraph(full_html, max_len=9500)
+
+            if len(chunks) >= 2:
+                logger.info("Splitting article into %d linked Telegraph pages", len(chunks))
+                part_urls = [None] * len(chunks)
+                last_idx = len(chunks) - 1
+                p_last_content = chunks[last_idx] + footer
+                p_last_title = f"{title} (Часть {last_idx + 1})"
+                res_last = await create_telegraph_page_async(p_last_title, p_last_content, timeout=timeout)
+                url_last, err_last = res_last if isinstance(res_last, tuple) else (res_last, None)
+                if url_last:
+                    part_urls[last_idx] = url_last
+                    all_parts_ok = True
+                    for idx in range(last_idx - 1, -1, -1):
+                        next_url = part_urls[idx + 1]
+                        nav_next = f'\n\n<hr><p>👉 <b><a href="{next_url}">Читать продолжение (Часть {idx + 2}) ➡️</a></b></p>'
+                        p_content = chunks[idx] + nav_next
+                        p_title = f"{title} (Часть {idx + 1})" if idx > 0 else title
+                        res_p = await create_telegraph_page_async(p_title, p_content, timeout=timeout)
+                        url_p, err_p = res_p if isinstance(res_p, tuple) else (res_p, None)
+                        if url_p:
+                            part_urls[idx] = url_p
+                        else:
+                            all_parts_ok = False
+                            break
+                    if all_parts_ok and part_urls[0]:
+                        logger.info("Multipart Telegraph published successfully: %s", part_urls)
+                        return part_urls[0], None
+        except Exception as split_err:
+            logger.error("Multipart Telegraph splitting failed: %s", split_err)
+
+        # Каскад 2: аварийный даунсайзинг до 9000 символов, если мультипарт не сработал
+        downsized_1 = _safe_truncate_html(full_html, max_len=9000 - len(footer)) + footer
+        res2 = await create_telegraph_page_async(title, downsized_1, timeout=timeout)
+        url2, err2 = res2 if isinstance(res2, tuple) else (res2, None)
+        if url2:
+            logger.info("Telegraph recovered on attempt 2 after downsizing to 9000 chars")
+            return url2, None
+
+        # Каскад 3: если всё еще CONTENT_TOO_BIG, вырезаем <figure> и ужимаем до 7500
+        if err2 and "CONTENT_TOO_BIG" in str(err2):
+            logger.warning(
+                "Telegraph CONTENT_TOO_BIG on attempt 2. Stripping <figure> tags and downsizing to 7500..."
+            )
+            no_figures = re.sub(r'<figure>.*?</figure>', '', full_html, flags=re.DOTALL)
+            downsized_2 = _safe_truncate_html(no_figures, max_len=7500 - len(footer)) + footer
+            res3 = await create_telegraph_page_async(title, downsized_2, timeout=timeout)
+            url3, err3 = res3 if isinstance(res3, tuple) else (res3, None)
+            if url3:
+                logger.info("Telegraph recovered on attempt 3 without figures at 7500 chars")
+                return url3, None
+            return None, err3
+
+    return None, err
 
 
 async def _generate_text_singleflight(prompt, kind, chat_id, topic_id, message_count, prompt_chars):
@@ -836,49 +946,54 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     2. ЛИМИТ ДЛИНЫ: не больше {DAILY_CHAR_BUDGET} символов. Это единственная цифра длины в задании — уложись в неё, отбирая главное, а не дописывая всё подряд.
     3. Разрешено использовать маркеры списков (- или •) для перечисления пунктов.
     4. ВЫДЕЛЯЙ важные термины, бренды и выводы **жирным шрифтом**.
-    5. Каждый новый раздел начинай с новой строки, выделяя ключевое слово **ЖИРНЫМ**.
-    === СТРУКТУРА СТАТЬИ ===
-    0. 📚 ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК  (Краткий ввод в теорию по самой сложной теме дня. Дай определение технологии, перечисли показания и противопоказания согласно мировым стандартам стоматологии. Это фундамент для дальнейшего разбора сообщений)
-    1. 🔥 ТЕМА ДНЯ (ГЛУБОКИЙ РАЗБОР)
+    5. Каждый новый раздел ОБЯЗАН начинаться с новой строки со знака ## и отделяться от текста ПУСТОЙ СТРОКОЙ (\n\n). Запрещено сливать заголовок раздела и текст в один абзац!
+    === СТРУКТУРА СТАТЬИ (СТРОГО СОБЛЮДАТЬ ЗАГОЛОВКИ И ПЕРЕНОСЫ) ===
+    ## 0. 📚 ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК: [Тема]
+    (Краткий ввод в теорию по самой сложной теме дня. Дай определение технологии, перечисли показания и противопоказания согласно мировым стандартам стоматологии. Это фундамент для дальнейшего разбора сообщений).
+
+    ## 1. 🔥 ТЕМА ДНЯ (ГЛУБОКИЙ РАЗБОР): [Тема]
     (Выбери самую сложную ИЛИ обсуждаемую тему. Распиши её как мини-лекцию: в чем суть, какие инструменты нужны, какие основные ошибки. Минимум 3-4 абзаца).
-    2. 🦷 КЛИНИЧЕСКИЕ КЕЙСЫ (ОБРАЗОВАТЕЛЬНЫЙ ФОРМАТ)
-    === ПРАВИЛО РАБОТЫ С КЛИНИЧЕСКИМИ СНИМКАМИ (КРИТИЧНО) ===
-    Если в тексте переписки к сообщению MSG_XXXXX прикреплен снимок (отмечено как "На фото в MSG_XXXXX"), и ты разбираешь этот клинический случай:
-    Ты ОБЯЗАН вставить маркер [IMG_XXXXX] отдельной строкой прямо в разбор кейса (после поля СИТУАЦИЯ или в начале описания снимка), чтобы фото отобразилось в статье!
-    Пример:
-    **▶️ СИТУАЦИЯ:** Пациент обратился с жалобами... На прицельной рентгенограмме очаг деструкции у верхушки корня.
-    [IMG_12345]
-    **ЧТО СДЕЛАЛИ:** Подробно шаги лечения.
-    **ЛОГИКА ЛЕЧЕНИЯ:** Почему выбрали именно этот протокол, а не другой.
-    **ТЕХНИЧЕСКИЕ ДЕТАЛИ:** Какие боры, какие торки на моторе, какая последовательность инструментов.
-    **ПОЧЕМУ ТАК:** Обоснование коллег, почему выбран этот метод.
-    **ВЫВОД:** Чему учит этот кейс.
-    Каждый пункт - несколько предложений (3-6).
+
+    ## 2. 🦷 КЛИНИЧЕСКИЕ КЕЙСЫ (ОБРАЗОВАТЕЛЬНЫЙ ФОРМАТ)
+    Каждый подробный клинический кейс начинай с подзаголовка:
+    ### Кейс 1: [Имя врача / диагноз / суть случая]
+    **▶️ СИТУАЦИЯ:** ...
+    [IMG_XXXXX]
+    **ЧТО СДЕЛАЛИ:** ...
+    **ЛОГИКА ЛЕЧЕНИЯ:** ...
+    **ТЕХНИЧЕСКИЕ ДЕТАЛИ:** ...
+    **ПОЧЕМУ ТАК:** ...
+    **ВЫВОД:** ...
+
     Сколько кейсов разбирать так подробно: не больше четырёх, самых содержательных.
     Остальные перечисли одной строкой каждый — суть и вывод, без шести полей.
-    Шесть полей по 3-6 предложений на десять кейсов физически не укладываются в
-    лимит: это 18-36 тысяч символов только на этом разделе.
-    3. 💰 РЫНОК И ДЕНЬГИ (ИНСАЙДЫ) (ЭКОНОМИЧЕСКАЯ АНАЛИТИКА)
+    Шесть полей по 3-6 предложений на десять кейсов физически не укладываются в лимит: это 18-36 тысяч символов только на этом разделе.
+
+    ## 3. 💰 РЫНОК И ДЕНЬГИ (ИНСАЙДЫ)
     (Здесь пиши ВСЕ цифры, которые найдешь. Зарплаты, выручки, стоимость аренды, цены на материалы. Сравнивай мнения. Это самый важный блок для владельцев и врачей).
-    4. 🎓 КЛИНИЧЕСКИЕ ТОНКОСТИ И НЮАНСЫ (НОВОЕ!)
+
+    ## 4. 🎓 КЛИНИЧЕСКИЕ ТОНКОСТИ И НЮАНСЫ
     (Собери здесь все мелкие советы, которые проскакивали: как держать зеркало, как не перегреть пульпу, как обрезать матрицу. Это должны быть ценные "фишки").
-    5. 📝 ПРАКТИЧЕСКИЕ ПРОТОКОЛЫ И СОВЕТЫ
+
+    ## 5. 📝 ПРАКТИЧЕСКИЕ ПРОТОКОЛЫ И СОВЕТЫ
     (Собери здесь конкретные инструкции: "Как фиксировать", "Чем полировать", "Как общаться с пациентом". Формат чек-листов).
 
-    6. ⚔️ АНАЛИЗ ГЛАВНОГО СПОРА (Если он был) ИЛИ РАЗБОР СЛОЖНОГО КЕЙСА
+    ## 6. ⚔️ АНАЛИЗ ГЛАВНОГО СПОРА
     (Если был спор. Оформи как:
     🛑 Лагерь А (Аргументы): ...
     ✅ Лагерь Б (Аргументы): ...)
     Найди самый жесткий спор дня. Распиши позиции сторон максимально подробно, с аргументами и контраргументами. Распиши конфликт подробно. Вынеси вердикт на основе EBM.
-    6.5. 🔍 СРАВНИТЕЛЬНЫЙ АНАЛИЗ И МАТЕРИАЛОВЕДЕНИЕ
+
+    ## 6.5. 🔍 СРАВНИТЕЛЬНЫЙ АНАЛИЗ И МАТЕРИАЛОВЕДЕНИЕ
     (Если в чате упоминали несколько материалов одного типа, проведи их глубокое сравнение: например: вязкость, усадка, сила адгезии, удобство полировки или другие параметры. Сделай акцент на химических, физических свойствах и цене (например, наличие MDP-мономера в бонде).
-    7. 🛠 ОБЗОР МАТЕРИАЛОВ
+
+    ## 7. 🛠 ОБЗОР МАТЕРИАЛОВ
     (Честные отзывы из чата. Что говно, а что топ. Подробные отзывы о материалах. Корректные названия).
     
-    8. 😂 ЮМОР / ЦИТАТЫЫ
+    ## 8. 😂 ЮМОР / ЦИТАТЫ
     (1-3 лучшие шутки или цитаты для атмосферы (с контекстом).
 
-    9.🌟 ЭКСПЕРТ ДНЯ 
+    ## 9. 🌟 ЭКСПЕРТ ДНЯ
     Выбери врача из чата, который продемонстрировал наивысшую клиническую экспертизу и помог коллегам.
     КРИТИЧЕСКИ ВАЖНО: Если в блоке «НАКОПЛЕННЫЕ ПРОФИЛИ УЧАСТНИКОВ ОБСУЖДЕНИЯ» содержатся профили врачей, обязательно сопоставляй советы доктора с его подтвержденной специализацией, клиническим арсеналом (оборудованием, микроскопом) и клиническими протоколами из досье. Приоритет отдавай обоснованным клиническим рекомендациям врачей с подтвержденным статусом в данной области, а не случайным или эмоциональным репликам. Укажи имя/ник эксперта, его подтвержденную специализацию и конкретную пользу, принесенную сообществу.
 {profiles_block}
@@ -908,24 +1023,24 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         
         raw_summary = response.text
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
-        final_html = clean_markdown_to_html(raw_summary)
+        cleaned_html = clean_markdown_to_html(raw_summary)
         
         # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback)
-        final_html = embed_media_into_summary_html(final_html, media_map, media_captions)
+        full_html = embed_media_into_summary_html(cleaned_html, media_map, media_captions)
 
-        footer = ""
-        if msg_count > 0 and "Сообщений за период" not in final_html:
-            footer = f"\n\n<i>Сообщений за период — {msg_count}</i>"
+        cta_telegraph = build_clinical_assistant_cta("telegraph")
+        count_footer = f"\n\n<i>Сообщений за период — {msg_count}</i>" if msg_count > 0 and "Сообщений за период" not in full_html else ""
+        telegraph_footer = f"\n\n{cta_telegraph}{count_footer}"
         
-        # Подвал со счётчиком дописывается ПОСЛЕ обрезки. Порог 11000 позволяет
-        # опубликовать полный дневной выпуск без срезания рубрик и подвала.
-        final_html = _safe_truncate_html(final_html, max_len=11000 - len(footer)) + footer
+        # Благодаря прямому UTF-8 транспорту одна страница Telegraph безопасно вмещает до 25 000+ символов.
+        # Не обрезаем статью преждевременно: _create_telegraph_page_resilient опубликует её целиком
+        # либо автоматически разделит на связанные части (Часть 1, Часть 2) при превышении лимита.
+        telegraph_html = full_html + telegraph_footer
         
         TELEGRAPH_THRESHOLD = 1500 
         sent_msg = None
 
         # --- НАСТРОЙКА ОТПРАВКИ В ТОПИК ---
-        # Чтобы отправить в топик, нужно сделать reply_to на ID топика
         send_params = {
             'parse_mode': 'HTML',
             'link_preview': True
@@ -935,8 +1050,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
         msg_to_send = ""
 
-        if len(final_html) < TELEGRAPH_THRESHOLD:
-            msg_to_send = final_html
+        if len(full_html) < TELEGRAPH_THRESHOLD:
+            msg_to_send = full_html
             direct_send_params = dict(send_params)
             direct_send_params['link_preview'] = False
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
@@ -957,166 +1072,119 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 "daily_direct",
             )
         else:
-            # Создание Telegraph
-            logger.info("📜 Создаем Telegraph страницу...")
-            
-            # ПРАВКА 1: СДВИГ ДАТЫ (Берем текущее время сервера, а не время первого сообщения)
+            # Создание Telegraph с каскадным даунсайзингом
+            logger.info("📜 Создаем Telegraph страницу (Daily)...")
             date_str = get_russian_date(datetime.now())
-            
             title = f"Дайджест 'Учимся Вместе' - {date_str}"
-            logger.info(f"summary telegraph start chat={chat_id} chars={len(final_html)}")
+            logger.info(f"summary telegraph start chat={chat_id} chars={len(telegraph_html)}")
             _write_summary_stage(
                 "telegraph_create",
                 kind="daily",
                 chat_id=chat_id,
                 topic_id=topic_id,
                 message_count=len(messages),
-                html_chars=len(final_html),
+                html_chars=len(telegraph_html),
             )
-            telegraph_res = await create_telegraph_page_async(
+            page_url, telegraph_error = await _create_telegraph_page_resilient(
                 title,
-                final_html,
+                telegraph_html,
+                full_html,
+                telegraph_footer,
                 timeout=TELEGRAPH_TIMEOUT_SECONDS,
             )
-            if isinstance(telegraph_res, tuple):
-                page_url, telegraph_error = telegraph_res
-            else:
-                page_url, telegraph_error = telegraph_res, None
             if telegraph_error:
-                logger.error("Telegraph subprocess failed: %s", telegraph_error)
+                logger.error("Telegraph daily subprocess failed: %s", telegraph_error)
             logger.info(f"summary telegraph done chat={chat_id} ok={bool(page_url)}")
-            
-            if page_url:
-                # ПРАВКА 2: ВАРИАТИВНОСТЬ И КОНСТРУКТОР ТИЗЕРА
-                
-                # А. ХУКИ (Вступление) — Профессиональные, без панибратства и кринжа
-                intros = [
-                    "⚡️ Коллеги, ключевые клинические обсуждения и опыт чата за последние 24 часа.",
-                    "🔬 Главные клинические случаи, разборы протоколов и аргументы в спорах за сутки.",
-                    "📚 Практическая выжимка дня: тактика лечения, ошибки и разбор материалов.",
-                    "☕️ Сэкономьте время на чтении архива чата. Вот сухой остаток дня.",
-                    "🧠 Концентрат практического опыта коллег в одном разборе.",
-                    "💎 Выжимка клинических инсайтов и практических нюансов дня в одной статье.",
-                    "📉 Рынок, кейсы и технологии. Выжимка для тех, кто ценит время.",
-                    "🚀 Готовая выжимка для вас по итогам сегодняшних обсуждений.",
-                    "👀 О чем спорили, над чем рассуждали и чему научились сегодня.",
-                    "🧬 Только доказательная медицина и реальная практика. Никакой воды.",
-                    "🛡 Ваша профессиональная опора: клинические нюансы и опыт коллег.",
-                    "🔥 Самые горячие дискуссии и полезные находки за 24 часа.",
-                    "📝 Методичка дня: протоколы, настройки, материалы.",
-                    "🎯 Бьем точно в цель: только то, что пригодится на завтрашнем приеме.",
-                    "🧱 Фундаментальные знания и практические лайфхаки сегодняшнего дня.",
-                    "⚖️ Взвешенный взгляд на споры и новинки стоматологии."
+
+            # ХУКИ И БУЛЛЕТЫ ДЛЯ ТИЗЕРА
+            intros = [
+                "⚡️ Коллеги, ключевые клинические обсуждения и опыт чата за последние 24 часа.",
+                "🔬 Главные клинические случаи, разборы протоколов и аргументы в спорах за сутки.",
+                "📚 Практическая выжимка дня: тактика лечения, ошибки и разбор материалов.",
+                "☕️ Сэкономьте время на чтении архива чата. Вот сухой остаток дня.",
+                "🧠 Концентрат практического опыта коллег в одном разборе.",
+                "💎 Выжимка клинических инсайтов и практических нюансов дня в одной статье.",
+                "📉 Рынок, кейсы и технологии. Выжимка для тех, кто ценит время.",
+                "🚀 Готовая выжимка для вас по итогам сегодняшних обсуждений.",
+                "👀 О чем спорили, над чем рассуждали и чему научились сегодня.",
+                "🧬 Только доказательная медицина и реальная практика. Никакой воды.",
+                "🛡 Ваша профессиональная опора: клинические нюансы и опыт коллег.",
+                "🔥 Самые горячие дискуссии и полезные находки за 24 часа.",
+                "📝 Методичка дня: протоколы, настройки, материалы.",
+                "🎯 Бьем точно в цель: только то, что пригодится на завтрашнем приеме.",
+                "🧱 Фундаментальные знания и практические лайфхаки сегодняшнего дня.",
+                "⚖️ Взвешенный взгляд на споры и новинки стоматологии."
+            ]
+
+            bullet_sets = [
+                "🔥 <b>Глубокий разбор тем дня</b>\n🦷 <b>Протоколы лечения (Step-by-step)</b>\n🛠 <b>Честные отзывы о материалах</b>",
+                "🛑 <b>Разбор клинических ошибок</b>\n💉 <b>Нюансы анестезии и хирургии</b>\n⚔️ <b>Аргументы из горячих споров</b>",
+                "💰 <b>Инсайды по рынку и ценам</b>\n📸 <b>Разбор фотопротоколов</b>\n🔩 <b>Технические настройки оборудования</b>",
+                "🔹 <b>Только проверенные факты</b>\n🔹 <b>Ссылки на исследования</b>\n🔹 <b>Опыт коллег без цензуры</b>",
+                "🎓 <b>Мини-лекции по сложным темам</b>\n🔬 <b>Макро-фото клинических случаев</b>\n📝 <b>Готовые алгоритмы действий</b>",
+                "🛠 <b>Чем работать: обзор инструментов</b>\n📉 <b>Как сэкономить не теряя качество</b>\n🧠 <b>Коллективный разум в действии</b>",
+                "⚠️ <b>Предупреждения и грабли</b>\n✅ <b>Золотые стандарты лечения</b>\n💬 <b>Лучшие цитаты и разборы</b>",
+                "🌶 <b>Сложные кейсы и их решения</b>\n🧪 <b>Химия материалов простыми словами</b>\n🤝 <b>Врачебная этика и общение</b>",
+                "▶️ <b>Кейсы дня</b>\n💡 <b>Лайфхаки, упрощающие жизнь</b>\n💊 <b>Фармакология на практике</b>",
+                "🌟 <b>Эксперты дня и их советы</b>\n📦 <b>Распаковка новых методик</b>\n🏁 <b>Итоги и выводы</b>"
+            ]
+
+            ctas = [
+                "👉 <b><a href='{url}'>Читать дайджест (Instant View)</a></b>",
+                "📖 <b><a href='{url}'>Открыть статью (5 минут чтения)</a></b>",
+                "⚡️ <b><a href='{url}'>Изучить подробности</a></b>",
+                "📲 <b><a href='{url}'>Смотреть</a></b>",
+                "🧐 <b><a href='{url}'>Перейти к чтению</a></b>"
+            ]
+
+            def _extract_topics(html_doc: str, max_t: int = 3) -> list:
+                candidates = []
+                patterns = [
+                    r'(?:ТЕМА ДНЯ|ТЕМА ДНЯ \(ГЛУБОКИЙ РАЗБОР\))[:\s\-–—]+([^\n<]+)',
+                    r'(?:▶️\s*СИТУАЦИЯ|КЕЙС|СЛУЧАЙ)[:\s\-–—]+([^\n<]+)',
+                    r'<h4>([^<]+)</h4>',
+                    r'<h3>([^<]+)</h3>',
+                    r'<b>([А-ЯЁ\s]{6,40})</b>'
                 ]
-
-                # Б. НАЧИНКА (Буллеты) - 10 комбинаций (Сеты) по умолчанию
-                bullet_sets = [
-                    # Сет 1 (Классика)
-                    "🔥 <b>Глубокий разбор тем дня</b>\n"
-                    "🦷 <b>Протоколы лечения (Step-by-step)</b>\n"
-                    "🛠 <b>Честные отзывы о материалах</b>",
-
-                    # Сет 2 (Проблемный)
-                    "🛑 <b>Разбор клинических ошибок</b>\n"
-                    "💉 <b>Нюансы анестезии и хирургии</b>\n"
-                    "⚔️ <b>Аргументы из горячих споров</b>",
-
-                    # Сет 3 (Финансово-технический)
-                    "💰 <b>Инсайды по рынку и ценам</b>\n"
-                    "📸 <b>Разбор фотопротоколов</b>\n"
-                    "🔩 <b>Технические настройки оборудования</b>",
-
-                    # Сет 4 (Лаконичный)
-                    "🔹 <b>Только проверенные факты</b>\n"
-                    "🔹 <b>Ссылки на исследования</b>\n"
-                    "🔹 <b>Опыт коллег без цензуры</b>",
-
-                    # Сет 5 (Образовательный)
-                    "🎓 <b>Мини-лекции по сложным темам</b>\n"
-                    "🔬 <b>Макро-фото клинических случаев</b>\n"
-                    "📝 <b>Готовые алгоритмы действий</b>",
-
-                    # Сет 6 (Инструментальный)
-                    "🛠 <b>Чем работать: обзор инструментов</b>\n"
-                    "📉 <b>Как сэкономить не теряя качество</b>\n"
-                    "🧠 <b>Коллективный разум в действии</b>",
-
-                    # Сет 7 (Осторожный)
-                    "⚠️ <b>Предупреждения и грабли</b>\n"
-                    "✅ <b>Золотые стандарты лечения</b>\n"
-                    "💬 <b>Лучшие цитаты и разборы</b>",
-                    
-                    # Сет 8 (Для профи)
-                    "🌶 <b>Сложные кейсы и их решения</b>\n"
-                    "🧪 <b>Химия материалов простыми словами</b>\n"
-                    "🤝 <b>Врачебная этика и общение</b>",
-
-                    # Сет 9 (Микс)
-                    "▶️ <b>Кейсы дня</b>\n"
-                    "💡 <b>Лайфхаки, упрощающие жизнь</b>\n"
-                    "💊 <b>Фармакология на практике</b>",
-
-                    # Сет 10 (Итоговый)
-                    "🌟 <b>Эксперты дня и их советы</b>\n"
-                    "📦 <b>Распаковка новых методик</b>\n"
-                    "🏁 <b>Итоги и выводы</b>"
-                ]
-
-                # В. ПРИЗЫВ (Кнопка) - 5 вариантов
-                ctas = [
-                    "👉 <b><a href='{url}'>Читать дайджест (Instant View)</a></b>",
-                    "📖 <b><a href='{url}'>Открыть статью (5 минут чтения)</a></b>",
-                    "⚡️ <b><a href='{url}'>Изучить подробности</a></b>",
-                    "📲 <b><a href='{url}'>Смотреть</a></b>",
-                    "🧐 <b><a href='{url}'>Перейти к чтению</a></b>"
-                ]
-
-                # Извлечение реальных клинических тем из статьи
-                def _extract_topics(html_doc: str, max_t: int = 3) -> list:
-                    candidates = []
-                    patterns = [
-                        r'(?:ТЕМА ДНЯ|ТЕМА ДНЯ \(ГЛУБОКИЙ РАЗБОР\))[:\s\-–—]+([^\n<]+)',
-                        r'(?:▶️\s*СИТУАЦИЯ|КЕЙС|СЛУЧАЙ)[:\s\-–—]+([^\n<]+)',
-                        r'<h4>([^<]+)</h4>',
-                        r'<h3>([^<]+)</h3>',
-                        r'<b>([А-ЯЁ\s]{6,40})</b>'
-                    ]
-                    for pat in patterns:
-                        for m in re.findall(pat, html_doc, re.IGNORECASE):
-                            cl = re.sub(r'<[^>]+>', '', m).strip(' :–—-.')
-                            if 8 <= len(cl) <= 60:
-                                if not any(st in cl.upper() for st in (
-                                    "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ", 
-                                    "КЛИНИЧЕСКИЕ КЕЙСЫ", "ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК", "СООБЩЕНИЙ ЗА",
-                                    "ДАЙДЖЕСТ", "УЧИМСЯ ВМЕСТЕ"
-                                )):
-                                    if cl not in candidates:
-                                        candidates.append(cl)
-                            if len(candidates) >= max_t:
-                                break
+                for pat in patterns:
+                    for m in re.findall(pat, html_doc, re.IGNORECASE):
+                        cl = re.sub(r'<[^>]+>', '', m).strip(' :–—-.')
+                        if 8 <= len(cl) <= 60:
+                            if not any(st in cl.upper() for st in (
+                                "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ", 
+                                "КЛИНИЧЕСКИЕ КЕЙСЫ", "ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК", "СООБЩЕНИЙ ЗА",
+                                "ДАЙДЖЕСТ", "УЧИМСЯ ВМЕСТЕ"
+                            )):
+                                if cl not in candidates:
+                                    candidates.append(cl)
                         if len(candidates) >= max_t:
                             break
-                    return candidates[:max_t]
+                    if len(candidates) >= max_t:
+                        break
+                return candidates[:max_t]
 
-                # Сборка конструктора
-                sel_intro = random.choice(intros)
-                dynamic_topics = _extract_topics(final_html)
-                if dynamic_topics:
-                    sel_bullets = "\n".join(f"🔹 <b>{t}</b>" for t in dynamic_topics)
-                else:
-                    sel_bullets = random.choice(bullet_sets)
-                sel_cta = random.choice(ctas).format(url=page_url)
-
-                msg_to_send = (
-                    f"🎓 <b>Дайджест из чата ({date_str})</b>\n\n"
-                    f"{sel_intro}\n\n"
-                    f"{sel_bullets}\n\n"
-                    f"{sel_cta}\n\n"
-                    f"💬 <i>Есть клинический вопрос или снимок? {_get_bot_deep_link()} — разберем случай вместе.</i>"
-                )
+            sel_intro = random.choice(intros)
+            dynamic_topics = _extract_topics(full_html)
+            if dynamic_topics:
+                sel_bullets = "\n".join(f"🔹 <b>{t}</b>" for t in dynamic_topics)
             else:
-                msg_to_send = _safe_truncate_html(final_html, max_len=3900)
+                sel_bullets = random.choice(bullet_sets)
 
+            if page_url:
+                sel_cta = random.choice(ctas).format(url=page_url)
+            else:
+                sel_cta = "📄 <b>Полный иллюстрированный выпуск доступен в прикрепленном PDF-файле ниже 👇</b>"
+
+            cta_telegram = build_clinical_assistant_cta("telegram")
+            msg_to_send = (
+                f"🎓 <b>Дайджест из чата ({date_str})</b>\n\n"
+                f"{sel_intro}\n\n"
+                f"{sel_bullets}\n\n"
+                f"{sel_cta}\n\n"
+                f"{cta_telegram}"
+            )
+
+            send_params['link_preview'] = bool(page_url)
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
             _write_summary_stage(
                 "telegram_send",
@@ -1135,10 +1203,34 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 "daily_teaser",
             )
 
-        # 9. ЗАКРЕП
+        # 9. ЗАКРЕП И ГЕНЕРАЦИЯ PDF
         if sent_msg:
             await _notify_delivery(delivery_hook, sent_msg)
             await _pin_message_safely(client, chat_id, sent_msg.id)
+
+            # Генерация и отправка верстанной журнальной PDF-версии вестника
+            try:
+                from digest_pdf import generate_digest_pdf
+                pdf_title = f"Клинический Дайджест StomChat ({date_str})"
+                pdf_path = await generate_digest_pdf(
+                    html_content=full_html,
+                    title=pdf_title,
+                    subtitle="Ежедневный клинический вестник профессионального сообщества",
+                    msg_count=msg_count,
+                    date_str=date_str,
+                )
+                if pdf_path and os.path.exists(pdf_path) and hasattr(client, "send_file"):
+                    pdf_caption = (
+                        f"📄 <b>{pdf_title}</b>\n\n"
+                        f"Полная иллюстрированная версия со всеми снимками, протоколами и кейсами дня."
+                    )
+                    pdf_params = {'caption': pdf_caption, 'parse_mode': 'HTML'}
+                    if topic_id:
+                        pdf_params['reply_to'] = topic_id
+                    await client.send_file(chat_id, pdf_path, **pdf_params)
+                    logger.info("PDF daily digest document delivered to chat=%s", chat_id)
+            except Exception as pdf_err:
+                logger.warning("PDF daily digest delivery failed: %s", pdf_err)
 
         logger.info(f"✅ Саммари отправлено в {chat_id}")
         runtime_guard.clear_summary_status("daily_summary_done")
@@ -1312,28 +1404,28 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # — включая чужие ошибки, споры и цены, — и вынести это в «Доску почёта»
     # статьи, которую читает всё сообщество.
     prompt = f"""
-    Ты — главный редактор крупного медицинского портала.
-    Твоя задача — написать **ДЕТАЛЬНЫЙ ОБЗОР** по материалам чата стоматологов за неделю в пределах {WEEKLY_CHAR_BUDGET} символов.
+    Ты — главный редактор клинического стоматологического издания.
+    Твоя задача — написать масштабный, глубокий **КЛИНИЧЕСКИЙ ОБЗОР (ЛОНГРИД)** по материалам профессионального чата стоматологов за неделю в объеме 11 000 – {WEEKLY_CHAR_BUDGET} символов.
     === ПРАВИЛА ВНИМАНИЯ ===
-    1. Проанализируй ВЕСЬ предоставленный лог. Не фокусируйся только на последних сообщениях. 
-    2. Если в начале или середине лога была важная дискуссия, она ОБЯЗАТЕЛЬНО должна попасть в отчет.
-    3. Твоя цель — равномерный охват всех тем за отчетный период.
-    4. Если один автор пишет несколько сообщений подряд — воспринимай это как единый монолог
+    1. Проанализируй ВЕСЬ предоставленный лог недели. Не фокусируйся только на последних сообщениях. 
+    2. Если в начале или середине лога была важная дискуссия или разбор, она ОБЯЗАТЕЛЬНО должна попасть в отчет.
+    3. Твоя цель — равномерный охват всех ключевых тем за отчетный период.
+    4. Если один автор пишет несколько сообщений подряд — воспринимай это как единый клинический монолог.
     === ГЛАВНОЕ ПРАВИЛО: ОБЪЕМ И ДЕТАЛИ ===
-    1. **ЗАПРЕЩЕНО СОКРАЩАТЬ.** Твоя цель — не "саммари", а "летопись". Если обсуждали 15 разных тем — распиши все 15.
-    2. **БОЛЬШЕ ИМЕН.** Люди любят, когда их упоминают. Если врач дал дельный совет — укажи его имя жирным (**Имя**). Постарайся упомянуть как можно больше активных участников.
-    3. **КЛИНИЧЕСКИЕ КЕЙСЫ.** Это сердце статьи. Описывай их максимально подробно: какой зуб, какой диагноз, какие инструменты, какие файлы, какая ирригация.
-        Пиши живым текстом, профессионально, но без пафоса. Представь, что пересказываешь суть другу-врачу. Коллеги обсуждают кейсы.
+    1. **ЗАПРЕЩЕНО СОКРАЩАТЬ.** Твоя цель — фундаментальная клиническая летопись. Не сжимай темы в пару строк, расписывай подробно.
+    2. **БОЛЬШЕ ИМЕН И СПЕЦИАЛИЗАЦИЙ.** Люди любят, когда их вклад замечают. Если врач дал дельный совет — укажи его имя жирным (**Имя**). Опирайся на накопленные профили участников.
+    3. **КЛИНИЧЕСКИЕ КЕЙСЫ — СЕРДЦЕ СТАТЬИ.** Описывай их максимально подробно: зуб, диагноз, жалобы, снимки, инструменты, файлы, протоколы ирригации (концентрации, экспозиция, активация), адгезивные протоколы, силеры.
+        Пиши живым профессиональным языком доказательной медицины, уважительно и по делу.
     === ПРАВИЛА (КАК ПИСАТЬ) ===
-    1. НИКАКОЙ ВОДЫ: Запрещены фразы типа "развернулась жаркая дискуссия", "тонкая грань", "наше профессиональное сообщество". Пиши сразу: "Сегодня спорили о..." или "Главная проблема дня — ...".
-    2. БОЛЬШЕ МЯСА: Нужны цифры, бренды, протоколы. Ищи конкретные названия брендов, настройки эндомоторов, время протравки, цифры зарплат (до рубля), проценты. Общие фразы ("обсудили цены") ЗАПРЕЩЕНЫ.
+    1. НИКАКОЙ ВОДЫ: Запрещены пустые фразы типа "развернулась жаркая дискуссия", "наше сообщество единодушно". Пиши сразу суть: "Главная тема недели — ..." или "Врач X показал сложный случай...".
+    2. БОЛЬШЕ МЯСА И ПАРАМЕТРОВ: Нужны цифры, бренды, протоколы. Ищи конкретные названия брендов, настройки эндомоторов (торк, скорость), время экспозиции, цифры зарплат и цен (до рубля), проценты. Общие фразы ("обсудили цены") ЗАПРЕЩЕНЫ.
     3. ОФОРМЛЕНИЕ: Заголовки ЖИРНЫМ КАПСОМ.
-    4. ПРАВИЛО ГЛУБИНЫ (DEEP DIVE):Пример - Не пиши просто "обсуждали IDS". Напиши: "Обсуждали технику IDS: последовательность нанесения адгезива, время экспозиции и какой именно жидкотекучий композит лучше использовать для запечатывания пор".
-    5. ПРАВИЛО АРГУМЕНТАЦИИ: Если кто-то говорит «это плохо», обязательно найди в чате и допиши ПОЧЕМУ это плохо. Приводи анатомические, физические и химические обоснования, которые звучали в чате.
-    6. ОПИСАНИЕ ТЕХНОЛОГИЙ: Если упоминается методика (например, «вертипреп»), кратко опиши её суть для тех, кто не в теме, чтобы статья была самодостаточной.
-    7. АКАДЕМИЧЕСКАЯ ТОЧНОСТЬ И БАЗА: Используй терминологию доказательной медицины. Прежде чем переходить к лайфхакам из чата, кратко опиши суть (например, если речь об адгезии — упомяни гибридный слой и деградацию коллагена, если об эндодонтии — анатомию системы корневых каналов, и так далее). Статья должна выглядеть как сочетание учебника и практического руководства. В то же время дружественный тон приятного общения должен быть сохранён - статью читать должно быть интересно!
-    8. АНТИ-ФАНТАЗИЯ: Если в чате обсуждается спорный или сомнительный метод, который противоречит медицинским стандартам, обязательно укажи на это с пометкой «Важное предупреждение». Не выдумывай факты, которых нет в логах, но дополняй их общепринятыми протоколами (Золотым стандартом), если это необходимо для полноты картины.
-    9. ПРАВИЛО ДИНАМИЧЕСКИХ ЗАГОЛОВКОВ (ЖЕСТКО): ЗАПРЕЩЕНО использовать стандартные названия разделов типа "Терапия", "Ортопедия" или "Энциклопедия". Каждый заголовок раздела должен быть КРЕАТИВНЫМ и отражать суть обсуждений этой конкретной недели. Примеры: Вместо "Терапия" — "ЭНДОДОНТИЧЕСКИЙ МАРАФОН: БИТВА ЗА МВ2 И СТУПЕНЬКИ", вместо "Главная тема" — "ХОЛИВАР НЕДЕЛИ: ГРЕТЬ ИЛИ НЕ ГРЕТЬ ГУТТАПЕРЧУ?".
+    4. ПРАВИЛО ГЛУБИНЫ (DEEP DIVE): Не пиши просто "обсуждали IDS". Напиши: "Обсуждали технику IDS: последовательность нанесения адгезива, время экспозиции и какой именно жидкотекучий композит лучше использовать для запечатывания пор".
+    5. ПРАВИЛО АРГУМЕНТАЦИИ: Если кто-то говорит «это плохо», обязательно найди в чате и допиши ПОЧЕМУ это плохо (анатомические, микробиологические или биомеханические причины).
+    6. ОПИСАНИЕ ТЕХНОЛОГИЙ: Если упоминается методика (например, «вертипреп» или «латеральная компакция»), кратко опиши её суть для тех, кто не в теме, чтобы статья была самодостаточной.
+    7. АКАДЕМИЧЕСКАЯ ТОЧНОСТЬ И БАЗА: Используй терминологию доказательной медицины (EBM). Прежде чем переходить к лайфхакам из чата, кратко опиши суть (деградация коллагена, гибридный слой, анатомия системы корневых каналов).
+    8. АНТИ-ФАНТАЗИЯ: Если в чате обсуждается сомнительный или опасный метод, противоречащий стандартам, обязательно укажи на это с пометкой «⚠️ Предупреждение редакции». Не выдумывай факты, которых нет в логах, но дополняй общепринятыми протоколами (Золотым стандартом).
+    9. ПРАВИЛО ДИНАМИЧЕСКИХ ЗАГОЛОВКОВ (ЖЕСТКО): ЗАПРЕЩЕНО использовать стандартные названия разделов типа "Терапия", "Ортопедия" или "Энциклопедия". Каждый заголовок раздела должен быть КРЕАТИВНЫМ и отражать суть обсуждений этой конкретной недели.
     === ПРАВИЛА ОФОРМЛЕНИЯ (ЖЕСТКО) ===
     1. Разрешено использовать маркеры списков (- или •) для перечисления пунктов и эмодзи в заголовках разделов, как в структуре ниже.
     2. Структурируй текст ПЕРЕНОСАМИ СТРОК и ЖИРНЫМ ШРИФТОМ: каждый раздел, кейс и пункт — с новой строки.
@@ -1394,11 +1486,11 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     1. Пиши ЖИВЫМ, ПРОФЕССИОНАЛЬНЫМ языком.
     2. БЕЗ ВСТУПЛЕНИЯ И ЗАКЛЮЧЕНИЯ: Сразу начинай со структуры.
     3. Из HTML-тегов используй только <b> и <i>. Тег <br> ЗАПРЕЩЕН: переносы делай настоящими переводами строк, иначе весь текст склеится в одну строку.
-    4. Объём статьи: не больше {WEEKLY_CHAR_BUDGET} символов. Всё, что выше, будет обрезано вместе с последними разделами.
+    4. Целевой объём статьи: 11 000 – {WEEKLY_CHAR_BUDGET} символов. Распределяй объём гармонично по всем разделам, чтобы финальные рубрики (Доска почета, Юмор) оставались полными и завершенными.
 {profiles_block}
     ЛОГ НЕДЕЛИ:
     {full_text}
-    Инструкция для самопроверки: Напиши максимально подробную, профессиональную, глубокую и развернутую статью в пределах {WEEKLY_CHAR_BUDGET} символов. Это летопись, а не краткое саммари. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, концентрируй пользу без воды.
+    Инструкция для самопроверки: Напиши масштабную, глубокую и развернутую статью в объеме 11 000 – {WEEKLY_CHAR_BUDGET} символов. Это полноценная клиническая летопись, а не краткое саммари. Излагай клиническую логику, протоколы, цифры и бренды во всех подробностях, концентрируй пользу без воды.
     """
 
     try:
@@ -1425,22 +1517,22 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             return None
             
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
-        final_html = clean_markdown_to_html(raw_text)
+        full_html = clean_markdown_to_html(raw_text)
         
         # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback)
-        final_html = embed_media_into_summary_html(final_html, media_map, media_captions)
+        full_html = embed_media_into_summary_html(full_html, media_map, media_captions)
         
-        # Подвал со счётчиком дописывается ПОСЛЕ обрезки и с запасом под свою
-        # длину. Раньше он шёл до неё, а обрезка режет с конца: на статье длиннее
-        # 9500 символов подвал уходил в отрез первым, вместе с «[Отчет сокращен
-        # из-за лимитов Telegraph]» на его месте. То есть счётчик пропадал ровно
-        # в тех выпусках, где неделя вышла содержательной.
-        footer = ""
-        if msg_count > 0 and "Сообщений за неделю" not in final_html:
-            footer = f"\n\n<i>Сообщений за неделю — {msg_count}</i>"
+        # Клинический CTA-подвал для Telegraph с описанием возможностей бота в ЛС
+        cta_telegraph = build_clinical_assistant_cta("telegraph")
+        count_footer = f"\n\n<i>Сообщений за неделю — {msg_count}</i>" if msg_count > 0 and "Сообщений за неделю" not in full_html else ""
+        telegraph_footer = f"\n\n{cta_telegraph}{count_footer}"
 
-        final_html = _safe_truncate_html(final_html, max_len=WEEKLY_HTML_LIMIT - len(footer)) + footer
-        # Публикация в Telegraph
+        # Благодаря прямому UTF-8 транспорту одна страница Telegraph безопасно вмещает до 28 000+ символов.
+        # Не обрезаем статью преждевременно: _create_telegraph_page_resilient опубликует её целиком
+        # либо автоматически разделит на связанные части (Часть 1, Часть 2) при превышении лимита.
+        telegraph_html = full_html + telegraph_footer
+
+        # Публикация в Telegraph с каскадным даунсайзингом
         date_str = get_russian_date(datetime.now())
         title = f"WEEKLY: Большая Стоматологическая Газета ({date_str})"
         
@@ -1451,59 +1543,20 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             chat_id=chat_id,
             topic_id=topic_id,
             message_count=len(messages),
-            html_chars=len(final_html),
+            html_chars=len(telegraph_html),
         )
-        telegraph_res = await create_telegraph_page_async(
+        page_url, telegraph_error = await _create_telegraph_page_resilient(
             title,
-            final_html,
+            telegraph_html,
+            full_html,
+            telegraph_footer,
             timeout=TELEGRAPH_TIMEOUT_SECONDS,
         )
-        if isinstance(telegraph_res, tuple):
-            page_url, telegraph_error = telegraph_res
-        else:
-            page_url, telegraph_error = telegraph_res, None
         if telegraph_error:
-            logger.error("Telegraph subprocess failed: %s", telegraph_error)
-        
-        if not page_url:
-            logger.error("❌ Не удалось создать Telegraph страницу (Weekly). Проверь валидность HTML. Пробуем отправить напрямую...")
-            # Попробуем отправить напрямую в телеграм, обрезав до 3900 символов
-            msg_to_send = _safe_truncate_html(final_html, max_len=3900)
-            send_params = {'parse_mode': 'HTML', 'link_preview': False}
-            if topic_id:
-                send_params['reply_to'] = topic_id
-            # Стадию обязана обновлять и аварийная ветка. Без этой записи в
-            # bot_summary_status.json до самого конца висел «telegraph_create»,
-            # хотя Telegraph уже отказал: и оператор, и сторож видели зависание
-            # на публикации там, где идёт отправка в чат. В дневной ветке отметка
-            # перед отправкой стоит на обоих путях — тизера и прямой отправки.
-            _write_summary_stage(
-                "telegram_send",
-                kind="weekly",
-                chat_id=chat_id,
-                topic_id=topic_id,
-                message_count=len(messages),
-                send_chars=len(msg_to_send),
-            )
-            sent_msg = await _send_message_once(
-                client,
-                chat_id,
-                topic_id,
-                msg_to_send,
-                send_params,
-                "weekly_fallback",
-            )
-            if sent_msg:
-                await _notify_delivery(delivery_hook, sent_msg)
-                await _pin_message_safely(client, chat_id, sent_msg.id)
-                logger.info(f"✅ Временный Weekly Digest отправлен напрямую в {chat_id}")
-                runtime_guard.clear_summary_status("weekly_summary_done")
-                return msg_to_send
-            
-            runtime_guard.clear_summary_status("weekly_telegraph_failed")
-            return None
+            logger.error("Telegraph weekly subprocess failed: %s", telegraph_error)
+        logger.info(f"summary weekly telegraph done chat={chat_id} ok={bool(page_url)}")
 
-        logger.info(f"🔗 Страница создана: {page_url}. Готовим тизер...")
+        logger.info(f"Готовим тизер для Weekly (Telegraph: {page_url or 'недоступен'})...")
         
         weekly_teasers = [
             f"🗞 <b>ВЫШЕЛ НОВЫЙ НОМЕР WEEKLY ({date_str})</b>\n\n"
@@ -1512,24 +1565,33 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             f"💉 <b>Клиническая панорама:</b> Подробный разбор кейсов (эндо, реставрации, хирургия).\n"
             f"🗣 <b>Личности:</b> Кого цитировали, с кем спорили, кому ставили лайки.\n"
             f"⚙️ <b>Материаловедение:</b> Честные отзывы о брендах без рекламы.\n\n"
-            f"Чтиво на 15 минут. Заваривайте кофе.\n\n"
-            f"👉 <b><a href='{page_url}'>ЧИТАТЬ ПОЛНЫЙ ВЫПУСК</a></b>",
+            f"Чтиво на 15 минут. Заваривайте кофе.",
 
             f"🔥 <b>ИТОГИ НЕДЕЛИ: Большой разбор ({date_str})</b>\n\n"
             f"Собрали в одну статью всё, чем жил чат последние 7 дней.\n\n"
             f"👨‍⚕️ <b>Доска почета:</b> Ищите свои фамилии в тексте!\n"
             f"🦷 <b>Кейс-марафон:</b> Фотопротоколы и тактика лечения.\n"
             f"⚔️ <b>Баттлы:</b> Аргументы сторон в вечных спорах.\n\n"
-            f"Энциклопедия коллективного опыта готова.\n\n"
-            f"👉 <b><a href='{page_url}'>ОТКРЫТЬ ЛОНГРИД</a></b>"
+            f"Энциклопедия коллективного опыта готова."
         ]
         
+        sel_teaser = random.choice(weekly_teasers)
+        if page_url:
+            sel_cta = f"👉 <b><a href='{page_url}'>ЧИТАТЬ ПОЛНЫЙ ВЫПУСК</a></b>"
+        else:
+            sel_cta = "📄 <b>Полный иллюстрированный выпуск доступен в прикрепленном PDF-файле ниже 👇</b>"
+
+        cta_telegram = build_clinical_assistant_cta("telegram")
         msg_to_send = (
-            f"{random.choice(weekly_teasers)}\n\n"
-            f"💬 <i>Есть клинический вопрос или снимок? {_get_bot_deep_link()} — разберем случай вместе.</i>"
+            f"{sel_teaser}\n\n"
+            f"{sel_cta}\n\n"
+            f"{cta_telegram}"
         )
         
-        send_params = {'parse_mode': 'HTML', 'link_preview': True}
+        send_params = {
+            'parse_mode': 'HTML',
+            'link_preview': bool(page_url)
+        }
         if topic_id:
             send_params['reply_to'] = topic_id
         
@@ -1565,14 +1627,16 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             try:
                 from digest_pdf import generate_digest_pdf
                 pdf_title = f"Клинический Вестник StomChat ({date_str})"
+                # КРИТИЧНО: В PDF передаем ПОЛНУЮ версию статьи (full_html),
+                # а не усеченную под лимиты сервиса Telegraph!
                 pdf_path = await generate_digest_pdf(
-                    html_content=final_html,
+                    html_content=full_html,
                     title=pdf_title,
                     subtitle="Большая стоматологическая газета • Недельный обзор",
                     msg_count=msg_count,
                     date_str=date_str,
                 )
-                if pdf_path and os.path.exists(pdf_path):
+                if pdf_path and os.path.exists(pdf_path) and hasattr(client, "send_file"):
                     pdf_caption = (
                         f"📄 <b>{pdf_title}</b>\n\n"
                         f"Полная журнальная PDF-версия вестника со всеми клиническими снимками, протоколами и таблицами."

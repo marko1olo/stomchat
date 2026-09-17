@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import html
 import json
 import logging
 import re
@@ -323,6 +324,7 @@ def format_clinician_memory_prompt(user_id: int, memory: Optional[dict] = None) 
 
     specialty = memory.get("specialty", "").strip()
     summary = memory.get("clinical_summary", "").strip()
+    group_summary = memory.get("group_summary", "").strip()
     facts_raw = memory.get("facts_json", "[]")
 
     facts_list = []
@@ -337,8 +339,15 @@ def format_clinician_memory_prompt(user_id: int, memory: Optional[dict] = None) 
     body = []
     if specialty:
         body.append(f"• Подтвержденная специализация: {specialty}")
-    if summary:
+
+    if summary and group_summary and summary != group_summary:
+        body.append(f"• Клиническое досье из общей беседы:\n{group_summary}")
+        body.append(f"• Опыт и специфика практики из ЛС:\n{summary}")
+    elif summary:
         body.append(f"• Актуальное клиническое досье (оборудование, материалы, протоколы, кейсы):\n{summary}")
+    elif group_summary:
+        body.append(f"• Клиническое досье врача (на основе сообщений и разборов в чате):\n{group_summary}")
+
     if facts_list:
         recent_facts = facts_list[-8:]
         facts_str = "\n".join([f"  - {f}" for f in recent_facts])
@@ -348,9 +357,62 @@ def format_clinician_memory_prompt(user_id: int, memory: Optional[dict] = None) 
         return "Клинический профиль доктора формируется (первые обращения)."
 
     content = "\n".join(body)
-    return f"""=== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ И КЛИНИЧЕСКИЙ ПРОФИЛЬ ВРАЧА (ИЗ ЛС) ===
-[Справочная информация для ассистента: этот блок сформирован и непрерывно актуализируется ИИ на основе всей истории общения с доктором в ЛС. Память содержит его специализацию, используемые протоколы/материалы и обсуждавшиеся клинические случаи. Опирайся на эти знания, веди диалог на равных и не переспрашивай то, что уже известно]:
+    return f"""=== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ И КЛИНИЧЕСКИЙ ПРОФИЛЬ ВРАЧА ===
+[Справочная информация для ассистента: этот блок сформирован и непрерывно актуализируется ИИ на основе анализа сообщений доктора в чате и истории общения в ЛС. Память содержит его подтвержденную специализацию, используемые протоколы/материалы и обсуждавшиеся клинические случаи. Опирайся на эти знания, веди диалог на равных коллега-коллеге и не переспрашивай то, что уже известно]:
 {content}"""
+
+
+def format_user_profile_card(memory: dict, display_name: str = "") -> str:
+    """
+    Форматирует красивую медицинскую карточку профиля врача для вывода по команде /profile в ЛС.
+    """
+    name = display_name or memory.get("first_name") or ""
+    username = memory.get("username")
+    user_label = f"<b>{html.escape(name)}</b>" if name else "<b>Коллега</b>"
+    if username:
+        user_label += f" (@{html.escape(username)})"
+
+    specialty = memory.get("specialty", "").strip() or "Стоматолог (уточняется в диалоге)"
+    summary = memory.get("clinical_summary", "").strip()
+    group_summary = memory.get("group_summary", "").strip()
+    pm_cnt = memory.get("pm_message_count", 0) or 0
+    grp_cnt = memory.get("group_message_count", 0) or 0
+    total_cnt = memory.get("message_count", 0) or (pm_cnt + grp_cnt)
+
+    facts_raw = memory.get("facts_json", "[]")
+    facts_list = []
+    try:
+        if facts_raw:
+            facts_list = json.loads(facts_raw)
+            if not isinstance(facts_list, list):
+                facts_list = []
+    except Exception:
+        facts_list = []
+
+    sections = [
+        f"🩺 <b>КЛИНИЧЕСКИЙ ПРОФИЛЬ ВРАЧА</b>\n{user_label}\n",
+        f"• <b>Специализация:</b> {html.escape(specialty)}",
+        f"• <b>Активность:</b> {total_cnt} сообщений (в группе: {grp_cnt}, в ЛС: {pm_cnt})",
+    ]
+
+    best_summary = summary or group_summary
+    if best_summary:
+        clean_summary = html.escape(best_summary[:1200].strip())
+        if len(best_summary) > 1200:
+            clean_summary += "..."
+        sections.append(f"\n📋 <b>Клиническое досье и арсенал:</b>\n<i>{clean_summary}</i>")
+
+    if facts_list:
+        rendered_facts = "\n".join([f"  • {html.escape(str(f))}" for f in facts_list[-6:]])
+        sections.append(f"\n💡 <b>Ключевые предпочтения в практике:</b>\n{rendered_facts}")
+
+    sections.append(
+        "\nℹ️ <i>Этот профиль автоматически собирается ИИ из ваших клинических разборов "
+        "и помогает ассистенту общаться с вами на равных без повторения базовых вопросов.</i>"
+    )
+
+    return "\n".join(sections)
+
 
 
 async def format_users_chunk_context(
@@ -728,3 +790,46 @@ async def group_memory_daemon_loop(interval_seconds: int = GROUP_MEMORY_DAEMON_I
         except Exception as e:
             logger.error(f"Unexpected error in group_memory_daemon_loop: {e}")
         await asyncio.sleep(interval_seconds)
+
+
+def format_user_profile_card(memory: dict, display_name: str) -> str:
+    """
+    Форматирует презентабельную клиническую карточку доктора для команды /profile и инлайн-меню.
+    Включает клиническую специализацию, сводку опыта из чата сообщества и ЛС.
+    """
+    safe_name = html.escape(display_name or "Доктор")
+    if not memory:
+        return (
+            f"👤 <b>Клинический профиль: {safe_name}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Клинический профиль только формируется.</i>\n\n"
+            "По мере общения в сообществе и в личных сообщениях бот запоминает вашу специализацию, "
+            "любимые протоколы, используемые материалы и клинический почерк."
+        )
+
+    specialty = html.escape(memory.get("specialty") or "Стоматолог общей практики / Врач-стоматолог")
+    group_summary = (memory.get("group_summary") or "").strip()
+    pm_summary = (memory.get("clinical_summary") or "").strip()
+    preferred_topics = html.escape((memory.get("preferred_topics") or "").strip())
+    msg_count = memory.get("group_message_count", 0)
+
+    lines = [
+        f"👤 <b>Клинический профиль: {safe_name}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"🩺 <b>Специализация:</b> {specialty}",
+    ]
+
+    if preferred_topics:
+        lines.append(f"📌 <b>Интересующие темы:</b> {preferred_topics}")
+
+    summary_text = group_summary or pm_summary
+    if summary_text:
+        escaped_summary = html.escape(summary_text)
+        lines.append(f"\n📝 <b>Клинический опыт и контекст:</b>\n{escaped_summary}")
+    else:
+        lines.append("\n<i>Клинический портрет доктора формируется в фоновом режиме по мере активности в чате.</i>")
+
+    if msg_count > 0:
+        lines.append(f"\n📊 <i>Активность в сообществе: {msg_count} сообщений</i>")
+
+    return "\n".join(lines)

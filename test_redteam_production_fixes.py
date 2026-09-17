@@ -6,6 +6,10 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import assistant
 import summarizer
 import config
+import runtime_guard
+
+# Изоляция файла статуса для test_isolation
+runtime_guard.SUMMARY_STATUS_PATH = "bot_summary_status_test.json"
 
 @pytest.mark.asyncio
 async def test_dialogue_resilience_emoji_sanitization():

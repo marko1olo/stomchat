@@ -206,12 +206,42 @@ def safe_truncate_html(html_str, max_len=9500):
 
     truncated = html_str[: safe_cut_index(html_str, budget)]
 
-    # Обрезаем по границе абзаца, если она достаточно далеко.
-    for marker in ("<p>", "<br>"):
-        position = truncated.rfind(marker)
-        if position > 2000:
-            truncated = truncated[:position]
+    # Ищем осмысленную границу обрезки (абзац, перевод строки, предложение, слово),
+    # чтобы никогда не разрезать слово пополам (например, «...за детал[Отчет сокращен...]»).
+    cut_pos = -1
+
+    # 1. Граница абзаца / блока
+    for marker in ("\n\n", "</p>", "<p>", "</figure>", "<br><br>", "<br/>\n", "<br>"):
+        pos = truncated.rfind(marker)
+        min_threshold = max(200, int(len(truncated) * 0.6))
+        if pos >= min_threshold:
+            cut_pos = pos + (len(marker) if marker in ("</p>", "</figure>") else 0)
             break
+
+    # 2. Граница строки (отдельный пункт списка, автор и т.д.)
+    if cut_pos == -1:
+        pos = truncated.rfind("\n")
+        min_threshold = max(200, int(len(truncated) * 0.7))
+        if pos >= min_threshold:
+            cut_pos = pos
+
+    # 3. Граница предложения (.!?; с последующим пробелом/переносом)
+    if cut_pos == -1:
+        for m in _SENTENCE_END_RE.finditer(truncated):
+            pos = m.end()
+            min_threshold = max(200, int(len(truncated) * 0.75))
+            if pos >= min_threshold:
+                cut_pos = pos
+
+    # 4. Граница слова (пробел)
+    if cut_pos == -1:
+        pos = truncated.rfind(" ")
+        min_threshold = max(200, int(len(truncated) * 0.8))
+        if pos >= min_threshold:
+            cut_pos = pos
+
+    if cut_pos > 0:
+        truncated = truncated[: safe_cut_index(truncated, cut_pos)].rstrip()
 
     body, unclosed = balance_html(truncated)
     body += "".join(f"</{tag}>" for tag in reversed(unclosed))
@@ -314,21 +344,43 @@ def clean_markdown_to_html(text):
     # 1. Сначала превращаем Markdown-жирный в HTML-жирный
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
 
-    # 2. Превращаем заголовки ### в жирный
-    text = re.sub(r'^#{1,6}\s+(.*)', r'<b>\1</b>', text, flags=re.MULTILINE)
-
-    # 3. Маркеры списков убираем, но ЗАПОМИНАЕМ, что строка была пунктом.
+    # 2. Обработка заголовков ###, списков и маркеров изображений
     marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
+    heading_re = re.compile(r'^[ \t]*#{1,6}\s+(.*)')
+    image_re = re.compile(r'^[ \t]*\[IMG_\d+\][ \t]*$')
+
     lines = []
     list_flags = []
-    for raw_line in text.split('\n'):
-        without_marker = marker_re.sub('', raw_line)
-        lines.append(without_marker)
-        list_flags.append(without_marker != raw_line)
+    heading_flags = []
+    image_flags = []
 
-    # 4. АЛГОРИТМ СЕМАНТИЧЕСКОЙ СКЛЕЙКИ
+    for raw_line in text.split('\n'):
+        line_clean = raw_line.strip()
+        is_img = bool(image_re.match(line_clean))
+
+        m_head = heading_re.match(raw_line)
+        if m_head:
+            content = m_head.group(1).strip()
+            if not (content.startswith("<b>") and content.endswith("</b>")):
+                content = f"<b>{content}</b>"
+            lines.append(content)
+            list_flags.append(False)
+            heading_flags.append(True)
+            image_flags.append(False)
+            continue
+
+        without_marker = marker_re.sub('', raw_line)
+        list_flags.append(without_marker != raw_line)
+        lines.append(without_marker)
+        heading_flags.append(False)
+        image_flags.append(is_img)
+
+    # 3. АЛГОРИТМ СЕМАНТИЧЕСКОЙ СКЛЕЙКИ
     final_lines = []
     final_is_list = []
+    final_is_heading = []
+    final_is_image = []
+
     # Жесткие терминаторы (конец мысли)
     hard_stops = ".!?:;"
     # Союзы и знаки продолжения
@@ -336,19 +388,23 @@ def clean_markdown_to_html(text):
 
     def looks_like_heading(rendered, plain):
         stripped = rendered.strip()
+        is_emoji_case_or_num = bool(re.match(r'^(?:[📚🔥🦷💰🎓📝⚔️🔍🛠😂🌟⚡🔬☕💎🚀🛡🧱⚖️#\d]|Кейс\s*№?|Случай\s*№?|Клинический)', plain, re.IGNORECASE))
+        max_len = 140 if is_emoji_case_or_num else 60
         return (
             stripped.startswith("<b>")
             and stripped.endswith("</b>")
             and "</b>" not in stripped[:-4]
-            and len(plain) < 60
+            and len(plain) < max_len
             and plain[-1:] not in (",", ":", ";")
         )
 
-    def append(rendered, is_list_item):
+    def append(rendered, is_list_item, is_heading_item, is_img_item):
         final_lines.append(rendered)
         final_is_list.append(is_list_item)
+        final_is_heading.append(is_heading_item)
+        final_is_image.append(is_img_item)
 
-    for line, is_list_item in zip(lines, list_flags):
+    for line, is_list_item, is_orig_heading, is_img in zip(lines, list_flags, heading_flags, image_flags):
         clean_line = line.strip()
 
         if not clean_line:
@@ -356,25 +412,33 @@ def clean_markdown_to_html(text):
                 last_txt = re.sub(r'<[^>]+>', '', final_lines[-1]).strip()
                 # Разрыв только если точка/двоеточие в конце
                 if last_txt and last_txt[-1] in hard_stops:
-                    append("", False)
+                    append("", False, False, False)
             continue
 
         stripped_curr = re.sub(r'<[^>]+>', '', clean_line).strip()
-        current_is_heading = looks_like_heading(clean_line, stripped_curr)
+        current_is_heading = is_orig_heading or looks_like_heading(clean_line, stripped_curr)
 
-        # Перед заголовком раздела — всегда пустая строка.
-        if current_is_heading and final_lines and final_lines[-1] != "":
-            append("", False)
+        # Перед заголовком или картинкой — всегда пустая строка
+        if (current_is_heading or is_img) and final_lines and final_lines[-1] != "":
+            append("", False, False, False)
 
         if not final_lines or final_lines[-1] == "":
-            append(clean_line, is_list_item)
+            append(clean_line, is_list_item, current_is_heading, is_img)
             continue
 
         prev_line = final_lines[-1]
+        prev_is_heading = final_is_heading[-1]
+        prev_is_img = final_is_image[-1]
         stripped_prev = re.sub(r'<[^>]+>', '', prev_line).strip()
 
+        # Картинки и заголовки НИКОГДА не склеиваются с соседними строками
+        if is_img or prev_is_img or current_is_heading or prev_is_heading:
+            append("", False, False, False)
+            append(clean_line, is_list_item, current_is_heading, is_img)
+            continue
+
         if not stripped_prev or not stripped_curr:
-            append(clean_line, is_list_item)
+            append(clean_line, is_list_item, current_is_heading, is_img)
             continue
 
         # ПРОВЕРКА НА СКЛЕЙКУ
@@ -393,7 +457,7 @@ def clean_markdown_to_html(text):
             should_join = True
 
         # КОРРЕКЦИЯ: Защита заголовков не должна срабатывать, если есть запятая или союз
-        is_header_like = prev_line.startswith('<b>') and len(stripped_prev) < 50
+        is_header_like = looks_like_heading(prev_line, stripped_prev)
         if is_header_like:
             if stripped_prev[-1] == "," or re.search(conjunctions, stripped_prev, re.I):
                 should_join = True
@@ -413,9 +477,9 @@ def clean_markdown_to_html(text):
             final_lines[-1] = f"{prev_line} {clean_line}"
             final_is_list[-1] = final_is_list[-1] or is_list_item
         else:
-            append(clean_line, is_list_item)
+            append(clean_line, is_list_item, current_is_heading, is_img)
 
-    # 5. Финальная чистка
+    # 4. Финальная чистка
     text = "\n".join(final_lines)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)

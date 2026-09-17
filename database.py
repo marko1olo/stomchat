@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -344,6 +345,28 @@ async def init_db():
                 if "duplicate column" not in str(exc).lower():
                     logger.warning("database migration media_remote_url НЕ применена: "
                                    "%s: %s", type(exc).__name__, exc)
+
+            # Таблица автоматически извлеченных и проверенных клинических протоколов сообщества
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clinical_protocols (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    category TEXT DEFAULT 'Общая стоматология',
+                    indication TEXT DEFAULT '',
+                    contraindications TEXT DEFAULT '',
+                    steps_json TEXT DEFAULT '[]',
+                    materials TEXT DEFAULT '',
+                    key_nuances TEXT DEFAULT '',
+                    author_doctor TEXT DEFAULT '',
+                    source_msg_id INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_category ON clinical_protocols(category)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_title ON clinical_protocols(title)")
 
     return await _run_db(operation)
 
@@ -1432,6 +1455,144 @@ async def get_user_messages_since(user_id, since_msg_id=0, limit=30):
             ).fetchall()
             return [{"msg_id": r[0], "text": r[1], "date": r[2]} for r in rows]
     return await _run_db(operation)
+
+
+async def save_clinical_protocol(
+    title,
+    category="Общая стоматология",
+    indication="",
+    contraindications="",
+    steps_json=None,
+    materials="",
+    key_nuances="",
+    author_doctor="",
+    source_msg_id=0,
+    steps=None,
+):
+    """Сохраняет или актуализирует структурированный клинический протокол в БД."""
+    if steps is not None and steps_json is None:
+        if isinstance(steps, (list, tuple)):
+            steps_json = json.dumps(steps, ensure_ascii=False)
+        else:
+            steps_json = str(steps)
+    if steps_json is None:
+        steps_json = "[]"
+
+    if isinstance(materials, (list, tuple)):
+        materials = ", ".join(str(m) for m in materials)
+    if isinstance(contraindications, (list, tuple)):
+        contraindications = "; ".join(str(c) for c in contraindications)
+
+    def operation():
+        with _connection() as db:
+            existing = db.execute(
+                "SELECT id FROM clinical_protocols WHERE LOWER(TRIM(title)) = LOWER(TRIM(?))",
+                (title,)
+            ).fetchone()
+            if existing:
+                db.execute(
+                    """
+                    UPDATE clinical_protocols
+                    SET category = ?, indication = ?, contraindications = ?,
+                        steps_json = ?, materials = ?, key_nuances = ?,
+                        author_doctor = CASE WHEN ? != '' THEN ? ELSE author_doctor END,
+                        source_msg_id = CASE WHEN ? != 0 THEN ? ELSE source_msg_id END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (category, indication, contraindications, steps_json, materials, key_nuances,
+                     author_doctor, author_doctor, source_msg_id, source_msg_id, existing[0])
+                )
+                return existing[0]
+            else:
+                cursor = db.execute(
+                    """
+                    INSERT INTO clinical_protocols (
+                        title, category, indication, contraindications, steps_json,
+                        materials, key_nuances, author_doctor, source_msg_id, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor, source_msg_id)
+                )
+                return cursor.lastrowid
+    return await _run_db(operation)
+
+
+async def get_clinical_protocols(category=None, search=None, limit=50):
+    """Возвращает перечень клинических протоколов с фильтрацией по категории и поисковому запросу."""
+    def operation():
+        with _connection() as db:
+            query = """
+                SELECT id, title, category, indication, contraindications,
+                       steps_json, materials, key_nuances, author_doctor, source_msg_id, created_at
+                FROM clinical_protocols
+                WHERE 1=1
+            """
+            params = []
+            if category:
+                query += " AND LOWER(category) = LOWER(?)"
+                params.append(category)
+            if search:
+                query += " AND (LOWER(title) LIKE ? OR LOWER(materials) LIKE ? OR LOWER(steps_json) LIKE ? OR LOWER(indication) LIKE ?)"
+                like_param = f"%{search.lower()}%"
+                params.extend([like_param, like_param, like_param, like_param])
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            rows = db.execute(query, params).fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "title": r[1],
+                    "category": r[2],
+                    "indication": r[3],
+                    "contraindications": r[4],
+                    "steps_json": r[5],
+                    "materials": r[6],
+                    "key_nuances": r[7],
+                    "author_doctor": r[8],
+                    "source_msg_id": r[9],
+                    "created_at": r[10],
+                }
+                for r in rows
+            ]
+    return await _run_db(operation)
+
+
+async def get_clinical_protocol_by_id(proto_id):
+    """Возвращает один протокол по ID."""
+    def operation():
+        with _connection() as db:
+            row = db.execute(
+                """
+                SELECT id, title, category, indication, contraindications,
+                       steps_json, materials, key_nuances, author_doctor, source_msg_id, created_at
+                FROM clinical_protocols WHERE id = ?
+                """,
+                (proto_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "title": row[1],
+                "category": row[2],
+                "indication": row[3],
+                "contraindications": row[4],
+                "steps_json": row[5],
+                "materials": row[6],
+                "key_nuances": row[7],
+                "author_doctor": row[8],
+                "source_msg_id": row[9],
+                "created_at": row[10],
+            }
+    return await _run_db(operation)
+
+
+async def search_clinical_protocols(query, limit=5):
+    """Полнотекстовый поиск по протоколам для RAG-подмешивания."""
+    return await get_clinical_protocols(search=query, limit=limit)
+
 
 
 

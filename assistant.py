@@ -26,6 +26,7 @@ from dental_vocab import (
 )
 import html_safe
 import media_tools
+import protocol_extractor
 import taxonomy
 import tg_safety
 import user_memory
@@ -797,12 +798,12 @@ def calculate_anesthesia_instant(text: str) -> str | None:
 
 
 def build_main_menu_markup():
-    """Строит инлайн-клавиатуру главного меню — 3 реальные кнопки врача."""
+    """Строит инлайн-клавиатуру главного меню — реальные кнопки врача."""
     from telethon import Button
     return [
         [Button.inline("💊 Препараты и дозы", data="nav:calc"),   Button.inline("🔬 Разобрать снимок", data="nav:xray")],
-        [Button.inline("🔍 Найти статью / протокол", data="nav:web")],
-        [Button.inline("💬 Задать клинический вопрос", data="nav:chat")],
+        [Button.inline("📚 Клинические протоколы", data="nav:proto"), Button.inline("🔍 Найти статью / протокол", data="nav:web")],
+        [Button.inline("👤 Мой профиль", data="nav:profile"), Button.inline("💬 Клинический вопрос", data="nav:chat")],
         [Button.inline("⭐ Мои закладки", data="nav:bookmarks"), Button.inline("⚙️ Настройки", data="nav:settings")],
     ]
 
@@ -877,6 +878,7 @@ async def init_assistant(bot_client):
             ("ЛС", types.BotCommandScopeDefault(), [
                 types.BotCommand(command='start', description='Запустить приветствие и инициализировать бота'),
                 types.BotCommand(command='help', description='Показать памятку по работе с ассистентом'),
+                types.BotCommand(command='profile', description='Мой клинический профиль и память'),
                 types.BotCommand(command='protocols', description='Показать доступные клинические протоколы в базе'),
                 # /wiki и /style реализованы и перечислены в /help, но в меню
                 # их не было — а меню это единственная поверхность, где врач
@@ -4583,6 +4585,99 @@ def is_clinical_consultation_query(text: str, has_media: bool, has_dental_topic:
     return bool(tooth_match and has_medical_marker)
 
 
+async def handle_private_message_bundle(bot_client, events_burst):
+    """
+    Интеллектуальный сборщик пакета быстрых сообщений от одного врача (снимок + голосовое/текст).
+    Объединяет реплики в один полноценный клинический запрос, устраняя ложное срабатывание рейт-лимита.
+    """
+    if not events_burst:
+        return
+    if len(events_burst) == 1:
+        await handle_private_message(bot_client, events_burst[0])
+        return
+
+    chat_id = events_burst[0].chat_id
+    logger.info("PM bundle: объединяем %d сообщений для chat_id=%s", len(events_burst), chat_id)
+
+    media_events = []
+    voice_events = []
+    text_parts = []
+
+    for ev in events_burst:
+        msg = getattr(ev, "message", None)
+        if not msg:
+            continue
+
+        is_voice = (
+            (getattr(msg, "voice", None) is not None and type(msg.voice).__name__ != "MagicMock")
+            or (getattr(msg, "audio", None) is not None and type(msg.audio).__name__ != "MagicMock")
+            or (getattr(msg, "video_note", None) is not None and type(msg.video_note).__name__ != "MagicMock")
+        )
+        has_pic = (
+            getattr(msg, "photo", None) is not None
+            or getattr(msg, "video", None) is not None
+            or media_tools.image_document(msg) is not None
+        )
+
+        if is_voice:
+            voice_events.append(ev)
+        elif has_pic:
+            media_events.append(ev)
+
+        msg_text = (msg.message or "").strip()
+        if msg_text:
+            text_parts.append(msg_text)
+
+    # Распознаем аудио/видео заметки из бандла
+    transcribed_voices = []
+    for vev in voice_events:
+        temp_p = None
+        try:
+            os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
+            temp_p = await asyncio.wait_for(
+                vev.message.download_media(file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"bundle_v_{vev.message.id}_")),
+                timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+            if temp_p and os.path.exists(temp_p):
+                import gemini_client as _gc
+                import blocking_tools
+                g_text, g_err = await _gc.transcribe_audio_gemini_multimodal(temp_p, duration_secs=0.0)
+                if not g_err and g_text:
+                    clean_t = await blocking_tools.correct_dental_transcription_async(g_text.strip())
+                    if clean_t:
+                        transcribed_voices.append(clean_t)
+                else:
+                    t_text, _ = await blocking_tools.transcribe_audio_async(temp_p, timeout=50)
+                    if t_text:
+                        clean_t = await blocking_tools.correct_dental_transcription_async(t_text.strip())
+                        if clean_t:
+                            transcribed_voices.append(clean_t)
+        except Exception as ve:
+            logger.warning("Error transcribing voice in PM bundle: %s", ve)
+        finally:
+            if temp_p and os.path.exists(temp_p):
+                try:
+                    os.remove(temp_p)
+                except Exception:
+                    pass
+
+    combined_elements = []
+    if text_parts:
+        combined_elements.append(" ".join(text_parts))
+    if transcribed_voices:
+        combined_elements.append(f"[Голосовое сообщение врача]: {' '.join(transcribed_voices)}")
+
+    unified_text = "\n\n".join(combined_elements).strip()
+
+    target_event = media_events[0] if media_events else events_burst[-1]
+    if len(media_events) > 1:
+        target_event._album_events = media_events
+    if unified_text:
+        target_event.message.message = unified_text
+
+    await handle_private_message(bot_client, target_event)
+
+
 async def handle_private_message(bot_client, event):
     """Глубокий обработчик входящих личных сообщений (ЛС) бота с RAG, зрением и памятью."""
     try:
@@ -4697,6 +4792,11 @@ async def handle_private_message(bot_client, event):
             "⚙️ стиль общения": "/style",
             "стиль общения": "/style",
             "стиль": "/style",
+            "👤 мой профиль": "/profile",
+            "мой профиль": "/profile",
+            "профиль": "/profile",
+            "📚 клинические протоколы": "/protocols",
+            "клинические протоколы": "/protocols",
             "📚 протоколы": "/protocols",
             "протоколы": "/protocols"
         }
@@ -4962,25 +5062,63 @@ async def handle_private_message(bot_client, event):
             return
 
         if user_state and user_state.get("state_type") == "case":
-            # Вложение в режиме кейса до анализа не доходит: маршрутизация в
-            # симулятор стоит ЗДЕСЬ, а обработка медиа — на 500 строк ниже.
-            # Снимок БЕЗ подписи внутри отбивается как пустой ход, а снимок С
-            # ПОДПИСЬЮ проходил как обычный текстовый ход: экзаменатор оценивал
-            # подпись («вот КТ, что дальше?»), вёл кейс дальше и ни словом не
-            # упоминал, что рентгена не видел. Врач при этом уверен в обратном —
-            # он его только что прислал. Ход не отменяем (ответ на текст всё же
-            # осмысленный), но про непрочитанный файл говорим прямо.
             case_attachment = (
                 getattr(event.message, "photo", None) is not None
                 or getattr(event.message, "video", None) is not None
                 or media_tools.image_document(event.message) is not None
             )
             if case_attachment:
-                await bot_client.send_message(
+                status_msg = await bot_client.send_message(
                     entity=chat_id,
-                    message="📎 <i>Снимок в режиме симулятора я не читаю" + (" — учёл только текст подписи." if (text or "").strip() else ". Отправьте текстовое описание вашего шага.") + " Чтобы разобрать рентген, выйдите из кейса: /abort.</i>",
-                    parse_mode='html'
+                    message="📥 <i>Изучаю снимок для материалов клинического кейса...</i>",
+                    parse_mode='html',
                 )
+                temp_case_media = None
+                case_media_desc = None
+                try:
+                    os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
+                    temp_case_media = await asyncio.wait_for(
+                        event.message.download_media(file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"case_{event.message.id}_")),
+                        timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                    )
+                    if temp_case_media and os.path.exists(temp_case_media):
+                        case_media_desc = await vision.describe_image(
+                            temp_case_media,
+                            caption=f"Клинический симулятор: {text or ''}",
+                            is_passive=False,
+                        )
+                except Exception as c_err:
+                    logger.warning("Failed to analyze media in case simulator: %s", c_err)
+                finally:
+                    if status_msg:
+                        try:
+                            await bot_client.delete_messages(chat_id, status_msg.id)
+                        except Exception:
+                            pass
+                    if temp_case_media and os.path.exists(temp_case_media):
+                        try:
+                            os.remove(temp_case_media)
+                        except Exception:
+                            pass
+
+                if case_media_desc:
+                    photo_note = f"[Врач предоставил снимок/рентген]: {case_media_desc}"
+                    text = f"{photo_note}\n\nДействие врача: {text}" if text else photo_note
+                else:
+                    if not (text or "").strip():
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message="❌ <i>Не удалось обработать снимок. Пожалуйста, опишите ваше действие текстом или пришлите снимок ещё раз.</i>",
+                            parse_mode='html',
+                        )
+                        return
+                    else:
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message="⚠️ <i>Снимок не удалось открыть, оцениваю только текст вашего действия.</i>",
+                            parse_mode='html',
+                        )
+
             await handle_interactive_case_step(bot_client, chat_id, text, user_state)
             return
 
@@ -5125,6 +5263,7 @@ async def handle_private_message(bot_client, event):
                 "• /start — перезапустить приветствие бота и открыть Главное меню. Синоним — /menu.\n"
                 "• /help — показать эту памятку.\n"
                 "• /style — настроить стиль общения (коллега, сухие факты, циник).\n"
+                "• /profile — показать мой клинический профиль, специализацию и память бота. Синоним — /me.\n"
                 "• /protocols — вывести список доступных клинических протоколов.\n"
                 "• /wiki — открыть интерактивную стоматологическую энциклопедию. Синоним — /encyclopedia.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
@@ -5163,25 +5302,56 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=help_text, buttons=help_buttons, parse_mode='html')
             return
 
-        if text.lower() == "/protocols":
-            protocols_text = (
-                "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
-                "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
-                "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
-                "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
-                "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
-                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
-                "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
-            )
+        if text.lower() in ("/profile", "/me", "/профиль"):
+            sender = await event.get_sender()
+            display_name = (
+                (getattr(sender, "first_name", "") or "") +
+                (" " + getattr(sender, "last_name", "") if getattr(sender, "last_name", "") else "")
+            ).strip() or getattr(sender, "username", "") or f"Доктор #{chat_id}"
+
+            memory = await database.get_user_memory(chat_id)
+            profile_card = user_memory.format_user_profile_card(memory, display_name)
+
             from telethon import Button
-            buttons = [
-                [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
-                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
-                # Вертикальное препарирование перечислено в тексте выше, а
-                # кнопки для него не было — открыть его врач не мог никак.
-                [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")]
+            profile_buttons = [
+                [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("⭐ Закладки", data="nav:bookmarks")],
+                [Button.inline("🏠 Главное меню", data="nav:main")]
             ]
-            await bot_client.send_message(entity=chat_id, message=protocols_text, buttons=buttons, parse_mode='html')
+            await bot_client.send_message(entity=chat_id, message=profile_card, buttons=profile_buttons, parse_mode='html')
+            return
+
+        if text.lower() == "/protocols" or text.lower().startswith("/protocols "):
+            proto_query = text[10:].strip() if text.lower().startswith("/protocols ") else ""
+            if proto_query:
+                found = await database.search_clinical_protocols(proto_query, limit=5)
+                if found:
+                    if len(found) == 1:
+                        msg_text, btns = protocol_extractor.format_protocol_view(found[0])
+                        await bot_client.send_message(entity=chat_id, message=msg_text, buttons=btns, parse_mode='html')
+                        return
+                    else:
+                        msg_text, btns = protocol_extractor.format_protocol_catalog(found, category_filter=None)
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message=f"🔍 <b>Найдено протоколов по запросу «{html.escape(proto_query)}»:</b>\n\n" + msg_text,
+                            buttons=btns,
+                            parse_mode='html'
+                        )
+                        return
+                else:
+                    from telethon import Button
+                    back_btns = [[Button.inline("📚 Все протоколы", data="proto:list"), Button.inline("🏠 Меню", data="nav:main")]]
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message=f"❌ По запросу «<b>{html.escape(proto_query)}</b>» протоколов не найдено.\nВы можете открыть общий каталог протоколов.",
+                        buttons=back_btns,
+                        parse_mode='html'
+                    )
+                    return
+
+            all_protos = await database.get_clinical_protocols(limit=20)
+            msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
+            await bot_client.send_message(entity=chat_id, message=msg_text, buttons=btns, parse_mode='html')
             return
 
         if text.lower() in ("/wiki", "/encyclopedia"):
@@ -5750,66 +5920,72 @@ async def handle_private_message(bot_client, event):
             return
         
         if has_media:
-            file_obj = getattr(getattr(event, "message", None), "file", None)
-            file_size = getattr(file_obj, "size", 0) or 0
-            MAX_MEDIA_SIZE = 35 * 1024 * 1024  # 35 МБ потолок
-            if file_size > MAX_MEDIA_SIZE:
+            album_events = getattr(event, "_album_events", None) or [event]
+            total_size = 0
+            for a_ev in album_events:
+                f_obj = getattr(getattr(a_ev, "message", None), "file", None)
+                total_size += (getattr(f_obj, "size", 0) or 0)
+
+            MAX_MEDIA_SIZE = 50 * 1024 * 1024  # 50 МБ потолок
+            if total_size > MAX_MEDIA_SIZE:
                 await bot_client.send_message(
                     entity=chat_id,
-                    message="⚠️ <i>Медиафайл превышает 35 МБ. Пожалуйста, сожмите файл или пришлите снимок в формате JPEG/PNG.</i>",
+                    message="⚠️ <i>Медиафайл(ы) превышают 50 МБ. Пожалуйста, сожмите файлы или пришлите их по отдельности.</i>",
                     parse_mode='html'
                 )
                 return
 
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
+            files_to_analyze = []
+            temp_paths_to_clean = set()
+            status_msg = None
             try:
                 # Отправляем статус ожидания
-                status_msg = await bot_client.send_message(entity=chat_id, message="📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>", parse_mode='html')
-                
-                # Таймаута у download_media нет своего. В ЛС это опаснее, чем в
-                # группе: обработчик держит замок на пользователя, и все
-                # следующие сообщения врача встают в очередь за подвисшей
-                # загрузкой — навсегда.
-                temp_path = await asyncio.wait_for(
-                    event.message.download_media(file=f"temp_media/{event.message.id}_"),
-                    timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                status_text = (
+                    f"📥 <i>Скачиваю и анализирую {len(album_events)} медиафайла(ов)... Подождите немного.</i>"
+                    if len(album_events) > 1
+                    else "📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>"
                 )
-                file_to_analyze = temp_path
+                status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
                 
-                # Если видео, извлекаем первый кадр
-                if event.message.video:
-                    logger.info("Извлечение первого кадр из видео в ЛС...")
-                    from media_tools import extract_first_frame_async
-                    file_to_analyze = await extract_first_frame_async(temp_path, timeout=60)
-                    
-                if file_to_analyze:
+                for a_ev in album_events:
+                    msg_obj = a_ev.message
+                    temp_path = await asyncio.wait_for(
+                        msg_obj.download_media(file=f"temp_media/{msg_obj.id}_"),
+                        timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                    )
+                    if temp_path and os.path.exists(temp_path):
+                        temp_paths_to_clean.add(temp_path)
+                        if msg_obj.video:
+                            logger.info(f"Извлечение первого кадра из видео {msg_obj.id} в ЛС...")
+                            from media_tools import extract_first_frame_async
+                            frame_path = await extract_first_frame_async(temp_path, timeout=60)
+                            if frame_path and os.path.exists(frame_path):
+                                temp_paths_to_clean.add(frame_path)
+                                files_to_analyze.append(frame_path)
+                        else:
+                            files_to_analyze.append(temp_path)
+
+                if files_to_analyze:
                     # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
                     vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
-                    media_description = await vision.describe_image(file_to_analyze, caption=vision_caption, is_passive=False)
+                    media_description = await vision.describe_image(files_to_analyze, caption=vision_caption, is_passive=False)
                     
                 # Удаляем статусное сообщение
-                await bot_client.delete_messages(chat_id, status_msg.id)
+                if status_msg:
+                    await bot_client.delete_messages(chat_id, status_msg.id)
             except Exception as e:
                 logger.error(f"Error analyzing media in PM: {e}")
                 media_error_shown = True
-                if 'status_msg' in locals():
-                    # Единственная строка, которой врач узнаёт, что снимок не
-                    # открылся. Без границы по времени она сама висла: врач сидел
-                    # перед «Скачиваю и анализирую…» до перезапуска процесса, замок
-                    # на пользователя не отпускался, следующие его вопросы не
-                    # обрабатывались вообще — и в журнале об этом ни строки,
-                    # зависание не исключение и except его не ловит. tg_safety сам
-                    # пишет WARNING с причиной и потраченным временем.
+                if status_msg:
                     notified = await tg_safety.edit_message(
                         bot_client, chat_id, status_msg.id,
-                        "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>",
+                        "❌ <i>Не удалось обработать медиафайл(ы). Попробуйте еще раз.</i>",
                         timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
                         op="edit_message:pm_media_failed", logger=logger,
                         parse_mode='html',
                     )
                     if not notified.ok:
-                        # Отметку снимаем: врач НЕ получил отказа, и ниже его обязан
-                        # догнать обычный send_message, иначе файл провалится молча.
                         media_error_shown = False
                         logger.warning(
                             "Отказ разбора файла не доставлен chat_id=%s: %s — "
@@ -5817,15 +5993,7 @@ async def handle_private_message(bot_client, event):
                             chat_id, notified.reason,
                         )
             finally:
-                # Очистка временных файлов.
-                #
-                # Здесь было os.path.exists(file_to_analyze) без проверки на
-                # None, а extract_first_frame_async именно None и возвращает,
-                # когда кадр вытащить не удалось. os.path.exists(None) бросает
-                # TypeError — прямо из finally, поверх любой обработки. Итог:
-                # видео в ЛС с неудачным извлечением кадра оставляло висеть
-                # статус «Скачиваю и анализирую...» навсегда, и ответа не было.
-                for path in {temp_path, locals().get('file_to_analyze')}:
+                for path in temp_paths_to_clean:
                     if not path:
                         continue
                     try:
@@ -5867,7 +6035,13 @@ async def handle_private_message(bot_client, event):
         portrait = user_memory.format_clinician_memory_prompt(chat_id, clinician_mem)
         
         # Если портрета и клинической памяти еще нет, запускаем первичную генерацию в фоне
-        if not clinician_mem.get("clinical_summary") and not user_profile.get("profile_portrait"):
+        has_existing_profile = bool(
+            clinician_mem.get("clinical_summary")
+            or clinician_mem.get("group_summary")
+            or clinician_mem.get("specialty")
+            or user_profile.get("profile_portrait")
+        )
+        if not has_existing_profile:
             async def _bg_portrait():
                 try:
                     p_text = await generate_user_portrait(chat_id)
@@ -7411,23 +7585,33 @@ async def handle_quiz_callback(bot_client, event):
             return
             
         elif nav_target in ("proto", "protocols"):
-            protocols_text = (
-                "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
-                "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
-                "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
-                "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
-                "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
-                "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
-                "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
-            )
-            buttons = [
-                [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
-                [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
-                [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")],
+            import protocol_extractor
+            all_protos = await database.get_clinical_protocols(limit=20)
+            msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
+            await edit_callback_message(bot_client, event, msg_text,
+                                       "edit_message:proto_list", buttons=btns,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif nav_target == "profile":
+            sender = await event.get_sender()
+            display_name = (
+                (getattr(sender, "first_name", "") or "") +
+                (" " + getattr(sender, "last_name", "") if getattr(sender, "last_name", "") else "")
+            ).strip() or getattr(sender, "username", "") or f"Доктор #{event.sender_id}"
+
+            memory = await database.get_user_memory(event.sender_id)
+            import user_memory
+            profile_card = user_memory.format_user_profile_card(memory, display_name)
+
+            from telethon import Button
+            profile_buttons = [
+                [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("⭐ Закладки", data="nav:bookmarks")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, protocols_text,
-                                       "edit_message:proto_list", buttons=buttons,
+            await edit_callback_message(bot_client, event, profile_card,
+                                       "edit_message:profile", buttons=profile_buttons,
                                        parse_mode='html')
             await event.answer()
             return
@@ -8067,31 +8251,57 @@ async def handle_quiz_callback(bot_client, event):
         await event.answer()
         return
 
-    if data_str == "proto:back":
-        protocols_text = (
-            "📚 <b>Основные клинические протоколы в Базе Знаний:</b>\n\n"
-            "• <b>BOPT (Biologically Oriented Preparation Technique):</b> Концепция препарирования без уступа.\n"
-            "• <b>Вертикальное препарирование:</b> Особенности ведения краев коронок, сохранение тканей.\n"
-            "• <b>Травление керамики:</b> Протоколы работы с плавиковой кислотой и силанизацией (E.max, полевой шпат).\n"
-            "• <b>Ирригация в эндодонтии:</b> Концентрации гипохлорита натрия, ЭДТА, протоколы активации (ультразвук, звуковая).\n"
-            "• <b>Обтурация корневых каналов:</b> Методики латеральной конденсации и вертикальной горячей гуттаперчи.\n\n"
-            "👇 <i>Выберите интересующий протокол ниже для детального изучения:</i>"
-        )
-        from telethon import Button
-        buttons = [
-            [Button.inline("🦷 BOPT", data="proto:bopt"), Button.inline("🧪 Травление", data="proto:etching")],
-            [Button.inline("💧 Ирригация", data="proto:irrigation"), Button.inline("🩸 Обтурация", data="proto:obturation")],
-            [Button.inline("📐 Вертикальное препарирование", data="proto:vertical")],
-            [Button.inline("⬅️ Назад в меню", data="nav:main")]
-        ]
-        await edit_callback_message(bot_client, event, protocols_text,
-                                   "edit_message:proto_list", buttons=buttons,
+    if data_str in ("proto:back", "proto:list"):
+        import protocol_extractor
+        all_protos = await database.get_clinical_protocols(limit=20)
+        msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
+        await edit_callback_message(bot_client, event, msg_text,
+                                   "edit_message:proto_list", buttons=btns,
                                    parse_mode='html')
         await event.answer()
         return
 
+    if data_str.startswith("proto:cat:"):
+        import protocol_extractor
+        category = data_str[10:].strip()
+        cat_filter = None if category == "all" else category
+        protos = await database.get_clinical_protocols(category=cat_filter, limit=20)
+        msg_text, btns = protocol_extractor.format_protocol_catalog(protos, category_filter=cat_filter)
+        await edit_callback_message(bot_client, event, msg_text,
+                                   "edit_message:proto_cat", buttons=btns,
+                                   parse_mode='html')
+        await event.answer()
+        return
+
+    if data_str.startswith("proto:view:"):
+        import protocol_extractor
+        try:
+            proto_id = int(data_str[11:].strip())
+            proto = await database.get_clinical_protocol_by_id(proto_id)
+            if proto:
+                msg_text, btns = protocol_extractor.format_protocol_view(proto)
+                await edit_callback_message(bot_client, event, msg_text,
+                                           "edit_message:proto_view", buttons=btns,
+                                           parse_mode='html')
+            else:
+                await event.answer("Клинический протокол не найден", alert=True)
+        except Exception as p_err:
+            logger.error(f"Error displaying protocol view: {p_err}")
+            await event.answer("Ошибка при открытии протокола", alert=True)
+        return
+
     if data_str.startswith("proto:"):
         proto_id = data_str.split(":")[1]
+        import protocol_extractor
+        found = await database.search_clinical_protocols(proto_id, limit=1)
+        if found:
+            msg_text, btns = protocol_extractor.format_protocol_view(found[0])
+            await edit_callback_message(bot_client, event, msg_text,
+                                       "edit_message:proto_article", buttons=btns,
+                                       parse_mode='html', link_preview=False)
+            await event.answer()
+            return
+
         keywords_map = {
             "irrigation": ["гипохлорит", "эдта", "ирригац", "активац"],
             "bopt": ["bopt", "уступ", "преп"],
@@ -8105,12 +8315,6 @@ async def handle_quiz_callback(bot_client, event):
         if not wiki_corpus:
             wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
         else:
-            # Здесь стоял голый срез wiki_corpus[:1500] + "...". clean_html_formatting
-            # сохраняет <b>, <i> и <code>, поэтому срез мог попасть внутрь тега или
-            # внутрь экранированной сущности (&amp;) — Telegram такую разметку
-            # отклоняет целиком, edit_message падает, и врач, нажавший кнопку
-            # протокола, не видит РОВНО НИЧЕГО. Плюс "..." дописывалось всегда,
-            # даже когда текст никуда не обрезали.
             wiki_corpus = html_safe.safe_truncate_html(wiki_corpus, max_len=PROTOCOL_EXCERPT_MAX_CHARS)
             
         proto_names = {

@@ -2260,6 +2260,23 @@ async def handle_new_message(event):
             logger.info(f"Skipping assistant triggers for bot-authored msg_id={msg_id} in chat {event.chat_id}.")
         else:
             runtime_guard.create_task(run_assistant_safe(), name=f"assistant_{msg_id}")
+
+            # Фоновое автоматическое распознавание клинических протоколов врачей
+            if text and len(text) > 130:
+                try:
+                    import protocol_extractor
+                    if protocol_extractor.is_protocol_candidate(text):
+                        logger.info("Protocol candidate detected in msg_id=%s from %s", msg_id, sender_name)
+                        runtime_guard.create_task(
+                            protocol_extractor.extract_and_save_protocol_async(
+                                text=text,
+                                author_doctor=sender_name or f"Доктор #{sender_id}",
+                                source_msg_id=msg_id
+                            ),
+                            name=f"proto_extract_{msg_id}"
+                        )
+                except Exception as proto_e:
+                    logger.warning("Protocol extractor check failed msg_id=%s: %s", msg_id, proto_e)
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -2380,17 +2397,80 @@ def _pm_user_lock(user_id):
     return lock
 
 
+_PM_PENDING_QUEUES = {}  # chat_id -> list of Telethon events
+_PM_BURST_WORKERS = {}   # chat_id -> asyncio.Task
+
+
 @bot_client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handle_private_message(event):
-    """Обработчик входящих личных сообщений (ЛС) бота."""
-    async def run_pm_safe():
-        try:
-            async with _pm_user_lock(event.chat_id):
-                await assistant.handle_private_message(bot_client, event)
-        except Exception as e:
-            logger.exception(f"Unexpected error in PM message handler: {e}")
+    """Обработчик входящих личных сообщений (ЛС) бота с debouncing-бандлингом быстрых реплик."""
+    chat_id = event.chat_id
+    raw_text = (event.message.message or "").strip()
 
-    runtime_guard.create_task(run_pm_safe(), name=f"pm_{event.message.id}")
+    # Команды (/start, /case, /quiz, /calc, /help, /wipe) исполняются сразу, без задержки
+    if raw_text.startswith("/"):
+        async def run_pm_cmd():
+            try:
+                async with _pm_user_lock(chat_id):
+                    await assistant.handle_private_message(bot_client, event)
+            except Exception as e:
+                logger.exception(f"Unexpected error in PM command handler: {e}")
+
+        runtime_guard.create_task(run_pm_cmd(), name=f"pm_cmd_{event.message.id}")
+        return
+
+    # Обычные реплики, снимки и голосовые собираем в очередь для склейки быстрых сообщений
+    queue = _PM_PENDING_QUEUES.setdefault(chat_id, [])
+    queue.append(event)
+
+    existing_worker = _PM_BURST_WORKERS.get(chat_id)
+    if existing_worker and not existing_worker.done():
+        # Воркер уже ожидает или обрабатывает этот чат — он заберет новое сообщение из очереди
+        return
+
+    async def run_burst_worker():
+        try:
+            async with _pm_user_lock(chat_id):
+                # Debounce loop: wait until no new messages/photos arrive for 1.2s (or 2.0s if media), max 6.0s
+                start_wait = time.time()
+                last_len = len(_PM_PENDING_QUEUES.get(chat_id, []))
+                while (time.time() - start_wait) < 6.0:
+                    first_ev = _PM_PENDING_QUEUES.get(chat_id, [None])[0]
+                    has_media_no_text = False
+                    if first_ev:
+                        msg = getattr(first_ev, "message", None)
+                        has_media = (
+                            getattr(msg, "photo", None) is not None
+                            or getattr(msg, "video", None) is not None
+                            or getattr(msg, "voice", None) is not None
+                            or getattr(msg, "audio", None) is not None
+                            or getattr(msg, "video_note", None) is not None
+                        )
+                        has_text = bool((getattr(msg, "message", None) or "").strip())
+                        has_media_no_text = has_media and not has_text
+
+                    wait_time = 2.0 if has_media_no_text else 1.2
+                    await asyncio.sleep(wait_time)
+                    current_len = len(_PM_PENDING_QUEUES.get(chat_id, []))
+                    if current_len == last_len:
+                        break
+                    last_len = current_len
+
+                burst = _PM_PENDING_QUEUES.pop(chat_id, [])
+                if not burst:
+                    return
+
+                if len(burst) == 1:
+                    await assistant.handle_private_message(bot_client, burst[0])
+                else:
+                    await assistant.handle_private_message_bundle(bot_client, burst)
+        except Exception as e:
+            logger.exception(f"Unexpected error in PM burst worker: {e}")
+        finally:
+            _PM_BURST_WORKERS.pop(chat_id, None)
+
+    task = runtime_guard.create_task(run_burst_worker(), name=f"pm_burst_{chat_id}")
+    _PM_BURST_WORKERS[chat_id] = task
 
 # Обработанные нажатия кнопок. Дедупликации не было: двойной тап по варианту
 # викторины обрабатывался дважды — двойная смена стиля, двойной edit_message,

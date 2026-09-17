@@ -29,8 +29,11 @@ for _stream in (sys.stdout, sys.stderr):
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_test_quiz_btns_")
 os.environ["STOMCHAT_DATA_DIR"] = _TMPDIR
 os.environ["STOMCHAT_DB_PATH"] = os.path.join(_TMPDIR, "stomat_bot.db")
+import config
+config.DB_PATH = os.path.join(_TMPDIR, "stomat_bot.db")
 import assistant
 import database
+database.DB_PATH = config.DB_PATH
 import tg_safety
 import blocking_tools
 import runtime_guard

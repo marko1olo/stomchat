@@ -356,9 +356,9 @@ async def scenario_fallback_stage():
     result = await S.process_weekly_batch(make_messages(), client, -100444)
 
     check("Telegraph отказал, но выпуск ушёл в чат", len(client.sends) == 1, f"got {client.sends}")
-    check("статья отправлена напрямую, а не тизер",
-          "телеграм" not in (result or "").lower() and "telegra.ph" not in (result or ""),
-          f"got {(result or '')[:60]!r}")
+    check("отправлен аккуратный тизер с отсылкой к PDF, а не сырая простыня текста",
+          len(result or "") <= 1500 and "pdf" in (result or "").lower(),
+          f"got len={len(result or '')}, text={(result or '')[:60]!r}")
     seen = client.status_at_send[-1] if client.status_at_send else {}
     check("в момент отправки сторож видит telegram_send, а не telegraph_create",
           seen.get("stage") == "telegram_send", f"got {seen.get('stage')!r}")
@@ -371,22 +371,21 @@ async def scenario_fallback_stage():
 
 
 async def scenario_footer():
-    print("\n[11] Подвал со счётчиком переживает обрезку")
+    print("\n[11] Длинная статья не урезается преждевременно, подвал со счётчиком на месте")
     install_stubs(LONG_ARTICLE)
     messages = make_messages()
     await S.process_weekly_batch(messages, FakeClient(), -100555)
     html_sent = TELEGRAPH_CALLS[-1]["html"]
 
-    check("статья действительно длиннее предела обрезки",
+    check("статья длиннее прежнего лимита 11500",
           len(S.clean_markdown_to_html(LONG_ARTICLE)) > S.WEEKLY_HTML_LIMIT,
           f"got {len(S.clean_markdown_to_html(LONG_ARTICLE))}")
-    check("обрезка сработала", "Отчет сокращен" in html_sent, "иначе проверка ничего не стоит")
+    check("преждевременной обрезки нет", "Отчет сокращен" not in html_sent)
+    check("все 20 разделов сохранены", "РАЗДЕЛ 20" in html_sent)
     check(f"счётчик сообщений на месте", f"Сообщений за неделю — {len(messages)}" in html_sent,
           f"хвост: {html_sent[-120:]!r}")
     check("счётчик стоит в самом конце", html_sent.rstrip().endswith("</i>"),
           f"хвост: {html_sent[-60:]!r}")
-    check(f"общая длина в пределах {S.WEEKLY_HTML_LIMIT}", len(html_sent) <= S.WEEKLY_HTML_LIMIT,
-          f"got {len(html_sent)}")
 
     print("\n[12] Короткая статья: подвал один и обрезки нет")
     install_stubs(SHORT_ARTICLE)

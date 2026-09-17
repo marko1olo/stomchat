@@ -20,6 +20,9 @@ import vision
 from vision import VisionDescription
 import gemini_client
 import assistant
+import runtime_guard
+
+runtime_guard.SUMMARY_STATUS_PATH = "bot_summary_status_test.json"
 
 
 class TestVisionDescription(unittest.TestCase):

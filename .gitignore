@@ -29,6 +29,8 @@ banned_models.json
 banned_models.json.tmp
 key_cooldowns.json
 key_cooldowns.json.tmp
+model_failures.json
+model_failures.json.tmp
 
 # Databases and backups
 *.db
@@ -72,6 +74,7 @@ ffmpeg.exe
 *.tmp
 *~
 scratch/
+scratch_*.py
 
 
 # Одноразовые скрипты замеров и проб. Их вывод живёт в отчётах _fix_*.md и

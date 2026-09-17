@@ -1,46 +1,59 @@
-## 2026-09-04T13:57:03Z
-You are Worker M3 (summarizer.py).
+## 2026-09-13T11:35:16Z
+You are teamwork_preview_worker_m3.
 Your working directory is: c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3
-The authoritative user request is at: c:\Users\danat\Desktop\stomchat\.agents\ORIGINAL_REQUEST.md
-The project blueprint is at: c:\Users\danat\Desktop\stomchat\PROJECT.md
-The survey report is at: c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_explorer_survey_2\survey_summarizer_report.md
-Test Writer handoff is at: c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_test_writer_m5\handoff.md
-
-CRITICAL CONSTRAINTS & RULES:
-1. СТРОЖАЙШИЙ ЗАПРЕТ: НЕ ОТПРАВЛЯТЬ ТЕСТОВЫЕ СООБЩЕНИЯ В ПРОД, В ТЕЛЕГРАМ-ГРУППУ ИЛИ РЕАЛЬНЫМ ПОЛЬЗОВАТЕЛЯМ!
-2. Cooldown 2.5-3 секунды между обращениями к LLM API.
-3. Windows terminal escaping safety: never run multiline powershell with variables in terminal parameters; write scripts to scratch files and execute by path.
-4. EXCLUSIVE WRITE OWNERSHIP: You exclusively own `c:\Users\danat\Desktop\stomchat\summarizer.py`. Do not touch any other production files.
+Your parent is: orchestrator_6 (conversation ID: 6c2dc5ab-edd6-4b46-ba53-af48fdfe521f)
 
 MANDATORY INTEGRITY WARNING:
 DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results, create dummy/facade implementations, or circumvent the intended task. A teamwork_preview_auditor will independently verify your work. Integrity violations WILL be detected and your work WILL be rejected.
 
-YOUR ASSIGNMENT (Milestone M3):
-1. Support both 8-tuple and 9-tuple message unpacking (backward compatibility):
-   In `process_summary_batch` (around line 614) and `process_weekly_batch` (around line 1031) in `summarizer.py`:
-   Change unpacking from rigid 8-tuple unpack to:
-   ```python
-   m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]
-   sender_id = msg[8] if len(msg) > 8 else None
-   ```
-2. Active authors identification & Clinical Profiles injection:
-   - Collect unique active senders (`sender_id`) from the filtered discussion messages (ranked by frequency of substantive messages, ignoring None or 0).
-   - Fetch their clinical profiles asynchronously via `user_memory.format_users_chunk_context(active_user_ids, max_chars=2000)`.
-   - Inject this clinical profile context into the daily summary generation prompt (and weekly prompt where appropriate) under a clearly identified section.
-3. Strict Budget Compliance (<= 2000 chars):
-   - The context budget is strictly enforced by `max_chars=2000` in Python.
-   - CRITICAL WARNING: DO NOT put literal text like "2000 символов" into the prompt string itself! Existing tests in `test_digest_formatting.py` and `test_fix_weekly.py` scan prompt text with regex `re.findall(r"(\d{4,5})\s*символ", prompt)`. Ensure the prompt instructions do not trigger regex false positives.
-4. "ЭКСПЕРТ ДНЯ" Prompt Rubric:
-   - In `DAILY_SUMMARY_PROMPT`, update the instructions for the "ЭКСПЕРТ ДНЯ" rubric:
-     Direct the model to choose the expert based on the doctor's verified clinical profile, specialty, equipment/microscope, and protocols from the clinical dossiers, rather than random conversational phrases.
-5. Fix 4 pre-existing E701 lint errors in `summarizer.py` (lines 567, 972, 1248, 1307: `if topic_id: ...` -> split into 2 lines).
-6. Verification:
-   - Run: `python test_user_memory.py`
-   - Run: `python test_budget_nesting.py`
-   - Run: `python test_fix_pm.py`
-   - Run: `python test_startup_boot.py`
-   - Run: `python test_digest_window.py`
-   - Run: `python test_memory_e2e_integration.py`
-   - Run: `python -m ruff check summarizer.py`
-   Ensure 100% tests pass and 0 linter errors.
-7. Write your handoff report to `c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\handoff.md` and notify me via send_message.
+MANDATORY: Read c:\Users\danat\Desktop\stomchat\.agents\ORIGINAL_REQUEST.md (specifically the latest section starting with ## 2026-09-13T11:26:13Z) before starting any work.
+
+MISSION (Milestone 3: Production Hardening & Architectural Mitigations):
+Implement targeted, high-reliability production code patches across:
+1. `assistant.py`
+2. `gemini_client.py`
+3. `config.py`
+
+Refer to the architectural specifications and root-cause analysis in:
+`c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_explorer_code_2\report_code.md`
+
+REQUIRED IMPLEMENTATIONS:
+1. Concurrency Debounce & In-Flight Thread Lock (Mitigates 18s double-reply race condition 177390 & 177392):
+   - In `assistant.py`:
+     - Canonical thread ID calculation: when `is_dialogue` is True and `reply_to_msg_id` is None, canonicalize the thread key to the active dialogue anchor (`state.get("last_case_bot_msg_id")`) instead of falling back to raw `msg_id`.
+     - Fast-fail entrance debounce: execute debounce checks on `(chat_id, resolved_thread_id)` and `(chat_id, sender_id)` at the very beginning of dialogue handling BEFORE the slow async LLM triage (`check_dialogue_continuation_triage`).
+     - In-flight task registry (`_ACTIVE_DIALOGUE_THREADS = set()`): track ongoing dialogue generations so that rapid incoming messages cannot launch duplicate parallel LLM generations for the same thread. Ensure safe cleanup via try/finally.
+   - In `config.py`:
+     - Define `DIALOGUE_THREAD_DEBOUNCE_SECONDS = 35` (configurable 30-45s window).
+2. Pediatric Safety Guard (Rule 12.1 Programmatic Pre-Check):
+   - In `assistant.py`:
+     - Implement deterministic pre-LLM check function `check_pediatric_anesthesia_safety(text: str)`:
+       - Detects anesthetic calculation intent (articaine, mepivacaine, lidocaine) + pediatric indicators (weight <15 kg, ребенок, малыш, etc.).
+       - Enforces double ceiling: min(weight * dose_per_kg, max_abs_dose).
+       - Enforces strict downward floor for carpules (`math.floor(max_dose / carpule_dose)`).
+       - Explicitly flags clinical contraindications (articaine contraindicated for children <4 years / <15 kg; 1 carpule of 68 mg exceeds the 60 mg limit for 12 kg child).
+       - Either returns direct safe clinical calculation response or injects ground-truth calculation block into system prompt, guaranteeing zero toxic dosage hallucinations or rounding errors.
+3. Adversarial Input Sanitization:
+   - In `assistant.py`:
+     - Sanitize user message text interpolated into `<user_dialogue>` by neutralizing/escaping XML angle brackets `<` and `>`.
+     - Deterministic pre-LLM regex filter against jailbreak patterns ("забудь инструкции", "игнорируй правила", "ты теперь DAN") and controlled substances ("трамадол", "прегабалин", "лирика", "морфин", "фентанил", "148-1/у", "кустарный синтез"). Returns professional refusal without wasting LLM tokens.
+4. Cascade 503 & Timeout Resilience:
+   - In `gemini_client.py`:
+     - Optimize temporary ban behavior so transient 503 errors use progressive cooldown (e.g. 60s initially) rather than an immediate 20-minute ban across the board.
+
+VERIFICATION & TESTING:
+- Run `python -m py_compile assistant.py gemini_client.py config.py` to confirm zero syntax errors.
+- Run all regression test suites:
+  - `python test_recon_fixes.py`
+  - `python test_multimodal_hybrid.py`
+  - `python test_dialogue_reply_limit.py`
+  - `python test_passive_gate.py`
+  - `python test_silent_failures.py`
+  - `python test_redteam_deep.py`
+  All must pass 100% cleanly!
+
+Deliverables:
+- Modified files: `assistant.py`, `gemini_client.py`, `config.py`
+- Handoff report: `c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\handoff.md`
+
+When done, send a message to parent (6c2dc5ab-edd6-4b46-ba53-af48fdfe521f) with detailed diffs and verification results.

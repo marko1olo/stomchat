@@ -1,57 +1,53 @@
-# BRIEFING — 2026-09-04T14:05:00Z
+# BRIEFING — 2026-09-13T11:35:30Z
 
 ## Mission
-Implement clinical profiles injection and 8/9-tuple unpacking in `summarizer.py` with expert selection rubric and 2000-char budget enforcement, plus fix E701 lints.
+Implement Milestone 3: Production Hardening & Architectural Mitigations across assistant.py, gemini_client.py, and config.py.
 
 ## 🔒 My Identity
-- Archetype: worker
+- Archetype: teamwork_preview_worker_m3
 - Roles: implementer, qa, specialist
 - Working directory: c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3
-- Original parent: 2eadec10-c0ef-4c69-9101-916f4567ad8a
-- Milestone: M3 (summarizer.py)
+- Original parent: 6c2dc5ab-edd6-4b46-ba53-af48fdfe521f
+- Milestone: Milestone 3 - Production Hardening & Architectural Mitigations
 
 ## 🔒 Key Constraints
-- EXCLUSIVE WRITE OWNERSHIP: Only edit `summarizer.py` (and files in own agent directory).
-- СТРОЖАЙШИЙ ЗАПРЕТ: НЕ ОТПРАВЛЯТЬ ТЕСТОВЫЕ СООБЩЕНИЯ В ПРОД, В ТЕЛЕГРАМ-ГРУППУ ИЛИ РЕАЛЬНЫМ ПОЛЬЗОВАТЕЛЯМ!
-- Cooldown 2.5-3 секунды между обращениями к LLM API.
-- Windows terminal escaping safety: never run multiline powershell with variables in terminal parameters; write scripts to scratch files and execute by path.
-- DO NOT CHEAT: Genuine implementation, no hardcoding, no facades.
-- CRITICAL REGEX CONSTRAINT: DO NOT put literal text like "2000 символов" into the prompt string itself (regex `(\d{4,5})\s*символ` false positive risk).
+- Genuine implementation only, no dummy/facade implementations or hardcoded results.
+- Zero syntax errors (py_compile pass).
+- 100% clean passes on all regression test suites:
+  - test_recon_fixes.py
+  - test_multimodal_hybrid.py
+  - test_dialogue_reply_limit.py
+  - test_passive_gate.py
+  - test_silent_failures.py
+  - test_redteam_deep.py
+- Deliverables: modified assistant.py, gemini_client.py, config.py, and handoff.md.
 
 ## Current Parent
-- Conversation ID: 2eadec10-c0ef-4c69-9101-916f4567ad8a
-- Updated: not yet
+- Conversation ID: 6c2dc5ab-edd6-4b46-ba53-af48fdfe521f
+- Updated: 2026-09-13T11:35:30Z
 
 ## Task Summary
-- **What to build**: Support 8-tuple and 9-tuple message unpacking; active authors extraction and clinical profiles injection into daily (and weekly) prompts; strict <= 2000 char context budget; update "ЭКСПЕРТ ДНЯ" rubric; fix 4 E701 linter errors in summarizer.py.
-- **Success criteria**: 100% tests pass (test_user_memory.py, test_budget_nesting.py, test_fix_pm.py, test_startup_boot.py, test_digest_window.py, test_memory_e2e_integration.py); ruff check summarizer.py 0 errors; handoff report written.
-- **Interface contracts**: PROJECT.md, survey_summarizer_report.md
-- **Code layout**: c:\Users\danat\Desktop\stomchat
-
-## Key Decisions Made
-- Unpack messages using slice `msg[:8]` and `sender_id = msg[8] if len(msg) > 8 else None` for backward compatibility with 8-tuples and support for 9-tuples.
-- Collect unique active senders ranked by substantive message count (ignoring None or 0).
-- Load clinical profiles asynchronously via `user_memory.format_users_chunk_context(active_user_ids, max_chars=2000)`.
-- Enforce `<= 2000` chars strictly in Python code (`MAX_USERS_CONTEXT_CHARS = 2000`), avoiding literal words like "2000 символов" in prompts to prevent regex false positives.
-- Updated "ЭКСПЕРТ ДНЯ" and "ДОСКА ПОЧЕТА (ГЕРОИ НЕДЕЛИ)" rubrics to ground selection on doctor's verified clinical profile, specialty, microscope/equipment, and protocols.
-- Defensively handled `create_telegraph_page_async` unpacking for tuple and single URL string returns.
-- Fixed 4 E701 linter errors in `summarizer.py`.
-
-## Artifact Index
-- c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\DISPATCH.md
-- c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\progress.md
-- c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\BRIEFING.md
-- c:\Users\danat\Desktop\stomchat\.agents\teamwork_preview_worker_m3\handoff.md
+- **What to build**:
+  1. Concurrency Debounce & In-Flight Thread Lock in assistant.py and config.py (canonical thread ID, fast-fail debounce, in-flight registry, DIALOGUE_THREAD_DEBOUNCE_SECONDS=35).
+  2. Pediatric Safety Guard (deterministic pre-LLM check function `check_pediatric_anesthesia_safety` in assistant.py).
+  3. Adversarial Input Sanitization in assistant.py (XML tag escaping, regex refusal for jailbreak and controlled substances).
+  4. Cascade 503 & Timeout Resilience in gemini_client.py (progressive cooldown for transient 503 errors).
+- **Success criteria**: All regression test suites pass cleanly, no regressions.
+- **Interface contracts**: PROJECT.md / SCOPE.md / report_code.md
 
 ## Change Tracker
-- **Files modified**: `summarizer.py` (added 8/9-tuple unpacking, active senders ranking, clinical profile injection, updated expert rubrics, fixed 4 E701 linter errors)
-- **Build status**: 100% PASSED (test_memory_e2e_integration 70/70, test_digest_window 17/17, test_digest_formatting 61/61, test_fix_weekly 70/70, test_user_memory 35/35, test_budget_nesting 29/29, test_fix_pm 29/29, test_startup_boot 51/51)
-- **Pending issues**: none
+- **Files modified**: TBD
+- **Build status**: TBD
+- **Pending issues**: TBD
 
 ## Quality Status
-- **Build/test result**: All 8 test suites passed with 0 failures
-- **Lint status**: 0 errors (`python -m ruff check summarizer.py` clean)
-- **Tests added/modified**: Verified through `test_memory_e2e_integration.py` and regression suite
+- **Build/test result**: TBD
+- **Lint status**: TBD
+- **Tests added/modified**: TBD
 
-## Loaded Skills
-None
+## Key Decisions Made
+- [TBD]
+
+## Artifact Index
+- DISPATCH.md — Assignment instructions
+- BRIEFING.md — Persistent working memory
