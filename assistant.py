@@ -3648,8 +3648,44 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             context_msgs, reply_text, invited=is_dialogue, reference=wiki_corpus
         )
         if not quality_ok:
-            logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
-            return False
+            reason_lower = (quality_reason or "").lower()
+            if any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
+                logger.info("Response quality validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", quality_reason)
+                reply_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", reply_text).strip()
+                quality_ok = True
+            elif is_dialogue:
+                # Врач переспросил или обратился напрямую — не глушим диалог тишиной (Silent Dropout),
+                # а формулируем строгий, безопасный и доказательный фоллбек без выдуманных деталей.
+                logger.warning(
+                    "Response quality validator REJECTED invited dialogue draft: %s. Falling back to safe conservative response.",
+                    quality_reason
+                )
+                fallback_prompt = f"""Ты — строгий клинический эксперт-стоматолог в Telegram-чате.
+Врач задал клинический/технический вопрос, но черновик ответа был отклонён рецензентом по причине: "{quality_reason}".
+Сформулируй предельно краткий (1-2 предложения), абсолютно безопасный, честный и доказательный ответ врачу.
+ТРЕБОВАНИЯ:
+1. Запрещено выдумывать каталожные артикулы, конкретные номера позиций или сомнительные дозировки. Если вопрос касается точного артикула или размера запчасти — прямо укажи, что точную спецификацию и артикул необходимо сверить по каталогу производителя/дилера системы.
+2. Сохраняй спокойный, уважительный тон опытного коллеги.
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
+4. Отвечай прямо по клинической сути, не упоминай валидаторы, ИИ, рецензентов или правила.
+
+Вопрос врача:
+{text}
+"""
+                ctx = {"kind": "dialogue_fallback", "thinking_level": "LOW"}
+                fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
+                fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
+                fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
+                if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
+                    reply_text = fb_text
+                    quality_ok = True
+                    logger.info("Dialogue safe fallback successfully generated.")
+                else:
+                    logger.warning("Dialogue safe fallback generation failed or empty. Suppressing reply.")
+                    return False
+            else:
+                logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+                return False
         logger.info(f"Response quality validator approved draft: {quality_reason}")
 
         # SENDING
@@ -3909,6 +3945,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Вся переписка выше дана исключительно для понимания клинического контекста!
 Твой ответ должен быть направлен СТРОГО на разбор присланного снимка/изображения и вопроса к сообщению #{msg_id}.
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: отвечать по очереди на старые реплики истории или пересказывать переписку.
+
+[ПРИОРИТЕТ ИЗОБРАЖЕНИЯ И ЗАЩИТА ОТ ИНЕРЦИИ КОНТЕКСТА:
+Если прислано новое фото/снимок, твой клинический анализ должен базироваться ИСКЛЮЧИТЕЛЬНО на визуализируемых структурах текущего изображения!
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО переносить диагнозы, патологии или находки из предыдущих не связанных обсуждений в чате (например, сломанные инструменты, очаги резорбции или хирургию из чужих прошлых кейсов) на текущее изображение, если их объективно нет на этом снимке или в подписи автора к нему!]
 """
     else:
         prompt = f"""
@@ -3971,8 +4011,37 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         context_msgs, reply_text, invited=not is_passive, reference=wiki_corpus
     )
     if not quality_ok:
-        logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
-        return
+        reason_lower = (quality_reason or "").lower()
+        if any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
+            logger.info("Media response validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", quality_reason)
+            reply_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", reply_text).strip()
+            quality_ok = True
+        elif not is_passive:
+            logger.warning(
+                "Media response quality validator REJECTED invited draft: %s. Falling back to safe conservative response.",
+                quality_reason
+            )
+            fallback_prompt = f"""Ты — клинический эксперт-стоматолог. Врач прислал фото/снимок с вопросом, но черновик разбора отклонён по причине: "{quality_reason}".
+Сформулируй краткий (1-2 предложения), предельно безопасный и взвешенный комментарий по снимку без домысливания деталей.
+Если по фото недостаточно чёткости или данных для однозначного вывода — прямо порекомендуй прицельный снимок или КЛКТ. Разметка: только HTML. Без Markdown.
+
+Подпись или вопрос врача:
+{caption_text}
+"""
+            ctx = {"kind": "media_fallback", "thinking_level": "LOW"}
+            fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
+            fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
+            fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
+            if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
+                reply_text = fb_text
+                quality_ok = True
+                logger.info("Media dialogue safe fallback successfully generated.")
+            else:
+                logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+                return
+        else:
+            logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
+            return
     logger.info(f"Media response quality validator approved draft: {quality_reason}")
 
     # SENDING
