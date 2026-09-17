@@ -165,6 +165,99 @@ def _reply_context(reply_id, reply_lookup, batch_ids):
     return f"(Ответ {parent_name} на «{quote}») ", 1
 
 
+def embed_media_into_summary_html(final_html: str, media_map: dict, media_captions: dict = None, max_images: int = 6) -> str:
+    """
+    Внедряет семантические узлы Telegraph figure/img/figcaption в итоговый HTML.
+    
+    1. Точная замена маркеров [IMG_{m_id}], расставленных моделью.
+    2. Детерминированный фоллбэк: если модель описала случай, но забыла маркер,
+       допустимые клинические снимки встраиваются в раздел клинических кейсов.
+    3. Зачистка любых оставшихся плейсхолдеров [IMG_\\d+].
+    """
+    if not final_html or not media_map:
+        return re.sub(r'\[IMG_\d+\]', '', final_html or '')
+
+    media_captions = media_captions or {}
+    placed_ids = set()
+    llm_placed_count = 0
+
+    # Шаг 1: Точная замена маркеров, сгенерированных LLM
+    for m_id, url in media_map.items():
+        if not url:
+            continue
+        placeholder = f"[IMG_{m_id}]"
+        if placeholder in final_html:
+            caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
+            if len(caption) > 140:
+                caption = caption[:137] + "..."
+            fig_node = f'<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>'
+            final_html = final_html.replace(placeholder, fig_node)
+            placed_ids.add(m_id)
+            llm_placed_count += 1
+
+    fallback_count = 0
+    # Шаг 2: Детерминированный фоллбэк для клинических снимков, упущенных моделью
+    remaining_ids = [m_id for m_id, url in media_map.items() if m_id not in placed_ids and url]
+    if remaining_ids and (llm_placed_count < max_images):
+        case_headers = [
+            "КЛИНИЧЕСКИЕ КЕЙСЫ",
+            "КЛИНИЧЕСКАЯ ПАНОРАМА",
+            "ТЕМА ДНЯ",
+            "Клинические кейсы",
+            "Клиническая панорама"
+        ]
+        
+        valid_fallback = []
+        for m_id in remaining_ids:
+            cap = media_captions.get(m_id, "")
+            # Исключаем явные мемы / немедицинские заглушки
+            if "немедицинск" in cap.lower() or "мем" in cap.lower():
+                continue
+            valid_fallback.append(m_id)
+
+        target_header_pos = -1
+        for hdr in case_headers:
+            pos = final_html.find(hdr)
+            if pos != -1:
+                target_header_pos = pos
+                break
+
+        slots_left = max_images - llm_placed_count
+        for m_id in valid_fallback[:slots_left]:
+            url = media_map[m_id]
+            caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
+            if len(caption) > 140:
+                caption = caption[:137] + "..."
+            fig_node = f'<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>'
+
+            msg_marker = f"MSG_{m_id}"
+            if msg_marker in final_html:
+                pos = final_html.find(msg_marker)
+                end_p = final_html.find("\n\n", pos)
+                if end_p != -1:
+                    final_html = final_html[:end_p] + f"\n\n{fig_node}" + final_html[end_p:]
+                else:
+                    final_html += f"\n\n{fig_node}"
+                placed_ids.add(m_id)
+                fallback_count += 1
+            elif target_header_pos != -1:
+                end_header_p = final_html.find("\n\n", target_header_pos)
+                if end_header_p != -1:
+                    final_html = final_html[:end_header_p] + f"\n\n{fig_node}" + final_html[end_header_p:]
+                else:
+                    final_html += f"\n\n{fig_node}"
+                placed_ids.add(m_id)
+                fallback_count += 1
+
+    final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
+    logger.info(
+        "summary media embedded: total=%d llm_placed=%d fallback=%d final_images=%d",
+        len(media_map), llm_placed_count, fallback_count, len(placed_ids)
+    )
+    return final_html
+
+
+
 def _message_matches_topic(message, topic_id):
     if not topic_id:
         return True
@@ -635,6 +728,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     # Сборка лога переписки для нейросети
     full_text_parts = ["ЛОГ ПЕРЕПИСКИ СТОМАТОЛОГОВ:\n\n"]
     media_map = {} # Карта для вставки фото
+    media_captions = {} # Описания снимков для подписей figcaption
 
     logger.info(f"summary build start chat={chat_id} messages={len(filtered_messages)}")
     reply_ids = [msg[6] for msg in filtered_messages if msg[6]]
@@ -674,6 +768,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
         if m_url:
             media_map[m_id] = m_url
+            if m_desc:
+                media_captions[m_id] = m_desc
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -746,8 +842,12 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     1. 🔥 ТЕМА ДНЯ (ГЛУБОКИЙ РАЗБОР)
     (Выбери самую сложную ИЛИ обсуждаемую тему. Распиши её как мини-лекцию: в чем суть, какие инструменты нужны, какие основные ошибки. Минимум 3-4 абзаца).
     2. 🦷 КЛИНИЧЕСКИЕ КЕЙСЫ (ОБРАЗОВАТЕЛЬНЫЙ ФОРМАТ)
-    (Не просто "проблема-решение". Пиши так:
-    **▶️ СИТУАЦИЯ:** Описание (что болело, какой зуб, что на снимке).
+    === ПРАВИЛО РАБОТЫ С КЛИНИЧЕСКИМИ СНИМКАМИ (КРИТИЧНО) ===
+    Если в тексте переписки к сообщению MSG_XXXXX прикреплен снимок (отмечено как "На фото в MSG_XXXXX"), и ты разбираешь этот клинический случай:
+    Ты ОБЯЗАН вставить маркер [IMG_XXXXX] отдельной строкой прямо в разбор кейса (после поля СИТУАЦИЯ или в начале описания снимка), чтобы фото отобразилось в статье!
+    Пример:
+    **▶️ СИТУАЦИЯ:** Пациент обратился с жалобами... На прицельной рентгенограмме очаг деструкции у верхушки корня.
+    [IMG_12345]
     **ЧТО СДЕЛАЛИ:** Подробно шаги лечения.
     **ЛОГИКА ЛЕЧЕНИЯ:** Почему выбрали именно этот протокол, а не другой.
     **ТЕХНИЧЕСКИЕ ДЕТАЛИ:** Какие боры, какие торки на моторе, какая последовательность инструментов.
@@ -810,15 +910,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
         final_html = clean_markdown_to_html(raw_summary)
         
-        # Вставка фото (семантический узел Telegraph figure/figcaption)
-        for m_id, url in media_map.items():
-            placeholder = f"[IMG_{m_id}]"
-            if placeholder in final_html:
-                final_html = final_html.replace(
-                    placeholder,
-                    f'<figure><img src="{url}"><figcaption>Клинический снимок #{m_id}</figcaption></figure>'
-                )
-        final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
+        # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback)
+        final_html = embed_media_into_summary_html(final_html, media_map, media_captions)
 
         footer = ""
         if msg_count > 0 and "Сообщений за период" not in final_html:
@@ -1258,6 +1351,14 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     (Самое масштабное обсуждение. Глубокий анализ проблемы, полярные мнения, итоги. Минимум 3-4 абзаца).
 
     ## 🦷 [ДИНАМИЧЕСКИЙ ЗАГОЛОВОК КЛИНИЧЕСКОЙ ПАНОРАМЫ] (Самый большой раздел!)
+    === ПРАВИЛО РАБОТЫ С КЛИНИЧЕСКИМИ СНИМКАМИ (КРИТИЧНО) ===
+    Если к разбираемому случаю в логе прикреплен снимок (помечено как "ФОТО/ВИДЕО" у MSG_XXXXX):
+    Ты ОБЯЗАН вставить маркер [IMG_XXXXX] отдельной строкой прямо в разбор кейса (после Названия кейса или Сути), чтобы снимок появился в статье.
+    Пример:
+    **Кейс №1: [Название проблемы] от врача [Имя]**
+    [IMG_12345]
+    *   **Суть:** ...
+    
     (Здесь собери ВСЕ кейсы, которые были. Не фильтруй. Оформляй каждый кейс отдельно):
     
     **Кейс №1: [Название проблемы] от врача [Имя]**
@@ -1326,18 +1427,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
         final_html = clean_markdown_to_html(raw_text)
         
-        # Вставка изображений (семантический узел Telegraph figure/figcaption)
-        for m_id, url in media_map.items():
-            placeholder = f"[IMG_{m_id}]"
-            if placeholder in final_html:
-                caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
-                if len(caption) > 140:
-                    caption = caption[:137] + "..."
-                final_html = final_html.replace(
-                    placeholder,
-                    f'<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>'
-                )
-        final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
+        # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback)
+        final_html = embed_media_into_summary_html(final_html, media_map, media_captions)
         
         # Подвал со счётчиком дописывается ПОСЛЕ обрезки и с запасом под свою
         # длину. Раньше он шёл до неё, а обрезка режет с конца: на статье длиннее
@@ -1469,6 +1560,30 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         if sent_msg:
             await _notify_delivery(delivery_hook, sent_msg)
             await _pin_message_safely(client, chat_id, sent_msg.id)
+
+            # Фоновая генерация и отправка журнальной PDF-версии вестника
+            try:
+                from digest_pdf import generate_digest_pdf
+                pdf_title = f"Клинический Вестник StomChat ({date_str})"
+                pdf_path = await generate_digest_pdf(
+                    html_content=final_html,
+                    title=pdf_title,
+                    subtitle="Большая стоматологическая газета • Недельный обзор",
+                    msg_count=msg_count,
+                    date_str=date_str,
+                )
+                if pdf_path and os.path.exists(pdf_path):
+                    pdf_caption = (
+                        f"📄 <b>{pdf_title}</b>\n\n"
+                        f"Полная журнальная PDF-версия вестника со всеми клиническими снимками, протоколами и таблицами."
+                    )
+                    pdf_params = {'caption': pdf_caption, 'parse_mode': 'HTML'}
+                    if topic_id:
+                        pdf_params['reply_to'] = topic_id
+                    await client.send_file(chat_id, pdf_path, **pdf_params)
+                    logger.info("PDF weekly digest document delivered to chat=%s", chat_id)
+            except Exception as pdf_err:
+                logger.warning("PDF digest delivery failed (non-critical): %s", pdf_err)
 
         logger.info(f"✅ MASSIVE Weekly Digest отправлен в {chat_id}")
         runtime_guard.clear_summary_status("weekly_summary_done")
