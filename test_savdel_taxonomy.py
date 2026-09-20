@@ -45,6 +45,9 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+_archive_dir = Path(__file__).resolve().parent / "scripts" / "archive"
+if _archive_dir.exists():
+    sys.path.insert(0, str(_archive_dir))
 
 import savdel
 
@@ -330,6 +333,9 @@ try:
 
     # ---- Д4/кодировка: import savdel выживает при cp1251 на stdout
     env = dict(os.environ, PYTHONIOENCODING="cp1251")
+    arch_str = str(_archive_dir)
+    cur_pypath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{arch_str}{os.pathsep}{cur_pypath}" if cur_pypath else arch_str
     proc = subprocess.run([sys.executable, "-c",
                            "import savdel; print('\\U0001F680 ok')"],
                           cwd=str(REPO), env=env,

@@ -1037,6 +1037,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         # либо автоматически разделит на связанные части (Часть 1, Часть 2) при превышении лимита.
         telegraph_html = full_html + telegraph_footer
         
+        date_str = get_russian_date(datetime.now())
         TELEGRAPH_THRESHOLD = 1500 
         sent_msg = None
 
@@ -1074,7 +1075,6 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         else:
             # Создание Telegraph с каскадным даунсайзингом
             logger.info("📜 Создаем Telegraph страницу (Daily)...")
-            date_str = get_russian_date(datetime.now())
             title = f"Дайджест 'Учимся Вместе' - {date_str}"
             logger.info(f"summary telegraph start chat={chat_id} chars={len(telegraph_html)}")
             _write_summary_stage(
@@ -1142,31 +1142,52 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 patterns = [
                     r'(?:ТЕМА ДНЯ|ТЕМА ДНЯ \(ГЛУБОКИЙ РАЗБОР\))[:\s\-–—]+([^\n<]+)',
                     r'(?:▶️\s*СИТУАЦИЯ|КЕЙС|СЛУЧАЙ)[:\s\-–—]+([^\n<]+)',
-                    r'<h4>([^<]+)</h4>',
                     r'<h3>([^<]+)</h3>',
-                    r'<b>([А-ЯЁ\s]{6,40})</b>'
+                    r'<h4>([^<]+)</h4>',
+                    r'<b>([А-ЯЁа-яё\s]{10,50})</b>'
                 ]
+                def _is_dup(cand: str, cur_list: list) -> bool:
+                    c_stems = set(re.findall(r'[а-яёa-z]{4,}', cand.lower()))
+                    for ex in cur_list:
+                        ex_stems = set(re.findall(r'[а-яёa-z]{4,}', ex.lower()))
+                        for cs in c_stems:
+                            for es in ex_stems:
+                                if cs[:5] == es[:5]:
+                                    return True
+                    return False
+
                 for pat in patterns:
                     for m in re.findall(pat, html_doc, re.IGNORECASE):
-                        cl = re.sub(r'<[^>]+>', '', m).strip(' :–—-.')
-                        if 8 <= len(cl) <= 60:
-                            if not any(st in cl.upper() for st in (
-                                "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ", 
-                                "КЛИНИЧЕСКИЕ КЕЙСЫ", "ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК", "СООБЩЕНИЙ ЗА",
-                                "ДАЙДЖЕСТ", "УЧИМСЯ ВМЕСТЕ"
-                            )):
-                                if cl not in candidates:
-                                    candidates.append(cl)
+                        cl = re.sub(r'<[^>]+>', '', m).strip(' :–—-.•*#')
+                        if any(st in cl.upper() for st in (
+                            "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ", 
+                            "КЛИНИЧЕСКИЕ КЕЙСЫ", "ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК", "СООБЩЕНИЙ ЗА",
+                            "ДАЙДЖЕСТ", "УЧИМСЯ ВМЕСТЕ", "МЕДИА-КОНТЕКСТ", "ИЛЛЮСТРАЦИЯ"
+                        )):
+                            continue
+                        words = cl.split()
+                        # Исключаем одиночные слова и случайные обрывки
+                        if len(words) < 2 and len(cl) < 16:
+                            continue
+                        if not (10 <= len(cl) <= 60):
+                            continue
+                        # Капитализируем первую букву темы
+                        norm = cl[0].upper() + cl[1:]
+                        if not _is_dup(norm, candidates) and norm not in candidates:
+                            candidates.append(norm)
                         if len(candidates) >= max_t:
                             break
                     if len(candidates) >= max_t:
                         break
+                # Если качественных тем меньше 2, лучше использовать эталонные буллеты
+                if len(candidates) < 2:
+                    return []
                 return candidates[:max_t]
 
             sel_intro = random.choice(intros)
             dynamic_topics = _extract_topics(full_html)
             if dynamic_topics:
-                sel_bullets = "\n".join(f"🔹 <b>{t}</b>" for t in dynamic_topics)
+                sel_bullets = "\n".join(f"🔹 {t}" for t in dynamic_topics)
             else:
                 sel_bullets = random.choice(bullet_sets)
 

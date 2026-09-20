@@ -28,6 +28,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_boot_")
+os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "boot.log")
 
 import config  # noqa: E402
 
@@ -41,6 +42,8 @@ import runtime_guard  # noqa: E402
 runtime_guard.HEARTBEAT_PATH = os.path.join(_TMPDIR, "hb.json")
 runtime_guard.SUMMARY_STATUS_PATH = os.path.join(_TMPDIR, "status.json")
 runtime_guard.WATCHDOG_DUMP_PATH = os.path.join(_TMPDIR, "dump.txt")
+runtime_guard.STARTUP_STATE_PATH = os.path.join(_TMPDIR, "startup_state.json")
+runtime_guard.get_startup_connect_wait = lambda: 0.0
 # Сторож убивает процесс через os._exit. В тесте он не нужен и опасен.
 runtime_guard.start_watchdog = lambda *a, **k: None
 runtime_guard.stop_watchdog = lambda *a, **k: None
@@ -48,6 +51,11 @@ runtime_guard.stop_watchdog = lambda *a, **k: None
 import main  # noqa: E402
 import assistant  # noqa: E402
 import database  # noqa: E402
+import user_memory  # noqa: E402
+
+user_memory.process_group_memory_daemon_batch = AsyncMock(return_value=None)
+user_memory.generate_gemini_text_async = AsyncMock(return_value=(None, "test_stub"))
+assistant.generate_gemini_text_async = AsyncMock(return_value=(None, "test_stub"))
 
 PASS, FAIL = [], []
 

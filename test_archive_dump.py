@@ -43,6 +43,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts", "archive"))
 import deppd  # noqa: E402
 
 PASS, FAIL = [], []
@@ -125,7 +126,7 @@ for kw, expect in ((dict(voice=D, document=D), True), (dict(photo=D), True),
           f"got {bool(kind)}")
 
 print("\n[6] Разбор вынесен из цикла по Telegram и виден тесту")
-SRC = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "deppd.py"),
+SRC = io.open(getattr(deppd, "__file__", os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "archive", "deppd.py")),
               encoding="utf-8-sig").read()
 check("media_kind — функция модуля, а не три ветки внутри main",
       "def media_kind(" in SRC)

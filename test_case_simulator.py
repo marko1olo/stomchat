@@ -50,7 +50,7 @@ class FakeResponse:
 
 class FakeBot:
     async def send_message(self, entity=None, message=None, parse_mode=None, **kw):
-        EVENTS.append(("send", message))
+        EVENTS.append(("send", message, kw.get("buttons")))
         return type("Sent", (), {"id": 70000 + len(EVENTS)})()
 
     async def delete_messages(self, chat_id, msg_id):
@@ -97,11 +97,15 @@ def state(step, history=None):
 
 
 def sent_texts():
-    return [payload for kind, payload in EVENTS if kind == "send"]
+    return [item[1] for item in EVENTS if item[0] == "send"]
+
+
+def sent_events():
+    return [item for item in EVENTS if item[0] == "send"]
 
 
 def kinds():
-    return [kind for kind, _ in EVENTS]
+    return [item[0] for item in EVENTS]
 
 
 async def run():
@@ -201,6 +205,33 @@ async def run():
     check("в истории и ход врача, и ответ экзаменатора", roles == ["user", "assistant"], f"got {roles}")
     check("текст врача сохранён дословно",
           messages[0]["content"] == "первый ход врача", f"got {messages[0]}")
+
+    print("\n[9] Интерактивные inline-кнопки навигации в симуляторе")
+    # Проверка кнопок при пустом вводе
+    reset()
+    await assistant.handle_interactive_case_step(BOT, USER_ID, "", state(1))
+    empty_ev = sent_events()[-1]
+    empty_btns = empty_ev[2] or []
+    empty_btn_datas = [b.data.decode('utf-8') if isinstance(b.data, bytes) else str(b.data) for row in empty_btns for b in row]
+    check("кнопка завершения при пустом вводе присутствует", "case:abort" in empty_btn_datas, f"got {empty_btn_datas}")
+
+    # Проверка кнопок на промежуточном шаге
+    reset()
+    await assistant.handle_interactive_case_step(BOT, USER_ID, "обработка 1.1", state(2))
+    step_ev = sent_events()[-1]
+    step_btns = step_ev[2] or []
+    step_btn_datas = [b.data.decode('utf-8') if isinstance(b.data, bytes) else str(b.data) for row in step_btns for b in row]
+    check("кнопка завершения на промежуточном шаге присутствует", "case:abort" in step_btn_datas, f"got {step_btn_datas}")
+
+    # Проверка кнопок на финальном шаге
+    reset()
+    await assistant.handle_interactive_case_step(BOT, USER_ID, "финальный ход", state(4))
+    fin_ev = sent_events()[-1]
+    fin_btns = fin_ev[2] or []
+    fin_btn_datas = [b.data.decode('utf-8') if isinstance(b.data, bytes) else str(b.data) for row in fin_btns for b in row]
+    check("финальный экран содержит кнопку нового кейса (case:start)", "case:start" in fin_btn_datas, f"got {fin_btn_datas}")
+    check("финальный экран содержит кнопку квиза (quiz:generate)", "quiz:generate" in fin_btn_datas, f"got {fin_btn_datas}")
+    check("финальный экран содержит кнопку возврата в меню (nav:main)", "nav:main" in fin_btn_datas, f"got {fin_btn_datas}")
 
 
 try:

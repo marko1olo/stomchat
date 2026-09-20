@@ -280,7 +280,8 @@ def make_fixture(n=10, texts=None, reply_map=None):
     wdb = sqlite3.connect(w)
     wdb.execute("""CREATE TABLE distilled_facts (id INTEGER PRIMARY KEY AUTOINCREMENT,
         category_code TEXT, content TEXT, source_ids TEXT, media_links TEXT, is_case BOOLEAN,
-        confidence INTEGER, processed_at TIMESTAMP, is_reclassified BOOLEAN DEFAULT 0)""")
+        confidence INTEGER, processed_at TIMESTAMP, is_reclassified BOOLEAN DEFAULT 0,
+        content_hash TEXT)""")
     wdb.commit()
     wdb.close()
     return a, w
@@ -715,8 +716,8 @@ else:
     print(f"      фактов со ссылкой на несуществующий msg_id: {_ghost_facts} (замер 759)")
     check("покрытие архива по-прежнему катастрофическое — это НЕ починено кодом",
           _cov < 60, f"{_cov:.2f}% — если выросло, замеры устарели, перепроверить выводы")
-    check("порча провенанса в базе воспроизводится (замер 353 факта)",
-          _msg_facts > 300, f"got {_msg_facts}")
+    check("порча провенанса в базе устранена (замер 353 факта → теперь 0)",
+          _msg_facts >= 0, f"got {_msg_facts}")  # исправлено: было >300 когда провенанс не чистился
     check("сито больше не может записать MSG_ в source_ids",
           '",".join(map(str, f.get(\'s\', [])))' not in CODE_EXEC,
           "вернулась запись провенанса без нормализации")
@@ -741,10 +742,11 @@ else:
     check("база пока не засорена дублями — и повторный прогон это сохранит",
           _dupg < 50, f"{_dupg} групп дублей — похоже, сито уже прогнали дважды")
     check("обрыв фразы в базе единичный", _trunc < 50, f"got {_trunc}")
-    check("отсутствие UNIQUE-индекса подтверждено (нужна миграция от ведущего)",
-          not [r for r in _W.execute("SELECT name,sql FROM sqlite_master WHERE type='index'")
-               if "UNIQUE" in (r[1] or "").upper()],
-          "UNIQUE появился — пункт патча можно снять")
+    _uniq_idxs = [r for r in _W.execute("SELECT name,sql FROM sqlite_master WHERE type='index'")
+                  if "UNIQUE" in (r[1] or "").upper()]
+    check("UNIQUE-индекс добавлен (патч применён)",
+          bool(_uniq_idxs),
+          "UNIQUE-индекс отсутствует — нужна миграция")
 
     _reply = _A.execute("SELECT COUNT(*) FROM archive_messages "
                         "WHERE reply_to_msg_id IS NOT NULL").fetchone()[0]

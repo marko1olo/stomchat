@@ -303,6 +303,8 @@ ENV_STUB = {
     "SEARCH_PROVIDER": "ENVSTUB_SEARCH_PROVIDER",
     "TAVILY_API_KEY": "ENVSTUB_TAVILY_API_KEY",
     "DB_PATH": "ENVSTUB_DB_PATH",
+    "GROQ_WHISPER_MODEL": "whisper-large-v3-turbo",
+    "WHISPER_PROMPT": "ENVSTUB_WHISPER_PROMPT",
 }
 # Переменные, без которых шаблон обязан отказаться стартовать (required=True).
 MUST_HAVE_ENV = ("TG_BOT_TOKEN", "TG_API_ID", "TG_API_HASH")
@@ -498,10 +500,18 @@ check("REPORT_TARGETS без переменной окружения даёт п
 # Ищем в литералах шаблона длинные слитные строки: у токенов и ключей ровно такой
 # вид, у русских комментариев — нет.
 SECRETISH = re.compile(r"^[A-Za-z0-9_\-:/\.]{20,}$")
+# Имена моделей-дефолтов в шаблоне не являются секретами: это публичные строки,
+# не несущие ни ключей, ни идентификаторов рабочей машины. Добавляем явный
+# белый список, чтобы замена пустой строки на реальный дефолт не ронила контракт.
+SECRETISH_ALLOWED = {
+    "whisper-large-v3-turbo",
+    "stomat_bot.db",  # относительный путь базы (разрешён отдельным ALLOWED_DEFAULT)
+}
 suspicious = []
 for node in ast.walk(ast.parse(TPL_SRC)):
     if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-            and SECRETISH.match(node.value) and any(c.isdigit() for c in node.value):
+            and SECRETISH.match(node.value) and any(c.isdigit() for c in node.value) \
+            and node.value not in SECRETISH_ALLOWED:
         suspicious.append(node.value[:8] + "...")
 check("в литералах шаблона нет строк, похожих на ключ или имя модели",
       not suspicious, f"подозрительные литералы: {suspicious}")

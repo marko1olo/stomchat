@@ -336,7 +336,7 @@ check("ответ уложен в предел Telegram", all(len(m or "") <= 40
 check("ответ ушёл одним сообщением, а не разорван по ссылкам",
       sum(1 for m in bot.sent if PUBMED_URL in (m or "")) == 1)
 check("ответ и запрос попали в историю ЛС",
-      len(SAVED_PM) == 1 and "Веб-поиск" in SAVED_PM[0][2] and PUBMED_URL in SAVED_PM[0][2],
+      len(SAVED_PM) == 1 and ("Веб-поиск" in SAVED_PM[0][2] or "открытым источникам" in SAVED_PM[0][2]) and PUBMED_URL in SAVED_PM[0][2],
       "следующий вопрос «а по второй ссылке что?» придёт без ссылок")
 
 print("\n[2] Промпт заземлён, а бюджет приходит сверху")
@@ -793,7 +793,7 @@ CAP.clear()
 _working = Bot()
 _elapsed_ok = drive_broken_photo(_working, chat_id=777102)
 check("на живом Telegram отказ уходит правкой статуса",
-      any("Не удалось обработать файл" in (m or "") for m in _working.sent),
+      any(("Не удалось обработать файл" in (m or "") or "Не удалось обработать медиафайл" in (m or "")) for m in _working.sent),
       "врач остаётся с «Скачиваю и анализирую… Подождите» навсегда")
 check("на живом Telegram дубля отказа нет",
       sum(1 for m in _working.sent if "Не смог открыть" in (m or "")) == 0,

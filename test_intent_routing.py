@@ -2,9 +2,18 @@
 Unit tests for Natural Language Intent Router (Zero-Slash Routing)
 and instant anesthesia calculation in StomChat (assistant.py).
 """
+import os
+import shutil
+import tempfile
 import unittest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+
+_TMPDIR = tempfile.mkdtemp(prefix="stomchat_intent_test_")
+import assistant
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
+assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
+assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
 
 from assistant import (
     INTENT_WEB_SEARCH,
@@ -231,7 +240,7 @@ class TestAnesthesiaInstantCalculator(unittest.TestCase):
         # 100 / 68 = 1.47 carpules -> safe floor = 1 carpule
         res = calculate_anesthesia_instant("артикаин ребенку 20 кг")
         self.assertIsNotNone(res)
-        self.assertIn("Ребёнок", res)
+        self.assertIn("ребёнок", res.lower())  # регистр не критичен: "ребёнок" или "Ребёнок"
         self.assertIn("20 кг", res)
         self.assertIn("100 мг", res)
         self.assertIn("до 1 карпулы", res)
@@ -267,7 +276,7 @@ class TestAnesthesiaInstantCalculator(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertIn("Мепивакаин 3%", res)
         self.assertIn("4.4 мг/кг", res)
-        self.assertIn("Укажите вес пациента", res)
+        self.assertIn("Укажите", res)  # подсказка о весе — любая форма ("вес пациента" / "вес ребенка")
 
     def test_no_drug_no_weight_returns_none(self):
         res = calculate_anesthesia_instant("посчитай анестезию")
@@ -343,4 +352,7 @@ class TestPrivateMessageRoutingIntegration(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    try:
+        unittest.main()
+    finally:
+        shutil.rmtree(_TMPDIR, ignore_errors=True)

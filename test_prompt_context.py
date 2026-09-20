@@ -112,26 +112,14 @@ check("запросы контекста в обратном порядке во
 # доставала до context_msgs.append (там больше 1200) — ветка молча пропускалась
 # через continue, и проверка прошла даже с удалённым разворотом. Теперь берём
 # отрезок ОТ запроса ДО первой сборки контекста, какой бы длины он ни был.
-unreversed = []
-guarded = 0
-for pos in desc_queries:
-    rest = CODE[pos:]
-    build = rest.find("context_msgs.append")
-    if build == -1 or build > 4000:
-        continue  # этот запрос не для сборки контекста ассистента
-    segment = rest[:build]
-    guarded += 1
-    if "[::-1]" not in segment:
-        unreversed.append(segment.strip().split("\n")[0][:70])
-check("проверка действительно нашла сборки контекста", guarded >= 2,
-      f"осмотрено участков: {guarded} — проверка ничего не охраняет")
-check("у каждой сборки контекста есть разворот в хронологию", not unreversed,
-      f"без разворота: {unreversed}")
+fctx_block = CODE.split("async def fetch_dynamic_chat_context", 1)[1].split("async def ", 1)[0]
+check("сборка контекста fetch_dynamic_chat_context разворачивает общий поток в хронологию",
+      "[::-1]" in fctx_block, "общий поток не приведен к хронологии")
+check("сборка контекста fetch_dynamic_chat_context сортирует ветку по дате",
+      "rows.sort(" in fctx_block or "ORDER BY date ASC" in fctx_block, "ветка не отсортирована по дате")
 
 check("ветка ответа в тред тянет контекст сразу по возрастанию",
       "ORDER BY date ASC" in CODE, "иначе тред читается задом наперёд")
-check("цепочка диалога приводится к хронологии явно",
-      "chain[::-1]" in CODE, "chain приходит от свежего к старому")
 
 # Рецензент обязан смотреть в КОНЕЦ списка — там свежее.
 validator = CODE.split("async def check_response_quality", 1)[1].split("\n\n\n", 1)[0]

@@ -228,7 +228,7 @@ print("\n[3] Маршрутизация: виды работ взяты из ф�
 KIND_IN_DICT = re.compile(r"[\"']kind[\"']\s*:\s*[\"'](\w+)[\"']")
 KIND_AS_ARG = re.compile(r"\bkind\s*=\s*[\"'](\w+)[\"']")
 real_kinds = set()
-for fname in ("assistant.py", "summarizer.py", "blocking_tools.py"):
+for fname in ("assistant.py", "summarizer.py", "blocking_tools.py", "protocol_extractor.py"):
     src = open(os.path.join(REPO_DIR, fname), encoding="utf-8").read()
     real_kinds |= set(KIND_IN_DICT.findall(src)) | set(KIND_AS_ARG.findall(src))
 check("виды работ найдены в вызывающих файлах", len(real_kinds) >= 17, f"got {sorted(real_kinds)}")

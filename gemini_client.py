@@ -501,9 +501,19 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         _record_failure("model_overloaded", error_text, api_key)
         return "model_overloaded"
 
+    if any(m in err_msg for m in ("404", "not_found", "not found", "does not exist")):
+        if model_name:
+            ban_model(model_name, 86400) # 24 hours
+            logger.warning(f"{provider.capitalize()} model {model_name} not found (404). Banned for 24h.")
+        _record_failure("model_not_found", error_text, api_key)
+        return "model_not_found"
+
     if "403" in err_msg or "permission" in err_msg:
-        set_key_cooldown(provider, api_key, 31536000) # 365 days
-        logger.warning(f"{provider.capitalize()} key permanently denied (403). Banned for 365 days.")
+        if provider == "gemini":
+            set_key_cooldown(provider, api_key, 31536000) # 365 days
+            logger.warning(f"{provider.capitalize()} key permanently denied (403). Banned for 365 days.")
+        else:
+            logger.warning(f"{provider.capitalize()} key denied (403).")
         _record_failure("key_denied", error_text, api_key)
         return "key_denied"
 
@@ -525,6 +535,7 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
 # строку. Первой идёт groq-llama — на такой задаче она быстрее lite-моделей.
 TRIAGE_KINDS = frozenset({
     "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
+    "group_ping_hot_check", "protocol_extraction",
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
 CHAT_KINDS = frozenset({
@@ -838,12 +849,17 @@ def generate_text(prompt, status_context=None, timeout=None):
                 elif kind == "daemon_memory":
                     create_kwargs["max_tokens"] = 2048
 
+                # Лимит OTPM для Groq (особенно бесплатные квоты Qwen): потолок 1000 токенов/мин
+                if provider == "groq" and "max_tokens" in create_kwargs:
+                    create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
+
                 # Нативный параметр размышлений для моделей:
-                # ВСЕМ передаем reasoning_effort="high" (кроме легковесных триажей с явным LOW)
-                if is_triage or thinking_level == "LOW":
-                    create_kwargs["reasoning_effort"] = "low"
-                else:
-                    create_kwargs["reasoning_effort"] = "high"
+                # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort
+                if provider == "gemini":
+                    if is_triage or thinking_level == "LOW":
+                        create_kwargs["reasoning_effort"] = "low"
+                    else:
+                        create_kwargs["reasoning_effort"] = "high"
 
                 try:
                     response = client.chat.completions.create(**create_kwargs)
@@ -914,7 +930,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     # Не спим: следующий ключ свежий, врач ждёт.
                     continue
 
-                if failure_reason == "model_overloaded":
+                if failure_reason in ("model_overloaded", "model_not_found"):
                     break
 
                 if failure_reason == "key_denied":
@@ -1416,8 +1432,8 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
         try:
             logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
             client = get_provider_client("groq", api_key, timeout=per_attempt)
-            whisper_model = getattr(config, "GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
-            whisper_prompt = getattr(config, "WHISPER_PROMPT", "Разговорная речь врача-стоматолога. Стоматологическая терминология, препараты, протоколы, без субтитров.")
+            whisper_model = getattr(config, "GROQ_WHISPER_MODEL", None) or "whisper-large-v3-turbo"
+            whisper_prompt = getattr(config, "WHISPER_PROMPT", None) or "Разговорная речь врача-стоматолога. Стоматологическая терминология, препараты, протоколы, без субтитров."
             create_kwargs = {
                 "model": whisper_model,
                 "response_format": "text",
@@ -1538,9 +1554,10 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
                         {"role": "user", "content": user_prompt}
                     ],
                     "temperature": 0.5,
-                    "max_tokens": 2048,
-                    "reasoning_effort": "high",
+                    "max_tokens": 800 if provider == "groq" else 2048,
                 }
+                if provider == "gemini":
+                    supp_kwargs["reasoning_effort"] = "high"
                 try:
                     response = client.chat.completions.create(**supp_kwargs)
                 except (TypeError, Exception) as err:

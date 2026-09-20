@@ -105,11 +105,12 @@ class FakeReplyTo:
 
 
 class FakeMessage:
-    def __init__(self, mid, text, reply_to_id=None, sender_id=1001):
+    def __init__(self, mid, text, reply_to_id=None, sender_id=1001, date=None):
         self.id = mid
         self.message = text
         self.sender_id = sender_id
         self.reply_to = FakeReplyTo(reply_to_id) if reply_to_id else None
+        self.date = date or datetime.utcnow()
 
     async def get_sender(self):
         await asyncio.sleep(0)
@@ -164,6 +165,8 @@ async def _fake_query_db(query_sql, params=()):
         return [(4,)]                   # reply_count >= 3 — ветка открыта
     if q.startswith("SELECT COUNT(*) FROM messages WHERE msg_id >"):
         return [(1,)]                   # диалог свежий, не устаревший
+    if q.startswith("SELECT date FROM messages"):
+        return [(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),)]
     return [("Коллега", "А как временная коронка получилась без формочки?", 87385, params[0] if params else None),
             ("Коллега", "Размоделировку сделать не проблема", 87386, params[0] if params else None)]
 
@@ -235,6 +238,7 @@ def reset_world(state=None):
             os.remove(path)
     A._PASSIVE_CLAIMS.clear()
     A.REPLIED_MSG_IDS.clear()
+    A.USER_COOLDOWNS.clear()
     A.BOT_ID = None
     LOGGED.clear()
 
@@ -253,8 +257,8 @@ async def run_two(msg_ids, parents, bot_authored_parent=False, texts=None):
 
     coros = []
     texts = texts or ["А как временная коронка получилась без формочки?"] * len(msg_ids)
-    for mid, parent, body in zip(msg_ids, parents, texts):
-        msg = FakeMessage(mid, body, parent)
+    for idx, (mid, parent, body) in enumerate(zip(msg_ids, parents, texts)):
+        msg = FakeMessage(mid, body, parent, sender_id=1001 + idx)
         event = FakeEvent(client, msg)
         coros.append(A.check_and_trigger_assistant(
             client, event, mid, msg.message, parent, sender_first_name="Коллега"))
@@ -462,7 +466,7 @@ A._PASSIVE_CLAIMS.clear()
 # ==========================================================================
 print("\n[4] Прямой ответ врачу заявкой не подавляется")
 reset_world()
-client4, results4 = asyncio.run(run_two([90001, 90002], [70000, 70000],
+client4, results4 = asyncio.run(run_two([90001, 90002], [70000, 70001],
                                         bot_authored_parent=True))
 check("оба прямых вопроса получили ответ", len(client4.sends) == 2,
       f"отправок {len(client4.sends)}: вопрос врача пропал молча")

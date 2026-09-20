@@ -153,27 +153,57 @@ def _build_journal_html(
     )
 
     # 3. Стилизуем подзаголовки клинических кейсов в карточки с бейджем и нумерацией
+    has_numbered_cases = bool(re.search(
+        r'<(?:p|h[2-4])>\s*(?:<b>|<strong>)\s*(?:###\s*)?(?:Кейс|Случай|Клинический кейс)\s*№?[0-9\.]*',
+        processed_body,
+        re.IGNORECASE
+    ))
+
+    if has_numbered_cases:
+        case_start_pat = r'(?:(?:Кейс|Случай|Клинический кейс)\s*№?[0-9\.]*[^<]*)'
+        case_bound_pat = r'(?:<figure>[\s\S]*?</figure>\s*)?<p>\s*(?:<b>|<strong>)\s*(?:###\s*)?(?:Кейс|Случай|Клинический кейс)\s*№?[0-9\.]*'
+    else:
+        case_start_pat = r'(?:▶️\s*СИТУАЦИЯ[^<]*)'
+        case_bound_pat = r'(?:<figure>[\s\S]*?</figure>\s*)?<p>\s*(?:<b>|<strong>)\s*(?:###\s*)?▶️\s*СИТУАЦИЯ'
+
     case_counter = 0
     def _case_replacer(match):
         nonlocal case_counter
         case_counter += 1
-        case_title = match.group(1).strip()
+        preceding_fig = (match.group(1) or "").strip()
+        case_title = match.group(2).strip()
         case_title = re.sub(r'^###\s*', '', case_title).strip()
-        rest = (match.group(2) or "").strip()
+        rest = (match.group(3) or "").strip()
         rest = re.sub(r'^(?:<br\s*/?>|\s)+', '', rest).strip()
         rest_html = f"\n<p>{rest}</p>" if rest else ""
+        case_body = (match.group(4) or "").strip()
+        fig_html = f"  {preceding_fig}\n" if preceding_fig else ""
         return (
             f'<div class="case-card">'
             f'  <div class="case-header">'
             f'    <span class="case-badge">🦷 КЛИНИЧЕСКИЙ СЛУЧАЙ #{case_counter}</span>'
             f'    <span class="case-title">{case_title}</span>'
-            f'  </div>{rest_html}'
+            f'  </div>{rest_html}\n'
+            f'{fig_html}'
+            f'  {case_body}\n'
             f'</div>'
         )
 
     processed_body = re.sub(
-        r'<p>\s*(?:<b>|<strong>)\s*(?:###\s*)?((?:(?:Кейс|Случай|Клинический кейс)\s*№?[0-9\.]*|▶️\s*СИТУАЦИЯ)[^<]+)(?:</b>|</strong>)(?:\s*<br\s*/?>|\s+)?([\s\S]*?)</p>',
+        rf'(?:(<figure>[\s\S]*?</figure>)\s*)?'
+        rf'<p>\s*(?:<b>|<strong>)\s*(?:###\s*)?({case_start_pat})'
+        rf'(?:</b>|</strong>)(?:\s*<br\s*/?>|\s+)?([\s\S]*?)</p>'
+        rf'\s*([\s\S]*?)'
+        rf'(?=(?:<div class="section-banner"|{case_bound_pat}|<div class="heroes-card"|<div class="journal-footer"|\Z))',
         _case_replacer,
+        processed_body,
+        flags=re.IGNORECASE,
+    )
+
+    # 3.1 Стилизуем клинический вывод кейса в акцентный неразрывный блок
+    processed_body = re.sub(
+        r'<p>\s*(?:<b>|<strong>)\s*(ВЫВОД:[^<]*)(?:</b>|</strong>)([\s\S]*?)</p>',
+        r'<div class="case-conclusion"><strong>\1</strong>\2</div>',
         processed_body,
         flags=re.IGNORECASE,
     )
@@ -348,9 +378,9 @@ def _build_journal_html(
             border-right: 1px solid #e2e8f0;
             border-bottom: 1px solid #e2e8f0;
             border-radius: 4px;
-            padding: 7px 12px;
-            margin-top: 18px;
-            margin-bottom: 10px;
+            padding: 5px 10px;
+            margin-top: 13px;
+            margin-bottom: 7px;
             page-break-inside: avoid;
             break-inside: avoid;
             page-break-after: avoid;
@@ -369,12 +399,31 @@ def _build_journal_html(
             border: 1px solid #e2e8f0;
             border-left: 4px solid #0284c7;
             border-radius: 6px;
-            padding: 10px 14px 8px 14px;
-            margin: 14px 0 14px 0;
-            page-break-inside: avoid;
-            break-inside: avoid;
+            padding: 8px 12px 6px 12px;
+            margin: 10px 0;
+            page-break-inside: auto;
+            break-inside: auto;
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
             clear: both;
+        }}
+
+        .case-conclusion {{
+            background: #f0fdf4;
+            border-left: 3.5px solid #16a34a;
+            border-radius: 0 4px 4px 0;
+            padding: 6px 10px;
+            margin: 8px 0;
+            font-size: 9pt;
+            color: #14532d;
+            page-break-inside: avoid;
+            break-inside: avoid;
+            page-break-before: avoid;
+            break-before: avoid;
+        }}
+
+        .case-conclusion strong {{
+            color: #15803d;
+            font-weight: 700;
         }}
 
         /* Карточка доски почета / героев недели */
@@ -496,7 +545,7 @@ def _build_journal_html(
 
         /* Фигуры и клинические снимки */
         figure {{
-            margin: 12px auto;
+            margin: 8px auto;
             text-align: center;
             page-break-inside: avoid;
             break-inside: avoid;
@@ -507,7 +556,7 @@ def _build_journal_html(
 
         figure img {{
             max-width: 100%;
-            max-height: 280px;
+            max-height: 220px;
             border-radius: 6px;
             border: 1px solid #cbd5e1;
             box-shadow: 0 3px 6px -1px rgba(0, 0, 0, 0.08);
@@ -516,7 +565,7 @@ def _build_journal_html(
         }}
 
         figcaption {{
-            margin-top: 6px;
+            margin-top: 4px;
             font-size: 8pt;
             color: #475569;
             line-height: 1.35;

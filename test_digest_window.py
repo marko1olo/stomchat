@@ -130,7 +130,7 @@ async def run():
 
     print("\n[4] Ничто не выпадает между вчерашним и сегодняшним дайджестом")
     # Вчерашнее окно: позавчера 20:00 -> вчера в час отчёта.
-    report_hour = getattr(config, "REPORT_HOUR", 10)
+    report_hour = getattr(config, "REPORT_HOUR", None) or 21
     yesterday_end = datetime.combine(yesterday, datetime.min.time()).replace(hour=report_hour)
     yesterday_start = (yesterday_end - timedelta(days=1)).replace(hour=20, minute=0, second=0)
 

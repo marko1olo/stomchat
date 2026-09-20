@@ -252,7 +252,7 @@ async def check_dialogue_continuation_triage(dialogue_chain, recent_chat=None):
    - Если врач просит клиническое обоснование, аргументацию или ставит под сомнение тактику ("Почему так решили?", "На каком основании?", "А как быть с...", "Почему именно этот материал/бор?", "Разве не лучше X?", "А если корень искривлен?").
    - Вопросы-сомнения и профессиональная дискуссия — это нормальная медицинская практика консилиума, а НЕ спор или троллинг.
    - ОСПАРИВАНИЕ ОШИБОК И ГАЛЛЮЦИНАЦИЙ БОТА (СТРОГО YES): Если врач оспаривает клинический вердикт, диагноз или находку бота на снимке, указывает на ошибку или ставит под сомнение увиденный дефект, даже в резкой, эмоциональной или саркастичной разговорной форме ("Ты где там это увидел?", "Какой нависающий край?", "Ты че алкаш?", "С дуба рухнул?", "Покажи где кариес", "Че за бред?"). Это КЛИНИЧЕСКАЯ АПЕЛЛЯЦИЯ. Бот ОБЯЗАН ответить: перепроверить снимок/контекст, признать ошибку если ошибся, или аргументированно пояснить свою мысль. Молчать при указании на ошибку категорически запрещено!
-   - Если врач задает уточняющий вопрос по протоколу, дозировке, анатомии, осложнениям или дополняет анамнез/симптомы.
+   - ВОПРОСЫ О ВОЗМОЖНОСТЯХ И ФУНКЦИЯХ БОТА (СТРОГО YES): Если врач спрашивает, как пользоваться ботом, какие есть протоколы/команды, как получить дайджест, посчитать анестезию или найти ассистента в ЛС — отвечай YES.
    На любые такие вопросы ВСЕГДА отвечай YES.
 
 2. КОГДА ОТВЕЧАТЬ NO (МОЛЧАТЬ):
@@ -803,7 +803,8 @@ def build_main_menu_markup():
     return [
         [Button.inline("💊 Препараты и дозы", data="nav:calc"),   Button.inline("🔬 Разобрать снимок", data="nav:xray")],
         [Button.inline("📚 Клинические протоколы", data="nav:proto"), Button.inline("🔍 Найти статью / протокол", data="nav:web")],
-        [Button.inline("👤 Мой профиль", data="nav:profile"), Button.inline("💬 Клинический вопрос", data="nav:chat")],
+        [Button.inline("🎲 Клинический квиз", data="nav:quiz"),   Button.inline("🎮 Симулятор кейса", data="nav:case")],
+        [Button.inline("👤 Мой профиль", data="nav:profile"),     Button.inline("💬 Клинический вопрос", data="nav:chat")],
         [Button.inline("⭐ Мои закладки", data="nav:bookmarks"), Button.inline("⚙️ Настройки", data="nav:settings")],
     ]
 
@@ -836,13 +837,14 @@ get_main_inline_keyboard = build_main_menu_markup
 MAIN_MENU_TEXT = (
     "👋 <b>StomChat AI — клинический ассистент для врача-стоматолога</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━\n"
-    "Просто напишите свой вопрос — или выберите что нужно:\n\n"
-    "💊 <b>Препараты и дозы</b> — анестетики, антибиотики, НПВС по весу и соматике\n"
-    "🔬 <b>Разобрать снимок</b> — пришлите рентген, ОПТГ или КЛКТ\n"
-    "🔍 <b>Найти статью / протокол</b> — поиск в PubMed, Cochrane, гайдлайны\n"
-    "💬 <b>Клинический вопрос</b> — консультация по диагнозу, тактике, технике\n"
-    "⭐ <b>Мои закладки</b> — посты, сохранённые из группы\n\n"
-    "<i>Принимаю голосовые сообщения, фото, снимки. "
+    "Задайте клинический вопрос своими словами или выберите раздел:\n\n"
+    "💊 <b>Препараты и дозы</b> — расчет карпул анестезии, двойные потолки дозировок\n"
+    "🔬 <b>Разобрать снимок</b> — анализ прицельных снимков, ОПТГ, КЛКТ и фото\n"
+    "📚 <b>Клинические протоколы</b> — доказательные стандарты и клинические рекомендации\n"
+    "🔍 <b>Найти статью / протокол</b> — зарубежные исследования, PubMed, Cochrane\n"
+    "🎲 <b>Квиз и симулятор</b> — проверка знаний и интерактивные клинические кейсы\n"
+    "⭐ <b>Мои закладки</b> — посты и материалы, сохранённые из группы\n\n"
+    "<i>💡 Принимаю аудиосообщения, фото и рентген-снимки прямо в диалог. "
     f"Помню последние {PM_HISTORY_LIMIT} сообщений диалога.</i>"
 )
 
@@ -992,8 +994,8 @@ PASSIVE_RETRY_MINUTES = 10      # после попытки, не давшей �
 # Максимальное количество ответов бота в одной диалоговой ветке / последовательном треде.
 # Раньше стояло жесткое ограничение в 3 ответа, из-за чего содержательные клинические
 # дискуссии с врачами обрывались. Повышено до 6.
-MAX_DIALOGUE_BOT_REPLIES = getattr(config, "MAX_DIALOGUE_BOT_REPLIES", 6)
-DIALOGUE_THREAD_DEBOUNCE_SECONDS = getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", 35)
+MAX_DIALOGUE_BOT_REPLIES = int(getattr(config, "MAX_DIALOGUE_BOT_REPLIES", None) or 6)
+DIALOGUE_THREAD_DEBOUNCE_SECONDS = int(getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", None) or 35)
 
 # Сколько держать ветку в processed_threads. Граница была по ДЛИНЕ — последние
 # 100 записей, `del threads[:-100]`, молча. Замер по архиву (117 847 реплик,
@@ -1235,7 +1237,11 @@ async def calculate_dynamic_passive_cooldown(state: dict) -> tuple[int, str]:
     velocity = await get_recent_message_velocity(hours=1)
     msk_hour = (datetime.utcnow().hour + 3) % 24
 
-    v_eff = max(velocity, 5)
+    try:
+        v_num = int(velocity)
+    except (ValueError, TypeError):
+        v_num = 25
+    v_eff = max(v_num, 5)
     f_vel = (30.0 / v_eff) ** 0.40
 
     if 10 <= msk_hour <= 18:
@@ -2310,7 +2316,7 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 2. Черновик содержит поверхностный псевдонаучный жаргон, выдуманные термины или бессодержательные утверждения без доказательного объяснения механизма.
 3. Ответ содержит неуместные, несерьёзные или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄).
 4. Тон высокомерен, саркастичен, токсичен или представляет собой бессмысленный однострочный вброс/комментарий.
-5. Ответ содержит выдуманные дозировки, протоколы или конкретные числовые значения, противоречащие клинической практике.
+5. КОНКРЕТНЫЕ ЦИФРЫ: Ответ содержит выдуманные дозировки, протоколы или конкретные числовые значения, противоречащие клинической практике или отсутствующие в справке/стандартах.
 6. Ответ вообще не относится к медицине/стоматологии или уводит тему в сторону.
 7. Топографическое или анатомическое несоответствие: рекомендации относятся к поверхностям, контактам или тканям, не затронутым вмешательством, либо смешиваются протоколы несовместимых дисциплин.
 8. Беспочвенная ритуальная критика: выдумывание несуществующих дефектов или дежурные шаблонные придирки без объективных оснований в клиническом контексте.
@@ -3101,11 +3107,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
                 # Проверяем "свежесть" диалога.
                 # Для прямого Reply на сообщение бота (is_parent_bot) даем врачу широкое окно:
-                # до 25 сообщений в чате (или до 45 минут на обдумывание и формулировку клинического вопроса).
-                # Для косвенных ответов в чужой ветке сохраняем строгий лимит (5 сообщений / 15 минут).
+                # до 30 сообщений в чате или до 180–240 минут (3–4 часа на операцию, лечение или прием).
+                # Для косвенных ответов в чужой ветке сохраняем строгий лимит (5 сообщений / 20 минут).
                 ref_id = nearest_bot_msg_id or reply_to_msg_id
-                max_allowed_msgs = 25 if is_parent_bot else 5
-                max_allowed_minutes = 45.0 if is_parent_bot else 15.0
+                max_allowed_msgs = 30 if is_parent_bot else 5
 
                 try:
                     msgs_since = await query_db_async(
@@ -3123,6 +3128,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping to avoid thread hijacking."
                     )
                     return False
+
+                # Расчет допустимого времени: для прямых ответов боту при спокойном чате (<= 10 сообщений)
+                # даем до 4 часов (240 мин), при умеренной активности — до 3 часов (180 мин).
+                if is_parent_bot:
+                    max_allowed_minutes = 240.0 if count_since <= 10 else 180.0
+                else:
+                    max_allowed_minutes = 20.0
 
                 # Проверка по времени исходного сообщения
                 try:
@@ -3820,6 +3832,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     if is_passive:
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
         if datetime.now() - last_run < timedelta(minutes=120):
+            elapsed_min = int((datetime.now() - last_run).total_seconds() / 60)
+            logger.info(
+                "Media Assistant: passive media cooldown active (%s/120 min elapsed). Skipping unrequested media msg_id=%s.",
+                elapsed_min,
+                msg_id,
+            )
             return  # Within 2-hour cooldown, skip!
 
     # Construct a simple event-like object for direct compatibility
@@ -4329,11 +4347,14 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     # user_text = "" и уходил экзаменатору как пустое действие врача — тот
     # оценивал пустоту и невозмутимо вёл кейс дальше.
     if not (user_text or "").strip():
+        from telethon import Button
+        abort_btn = [[Button.inline("⏹️ Завершить симулятор", data="case:abort")]]
         await bot_client.send_message(
             entity=chat_id,
             message="🎮 <i>В режиме клинического кейса я читаю только текст — "
                     "опишите ваши действия словами.</i>\n"
-                    "<i>Выйти из симулятора: /abort</i>",
+                    "<i>Выйти из симулятора: /abort или кнопка ниже:</i>",
+            buttons=abort_btn,
             parse_mode='html'
         )
         return
@@ -4424,11 +4445,16 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
     reply_text = response.text.strip()
     reply_text = clean_html_formatting(reply_text)
     
+    from telethon import Button
     if is_last_step:
         # Clear state
         await database.clear_user_interactive_state(chat_id)
         final_message = f"🏁 <b>Разбор случая завершен!</b>\n\n{reply_text}"
-        await bot_client.send_message(entity=chat_id, message=final_message, parse_mode='html')
+        finish_buttons = [
+            [Button.inline("🚀 Новый кейс", data="case:start"), Button.inline("🎲 Клинический квиз", data="quiz:generate")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
+        ]
+        await bot_client.send_message(entity=chat_id, message=final_message, buttons=finish_buttons, parse_mode='html')
     else:
         # Update history and save state
         history_data.append({"role": "assistant", "content": reply_text})
@@ -4443,7 +4469,8 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             case_id="dynamic",
             history=json.dumps(history_payload, ensure_ascii=False)
         )
-        await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
+        step_buttons = [[Button.inline("⏹️ Завершить симулятор", data="case:abort")]]
+        await bot_client.send_message(entity=chat_id, message=reply_text, buttons=step_buttons, parse_mode='html')
 
     # Реплика экзаменатора уходит и в историю ЛС, а не только в state кейса.
     #
@@ -4759,46 +4786,74 @@ async def handle_private_message(bot_client, event):
         # Map text menu button clicks to slash commands
         btn_mapping = {
             # Постоянная нижняя панель быстрого доступа (ReplyKeyboardMarkup)
-            "📖 база знаний": "/wiki",
-            "база знаний": "/wiki",
-            "🎲 квиз": "/quiz",
-            "квиз": "/quiz",
+            "💊 препараты и дозы": "/calc",
+            "препараты и дозы": "/calc",
+            "💊 препараты": "/calc",
+            "препараты": "/calc",
+            "дозы препаратов": "/calc",
+            "дозы": "/calc",
+            "дозировки": "/calc",
             "🧮 калькулятор": "/calc",
             "калькулятор": "/calc",
+            "калькулятор анестезии": "/calc",
+            "расчет анестезии": "/calc",
+            "расчёт анестезии": "/calc",
+
+            "🔍 найти статью": "/web",
+            "найти статью": "/web",
+            "🔍 найти": "/web",
+            "найти статьи": "/web",
+            "🔍 поиск в сети": "/web",
+            "поиск в сети": "/web",
+            "web-поиск": "/web",
+            "🌐 поиск в сети": "/web",
+            "🔍 поиск": "/web",
+            "поиск": "/web",
+            "найти": "/web",
+
             "⭐ закладки": "/bookmarks",
             "мои закладки": "/bookmarks",
             "закладки": "/bookmarks",
-            "⌨️ главное меню": "/start",
-            "главное меню": "/start",
-            "меню": "/start",
-            "кнопка меню": "/start",
-            "навигация": "/start",
+            "сохраненки": "/bookmarks",
+            "сохранёнки": "/bookmarks",
 
-            # Синонимы и легаси-кнопки
+            "⌨️ меню": "/menu",
+            "меню": "/menu",
+            "⌨️ главное меню": "/menu",
+            "главное меню": "/menu",
+            "кнопка меню": "/menu",
+            "навигация": "/menu",
+
+            # Протоколы и база знаний
+            "📚 клинические протоколы": "/protocols",
+            "клинические протоколы": "/protocols",
+            "📚 протоколы": "/protocols",
+            "протоколы": "/protocols",
+            "📖 база знаний": "/wiki",
+            "база знаний": "/wiki",
             "📖 энциклопедия": "/wiki",
             "энциклопедия": "/wiki",
+
+            # Квизы, симуляторы и кейсы
+            "🎲 квиз": "/quiz",
+            "квиз": "/quiz",
+            "🎲 викторина": "/quiz",
+            "викторина": "/quiz",
             "🎮 клинический кейс": "/case",
             "клинический кейс": "/case",
             "симулятор": "/case",
             "симулятор кейсов": "/case",
-            "🎲 викторина": "/quiz",
-            "викторина": "/quiz",
-            "🌐 поиск в сети": "/web",
-            "поиск в сети": "/web",
-            "web-поиск": "/web",
+
+            # Профиль, статистика, стиль
+            "👤 мой профиль": "/profile",
+            "мой профиль": "/profile",
+            "профиль": "/profile",
             "📊 статистика чата": "/stats",
             "статистика чата": "/stats",
             "статистика": "/stats",
             "⚙️ стиль общения": "/style",
             "стиль общения": "/style",
             "стиль": "/style",
-            "👤 мой профиль": "/profile",
-            "мой профиль": "/profile",
-            "профиль": "/profile",
-            "📚 клинические протоколы": "/protocols",
-            "клинические протоколы": "/protocols",
-            "📚 протоколы": "/protocols",
-            "протоколы": "/protocols"
         }
         if text.lower() in btn_mapping:
             text = btn_mapping[text.lower()]
@@ -5026,7 +5081,7 @@ async def handle_private_message(bot_client, event):
                     )
 
                 if detected.name == INTENT_MENU:
-                    text = "/start"
+                    text = "/menu"
                 elif detected.name == INTENT_HELP:
                     text = "/help"
                 elif detected.name == INTENT_STYLE:
@@ -5048,15 +5103,25 @@ async def handle_private_message(bot_client, event):
 
         # Автоматический выход из симулятора при вводе любой другой команды или нажатии кнопки меню
         is_command = text.startswith("/")
-        if is_command and user_state and user_state.get("state_type") == "case" and text.lower() not in ("/abort", "/exit"):
+        if is_command and user_state and user_state.get("state_type") == "case" and text.lower() not in ("/abort", "/exit", "/stop"):
             await database.clear_user_interactive_state(chat_id)
             user_state = None
             await bot_client.send_message(entity=chat_id, message="⏹️ <i>Активный клинический симулятор прерван для выполнения новой команды.</i>", parse_mode='html')
 
-        if text.lower() in ("/abort", "/exit", "выход", "отмена"):
+        if text.lower() in ("/abort", "/exit", "/stop", "выход", "отмена", "стоп"):
             if user_state:
                 await database.clear_user_interactive_state(chat_id)
-                await bot_client.send_message(entity=chat_id, message="⏹️ <i>Интерактивная сессия симулятора успешно сброшена.</i>", parse_mode='html')
+                from telethon import Button
+                exit_btns = [
+                    [Button.inline("🚀 Начать новый кейс", data="case:start")],
+                    [Button.inline("⬅️ В главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="⏹️ <b>Интерактивная сессия симулятора успешно завершена.</b>\n\nВы можете запустить новый кейс или вернуться в главное меню.",
+                    buttons=exit_btns,
+                    parse_mode='html'
+                )
             else:
                 await bot_client.send_message(entity=chat_id, message="ℹ️ <i>У вас нет активной сессии симулятора.</i>", parse_mode='html')
             return
@@ -5211,12 +5276,21 @@ async def handle_private_message(bot_client, event):
             )
             return
 
-        if text.lower() in ("/start", "/menu") or text.lower().startswith("/start "):
+        if text.lower() in ("/menu", "меню") or text.lower().startswith("/menu "):
+            await bot_client.send_message(
+                entity=chat_id,
+                message=MAIN_MENU_TEXT,
+                buttons=build_main_menu_markup(),
+                parse_mode='html'
+            )
+            return
+
+        if text.lower() == "/start" or text.lower().startswith("/start "):
             keyboard = build_reply_keyboard()
             try:
                 await bot_client.send_message(
                     entity=chat_id,
-                    message="⌨️ <i>Нижнее меню быстрого доступа активировано.</i>",
+                    message="👋 <b>Добро пожаловать в StomChat!</b>\n<i>Нижняя панель быстрого доступа закреплена внизу экрана.</i>",
                     buttons=keyboard,
                     parse_mode='html'
                 )
@@ -5260,10 +5334,10 @@ async def handle_private_message(bot_client, event):
         if text.lower() == "/help":
             help_text = (
                 "💡 <b>Доступные команды в ЛС:</b>\n\n"
-                "• /start — перезапустить приветствие бота и открыть Главное меню. Синоним — /menu.\n"
+                "• /start — перезапустить приветствие бота и открыть Главное меню. Синонимы — /menu, /меню, /start_consult.\n"
                 "• /help — показать эту памятку.\n"
                 "• /style — настроить стиль общения (коллега, сухие факты, циник).\n"
-                "• /profile — показать мой клинический профиль, специализацию и память бота. Синоним — /me.\n"
+                "• /profile — показать мой клинический профиль, специализацию и память бота. Синонимы — /me, /профиль.\n"
                 "• /protocols — вывести список доступных клинических протоколов.\n"
                 "• /wiki — открыть интерактивную стоматологическую энциклопедию. Синоним — /encyclopedia.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
@@ -5275,7 +5349,7 @@ async def handle_private_message(bot_client, event):
                 "можно открыть и проверить (то, чего нет в базе чата: она заканчивается "
                 "февралём 2026). Синоним — /найди.\n"
                 "• /case — запустить интерактивный клинический симулятор.\n"
-                "• /abort — сбросить текущий клинический симулятор. Синоним — /exit.\n\n"
+                "• /abort — сбросить текущий клинический симулятор. Синонимы — /exit, /stop.\n\n"
                 # Раздел появился потому, что групповые команды не были описаны
                 # НИГДЕ: ни в меню, ни здесь, ни в промпте. Их шесть, они
                 # работают, и врач о них не знал.
@@ -5407,7 +5481,12 @@ async def handle_private_message(bot_client, event):
                 "Объём карпулы и концентрацию сверяйте с инструкцией к своему препарату — "
                 "у разных производителей они отличаются.</i>"
             )
-            await bot_client.send_message(entity=chat_id, message=calc_text, parse_mode='html')
+            from telethon import Button
+            buttons = [
+                [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("⬅️ В главное меню", data="nav:main")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=calc_text, buttons=buttons, parse_mode='html')
             return
 
         if text.lower() == "/quiz":
@@ -5587,7 +5666,7 @@ async def handle_private_message(bot_client, event):
             wiki_facts = []
             if os.path.exists("stomat_wiki.db"):
                 try:
-                    with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+                    with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=10)) as conn:
                         c = conn.cursor()
                         for kw in keywords:
                             _w, _p = like_any_case("content", kw)
@@ -5634,12 +5713,21 @@ async def handle_private_message(bot_client, event):
             parts = text.split(None, 1)
             query_param = parts[1].strip() if len(parts) > 1 else ""
             if not query_param:
+                from telethon import Button
+                buttons = [[Button.inline("⬅️ В главное меню", data="nav:main")]]
                 await tg_safety.send_message(
                     bot_client, chat_id,
-                    "🌐 <b>Что искать в открытых источниках?</b>\n"
-                    "Пример: <code>/web биодентин перфорация дна полости</code>\n\n"
-                    "<i>Это поиск по интернету со ссылками, которые можно открыть. "
+                    "🌐 <b>Поиск в открытых источниках и PubMed</b>\n\n"
+                    "Поиск клинических исследований, метаанализов и гайдлайнов со ссылками на первоисточники.\n\n"
+                    "💡 <b>Как пользоваться:</b>\n"
+                    "Отправьте команду со своим запросом, например:\n"
+                    "• <code>/web биодентин перфорация дна полости</code>\n"
+                    "• <code>/web BOPT preparation technique success rate</code>\n"
+                    "• <code>/web vital pulp therapy MTA vs Biodentine</code>\n"
+                    "• <code>/web peri-implantitis treatment protocol 2025</code>\n\n"
+                    "<i>Это поиск по открытым научным источникам со ссылками, которые можно открыть. "
                     "Для поиска по базе чата — /search.</i>",
+                    buttons=buttons,
                     timeout=WEB_STATUS_TIMEOUT_SECONDS, op="send_message:web_hint",
                     logger=logger, parse_mode='html',
                 )
@@ -5750,7 +5838,7 @@ async def handle_private_message(bot_client, event):
             # ссылок, и модель отвечает про источники, которых не видела.
             await database.save_pm_message(
                 chat_id, "Assistant",
-                lookup['text']
+                answer_text
             )
             return
 
@@ -5807,13 +5895,15 @@ async def handle_private_message(bot_client, event):
                 case_id="dynamic",
                 history=json.dumps(history_payload, ensure_ascii=False)
             )
+            from telethon import Button
             case_welcome = (
                 "🎮 <b>Интерактивный клинический симулятор запущен!</b>\n"
                 "Вы можете отвечать текстом или отправлять голосовые сообщения. Бот будет анализировать ваши действия и вести кейс дальше.\n"
-                "Для отмены отправьте /abort.\n\n"
+                "Для завершения нажмите кнопку ниже или отправьте /abort.\n\n"
                 f"{starting_text}"
             )
-            await bot_client.send_message(entity=chat_id, message=case_welcome, parse_mode='html')
+            case_btns = [[Button.inline("⏹️ Завершить симулятор", data="case:abort")]]
+            await bot_client.send_message(entity=chat_id, message=case_welcome, buttons=case_btns, parse_mode='html')
             # Условие кейса тоже в историю ЛС: без него первый ход врача
             # ("назначу КТ 3.6") лежит в pm_messages как реплика ни на что —
             # ни жалоб, ни анамнеза, на которые он отвечает, в истории нет.
@@ -5980,7 +6070,7 @@ async def handle_private_message(bot_client, event):
                 if status_msg:
                     notified = await tg_safety.edit_message(
                         bot_client, chat_id, status_msg.id,
-                        "❌ <i>Не удалось обработать медиафайл(ы). Попробуйте еще раз.</i>",
+                        "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>",
                         timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
                         op="edit_message:pm_media_failed", logger=logger,
                         parse_mode='html',
@@ -6929,7 +7019,7 @@ async def handle_group_quiz(bot_client, event):
         user_id=int(quiz_id),
         state_type="quiz_config",
         current_step=correct,
-        case_id=explanation[:200],
+        case_id=explanation,
         history=json.dumps(init_votes)
     )
     
@@ -7241,7 +7331,7 @@ async def wiki_subtopic_counts(cat_id):
 
     def sync_count():
         result = {}
-        with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+        with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=10)) as conn:
             conn.execute("PRAGMA busy_timeout = 10000")
             for sub_id, _title, _codes in entry[1]:
                 where, params = _wiki_code_filter(sub_id)
@@ -7334,7 +7424,7 @@ async def query_wiki_fact_page(subtopic_id, page_idx):
         return facts[page_idx % len(facts)], len(facts)
 
     def sync_query():
-        with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+        with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=10)) as conn:
             conn.execute("PRAGMA busy_timeout = 10000")
             base = (f"FROM distilled_facts WHERE {where} "
                     f"AND content IS NOT NULL AND TRIM(content) <> '' GROUP BY content")
@@ -7376,52 +7466,51 @@ async def query_wiki_subtopic(subtopic_id):
     facts = []
     if os.path.exists("stomat_wiki.db"):
         try:
-            conn = sqlite3.connect("stomat_wiki.db", timeout=10)
-            c = conn.cursor()
+            with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=10)) as conn:
+                c = conn.cursor()
 
-            # 1. Try category code search
-            codes = codes_map.get(subtopic_id, [])
-            for code in codes:
-                if not taxonomy.code_is_valid(code):
-                    continue
-                # Та же граница токена, что и в основном пути: запасной поиск не
-                # имеет права показывать врачу другой набор статей.
-                params = taxonomy.token_patterns(code) + (WIKI_FALLBACK_ROWS_PER_CODE,)
-                c.execute("SELECT content FROM distilled_facts WHERE "
-                          f"{taxonomy.token_sql('category_code')} LIMIT ?", params)
-                for row in c.fetchall():
-                    fact = row[0].strip()
-                    if fact not in facts:
-                        facts.append(fact)
-
-            # 2. Fallback to keyword search if category code yields no results
-            if not facts:
-                keywords_map = {
-                    "ortho_bopt": ["bopt", "уступ", "преп"],
-                    "ortho_vin": ["винил", "вкладк", "накладк"],
-                    "ortho_crown": ["коронка", "коронок", "мост", "протез"],
-                    "endo_irr": ["гипохлорит", "хлоргексидин", "эдта", "ирригац"],
-                    "endo_obt": ["гуттаперч", "силер", "обтурац"],
-                    "endo_files": ["файл", "реципрок", "протейпер", "мту"],
-                    "perio_dis": ["гингивит", "пародонт", "пародонтоз"],
-                    "perio_clean": ["кюрет", "скалер", "чистк", "налет", "камень"],
-                    "perio_plast": ["десна", "десны", "сст", "трансплантат"],
-                    "surg_impl": ["имплант", "абатм", "формировател", "заглушк"],
-                    "surg_rem": ["удален", "экстракц", "лунк"],
-                    "surg_bone": ["синус", "остеот", "мембран", "биоосс", "аугмент"],
-                    "gnat_joint": ["окклюз", "сустав", "внчс"],
-                    "gnat_splint": ["сплинт", "капп", "шина"]
-                }
-                kws = keywords_map.get(subtopic_id, ["дентин"])
-                for kw in kws:
-                    _w, _p = like_any_case("content", kw)
-                    c.execute("SELECT content FROM distilled_facts "
-                              f"WHERE {_w} LIMIT 10", _p)
+                # 1. Try category code search
+                codes = codes_map.get(subtopic_id, [])
+                for code in codes:
+                    if not taxonomy.code_is_valid(code):
+                        continue
+                    # Та же граница токена, что и в основном пути: запасной поиск не
+                    # имеет права показывать врачу другой набор статей.
+                    params = taxonomy.token_patterns(code) + (WIKI_FALLBACK_ROWS_PER_CODE,)
+                    c.execute("SELECT content FROM distilled_facts WHERE "
+                              f"{taxonomy.token_sql('category_code')} LIMIT ?", params)
                     for row in c.fetchall():
                         fact = row[0].strip()
                         if fact not in facts:
                             facts.append(fact)
-            conn.close()
+
+                # 2. Fallback to keyword search if category code yields no results
+                if not facts:
+                    keywords_map = {
+                        "ortho_bopt": ["bopt", "уступ", "преп"],
+                        "ortho_vin": ["винил", "вкладк", "накладк"],
+                        "ortho_crown": ["коронка", "коронок", "мост", "протез"],
+                        "endo_irr": ["гипохлорит", "хлоргексидин", "эдта", "ирригац"],
+                        "endo_obt": ["гуттаперч", "силер", "обтурац"],
+                        "endo_files": ["файл", "реципрок", "протейпер", "мту"],
+                        "perio_dis": ["гингивит", "пародонт", "пародонтоз"],
+                        "perio_clean": ["кюрет", "скалер", "чистк", "налет", "камень"],
+                        "perio_plast": ["десна", "десны", "сст", "трансплантат"],
+                        "surg_impl": ["имплант", "абатм", "формировател", "заглушк"],
+                        "surg_rem": ["удален", "экстракц", "лунк"],
+                        "surg_bone": ["синус", "остеот", "мембран", "биоосс", "аугмент"],
+                        "gnat_joint": ["окклюз", "сустав", "внчс"],
+                        "gnat_splint": ["сплинт", "капп", "шина"]
+                    }
+                    kws = keywords_map.get(subtopic_id, ["дентин"])
+                    for kw in kws:
+                        _w, _p = like_any_case("content", kw)
+                        c.execute("SELECT content FROM distilled_facts "
+                                  f"WHERE {_w} LIMIT 10", _p)
+                        for row in c.fetchall():
+                            fact = row[0].strip()
+                            if fact not in facts:
+                                facts.append(fact)
         except Exception as e:
             logger.error(f"Error querying wiki subtopic: {e}")
     return facts
@@ -7431,7 +7520,7 @@ async def query_random_wiki_fact():
     fact = None
     if os.path.exists("stomat_wiki.db"):
         try:
-            with contextlib.closing(sqlite3.connect("stomat_wiki.db", timeout=10)) as conn:
+            with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=10)) as conn:
                 c = conn.cursor()
                 c.execute("SELECT content FROM distilled_facts ORDER BY RANDOM() LIMIT 1")
                 row = c.fetchone()
@@ -8030,7 +8119,7 @@ async def handle_quiz_callback(bot_client, event):
                 user_id=int(quiz_id),
                 state_type="quiz_config",
                 current_step=correct,
-                case_id=explanation[:200],
+                case_id=explanation,
                 history=json.dumps(init_votes)
             )
 
@@ -9217,8 +9306,118 @@ async def check_and_send_pm_pings(bot_client):
 
 
 async def check_and_send_group_activity_pings(bot_client):
-    """Отключено: безадресная рассылка пингов в ЛС о событиях в группе порождала спам и блокировки бота."""
-    error = None
-    if error:
-        return
-    return
+    """Приглашения в чат: уведомляет молчащих врачей о горячем обсуждении в группе."""
+    GROUP_ACTIVITY_SILENCE_DAYS = 3       # врач молчит столько — кандидат
+    GROUP_PING_COOLDOWN_HOURS = 48        # не чаще этого слать одному врачу
+    try:
+        # Тихие часы — выходим до LLM-вызова.
+        if is_ping_quiet_hours():
+            logger.debug("Group activity pings skipped: quiet hours.")
+            return
+
+        # --- 1. Bootstrap: завести записи для активных ЛС-собеседников ---
+        active_ids = await database.get_active_pm_users(days_limit=30)
+        state = load_state()
+        pings = state.setdefault("pm_pings", {})
+        changed = False
+        now = datetime.now()
+        for uid in active_ids:
+            uid_str = str(uid)
+            if uid_str not in pings:
+                pings[uid_str] = {"last_activity": now.isoformat()}
+                changed = True
+        if changed:
+            save_state(state)
+
+        # --- 2. LLM: проверяем, есть ли горячая тема в чате ---
+        recent_msgs = await database.get_last_n_messages(limit=25)
+        text_msgs = [m for m in recent_msgs if (m[3] or "").strip() and int(m[0] or 0) < 90000000]
+        if len(text_msgs) < 5:
+            logger.debug("Group ping: not enough recent messages (%d < 5), skipping.", len(text_msgs))
+            return
+
+        chat_sample = "\n".join(f"{m[1] or 'Врач'}: {(m[3] or '').strip()[:200]}" for m in text_msgs[-20:])
+        status_ctx = {"kind": "group_ping_hot_check"}
+        prompt = (
+            "Ты — клинический координатор стоматологического сообщества.\n"
+            "Оцени последние сообщения из группы ниже:\n"
+            f"{chat_sample}\n\n"
+            "Если в чате сейчас идёт активное, содержательное клиническое обсуждение сложного случая или профессионального вопроса, "
+            "верни JSON строго в формате: {\"is_hot\": true, \"topic\": \"коротко тема обсуждения\", \"teaser\": \"интригующая краткая фраза для коллег\"}.\n"
+            "Если обсуждения нет, обычный бытовой флуд или мало активности — верни: {\"is_hot\": false}."
+        )
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+        if error or not response or not getattr(response, "text", None):
+            logger.warning("Group ping: LLM error, skipping cycle. error=%s", error)
+            return
+
+        data = user_memory._extract_json_object(response.text)
+        if not data:
+            import json as _json
+            try:
+                data = _json.loads(response.text)
+            except Exception:
+                logger.warning("Group ping: bad LLM response: %r", response.text[:200])
+                return
+
+        if not data.get("is_hot"):
+            logger.debug("Group ping: discussion is not hot, skipping.")
+            return
+
+        teaser = data.get("teaser", "В чате идёт горячее обсуждение!")
+        topic = data.get("topic", "")
+
+        # --- 3. Фильтруем кандидатов ---
+        state = load_state()
+        pings = state.get("pm_pings", {})
+        candidates = []
+        for uid_str, info in pings.items():
+            if info.get("pings_opted_out"):
+                continue
+            if info.get("ping_failures", 0) >= MAX_PING_FAILURES:
+                continue
+            last_gp_raw = info.get("last_group_ping")
+            if last_gp_raw:
+                last_gp = _parse_state_dt(last_gp_raw)
+                if now - last_gp < timedelta(hours=GROUP_PING_COOLDOWN_HOURS):
+                    continue
+            last_act = _parse_state_dt(info.get("last_activity"))
+            if now - last_act < timedelta(days=GROUP_ACTIVITY_SILENCE_DAYS):
+                continue
+            candidates.append(int(uid_str))
+
+        targets = select_ping_targets(candidates)
+        if not targets:
+            logger.debug("Group ping: no eligible candidates.")
+            return
+
+        text = f"🔥 {teaser}"
+        if topic:
+            text += f"\n\nТема: {topic}"
+
+        for chat_id in targets:
+            chat_id_str = str(chat_id)
+            try:
+                await bot_client.send_message(chat_id, text)
+                commit_pm_ping(chat_id_str, last_group_ping=now.isoformat())
+                logger.info("Group activity ping sent to chat_id=%s", chat_id)
+            except Exception as send_err:
+                if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
+                    wait_seconds = tg_safety.flood_wait_seconds(send_err)
+                    logger.warning(
+                        "Group ping hit FloodWait chat_id=%s wait=%ss — счётчик "
+                        "НЕ увеличен (это наша скорость, не врач), рассылка "
+                        "остановлена до следующего цикла",
+                        chat_id, wait_seconds,
+                    )
+                    break
+                _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
+                failures = _info.get("ping_failures", 0) + 1
+                logger.warning(
+                    f"Failed to send group activity ping to {chat_id} "
+                    f"(failure {failures}): {send_err}"
+                )
+                continue
+
+    except Exception as g_err:
+        logger.error("Global error in check_and_send_group_activity_pings: %s", g_err)

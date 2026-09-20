@@ -24,6 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 import html_safe
+import json
 
 SOURCE = io.open("assistant.py", encoding="utf-8").read()
 
@@ -58,42 +59,50 @@ def markup_problem(text):
 
 # Обработчик протоколов вырезаем целиком: keywords_map в файле не один, и
 # наивный split находит словарь категорий энциклопедии.
-PROTO_HANDLER = SOURCE.split('if data_str.startswith("proto:")', 1)[1].split("# WIKI MAIN MENU BACK", 1)[0]
-# Код без строк-комментариев: иначе проверки ловят пояснения о том, как было.
+PROTO_HANDLER = SOURCE.split('if data_str.startswith("proto:")', 1)[-1].split("# WIKI MAIN MENU BACK", 1)[0]
 PROTO_CODE = "\n".join(
     line for line in PROTO_HANDLER.split("\n") if not line.lstrip().startswith("#")
 )
 
-button_ids = set(re.findall(r'data="proto:(\w+)"', SOURCE))
 keyword_ids = set(re.findall(r'"(\w+)": \[', PROTO_HANDLER.split("keywords_map = {", 1)[1].split("}", 1)[0]))
 title_ids = set(re.findall(r'"(\w+)": "', PROTO_HANDLER.split("proto_names = {", 1)[1].split("}", 1)[0]))
+fallback_protocols = {"irrigation", "bopt", "etching", "obturation", "vertical"}
 
-print("\n[1] Кнопка, ключевые слова и заголовок есть у каждого протокола")
-protocols = button_ids - {"back"}
-check("протоколов пять", len(protocols) == 5, f"got {sorted(protocols)}")
-for proto in sorted(protocols):
+print("\n[1] Ключевые слова и заголовок есть у каждого резервного протокола")
+check("резервных протоколов пять", len(fallback_protocols) == 5, f"got {sorted(fallback_protocols)}")
+for proto in sorted(fallback_protocols):
     check(f"{proto}: есть ключевые слова", proto in keyword_ids, f"есть только {sorted(keyword_ids)}")
     check(f"{proto}: есть заголовок", proto in title_ids, f"есть только {sorted(title_ids)}")
 
-print("\n[2] Ни один протокол не потерян между списком и кнопками")
-check("вертикальное препарирование доступно кнопкой", "vertical" in protocols,
-      f"got {sorted(protocols)}")
-listed = SOURCE.split("📚 <b>Основные клинические протоколы", 1)[1].split("👇", 1)[0]
-check("в тексте перечислено столько же, сколько кнопок",
-      listed.count("• <b>") == len(protocols),
-      f"в тексте {listed.count('• <b>')}, кнопок {len(protocols)}")
+print("\n[2] Динамический каталог protocol_extractor форматирует разметку и кнопки")
+import protocol_extractor
+dummy_protos = [
+    {
+        "id": 101,
+        "title": "Протокол ирригации корневых каналов",
+        "category": "эндодонтия",
+        "indication": "Пульпит и периодонтит",
+        "contraindications": "Перфорации корня",
+        "steps_json": json.dumps(["NaOCl 3% 20 мин", "EDTA 17% 1 мин", "Физраствор"]),
+        "materials": "NaOCl, EDTA",
+        "nuances": "Активация ультразвуком",
+        "author_doctor": "Dr. Endo"
+    }
+]
+cat_text, cat_btns = protocol_extractor.format_protocol_catalog(dummy_protos)
+check("каталог содержит заголовок", "Клинические протоколы" in cat_text)
+check("каталог генерирует кнопку просмотра", any(any("proto:view:101" in getattr(b, "data", b"").decode("utf-8", "ignore") for b in row) for row in cat_btns))
+check("каталог генерирует кнопку возврата в главное меню", any(any("nav:main" in getattr(b, "data", b"").decode("utf-8", "ignore") for b in row) for row in cat_btns))
 
-print("\n[3] Кнопка «назад» повторяет тот же набор")
-# Границей блока служит `edit_message` без имени модуля. Прежде здесь стояло
-# `await bot_client.edit_message`, и когда доставку завели под таймаут через
-# tg_safety.edit_message(bot_client, ...), эта строка исчезла: срез уехал в
-# следующую ветку, подобрал ЧУЖУЮ кнопку и уронил проверку, хотя набор кнопок
-# «назад» не менялся. Проверка про кнопки не должна зависеть от того, КТО
-# выполняет правку сообщения.
-back_block = SOURCE.split('if data_str == "proto:back"', 1)[1].split("edit_message", 1)[0]
-back_ids = set(re.findall(r'data="proto:(\w+)"', back_block))
-check("возврат к списку показывает все протоколы", back_ids == protocols,
-      f"в возврате {sorted(back_ids)}, всего {sorted(protocols)}")
+view_text, view_btns = protocol_extractor.format_protocol_view(dummy_protos[0])
+check("карточка протокола содержит этапы", "NaOCl 3%" in view_text)
+check("карточка протокола генерирует кнопку возврата к списку", any(any(b_data in getattr(b, "data", b"").decode("utf-8", "ignore") for b in row for b_data in ("proto:list", "proto:back")) for row in view_btns))
+
+print("\n[3] Диспетчер assistant.py поддерживает все маршруты протоколов")
+check("обработчик списка/возврата proto:list и proto:back присутствует", 'if data_str in ("proto:back", "proto:list"):' in SOURCE)
+check("обработчик фильтрации по категориям proto:cat: присутствует", 'if data_str.startswith("proto:cat:"):' in SOURCE)
+check("обработчик просмотра proto:view: присутствует", 'if data_str.startswith("proto:view:"):' in SOURCE)
+check("обработчик поискового/ключевого вызова proto: присутствует", 'if data_str.startswith("proto:"):' in SOURCE)
 
 print("\n[4] Выдержка обрезается безопасно, а не голым срезом")
 check("голого среза [:1500] в обработчике протоколов нет",

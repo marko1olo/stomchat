@@ -122,10 +122,11 @@ check("протухшая запись отброшена при чтении",
 print("\n[4] Попытки не сгорают на ключах, стоящих на кулдауне")
 # Восемь из десяти ключей Google остывают. При бюджете 3 попытки живых ключей
 # хватает — модель обязана быть опрошена, а не пропущена.
-reset({"gemini-3.5-flash": None})
+reset({"gemini-3.5-flash": None, "gemini-3.5-flash-lite": None})
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
 _behaviour["gemini-3.5-flash"] = "готовый ответ"
+_behaviour["gemini-3.5-flash-lite"] = "готовый ответ"
 
 res = gc.generate_text("вопрос", {"kind": "pm_chat"})
 check("ответ получен, несмотря на 8 остывающих ключей", res is not None and res.text == "готовый ответ",
@@ -137,8 +138,9 @@ check("сделан ровно один запрос", len(REQUESTS) == 1, f"got
 
 print("\n[5] Все ключи провайдера на кулдауне — каскад идёт дальше, а не молчит")
 reset({"gemini-3.5-flash": None, "gemini-3.7-flash": None, "gemini-3.6-flash": None,
-       "gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
-       "llama-3.3-70b-versatile": "ответ от groq"})
+       "gemini-3.8-flash": None, "gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
+       "llama-3.3-70b-versatile": "ответ от groq", "qwen/qwen3.8-27b": "ответ от groq",
+       "qwen/qwen3.6-27b": "ответ от groq"})
 for key in GOOGLE_KEYS:
     gc.set_key_cooldown("gemini", key, seconds=300)
 
@@ -149,7 +151,8 @@ check("к Google не обращались вовсе", not (set(keys_used()) & 
       f"got {keys_used()}")
 
 print("\n[6] 429 ставит ключ на кулдаун и переходит к следующему")
-reset({"gemini-3.5-flash": Exception("429 Too Many Requests: rate limit exceeded")})
+reset({"gemini-3.5-flash": Exception("429 Too Many Requests: rate limit exceeded"),
+       "gemini-3.5-flash-lite": Exception("429 Too Many Requests: rate limit exceeded")})
 res = gc.generate_text("вопрос", {"kind": "pm_chat"})
 tried = keys_used()
 check("испробовано несколько разных ключей", len(set(tried)) > 1, f"got {tried}")
@@ -176,7 +179,8 @@ check("каскад ушёл к следующей модели",
       "gemini-3.5-flash" in models_used() or len(set(models_used())) > 1, f"got {models_used()}")
 
 print("\n[9] Забаненная модель пропускается на следующем вызове")
-reset({"gemini-3.6-flash": "не должно вызваться", "gemini-3.5-flash": "ответ резервной"})
+reset({"gemini-3.6-flash": "не должно вызваться", "gemini-3.7-flash": "ответ резервной",
+       "gemini-3.5-flash": "ответ резервной"})
 gc.ban_model("gemini-3.6-flash", 1200)
 res = gc.generate_text("сводка", {"kind": "summary"})
 check("основная модель не опрашивалась", "gemini-3.6-flash" not in models_used(),

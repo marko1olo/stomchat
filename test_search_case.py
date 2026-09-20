@@ -263,10 +263,10 @@ print(f"      поиск по {len(CORPUS_KEYS)} ключам: оператор�
       f"из них SELECT {len(selects)}, LIMIT-ы {limits}")
 check("справка по трём ключам не пуста", traced_wiki.strip() != "",
       "трасса сняла соединение, а не только посчитала его")
-check("на каждый ключ по одной выборке в вике и в архиве",
-      len(selects) == 2 * len(CORPUS_KEYS),
-      f"SELECT-ов {len(selects)}, ожидалось {2 * len(CORPUS_KEYS)} — либо часть ключей "
-      f"врача до базы не дошла, либо запрос размножился на каждую форму")
+check("на каждый ключ по одной выборке в вике, бот-базе и архиве",
+      2 * len(CORPUS_KEYS) <= len(selects) <= 3 * len(CORPUS_KEYS),
+      f"SELECT-ов {len(selects)}, ожидалось от {2 * len(CORPUS_KEYS)} до {3 * len(CORPUS_KEYS)} — "
+      f"либо часть ключей врача до базы не дошла, либо превышен лимит баз")
 check("каждая выборка ограничена LIMIT", len(limits) == len(selects) and len(selects) > 0,
       f"без LIMIT {len(selects) - len(limits)} из {len(selects)} — лишние строки читаются "
       f"впустую и вытесняют другие ключи")

@@ -126,7 +126,7 @@ async def extract_protocol_from_text_async(
 
     try:
         status_ctx = {"kind": "protocol_extraction", "thinking_level": "LOW", "max_tokens": 2048}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=45)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
         if error or not response or not getattr(response, "text", None):
             logger.warning(f"Protocol extraction LLM error: {error}")
             return None

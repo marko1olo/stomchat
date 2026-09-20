@@ -39,17 +39,42 @@ def _default_log_path():
     return "bot.log"
 
 
-LOG_PATH = _default_log_path()
-HEARTBEAT_PATH = "bot_heartbeat.json"
-SUMMARY_STATUS_PATH = "bot_summary_status.json"
-
-def _default_startup_state_path():
+def _is_test_runner() -> bool:
     try:
         import sys
-        entry = os.path.basename(sys.argv[0] or "")
+        for arg in sys.argv:
+            base = os.path.basename(arg or "")
+            if (base.startswith("test_") and base.endswith(".py")) or "run_all_tests" in base:
+                return True
     except Exception:
-        entry = ""
-    if entry.startswith("test_") and entry.endswith(".py"):
+        pass
+    return False
+
+
+def _default_heartbeat_path():
+    override = os.getenv("STOMCHAT_HEARTBEAT_PATH")
+    if override:
+        return override
+    if _is_test_runner():
+        return "bot_test_heartbeat.json"
+    return "bot_heartbeat.json"
+
+
+def _default_summary_status_path():
+    override = os.getenv("STOMCHAT_SUMMARY_STATUS_PATH")
+    if override:
+        return override
+    if _is_test_runner():
+        return "bot_test_summary_status.json"
+    return "bot_summary_status.json"
+
+
+LOG_PATH = _default_log_path()
+HEARTBEAT_PATH = _default_heartbeat_path()
+SUMMARY_STATUS_PATH = _default_summary_status_path()
+
+def _default_startup_state_path():
+    if _is_test_runner():
         return "bot_test_startup_state.json"
     return "bot_startup_state.json"
 

@@ -247,12 +247,12 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 ("qwen/qwen3.8-27b", "groq"),
                 ("qwen/qwen3.6-27b", "groq"),
             ]
-            # Gemini превосходит сторонние модели в распознавании клинических снимков.
-            # Для активных врачебных запросов (is_passive=False) всегда стартуем со
-            # старшей модели (start_idx=0). Для фонового сбора данных (is_passive=True)
-            # распределяем нагрузку по пулу (random start_idx), сохраняя квоты.
-            start_idx = 0 if not is_passive else random.randint(0, len(models_pool) - 1)
-            models_cascade = models_pool[start_idx:] + models_pool[:start_idx]
+            # Исключаем временно забаненные модели (по 503/404)
+            banned_map = gemini_client.get_banned_models()
+            unbanned_pool = [entry for entry in models_pool if entry[0] not in banned_map]
+            active_pool = unbanned_pool if unbanned_pool else [models_pool[0]]
+            start_idx = 0 if not is_passive else random.randint(0, len(active_pool) - 1)
+            models_cascade = active_pool[start_idx:] + active_pool[:start_idx]
 
             timeout = httpx.Timeout(
                 GROQ_HTTP_TIMEOUT_SECONDS,
@@ -339,7 +339,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         "content": content_arr
                                     }
                                 ],
-                                max_tokens=1200
+                                max_tokens=800 if provider == "groq" else 1200
                             )
                             content = resp.choices[0].message.content
                             if content:
@@ -380,6 +380,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
                                     return VisionDescription(english_fallback, image_urls=image_urls)
                                 return None
+                            if any(s in err_str for s in ("404", "not_found", "does not exist", "not found")):
+                                gemini_client.ban_model(model_name, 86400)
+                                logger.warning(f"Vision {provider} model {model_name} not found (404). Banned for 24h.")
+                                break
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель

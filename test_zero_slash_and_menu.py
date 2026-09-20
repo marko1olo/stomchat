@@ -383,6 +383,55 @@ async def run_all_tests():
     sent_text = SENT[-1]["message"] if SENT else ""
     check("Ответ содержит разбор клинической ситуации", len(sent_text) > 20)
 
+    print("\n" + "=" * 65)
+    print("ТЕСТ 5: Тапы по кнопкам постоянной клавиатуры ReplyKeyboardMarkup")
+    print("=" * 65)
+
+    # 1. Тап по «💊 Препараты и дозы»
+    reset()
+    msg_tap_calc = FakeEvent(FakeMessage(text="💊 Препараты и дозы"))
+    await assistant.handle_private_message(bot, msg_tap_calc)
+    check("Тап «💊 Препараты и дозы» открыл калькулятор", len(SENT) == 1)
+    calc_res = SENT[-1]["message"] if SENT else ""
+    check("Ответ калькулятора содержит справочник дозировок", "калькулятор" in calc_res.lower() and "500 мг" in calc_res)
+    calc_btns = SENT[-1].get("buttons") or []
+    flattened_btns = [b for row in calc_btns for b in row]
+    btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data) for b in flattened_btns if hasattr(b, "data")]
+    check("Калькулятор снабжен инлайн-кнопками препаратов (calc:articaine)", "calc:articaine" in btn_datas)
+    check("Калькулятор снабжен кнопкой возврата (nav:main)", "nav:main" in btn_datas)
+
+    # 2. Тап по «🔍 Найти статью»
+    reset()
+    msg_tap_web = FakeEvent(FakeMessage(text="🔍 Найти статью"))
+    await assistant.handle_private_message(bot, msg_tap_web)
+    check("Тап «🔍 Найти статью» открыл раздел поиска", len(SENT) == 1)
+    web_res = SENT[-1]["message"] if SENT else ""
+    check("Ответ содержит памятку по поиску в PubMed", "pubmed" in web_res.lower() or "поиск" in web_res.lower())
+    web_btns = SENT[-1].get("buttons") or []
+    flat_web = [b for row in web_btns for b in row]
+    web_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data) for b in flat_web if hasattr(b, "data")]
+    check("Раздел поиска снабжен кнопкой возврата (nav:main)", "nav:main" in web_datas)
+
+    # 3. Тап по «⌨️ Меню» (должен слать РОВНО 1 сообщение, без дублирующего мусора)
+    reset()
+    msg_tap_menu = FakeEvent(FakeMessage(text="⌨️ Меню"))
+    await assistant.handle_private_message(bot, msg_tap_menu)
+    check("Тап «⌨️ Меню» прислал РОВНО ОДНО сообщение (нет спам-дублей)", len(SENT) == 1)
+    menu_res = SENT[-1]["message"] if SENT else ""
+    check("Ответ содержит главное меню StomChat", "StomChat" in menu_res)
+    menu_btns = SENT[-1].get("buttons") or []
+    flat_menu = [b for row in menu_btns for b in row]
+    menu_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data) for b in flat_menu if hasattr(b, "data")]
+    check("Главное меню содержит кнопки квиза и симулятора", "nav:quiz" in menu_datas and "nav:case" in menu_datas)
+
+    # 4. Тап по «⭐ Закладки»
+    reset()
+    msg_tap_bm = FakeEvent(FakeMessage(text="⭐ Закладки"))
+    await assistant.handle_private_message(bot, msg_tap_bm)
+    check("Тап «⭐ Закладки» открыл раздел закладок", len(SENT) >= 1)
+    bm_res = SENT[-1]["message"] if SENT else ""
+    check("Ответ содержит информацию о закладках", "заклад" in bm_res.lower())
+
 
 try:
     asyncio.run(run_all_tests())

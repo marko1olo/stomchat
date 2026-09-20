@@ -58,6 +58,8 @@ import assistant  # noqa: E402
 import database  # noqa: E402
 import tg_safety  # noqa: E402
 
+asyncio.run(database.init_db())
+
 PASS, FAIL = [], []
 
 

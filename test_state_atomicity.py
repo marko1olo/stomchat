@@ -8,6 +8,12 @@ import shutil
 import sys
 import tempfile
 
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 _TMPDIR = tempfile.mkdtemp(prefix="stomstate_")
 
 # Подменяем пути состояния ДО импорта assistant, чтобы не трогать боевой файл.

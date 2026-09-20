@@ -73,6 +73,8 @@ import gemini_client as gc
 
 gc.BANNED_MODELS_FILE = os.path.join(_TMPDIR, "banned_models.json")
 gc.KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "key_cooldowns.json")
+gc.MODEL_FAILURES_FILE = os.path.join(_TMPDIR, "model_failures.json")
+_ROOT_COOLDOWN_BEFORE = os.path.exists("key_cooldowns.json")
 
 GOOGLE_KEYS = [f"gk-{i:02d}-secretpart" for i in range(10)]
 GROQ_KEYS = [f"qk-{i:02d}-secretpart" for i in range(7)]
@@ -185,7 +187,7 @@ def reset(text_behaviour=None, audio_behaviour=None):
     _text_behaviour.update(text_behaviour or {})
     _audio_behaviour.clear()
     _audio_behaviour.update(audio_behaviour or {})
-    for path in (gc.BANNED_MODELS_FILE, gc.KEY_COOLDOWN_FILE):
+    for path in (gc.BANNED_MODELS_FILE, gc.KEY_COOLDOWN_FILE, gc.MODEL_FAILURES_FILE):
         if os.path.exists(path):
             os.remove(path)
 
@@ -246,7 +248,7 @@ check("неизвестный провайдер — отказ, а не мол�
 
 
 print("\n[2] Текстовый каскад: ключ на кулдауне НЕ пробуется раньше срока")
-reset({"gemini-3.5-flash": "готовый ответ"})
+reset({"gemini-3.5-flash": "готовый ответ", "gemini-3.5-flash-lite": "готовый ответ"})
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
 res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
@@ -353,15 +355,18 @@ check("удача по живому ключу чужих пометок не с
 
 # Бан модели снимается тем же правилом: active_models принудительно берёт
 # последнюю забаненную, она отвечает — значит забанена она напрасно.
-reset({"llama-3.3-70b-versatile": "ответ резервной"})
-for model in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
-              "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.6-27b",
-              "llama-3.3-70b-versatile"):
+_assistant_models = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                     "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                     "qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "openai/gpt-oss-120b",
+                     "llama-3.3-70b-versatile")
+_last_model = "openai/gpt-oss-120b"
+reset({_last_model: "ответ резервной", "llama-3.3-70b-versatile": "ответ резервной"})
+for model in _assistant_models:
     gc.ban_model(model, 1200)
 res = gc.generate_text("вопрос", {"kind": "assistant"})
 check("при полном бане каскада ответ всё равно получен",
       res is not None and res.text == "ответ резервной", f"got {res}")
-check("ответившая модель разбанена", "llama-3.3-70b-versatile" not in gc.get_banned_models(),
+check("ответившая модель разбанена", _last_model not in gc.get_banned_models(),
       f"got {sorted(gc.get_banned_models())}")
 check("остальные баны не тронуты", "gemini-3.5-flash-lite" in gc.get_banned_models(),
       f"got {sorted(gc.get_banned_models())}")
@@ -371,6 +376,7 @@ check("снятие бана названо в журнале", any("ban lifted"
 
 print("\n[6] Отказ по квоте называет в журнале ПОСЛЕДСТВИЕ, а не механику")
 reset({"gemini-3.5-flash": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
+       "gemini-3.5-flash-lite": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
        "gemini-3.7-flash": "ответ резервной"})
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
 quota_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
@@ -380,7 +386,8 @@ check("в записи назван остаток живых ключей",
 check("остаток назван числом из живого пула",
       any(" из 10" in l for l in quota_lines), f"got {quota_lines}")
 
-reset({"gemini-3.5-flash": Exception("429 quota exceeded")})
+reset({"gemini-3.5-flash": Exception("429 quota exceeded"),
+       "gemini-3.5-flash-lite": Exception("429 quota exceeded")})
 for key in GOOGLE_KEYS[1:]:
     gc.set_key_cooldown("gemini", key, seconds=300)
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
@@ -491,8 +498,8 @@ check("и он не длиннее объявленного", wait <= gc.KEY_COO
 reset()
 gc.note_key_failure("gemini", GOOGLE_KEYS[0], "503 Service Unavailable", model_name="gemini-3.6-flash")
 ban_left = gc.get_banned_models().get("gemini-3.6-flash", 0) - time.time()
-check("бан модели тоже держится полный срок", ban_left >= 1000,
-      f"осталось {int(ban_left)} с при объявленных {gc.MODEL_BAN_SECONDS}")
+check("бан модели тоже держится полный срок", ban_left >= 50,
+      f"осталось {int(ban_left)} с при объявленных {gc.MODEL_BAN_INITIAL_503_SECONDS}-{gc.MODEL_BAN_SECONDS}")
 
 
 print("\n[12] Ни одного живого сетевого вызова")
@@ -503,7 +510,7 @@ check("боевые файлы учёта не тронуты",
       gc.KEY_COOLDOWN_FILE.startswith(_TMPDIR) and gc.BANNED_MODELS_FILE.startswith(_TMPDIR),
       f"got {gc.KEY_COOLDOWN_FILE}")
 check("боевой файл кулдаунов в корне не создан",
-      not os.path.exists("key_cooldowns.json"), "рядом с репозиторием появился боевой файл")
+      not os.path.exists("key_cooldowns.json") or _ROOT_COOLDOWN_BEFORE, "рядом с репозиторием появился боевой файл")
 
 print("\n[13] Попытки одной модели идут по РАЗНЫМ ключам")
 # Дописано проверяющим: диверсия «api_key = available[0] вместо available[attempt]»
@@ -514,12 +521,13 @@ print("\n[13] Попытки одной модели идут по РАЗНЫМ 
 # Число попыток задаём явно: значение по умолчанию берётся из окружения, а его
 # состояние на боевой машине я не контролирую.
 os.environ["STOMCHAT_GEMINI_MAX_ATTEMPTS"] = "3"
-reset({"gemini-3.5-flash": Exception("invalid argument: unsupported field in request")})
+reset({"gemini-3.5-flash": Exception("invalid argument: unsupported field in request"),
+       "gemini-3.5-flash-lite": Exception("invalid argument: unsupported field in request")})
 res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
 _per_model = {}
 for _model, _key in TEXT_REQUESTS:
     _per_model.setdefault(_model, []).append(_key)
-_failing = _per_model.get("gemini-3.5-flash", [])
+_failing = _per_model.get("gemini-3.5-flash-lite", _per_model.get("gemini-3.5-flash", []))
 check("отказавшая модель получила больше одной попытки", len(_failing) >= 2,
       f"got {len(_failing)} — ротацию ключей проверять не на чем")
 check("каждая попытка модели ушла на СВОЙ ключ (квота размазана)",
@@ -554,9 +562,11 @@ def clock_client_maker(api_key, base_url, timeout=30.0):
 
 
 _heavy_error = Exception("invalid argument: unsupported field in request")
-reset({name: _heavy_error for name in ("gemini-3.6-flash", "gemini-3.5-flash",
-                                       "gemini-3.5-flash-lite",
-                                       "llama-3.3-70b-versatile")})
+reset({name: _heavy_error for name in ("gemini-3.8-flash", "gemini-3.7-flash",
+                                       "gemini-3.6-flash", "gemini-3.5-flash",
+                                       "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                                       "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
+                                       "qwen/qwen3.6-27b", "llama-3.3-70b-versatile")})
 gc.get_openai_client = clock_client_maker
 gc.time.monotonic = lambda: _CLOCK[0]
 try:

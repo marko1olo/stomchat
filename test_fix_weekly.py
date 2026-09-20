@@ -431,7 +431,20 @@ asyncio.run(main())
 print("\n[15] Боевые файлы не тронуты")
 live_after = snapshot()
 for name in LIVE_FILES:
-    check(f"{name} без изменений", LIVE_BEFORE[name] == live_after[name],
+    is_same = LIVE_BEFORE[name] == live_after[name]
+    if not is_same and name == "bot_heartbeat.json":
+        try:
+            import json
+            import psutil
+            with open(os.path.join(REPO_DIR, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            hb_pid = data.get("pid")
+            if hb_pid and hb_pid != os.getpid():
+                if psutil.pid_exists(hb_pid):
+                    is_same = True
+        except Exception:
+            pass
+    check(f"{name} без изменений", is_same,
           f"{LIVE_BEFORE[name]} -> {live_after[name]}")
 check("журнал уведён во временный каталог",
       os.environ["STOMCHAT_LOG_PATH"].startswith(TMP_DIR))

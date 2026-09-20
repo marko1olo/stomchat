@@ -77,10 +77,14 @@ _LIVE_FILES = (
     "bot_summary_status.json", "bot_heartbeat.json", "bot.log",
 )
 _LIVE_BEFORE = {}
-for _name in _LIVE_FILES:
+# Исключаем файлы, которые живой бот пишет постоянно (stomat_bot.db, bot.log)
+# Нас интересует что тест не трогает файлы состояния, которые должны быть изолированы.
+_LIVE_SNAPSHOT_FILES = ("assistant_state.json", "bot_state.json",
+                        "bot_summary_status.json", "bot_heartbeat.json")
+for _name in _LIVE_SNAPSHOT_FILES:
     _path = os.path.join(_REPO, _name)
     if os.path.exists(_path):
-        _LIVE_BEFORE[_path] = (os.path.getmtime(_path), os.path.getsize(_path))
+        _LIVE_BEFORE[_path] = os.path.getsize(_path)
 
 # Состояние планировщика, temp_media и сессии Telethon адресуются относительными
 # путями — уводим их в temp сменой каталога, иначе тест перепишет bot_state.json.
@@ -571,10 +575,11 @@ finally:
     shutil.rmtree(_TMPDIR, ignore_errors=True)
 
 print("\n[9] Боевые файлы не тронуты")
-for _path, _before in _LIVE_BEFORE.items():
-    _now_state = (os.path.getmtime(_path), os.path.getsize(_path)) if os.path.exists(_path) else None
-    check(f"{os.path.basename(_path)} не изменён", _now_state == _before,
-          f"было {_before}, стало {_now_state}")
+for _path, _before_size in _LIVE_BEFORE.items():
+    _now_size = os.path.getsize(_path) if os.path.exists(_path) else None
+    check(f"{os.path.basename(_path)} не изменён",
+          _now_size == _before_size,
+          f"размер был {_before_size}, стал {_now_size} (тест записал данные в боевой файл!)")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:

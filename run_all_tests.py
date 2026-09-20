@@ -91,6 +91,7 @@ def count_checks(output):
 
 _TEST_DRIVER = (
     "import runpy, sys; "
+    "[s.reconfigure(encoding='utf-8', errors='replace') for s in (sys.stdout, sys.stderr) if hasattr(s, 'reconfigure')]; "
     "config_dir, script, *args = sys.argv[1:]; "
     "sys.path.insert(0, config_dir); "
     "sys.argv = [script, *args]; "
@@ -118,6 +119,8 @@ def test_environment(config_dir):
     """Изолированные, заведомо нерабочие настройки для статических регрессий."""
     env = os.environ.copy()
     env.update({
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
         "TG_BOT_TOKEN": "000000000:stomchat-test-token",
         "TG_API_ID": "123456",
         "TG_API_HASH": "stomchat-test-api-hash",
@@ -125,9 +128,9 @@ def test_environment(config_dir):
         "SOURCE_CHAT_ID": "-1000000000001",
         "REPORT_CHAT_ID": "-1000000000002",
         "REPORT_TARGETS": "[]",
-        "GOOGLE_API_KEYS": "",
-        "GROQ_API_KEYS": "",
-        "GROQ_VISION_MODEL": "",
+        "GOOGLE_API_KEYS": "test_gkey_1,test_gkey_2,test_gkey_3",
+        "GROQ_API_KEYS": "test_groq_1,test_groq_2,test_groq_3",
+        "GROQ_VISION_MODEL": "meta-llama/llama-4-scout-17b-vision",
         "TELEGRAPH_TOKEN": "",
         "GEMINI_MODEL": "",
         "GROQ_MODEL": "",
@@ -172,7 +175,7 @@ def main():
         began = time.monotonic()
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", _TEST_DRIVER, config_dir, name],
+                [sys.executable, "-X", "utf8", "-c", _TEST_DRIVER, config_dir, name],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=TEST_TIMEOUT_SECONDS, env=child_env,
             )
@@ -202,6 +205,29 @@ def main():
 
     after = snapshot()
     changed = [p for p in set(before) | set(after) if before.get(p) != after.get(p)]
+    try:
+        import json, psutil
+        live_pid = None
+        if os.path.exists("bot_heartbeat.json"):
+            with open("bot_heartbeat.json", "r", encoding="utf-8") as f:
+                hb = json.load(f)
+            p = hb.get("pid")
+            if p and p != os.getpid() and psutil.pid_exists(p):
+                live_pid = p
+        if live_pid:
+            for live_file in ("bot_heartbeat.json", "bot.log", "stomat_bot.db"):
+                if live_file in changed:
+                    changed.remove(live_file)
+            if "bot_summary_status.json" in changed:
+                try:
+                    with open("bot_summary_status.json", "r", encoding="utf-8") as f:
+                        st = json.load(f)
+                    if st.get("pid") == live_pid:
+                        changed.remove("bot_summary_status.json")
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     print("\n" + "=" * 66)
     print(f"наборов: {len(tests)}   проверок: {total_passed + total_failed}   "
