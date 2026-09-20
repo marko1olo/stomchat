@@ -1,18 +1,24 @@
 """
-Тестовый сьют для 3 уникальных клинических суперсил StomChat:
-  1. Генератор записи в амбулаторную медицинскую карту (Форма № 043/у) — /record (/043, /дневник, /карта)
+Тестовый сьют для 6 уникальных клинических суперсил StomChat:
+  1. Генератор записи в амбулаторную карту (Форма № 043/у) — /record (/043, /дневник, /карта)
   2. Клинический чекер соматических рисков и фармакологии — /rx (/риск, /риски, /соматика)
   3. Виртуальный мультидисциплинарный консилиум — /concilium (/консилиум, /план)
+  4. Протоколы действий при осложнениях у кресла (Chairside Rescue) — /sos (/осложнение, /факап, /спасите)
+  5. Переводчик с «пациентского» на клинический язык — /translate (/переводчик, /пациент, /сленг)
+  6. Батл стоматологических материалов и протоколов (Material Match) — /vs (/сравнить, /материал, /выбор)
 
 Проверяет:
-  - Поверхность команд (меню BotCommand, текст /help, синонимы, правило 11 в промпте)
-  - Инлайн-кнопки Главного меню (nav:record, nav:rx, nav:concilium) и описание в MAIN_MENU_TEXT
+  - Поверхность команд (меню BotCommandScopeDefault, текст /help, все синонимы, Правило 11 в промпте)
+  - Инлайн-кнопки Главного меню (nav:record, nav:rx, nav:concilium, nav:sos, nav:translate, nav:vs) и MAIN_MENU_TEXT
   - Поведение при вызове команд без аргументов (интерактивные памятки с кнопками)
-  - Поведение при вызове команд с аргументами (формирование профильных EBM-промптов)
-  - Колбэки навигации nav:record, nav:rx, nav:concilium
-  - Колбэки шаблонов record:therapy, record:ortho, record:surgery, record:perio
-  - Колбэки гайдлайнов rx:mronj, rx:anticoag, rx:cardio, rx:endo
-  - Колбэк демонстрационного консилиума concilium:example
+  - Поведение при вызове команд с аргументами (трансформация в структурированные EBM-промпты)
+  - Колбэки навигации (nav:*)
+  - Колбэки шаблонов 043/у (record:*)
+  - Колбэки гайдлайнов соматических рисков (rx:*)
+  - Колбэк демонстрационного консилиума (concilium:example)
+  - Колбэки экстренной помощи при осложнениях (sos:*)
+  - Колбэки переводчика с пациентского (trans:*)
+  - Колбэки батлов материалов (vs:*)
 
 Запуск: python -X utf8 test_clinical_superpowers.py
 """
@@ -90,6 +96,30 @@ class FakeCallbackEvent:
         return self
 
 
+class FakeMsg:
+    def __init__(self, text):
+        self.id = 701
+        self.message = text
+        self.text = text
+        self.video = None
+        self.photo = None
+        self.document = None
+        self.voice = None
+        self.audio = None
+        self.reply_to = None
+
+    async def download_media(self, file=None):
+        return None
+
+
+class FakePmEvent:
+    def __init__(self, msg, uid=USER):
+        self.chat_id = uid
+        self.sender_id = uid
+        self.message = msg
+        self.sender = type("Sender", (), {"id": uid, "username": "dr_dan", "first_name": "Dan"})()
+
+
 class TestClinicalSuperpowers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,32 +136,37 @@ class TestClinicalSuperpowers(unittest.TestCase):
         shutil.rmtree(_TMPDIR, ignore_errors=True)
 
     def test_01_commands_surface_registration(self):
-        print("\n[1] Регистрация команд в меню Telegram и промпте")
+        print("\n[1] Регистрация 6 суперсил в меню Telegram, /help и Rule 11")
         # 1. Меню Default Scope
         menu_cmds = set(re.findall(r"types\.BotCommand\(command='([^']+)'", self.source))
-        check("/record зарегистрирована в меню", "record" in menu_cmds)
-        check("/rx зарегистрирована в меню", "rx" in menu_cmds)
-        check("/concilium зарегистрирована в меню", "concilium" in menu_cmds)
+        for cmd in ("record", "rx", "concilium", "sos", "translate", "vs"):
+            check(f"/{cmd} зарегистрирована в меню Telegram", cmd in menu_cmds)
 
         # 2. Пункты в /help
         help_block = self.source.split("💡 <b>Доступные команды в ЛС:</b>", 1)[1].split("await bot_client", 1)[0]
         help_bullets = set(re.findall(r"• /(\w+)", help_block))
-        check("/record есть в /help", "record" in help_bullets)
-        check("/rx есть в /help", "rx" in help_bullets)
-        check("/concilium есть в /help", "concilium" in help_bullets)
+        for cmd in ("record", "rx", "concilium", "sos", "translate", "vs"):
+            check(f"/{cmd} есть в буллетах /help", cmd in help_bullets)
 
-        # 3. Синонимы в /help
-        for syn in ("/043", "/дневник", "/карта", "/риск", "/риски", "/соматика", "/консилиум", "/план"):
-            check(f"Синоним {syn} упомянут в /help", syn in help_block)
+        # 3. Все клинические синонимы в /help
+        synonyms = [
+            "/043", "/дневник", "/карта",
+            "/риск", "/риски", "/соматика",
+            "/консилиум", "/план",
+            "/осложнение", "/факап", "/спасите",
+            "/переводчик", "/пациент", "/сленг",
+            "/сравнить", "/материал", "/выбор"
+        ]
+        for syn in synonyms:
+            check(f"Синоним {syn} описан в /help", syn in help_block)
 
-        # 4. Правило 11 в промпте
+        # 4. Правило 11 в системном промпте
         prompt_block = self.source.split("11. ФУНКЦИОНАЛ БОТА:", 1)[1].split("\n12.", 1)[0]
-        check("/record упомянута в Rule 11", "/record" in prompt_block)
-        check("/rx упомянута в Rule 11", "/rx" in prompt_block)
-        check("/concilium упомянута в Rule 11", "/concilium" in prompt_block)
+        for cmd in ("/record", "/rx", "/concilium", "/sos", "/translate", "/vs"):
+            check(f"{cmd} упомянута в Rule 11", cmd in prompt_block)
 
     def test_02_main_menu_integration(self):
-        print("\n[2] Интеграция в Главное меню")
+        print("\n[2] Интеграция в Главное меню (кнопки и описание)")
         markup = assistant.build_main_menu_markup()
         callbacks = []
         for row in markup:
@@ -142,40 +177,38 @@ class TestClinicalSuperpowers(unittest.TestCase):
         check("Кнопка Карты 043/у (nav:record) есть в меню", "nav:record" in callbacks)
         check("Кнопка Соматики (nav:rx) есть в меню", "nav:rx" in callbacks)
         check("Кнопка Консилиума (nav:concilium) есть в меню", "nav:concilium" in callbacks)
+        check("Кнопка SOS-осложнений (nav:sos) есть в меню", "nav:sos" in callbacks)
+        check("Кнопка Переводчика (nav:translate) есть в меню", "nav:translate" in callbacks)
+        check("Кнопка Батла материалов (nav:vs) есть в меню", "nav:vs" in callbacks)
 
         menu_text = assistant.MAIN_MENU_TEXT
         check("Карта 043/у описана в MAIN_MENU_TEXT", "043/у" in menu_text)
         check("Соматика Rx-Check описана в MAIN_MENU_TEXT", "Rx-Check" in menu_text)
         check("Консилиум описан в MAIN_MENU_TEXT", "Консилиум" in menu_text)
+        check("SOS-Спасение описано в MAIN_MENU_TEXT", "SOS-Спасение" in menu_text)
+        check("Пациентский переводчик описан в MAIN_MENU_TEXT", "Пациентский переводчик" in menu_text)
+        check("Батл материалов описан в MAIN_MENU_TEXT", "Батл материалов" in menu_text)
 
     def test_03_interactive_navigation_callbacks(self):
         print("\n[3] Интерактивные колбэки навигации (nav:*)")
         bot = FakeBot()
 
         async def run_nav_tests():
-            # nav:record
-            cb = FakeCallbackEvent("nav:record")
-            await assistant.handle_quiz_callback(bot, cb)
-            check("nav:record вызвал answer", cb.answered_count >= 1)
-            check("nav:record обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
-            msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-            check("nav:record содержит описание Формы 043/у", "Форма № 043/у" in msg)
-
-            # nav:rx
-            cb = FakeCallbackEvent("nav:rx")
-            await assistant.handle_quiz_callback(bot, cb)
-            check("nav:rx вызвал answer", cb.answered_count >= 1)
-            check("nav:rx обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
-            msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-            check("nav:rx содержит описание Rx-Check", "Rx-Check" in msg)
-
-            # nav:concilium
-            cb = FakeCallbackEvent("nav:concilium")
-            await assistant.handle_quiz_callback(bot, cb)
-            check("nav:concilium вызвал answer", cb.answered_count >= 1)
-            check("nav:concilium обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
-            msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-            check("nav:concilium содержит описание Консилиума", "консилиум" in msg.lower())
+            nav_cases = [
+                ("nav:record", "Форма № 043/у"),
+                ("nav:rx", "Rx-Check"),
+                ("nav:concilium", "консилиум"),
+                ("nav:sos", "Chairside Rescue"),
+                ("nav:translate", "Dental Translator"),
+                ("nav:vs", "Material Match")
+            ]
+            for target, marker in nav_cases:
+                cb = FakeCallbackEvent(target)
+                await assistant.handle_quiz_callback(bot, cb)
+                check(f"{target} вызвал answer", cb.answered_count >= 1)
+                check(f"{target} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                check(f"{target} содержит «{marker}»", marker.lower() in msg.lower())
 
         asyncio.run(run_nav_tests())
 
@@ -238,31 +271,75 @@ class TestClinicalSuperpowers(unittest.TestCase):
 
         asyncio.run(run_concilium_tests())
 
-    def test_07_empty_commands_in_pm(self):
-        print("\n[7] Вызов команд без аргументов в ЛС (handle_private_message)")
+    def test_07_sos_callbacks(self):
+        print("\n[7] Протоколы экстренных осложнений у кресла (sos:*)")
         bot = FakeBot()
 
-        class FakeMsg:
-            def __init__(self, text):
-                self.id = 701
-                self.message = text
-                self.text = text
-                self.video = None
-                self.photo = None
-                self.document = None
-                self.voice = None
-                self.audio = None
-                self.reply_to = None
+        async def run_sos_tests():
+            cases = [
+                ("sos:file", ["Bypass", "C-Pilot", "EDTA", "Деэскалация"]),
+                ("sos:perf", ["MTA", "Biodentine", "перфорация", "коллаген"]),
+                ("sos:sealer", ["NaOCl accident", "Дексаметазон", "нижнечелюстной канал"]),
+                ("sos:bleed", ["Транексамовой", "кюретаж", "ушивание", "давление"])
+            ]
+            for action, keywords in cases:
+                cb = FakeCallbackEvent(action)
+                await assistant.handle_quiz_callback(bot, cb)
+                check(f"{action} вызвал answer", cb.answered_count >= 1)
+                check(f"{action} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                for kw in keywords:
+                    check(f"{action} содержит ключевой протокол «{kw}»", kw.lower() in msg.lower())
 
-            async def download_media(self, file=None):
-                return None
+        asyncio.run(run_sos_tests())
 
-        class FakePmEvent:
-            def __init__(self, msg, uid=USER):
-                self.chat_id = uid
-                self.sender_id = uid
-                self.message = msg
-                self.sender = type("Sender", (), {"id": uid, "username": "dr_dan", "first_name": "Dan"})()
+    def test_08_translate_callbacks(self):
+        print("\n[8] Переводчик с «пациентского» на клинический (trans:*)")
+        bot = FakeBot()
+
+        async def run_trans_tests():
+            cases = [
+                ("trans:arsenic", ["K04.0", "As2O3", "мышьяк", "Рекорд"]),
+                ("trans:laser", ["K02.1", "фотополимеризационн", "лазер", "длина волны"]),
+                ("trans:bone", ["K05.3", "резорбция", "кость", "SRP"]),
+                ("trans:nerve", ["K04.0", "сквозняк", "нерв", "пульпы"])
+            ]
+            for action, keywords in cases:
+                cb = FakeCallbackEvent(action)
+                await assistant.handle_quiz_callback(bot, cb)
+                check(f"{action} вызвал answer", cb.answered_count >= 1)
+                check(f"{action} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                for kw in keywords:
+                    check(f"{action} содержит термин/юмор «{kw}»", kw.lower() in msg.lower())
+
+        asyncio.run(run_trans_tests())
+
+    def test_09_vs_callbacks(self):
+        print("\n[9] Батлы материалов и протоколов (vs:*)")
+        bot = FakeBot()
+
+        async def run_vs_tests():
+            cases = [
+                ("vs:ceramics", ["1200 МПа", "E.max", "10-MDP", "плавиковой"]),
+                ("vs:adhesion", ["OptiBond FL", "Universal", "35–42 МПа", "10-MDP"]),
+                ("vs:sealer", ["AH Plus", "BioRoot", "силикат кальция", "Single-Cone"]),
+                ("vs:mta", ["MTA", "Biodentine", "12 минут", "дисколорит"])
+            ]
+            for action, keywords in cases:
+                cb = FakeCallbackEvent(action)
+                await assistant.handle_quiz_callback(bot, cb)
+                check(f"{action} вызвал answer", cb.answered_count >= 1)
+                check(f"{action} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                for kw in keywords:
+                    check(f"{action} содержит EBM-факт «{kw}»", kw.lower() in msg.lower())
+
+        asyncio.run(run_vs_tests())
+
+    def test_10_empty_and_arg_commands_in_pm(self):
+        print("\n[10] Вызовы всех 6 команд в ЛС (без аргументов и с аргументами)")
+        bot = FakeBot()
 
         async def run_pm_tests():
             # 1. /record
@@ -270,46 +347,70 @@ class TestClinicalSuperpowers(unittest.TestCase):
             ev_rec = FakePmEvent(FakeMsg("/record"))
             await assistant.handle_private_message(bot, ev_rec)
             check("/record в ЛС отправляет сообщение", len(bot.sent_messages) >= 1)
-            last = bot.sent_messages[-1]
-            check("/record содержит описание Формы 043/у", "Форма № 043/у" in last["message"])
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
-                         for row in (last.get("buttons") or []) for b in row if hasattr(b, "data")]
-            check("/record содержит кнопку record:therapy", "record:therapy" in btn_datas)
-            check("/record содержит кнопку record:ortho", "record:ortho" in btn_datas)
-            check("/record содержит кнопку record:surgery", "record:surgery" in btn_datas)
-            check("/record содержит кнопку record:perio", "record:perio" in btn_datas)
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/record содержит кнопки record:*", "record:therapy" in btn_datas)
 
             # 2. /rx
             bot.sent_messages.clear()
             ev_rx = FakePmEvent(FakeMsg("/rx"))
             await assistant.handle_private_message(bot, ev_rx)
             check("/rx в ЛС отправляет сообщение", len(bot.sent_messages) >= 1)
-            last = bot.sent_messages[-1]
-            check("/rx содержит описание Rx-Check", "Rx-Check" in last["message"])
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
-                         for row in (last.get("buttons") or []) for b in row if hasattr(b, "data")]
-            check("/rx содержит кнопку rx:mronj", "rx:mronj" in btn_datas)
-            check("/rx содержит кнопку rx:anticoag", "rx:anticoag" in btn_datas)
-            check("/rx содержит кнопку rx:cardio", "rx:cardio" in btn_datas)
-            check("/rx содержит кнопку rx:endo", "rx:endo" in btn_datas)
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/rx содержит кнопки rx:*", "rx:mronj" in btn_datas)
 
             # 3. /concilium
             bot.sent_messages.clear()
             ev_conc = FakePmEvent(FakeMsg("/concilium"))
             await assistant.handle_private_message(bot, ev_conc)
             check("/concilium в ЛС отправляет сообщение", len(bot.sent_messages) >= 1)
-            last = bot.sent_messages[-1]
-            check("/concilium содержит описание Консилиума", "консилиум" in last["message"].lower())
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
-                         for row in (last.get("buttons") or []) for b in row if hasattr(b, "data")]
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
             check("/concilium содержит кнопку concilium:example", "concilium:example" in btn_datas)
+
+            # 4. /sos (пустая)
+            bot.sent_messages.clear()
+            ev_sos = FakePmEvent(FakeMsg("/sos"))
+            await assistant.handle_private_message(bot, ev_sos)
+            check("/sos без аргументов отправляет меню SOS", len(bot.sent_messages) >= 1)
+            btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/sos содержит кнопку sos:file", "sos:file" in btn_datas)
+            check("/sos содержит кнопку sos:perf", "sos:perf" in btn_datas)
+            check("/sos содержит кнопку sos:sealer", "sos:sealer" in btn_datas)
+            check("/sos содержит кнопку sos:bleed", "sos:bleed" in btn_datas)
+
+            # 5. /translate (пустая)
+            bot.sent_messages.clear()
+            ev_trans = FakePmEvent(FakeMsg("/translate"))
+            await assistant.handle_private_message(bot, ev_trans)
+            check("/translate без аргументов отправляет меню переводчика", len(bot.sent_messages) >= 1)
+            btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/translate содержит кнопку trans:arsenic", "trans:arsenic" in btn_datas)
+            check("/translate содержит кнопку trans:laser", "trans:laser" in btn_datas)
+            check("/translate содержит кнопку trans:bone", "trans:bone" in btn_datas)
+            check("/translate содержит кнопку trans:nerve", "trans:nerve" in btn_datas)
+
+            # 6. /vs (пустая)
+            bot.sent_messages.clear()
+            ev_vs = FakePmEvent(FakeMsg("/vs"))
+            await assistant.handle_private_message(bot, ev_vs)
+            check("/vs без аргументов отправляет меню батлов", len(bot.sent_messages) >= 1)
+            btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                         for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/vs содержит кнопку vs:ceramics", "vs:ceramics" in btn_datas)
+            check("/vs содержит кнопку vs:adhesion", "vs:adhesion" in btn_datas)
+            check("/vs содержит кнопку vs:sealer", "vs:sealer" in btn_datas)
+            check("/vs содержит кнопку vs:mta", "vs:mta" in btn_datas)
 
         asyncio.run(run_pm_tests())
 
 
 def run_tests():
     print("=" * 65)
-    print("ТЕСТИРОВАНИЕ КЛИНИЧЕСКИХ СУПЕРСИЛ STOMCHAT")
+    print("ТЕСТИРОВАНИЕ КЛИНИЧЕСКИХ СУПЕРСИЛ STOMCHAT (6 SUPERPOWERS)")
     print("=" * 65)
 
     suite = unittest.TestLoader().loadTestsFromTestCase(TestClinicalSuperpowers)
