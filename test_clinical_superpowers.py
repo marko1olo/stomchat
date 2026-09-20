@@ -619,6 +619,42 @@ class TestClinicalSuperpowers(unittest.TestCase):
                              for row in (last_btns or []) for b in row if hasattr(b, "data")]
                 check(f"Подменю {nav_cmd} содержит верхнюю кнопку генерации {expected_ai}", expected_ai in btn_datas)
 
+            # 4. Проверка полноты и валидности плотной сетки (Web Mesh) всех 51 карточек
+            all_dicts = [
+                ("sos", assistant.CLINICAL_SOS_CARDS),
+                ("record", assistant.CLINICAL_RECORD_TEMPLATES),
+                ("rx", assistant.RX_RISK_CARDS),
+                ("concilium", assistant.CONCILIUM_CARDS),
+                ("trans", assistant.PATIENT_TRANSLATION_CARDS),
+                ("vs", assistant.MATERIAL_BATTLE_CARDS),
+            ]
+            valid_destinations = {
+                'record': set(assistant.CLINICAL_RECORD_TEMPLATES.keys()) | {'ai', 'random'},
+                'rx': set(assistant.RX_RISK_CARDS.keys()) | {'ai', 'random'},
+                'concilium': set(assistant.CONCILIUM_CARDS.keys()) | {'ai', 'random'},
+                'sos': set(assistant.CLINICAL_SOS_CARDS.keys()) | {'ai', 'random'},
+                'trans': set(assistant.PATIENT_TRANSLATION_CARDS.keys()) | {'ai', 'random'},
+                'vs': set(assistant.MATERIAL_BATTLE_CARDS.keys()) | {'ai', 'random'},
+                'calc': {'articaine', 'mepivacaine', 'lidocaine'},
+                'nav': {'main', 'sos', 'record', 'rx', 'concilium', 'translate', 'vs', 'wiki'}
+            }
+            total_card_count = 0
+            for sec_name, d in all_dicts:
+                for c_key, c_val in d.items():
+                    total_card_count += 1
+                    cl = c_val.get("crosslinks", [])
+                    check(f"Карточка {sec_name}:{c_key} имеет ровно 4 кросс-линка", len(cl) == 4)
+                    for cat, cb_str, lbl in cl:
+                        parts = cb_str.split(":", 1)
+                        prefix = parts[0]
+                        action = parts[1] if len(parts) > 1 else ""
+                        check(f"Кросс-линк {cb_str} в {sec_name}:{c_key} валиден",
+                              prefix in valid_destinations and action in valid_destinations[prefix])
+
+                    card_markup = assistant.build_clinical_card_markup(sec_name, c_key, cl)
+                    check(f"Карточка {sec_name}:{c_key} формирует 4 ряда кнопок (4x2 сетка)", len(card_markup) == 4)
+            check("Всего проверена 51 клиническая карточка", total_card_count == 51)
+
         asyncio.run(run_mesh_tests())
 
 
