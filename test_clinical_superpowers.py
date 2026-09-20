@@ -527,6 +527,101 @@ class TestClinicalSuperpowers(unittest.TestCase):
         asyncio.run(run_pm_tests())
 
 
+
+    def test_11_live_ai_generation_callbacks(self):
+        print("\n[11] Живая генерация клинических кейсов через ИИ (*:ai) и оффлайн-фоллбэк")
+        bot = FakeBot()
+
+        async def run_ai_tests():
+            # 1. Тест с успешной генерацией через Gemini
+            original_gemini = assistant.generate_gemini_text_async
+
+            class MockAiResponse:
+                def __init__(self, text):
+                    self.text = text
+
+            async def mock_gemini_success(prompt, ctx, timeout=90):
+                return MockAiResponse("<b>Клинический протокол:</b> Зуб 4.7. Промывание 3% NaOCl с УЗ. Доза артикаина: 3.4 мл."), None
+
+            assistant.generate_gemini_text_async = mock_gemini_success
+            try:
+                ai_actions = ["sos:ai", "record:ai", "rx:ai", "concilium:ai", "trans:ai", "vs:ai"]
+                for action in ai_actions:
+                    cb = FakeCallbackEvent(action)
+                    await assistant.handle_quiz_callback(bot, cb)
+                    check(f"{action} вызвал answer", cb.answered_count >= 1)
+                    check(f"{action} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                    msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                    check(f"{action} содержит маркер живой ИИ-генерации", "Живой ИИ-разбор StomChat Superpowers" in msg)
+                    last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                    btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                                 for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                    sec = action.split(":")[0]
+                    check(f"{action} имеет кнопку повторной генерации {sec}:ai", f"{sec}:ai" in btn_datas)
+                    check(f"{action} имеет кнопку архива {sec}:random", f"{sec}:random" in btn_datas)
+                    check(f"{action} имеет кнопку возврата в главное меню nav:main", "nav:main" in btn_datas)
+
+                # 2. Тест оффлайн-фоллбэка при сетевом сбое / ошибке Gemini
+                async def mock_gemini_failure(prompt, ctx, timeout=90):
+                    return None, "Network timeout 504"
+
+                assistant.generate_gemini_text_async = mock_gemini_failure
+                for action in ai_actions:
+                    cb = FakeCallbackEvent(action)
+                    await assistant.handle_quiz_callback(bot, cb)
+                    check(f"{action} (fallback) вызвал answer", cb.answered_count >= 1)
+                    msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                    check(f"{action} (fallback) выдал проверенный кэш с пометкой архива", "Клинический архив StomChat" in msg)
+            finally:
+                assistant.generate_gemini_text_async = original_gemini
+
+        asyncio.run(run_ai_tests())
+
+    def test_12_nba_clinical_mesh_crosslinks(self):
+        print("\n[12] Сквозная связность Web Mesh (NBA в ЛС, подменю и карточки)")
+        bot = FakeBot()
+
+        async def run_mesh_tests():
+            # 1. Проверка кнопок Next Best Action (NBA)
+            nba_btns = assistant.build_nba_markup(topic_query="bleeding", has_media=False)
+            nba_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                         for row in nba_btns for b in row if hasattr(b, "data")]
+            check("NBA содержит сохранение в закладки nba:bm", "nba:bm" in nba_datas)
+            check("NBA содержит протоколы nba:proto", any(d.startswith("nba:proto") for d in nba_datas))
+            check("NBA содержит PubMed nba:web", any(d.startswith("nba:web") for d in nba_datas))
+            check("NBA содержит экспорт в PDF nba:pdf", "nba:pdf" in nba_datas)
+            check("NBA содержит прямую ссылку на Карту 043/у (nav:record)", "nav:record" in nba_datas)
+            check("NBA содержит прямую ссылку на Соматику (nav:rx)", "nav:rx" in nba_datas)
+            check("NBA содержит прямую ссылку на SOS-Rescue (nav:sos)", "nav:sos" in nba_datas)
+            check("NBA содержит прямую ссылку на Батл материалов (nav:vs)", "nav:vs" in nba_datas)
+
+            # 2. Проверка карточек на наличие ИИ-генерации
+            for sec, key in [("sos", "file"), ("record", "endo"), ("rx", "anticoag"), ("vs", "ceramics")]:
+                card_btns = assistant.build_clinical_card_markup(sec, key, [("record", "record:therapy", "Тест")])
+                c_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                           for row in card_btns for b in row if hasattr(b, "data")]
+                check(f"Карточка {sec}:{key} содержит кнопку ИИ-генерации {sec}:ai:{key}", f"{sec}:ai:{key}" in c_datas)
+                check(f"Карточка {sec}:{key} содержит ротацию архива {sec}:random", f"{sec}:random" in c_datas)
+
+            # 3. Проверка наличия верхних ИИ-кнопок в навигационных подменю nav:*
+            for nav_cmd, expected_ai in [
+                ("nav:record", "record:ai"),
+                ("nav:rx", "rx:ai"),
+                ("nav:concilium", "concilium:ai"),
+                ("nav:sos", "sos:ai"),
+                ("nav:translate", "trans:ai"),
+                ("nav:vs", "vs:ai"),
+            ]:
+                cb = FakeCallbackEvent(nav_cmd)
+                await assistant.handle_quiz_callback(bot, cb)
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"Подменю {nav_cmd} содержит верхнюю кнопку генерации {expected_ai}", expected_ai in btn_datas)
+
+        asyncio.run(run_mesh_tests())
+
+
 def run_tests():
     print("=" * 65)
     print("ТЕСТИРОВАНИЕ КЛИНИЧЕСКИХ СУПЕРСИЛ STOMCHAT (EXPANDED DYNAMIC)")

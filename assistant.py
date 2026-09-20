@@ -847,7 +847,8 @@ get_main_inline_keyboard = build_main_menu_markup
 def build_nba_markup(topic_query="", has_media=False):
     """
     Формирует интерактивные кнопки Next Best Action под клиническим ответом в ЛС:
-    мгновенное сохранение в закладки, связанные протоколы, поиск в PubMed или экспорт в PDF.
+    мгновенное сохранение в закладки, связанные протоколы, поиск в PubMed, экспорт в PDF,
+    а также прямой переход в клинические суперсилы (Карта 043/у, Соматика Rx, SOS-Rescue, Батл VS).
     """
     from telethon import Button
     tag = (topic_query or "").strip().lower()
@@ -861,6 +862,14 @@ def build_nba_markup(topic_query="", has_media=False):
         [
             Button.inline("🌐 PubMed", data=f"nba:web:{tag_clean}"),
             Button.inline("📄 Экспорт в PDF", data="nba:pdf"),
+        ],
+        [
+            Button.inline("📋 Карта 043/у", data="nav:record"),
+            Button.inline("🛡 Соматика (Rx)", data="nav:rx"),
+        ],
+        [
+            Button.inline("🚨 SOS-Спасение", data="nav:sos"),
+            Button.inline("⚖️ Батл (VS)", data="nav:vs"),
         ]
     ]
     return buttons
@@ -5698,16 +5707,28 @@ def build_clinical_card_markup(section_type: str, card_key: str, crosslinks: lis
                 row = []
         if row:
             buttons.append(row)
-    rot_labels = {
-        "sos": "🔄 Другая ситуация у кресла",
-        "trans": "🔄 Другой перл пациента",
-        "vs": "🔄 Другой батл материалов",
-        "record": "🔄 Другой шаблон 043/у",
-        "rx": "🔄 Другой соматический риск",
-        "concilium": "🔄 Другой консилиум"
+
+    ai_labels = {
+        "sos": "✨ Новый случай через ИИ",
+        "trans": "✨ Новый перл через ИИ",
+        "vs": "✨ Сгенерировать батл ИИ",
+        "record": "✨ Сгенерировать 043/у ИИ",
+        "rx": "✨ Соматический чекер ИИ",
+        "concilium": "✨ Собрать консилиум ИИ"
     }
-    rot_label = rot_labels.get(section_type, "🔄 Другой вариант")
-    buttons.append([Button.inline(rot_label, data=f"{section_type}:random")])
+    rot_labels = {
+        "sos": "🎲 Из архива SOS",
+        "trans": "🎲 Из архива перлов",
+        "vs": "🎲 Из архива батлов",
+        "record": "🎲 Из архива 043/у",
+        "rx": "🎲 Из архива рисков",
+        "concilium": "🎲 Из архива консилиумов"
+    }
+    buttons.append([
+        Button.inline(ai_labels.get(section_type, "✨ Новый кейс через ИИ"), data=f"{section_type}:ai:{card_key}"),
+        Button.inline(rot_labels.get(section_type, "🔄 Другой вариант"), data=f"{section_type}:random")
+    ])
+
     back_labels = {
         "sos": ("🚨 Все SOS-протоколы", "nav:sos"),
         "trans": ("🗣 К переводчику", "nav:translate"),
@@ -7246,6 +7267,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Сгенерировать карту 043/у через ИИ", data="record:ai")],
                     [Button.inline("🎲 Случайный шаблон 043/у", data="record:random")],
                     [Button.inline("🦷 Кариес (Терапия)", data="record:therapy"), Button.inline("👑 Коронка (Ортопедия)", data="record:ortho")],
                     [Button.inline("🔪 Удаление 3.8 (Хирургия)", data="record:surgery"), Button.inline("🩸 Пародонтология (SRP)", data="record:perio")],
@@ -7291,6 +7313,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Экспресс-чекер рисков через ИИ", data="rx:ai")],
                     [Button.inline("🎲 Случайный соматический риск", data="rx:random")],
                     [Button.inline("🦴 Бисфосфонаты (MRONJ)", data="rx:mronj"), Button.inline("🩸 Антикоагулянты (МНО)", data="rx:anticoag")],
                     [Button.inline("❤️ Кардиориски & Адреналин", data="rx:cardio"), Button.inline("🛡 Эндокардит (AHA)", data="rx:endo")],
@@ -7332,6 +7355,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Собрать живой консилиум через ИИ", data="concilium:ai")],
                     [Button.inline("🎲 Случайный консилиум", data="concilium:random")],
                     [Button.inline("🏛 Тотальная реабилитация", data="concilium:example")],
                     [Button.inline("🔬 Эндо-пародонтальный дефект 4.6", data="concilium:endo_perio")],
@@ -7378,6 +7402,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Новый клинический случай через ИИ", data="sos:ai")],
                     [Button.inline("🎲 Случайная ситуация у кресла", data="sos:random")],
                     [Button.inline("💔 Файлолом", data="sos:file"), Button.inline("🕳 Перфорация", data="sos:perf")],
                     [Button.inline("⚠️ Выведение силера", data="sos:sealer"), Button.inline("🩸 Кровотечение", data="sos:bleed")],
@@ -7423,6 +7448,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Разобрать новый перл через ИИ", data="trans:ai")],
                     [Button.inline("🎲 Случайный пациентский перл", data="trans:random")],
                     [Button.inline("☠️ «Положите мышьяк»", data="trans:arsenic"), Button.inline("⚡️ «Пломба лазером»", data="trans:laser")],
                     [Button.inline("🦴 «Кость рассосалась»", data="trans:bone"), Button.inline("❄️ «Нерв простудил»", data="trans:nerve")],
@@ -7466,6 +7492,7 @@ async def handle_private_message(bot_client, event):
                 )
                 from telethon import Button
                 buttons = [
+                    [Button.inline("✨ Запустить батл материалов через ИИ", data="vs:ai")],
                     [Button.inline("🎲 Случайный батл материалов", data="vs:random")],
                     [Button.inline("👑 Цирконий vs E.max", data="vs:ceramics"), Button.inline("💧 OptiBond FL vs Universal", data="vs:adhesion")],
                     [Button.inline("🔬 Биокерамика vs AH Plus", data="vs:sealer"), Button.inline("🧱 MTA vs Biodentine", data="vs:mta")],
@@ -9504,6 +9531,264 @@ async def handle_nba_callback(bot_client, event, data_str):
         return
 
 
+async def handle_clinical_ai_generation(bot_client, event, section_type: str, sub_kind: str = ""):
+    """
+    Генерирует живой клинический кейс или протокол через Gemini с практическими EBM-акцентами
+    (манипуляции для рук, дозировки мг/кг, деэскалация, юридическая броня 043/у)
+    и безопасным оффлайн-фоллбэком на проверенный архив из 51 карточки.
+    """
+    from telethon import Button
+    import random
+    chat_id = event.chat_id or getattr(event, "sender_id", 0)
+
+    # 1. Снимаем спиннер с кнопки в клиенте Telegram
+    try:
+        await event.answer("⚡ Запускаю клинический ИИ...", alert=False)
+    except Exception:
+        pass
+
+    # 2. Формируем статус ожидания
+    status_titles = {
+        "sos": "🚨 <b>Консилиум SOS-Rescue: Разбор интраоперационного осложнения...</b>",
+        "record": "📋 <b>Генератор 043/у: Создание юридически безупречной записи...</b>",
+        "rx": "🛡 <b>Клинический фармаколог: Экспресс-чекер соматических рисков...</b>",
+        "concilium": "🏛 <b>Мультидисциплинарный консилиум: Разработка Roadmap лечения...</b>",
+        "trans": "🗣 <b>Клинический переводчик: Дешифровка жалобы пациента и скрипт...</b>",
+        "vs": "⚖️ <b>Лаборатория материалов: Сравнение физики, адгезии и МПа...</b>",
+    }
+    wait_text = (
+        f"{status_titles.get(section_type, '⚡ <b>Клинический ИИ формирует разбор...</b>')}\n\n"
+        "<i>Сверяю международные гайдлайны (ESE, ITI, AHA), точные дозировки мг/кг, "
+        "манипуляции для рук и юридическую формулировку...</i>"
+    )
+    await edit_callback_message(bot_client, event, wait_text, f"edit_message:{section_type}_ai_wait", parse_mode='html')
+
+    # 3. Случайные переменные для вариативности
+    fdi_teeth = ["1.1", "1.4", "1.6", "2.1", "2.4", "2.6", "3.6", "3.7", "3.8", "4.6", "4.7", "4.8"]
+    ages = [26, 34, 45, 52, 63, 71]
+    comorbidities = [
+        "гипертоническая болезнь 2 ст. (АД 155/95) + приём Ксарелто (ривароксабан 20 мг)",
+        "сахарный диабет 2 типа (HbA1c 7.9%) + аллергия на пенициллиновый ряд",
+        "остеопороз (приём алендроната перорально 4 года) + гастрит",
+        "ИБС, стентирование коронарных артерий 8 мес. назад (ДАТТ: кардиомагнил + плавикс)",
+        "беременность 2 триместр (22 недели) + выраженная дентофобия",
+        "хроническая болезнь почек 3 ст. (СКФ 45 мл/мин) + компенсированная подагра"
+    ]
+    cur_tooth = random.choice(fdi_teeth)
+    cur_age = random.choice(ages)
+    cur_somat = random.choice(comorbidities)
+
+    sub_tag = sub_kind.replace("ai:", "").replace("ai", "").strip()
+
+    if section_type == "sos":
+        sos_topics = ["файлолом за апексом", "перфорация фуркации дна", "выведение силера в нижнечелюстной канал",
+                      "струйное кровотечение из лунки на фоне ПОАК", "гипохлоритовая авария с отёком щеки",
+                      "подкожная эмфизема мягких тканей", "срыв торка имплантата на кости D4", "острый вывих ВНЧС"]
+        chosen_topic = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(sos_topics)
+        prompt = (
+            f"Ты — опытный челюстно-лицевой хирург и эндодонтист экстренной стоматологической помощи.\n"
+            f"Разбери РЕАЛЬНОЕ, острое интраоперационное осложнение у кресла.\n\n"
+            f"Вводные: пациент {cur_age} лет, зуб {cur_tooth} (FDI), соматика: {cur_somat}. Тема: {chosen_topic}.\n\n"
+            f"КРИТИЧЕСКИЕ ИНСТРУКЦИИ: СТРОГО БЕЗ ВОДЫ И ТЕОРЕТИЧЕСКИХ ВВЕДЕНИЙ! Врач оперирует прямо сейчас.\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"🚨 <b>SOS-Rescue: {chosen_topic.capitalize()} (Зуб {cur_tooth})</b>\n\n"
+            f"<b>Клиническая ситуация:</b> пациент {cur_age} лет, зуб {cur_tooth}, {cur_somat}.\n\n"
+            f"⚡ <b>Что делать РУКАМИ прямо сейчас (по секундам):</b>\n"
+            f"1. [Конкретное механическое действие: обороты, инструмент, отключение охлаждения/ультразвука]\n"
+            f"2. [Промывание/очистка: состав, концентрация, подогрев, экспозиция]\n"
+            f"3. [Методика закрытия/извлечения/гемостаза]\n\n"
+            f"💊 <b>Фармакология и точные дозы:</b>\n"
+            f"• Препараты с точными мг/кг и предельным потолком дозировки (анестетик, гемостатик, анальгетик).\n\n"
+            f"🗣 <b>Деэскалация с пациентом (слова врача без чувства вины):</b>\n"
+            f"«[Точный текст спокойным, уверенным голосом, объясняющий анатомическую особенность и план]»\n\n"
+            f"📝 <b>Запись в Карту 043/у (юридическая защита):</b>\n"
+            f"<i>[Точная формулировка для МИС с фиксацией ИДС, анатомических рисков и манипуляций]</i>\n\n"
+            f"⚠️ <b>Красные флаги:</b> симптомы, при которых немедленно вызывается СМП / стационар ЧЛХ."
+        )
+
+    elif section_type == "record":
+        specs = ["эндодонтия пульпита с MB2", "дентальная имплантация в области моляра", "сложное атипичное удаление дистопированного зуба",
+                 "тотальное препарирование под циркониевую коронку BOPT", "прямая композитная реставрация жевательного зуба по окклюзионному компасу",
+                 "закрытый кюретаж пародонтальных карманов SRP с ультразвуком"]
+        chosen_spec = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(specs)
+        prompt = (
+            f"Ты — начмед стоматологической клиники и судебно-медицинский эксперт.\n"
+            f"Оформи юридически безупречный протокол приёма в амбулаторную медицинскую карту 043/у.\n\n"
+            f"Вводные: пациент {cur_age} лет, зуб {cur_tooth}, {cur_somat}. Вмешательство: {chosen_spec}.\n\n"
+            f"КРИТИЧЕСКИЕ ИНСТРУКЦИИ: запись должна полностью удовлетворять Приказу Минздрава РФ № 834н и защищать клинику от претензий.\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"📋 <b>Протокол Карты 043/у: {chosen_spec.capitalize()} (Зуб {cur_tooth})</b>\n\n"
+            f"<b>Диагноз (МКБ-10):</b> [Код и полное клиническое наименование]\n"
+            f"<b>Жалобы и Анамнез:</b> [Жалобы, соматический фон: {cur_somat}, переносимость анестетиков]\n"
+            f"<b>Status praesens:</b> [Детальное описание зуба {cur_tooth}, зондирование, перкуссия, прикус, данные визиографии/КЛКТ]\n\n"
+            f"<b>Пошаговый протокол лечения:</b>\n"
+            f"1. Анестезия: [Препарат, %, вазоконстриктор, объём в мл, отрицательная аспирационная проба]\n"
+            f"2. Изоляция: [Коффердам, кламп, герметизация жидким коффердамом]\n"
+            f"3. Препарирование / Инструментация: [Охлаждение, тип боров/файлов, рабочая длина]\n"
+            f"4. Антисептический протокол: [Растворы, подогрев, УЗ-активация]\n"
+            f"5. Обтурация / Реставрация / Ушивание: [Материалы, методика, шовный материал Vicryl]\n\n"
+            f"<b>Рекомендации и назначения:</b> [Охранительный режим, гигиена, медикаменты с дозировками]\n"
+            f"<b>Юридическая защита:</b> [Подписано ИДС, фотопротокол, контрольный рентген-снимок]."
+        )
+
+    elif section_type == "rx":
+        rx_themes = ["приём ПОАК (Ксарелто / Эликвис) перед хирургией", "бисфосфонаты и риск MRONJ при имплантации",
+                     "артериальная гипертензия и безопасные дозы адреналина", "сахарный диабет 2 типа и приживление костного графта",
+                     "аспириновая астма и запрет НПВС", "хроническая болезнь почек и выведение анестетиков"]
+        chosen_rx = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(rx_themes)
+        prompt = (
+            f"Ты — клинический фармаколог и стоматолог-хирург.\n"
+            f"Проведи клинический чекер лекарственных взаимодействий и соматических рисков (Rx-Check).\n\n"
+            f"Пациент: {cur_age} лет, анамнез: {cur_somat}. Тема: {chosen_rx}.\n\n"
+            f"КРИТИЧЕСКИЕ ИНСТРУКЦИИ: строго доказательная медицина (EBM: AHA, ESC, AAOMS). Никаких общих фраз!\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"🛡 <b>EBM-Гайдлайн: Соматический риск и фармакотерапия (Rx-Check)</b>\n\n"
+            f"<b>Клинический статус:</b> Пациент {cur_age} лет, {cur_somat}.\n"
+            f"<b>Тема риска:</b> {chosen_rx.capitalize()}.\n\n"
+            f"⚠️ <b>Фармакодинамика и риски у кресла:</b> [влияние на гемостаз, риск тромбоза vs кровотечения, остеонекроз]\n"
+            f"💉 <b>Выбор анестетика и дозировки:</b> [артикаин vs мепивакаин, адреналин 1:200к или без вазоконстриктора, макс. карпул]\n"
+            f"⏱ <b>Тайминг приема медикаментов:</b> [когда пить препараты, почему ПОАК НЕЛЬЗЯ отменять самостоятельно]\n"
+            f"🩸 <b>Хирургический протокол и гемостаз:</b> [местные средства, транексам, ушивание, антибиотикопрофилактика]\n"
+            f"⚠️ <b>Красные флаги:</b> [показания к переносу операции или консультации профильного врача]."
+        )
+
+    elif section_type == "vs":
+        battles = ["Дисиликат лития (E.max) vs Диоксид циркония (3Y/4Y/5Y-PSZ)",
+                   "OptiBond FL (4 поколение) vs Универсальные самопротравливающие адгезивы (8 поколение)",
+                   "Биокерамический силер (BioRoot) vs Эпоксидный силер (AH Plus)",
+                   "MTA (Mineral Trioxide Aggregate) vs Biodentine (силикат кальция)",
+                   "Препарирование BOPT (вертикальное) vs Круговой уступ Chamfer (горизонтальное)",
+                   "Стекловолоконный штифт (СВШ) vs Литая культевая вкладка vs Анатомический Core-BuildUp"]
+        chosen_battle = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(battles)
+        prompt = (
+            f"Ты — стоматолог-материаловед и ортопед/терапевт высшей квалификации.\n"
+            f"Проведи глубокий технический и клинический батл стоматологических материалов/методик.\n\n"
+            f"Сравниваемые варианты: {chosen_battle}.\n\n"
+            f"КРИТИЧЕСКИЕ ИНСТРУКЦИИ: сухая физика, точные мегапаскали (МПа), протоколы адгезии, никакой рекламы.\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"⚖️ <b>Батл материалов: {chosen_battle}</b>\n\n"
+            f"🔬 <b>Физика, прочность и цифры:</b>\n"
+            f"• Прочность на изгиб (МПа), модуль эластичности (ГПа), толщина редукции тканей, износ антагонистов.\n\n"
+            f"🛠 <b>Химический протокол фиксации / бондинга:</b>\n"
+            f"• Пошаговая подготовка поверхности (кислоты, пескоструй, силанизация, праймеры 10-MDP, полимеризация).\n\n"
+            f"🎯 <b>Клинические показания у кресла:</b>\n"
+            f"• Когда безоговорочно выигрывает вариант А.\n"
+            f"• Когда строго показан вариант Б.\n\n"
+            f"🏆 <b>Вердикт клинициста:</b> краткое резюме без маркетинговой шелухи."
+        )
+
+    elif section_type == "trans":
+        myths = ["«Доктор, мне прошлый врач сказал, что у меня кость во рту рассосалась»",
+                 "«Положите мне мышьяк, как в детстве, чтобы нерв сам умер»",
+                 "«Поставьте мне световую пломбочку лазером без сверления и укола»",
+                 "«У меня аллергия на адреналин, сердце колотится как бешеное»",
+                 "«Зачем лечить молочный зуб, он же всё равно выпадет?»",
+                 "«Почему коронка стоит 30 тысяч, там же просто кусочек керамики?»"]
+        chosen_myth = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(myths)
+        prompt = (
+            f"Ты — опытный стоматолог-клиницист с доброй иронией и глубоким знанием психологии пациентов.\n"
+            f"Разбери популярный пациентский перл или страх: {chosen_myth}.\n\n"
+            f"КРИТИЧЕСКИЕ ИНСТРУКЦИИ: отвечай живо, профессионально, с тонким медицинским юмором.\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"🗣 <b>Клинический декодер: {chosen_myth}</b>\n\n"
+            f"🔬 <b>Что это значит на медицинском языке (МКБ-10 и патогенез):</b>\n"
+            f"[Строгое доказательное объяснение процесса резорбции, воспаления или фармакокинетики]\n\n"
+            f"💬 <b>Скрипт для врача (как объяснить пациенту за 60 секунд без чувства вины):</b>\n"
+            f"«[Доступная метафора, снимающая панику и повышающая доверие к врачу]»\n\n"
+            f"📝 <b>Запись в 043/у:</b> [как юридически грамотно зафиксировать информирование в карте]\n\n"
+            f"😄 <b>Врачебная жиза / В ординаторской:</b> [остроумный комментарий для коллег]."
+        )
+
+    elif section_type == "concilium":
+        situations = [
+            f"Пациент {cur_age} лет. Стираемость фронта II степени, снижение ВНОЛ на 3.5 мм. Периапикальный очаг {cur_tooth} (PAI 4). Адентия 1.6, 4.6. Тонкий биотип десны.",
+            f"Пациентка {cur_age} лет. Зубоальвеолярное выдвижение 1.6 на 4 мм (Попов-Годон) после давнего удаления 4.6. Межокклюзионное пространство 2.5 мм. Дефект кости гребня.",
+            f"Пациент {cur_age} лет. Рецессии десны 2-3 мм во фронтальном отделе. Эндо-пародонтальный дефект зуба {cur_tooth}. Подвижность I-II степени. Планируются элайнеры."
+        ]
+        chosen_sit = sub_tag if sub_tag and sub_tag not in ("random", "next") else random.choice(situations)
+        prompt = (
+            f"Ты — председатель мультидисциплинарного консилиума стоматологов высшей категории.\n"
+            f"Проведи комплексный разбор сложного клинического случая коллегией 4 экспертов.\n\n"
+            f"Клиническая картина: {chosen_sit}. Сопутствующая патология: {cur_somat}.\n\n"
+            f"Формат ответа (только HTML: <b>, <i>, <code>):\n"
+            f"🏛 <b>Мультидисциплинарный консилиум StomChat</b>\n\n"
+            f"<b>Клинический статус:</b> {chosen_sit}\n"
+            f"<b>Соматический статус:</b> {cur_somat}\n\n"
+            f"🔬 <b>Эндодонтист:</b> [Оценка феррула, прогноз сохранения зубов, протокол распломбировки/обтурации]\n"
+            f"🔪 <b>Хирург-имплантолог:</b> [Мягкотканная аугментация, костная пластика, тайминг имплантации]\n"
+            f"📐 <b>Ортодонт / Пародонтолог:</b> [Нормализация окклюзионной плоскости, интрузия микровинтами TADs, SRP]\n"
+            f"👑 <b>Ортопед-гнатолог:</b> [Определение ЦС, сплинт-терапия, ВНОЛ, wax-up, выбор керамики/циркония]\n\n"
+            f"🗺 <b>Согласованный Roadmap лечения:</b>\n"
+            f"• Фаза 1 (Месяц 1): Неотложная санация, эндодонтия, пародонтология\n"
+            f"• Фаза 2 (Месяцы 2–4): Хирургия / ортодонтическая подготовка\n"
+            f"• Фаза 3 (Месяцы 5–7): Временное протезирование, окклюзионный тест-драйв\n"
+            f"• Фаза 4 (Месяц 8): Постоянные реставрации и диспансерный график."
+        )
+    else:
+        prompt = f"Дай краткий доказательный клинический протокол по теме: {section_type}"
+
+    # 5. Вызываем генерацию через Gemini
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    response = None
+    error = None
+    if generate_gemini_text_async:
+        try:
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+        except Exception as e:
+            error = str(e)
+
+    # 6. Обработка результата / Fallback на кэш 51 карточки
+    if not error and response and getattr(response, "text", None):
+        res_text = clean_html_formatting(response.text.strip())
+        final_text = f"✨ <b>Живой ИИ-разбор StomChat Superpowers</b>\n\n{res_text}"
+    else:
+        cached_dict_map = {
+            "sos": CLINICAL_SOS_CARDS,
+            "record": CLINICAL_RECORD_TEMPLATES,
+            "rx": RX_RISK_CARDS,
+            "concilium": CONCILIUM_CARDS,
+            "trans": PATIENT_TRANSLATION_CARDS,
+            "vs": MATERIAL_BATTLE_CARDS,
+        }
+        cached_dict = cached_dict_map.get(section_type, CLINICAL_SOS_CARDS)
+        fallback_key = random.choice(list(cached_dict.keys()))
+        card_data = cached_dict[fallback_key]
+        final_text = (
+            f"💡 <i>(Клинический архив StomChat — режим оффлайн-кэша)</i>\n\n"
+            f"{card_data['text']}"
+        )
+
+    # 7. Полная сетка кнопок связности (Crosslinks + ИИ-генерация + Навигация)
+    cross_mesh = {
+        "sos": [("record", "record:ai", "📋 В Карту 043/у"), ("rx", "rx:anticoag", "🛡 Соматика (Rx)")],
+        "record": [("sos", "sos:ai", "🚨 SOS-Rescue"), ("vs", "vs:ai", "⚖️ Батл материалов")],
+        "rx": [("record", "record:ai", "📋 Протокол в 043/у"), ("sos", "sos:bleed", "🚨 SOS-Rescue")],
+        "vs": [("record", "record:ai", "📋 В Карту 043/у"), ("trans", "trans:ai", "🗣 Перлы пациентов")],
+        "trans": [("record", "record:ai", "📋 В Карту 043/у"), ("vs", "vs:ai", "⚖️ Батл (VS)")],
+        "concilium": [("record", "record:ai", "📋 В Карту 043/у"), ("rx", "rx:ai", "🛡 Соматика (Rx)")],
+    }
+    btns = []
+    sec_cross = cross_mesh.get(section_type, [])
+    if sec_cross:
+        btns.append([Button.inline(lbl, data=cb) for _, cb, lbl in sec_cross])
+    btns.append([
+        Button.inline("✨ Еще случай через ИИ", data=f"{section_type}:ai"),
+        Button.inline("🎲 Из архива", data=f"{section_type}:random")
+    ])
+    back_targets = {
+        "sos": ("🚨 Все SOS-протоколы", "nav:sos"),
+        "record": ("📋 Все шаблоны 043/у", "nav:record"),
+        "rx": ("🛡 Все риски (Rx)", "nav:rx"),
+        "concilium": ("🏛 К консилиуму", "nav:concilium"),
+        "trans": ("🗣 Все перлы", "nav:translate"),
+        "vs": ("⚖️ Все батлы", "nav:vs"),
+    }
+    b_title, b_cb = back_targets.get(section_type, ("⬅️ Назад", "nav:main"))
+    btns.append([Button.inline(b_title, data=b_cb), Button.inline("⬅️ В главное меню", data="nav:main")])
+
+    await edit_callback_message(bot_client, event, final_text, f"edit_message:{section_type}_ai_result", buttons=btns, parse_mode='html')
+
+
 async def handle_quiz_callback(bot_client, event):
     """
     Централизованный диспетчер навигационных колбэков и инлайн-кнопок.
@@ -9866,6 +10151,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или откройте готовый клинический шаблон записи:</i>"
             )
             buttons = [
+                [Button.inline("✨ Сгенерировать карту 043/у через ИИ", data="record:ai")],
                 [Button.inline("🎲 Случайный шаблон 043/у", data="record:random")],
                 [Button.inline("🦷 Кариес (Терапия)", data="record:therapy"), Button.inline("👑 Коронка (Ортопедия)", data="record:ortho")],
                 [Button.inline("🔪 Удаление 3.8 (Хирургия)", data="record:surgery"), Button.inline("🩸 Пародонтология (SRP)", data="record:perio")],
@@ -9892,6 +10178,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или откройте экспресс-гайдлайн по ключевым группам рисков:</i>"
             )
             buttons = [
+                [Button.inline("✨ Экспресс-чекер рисков через ИИ", data="rx:ai")],
                 [Button.inline("🎲 Случайный соматический риск", data="rx:random")],
                 [Button.inline("🦴 Бисфосфонаты (MRONJ)", data="rx:mronj"), Button.inline("🩸 Антикоагулянты (МНО)", data="rx:anticoag")],
                 [Button.inline("❤️ Кардиориски & Адреналин", data="rx:cardio"), Button.inline("🛡 Эндокардит (AHA)", data="rx:endo")],
@@ -9915,6 +10202,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или посмотрите демонстрационный клинический консилиум:</i>"
             )
             buttons = [
+                [Button.inline("✨ Собрать живой консилиум через ИИ", data="concilium:ai")],
                 [Button.inline("🎲 Случайный консилиум", data="concilium:random")],
                 [Button.inline("🏛 Тотальная реабилитация", data="concilium:example")],
                 [Button.inline("🔬 Эндо-пародонтальный дефект 4.6", data="concilium:endo_perio")],
@@ -9939,6 +10227,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или откройте экспресс-протокол первой помощи:</i>"
             )
             buttons = [
+                [Button.inline("✨ Новый клинический случай через ИИ", data="sos:ai")],
                 [Button.inline("🎲 Случайная ситуация у кресла", data="sos:random")],
                 [Button.inline("💔 Файлолом", data="sos:file"), Button.inline("🕳 Перфорация", data="sos:perf")],
                 [Button.inline("⚠️ Выведение силера", data="sos:sealer"), Button.inline("🩸 Кровотечение", data="sos:bleed")],
@@ -9965,6 +10254,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или выберите классические пациентские перлы:</i>"
             )
             buttons = [
+                [Button.inline("✨ Разобрать новый перл через ИИ", data="trans:ai")],
                 [Button.inline("🎲 Случайный пациентский перл", data="trans:random")],
                 [Button.inline("☠️ «Положите мышьяк»", data="trans:arsenic"), Button.inline("⚡️ «Пломба лазером»", data="trans:laser")],
                 [Button.inline("🦴 «Кость рассосалась»", data="trans:bone"), Button.inline("❄️ «Нерв простудил»", data="trans:nerve")],
@@ -9993,6 +10283,7 @@ async def handle_quiz_callback(bot_client, event):
                 "👇 <i>Или откройте фундаментальные батлы стоматологии:</i>"
             )
             buttons = [
+                [Button.inline("✨ Запустить батл материалов через ИИ", data="vs:ai")],
                 [Button.inline("🎲 Случайный батл материалов", data="vs:random")],
                 [Button.inline("👑 Цирконий vs E.max", data="vs:ceramics"), Button.inline("💧 OptiBond FL vs Universal", data="vs:adhesion")],
                 [Button.inline("🔬 Биокерамика vs AH Plus", data="vs:sealer"), Button.inline("🧱 MTA vs Biodentine", data="vs:mta")],
@@ -10008,6 +10299,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.1. ОБРАБОТЧИКИ КЛИНИЧЕСКИХ ШАБЛОНОВ 043/у record:*
     if data_str.startswith("record:"):
         rec_kind = data_str.split(":", 1)[1]
+        if rec_kind == "ai" or rec_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "record", rec_kind)
+            return
         if rec_kind in ("random", "next", "shuffle") or rec_kind not in CLINICAL_RECORD_TEMPLATES:
             rec_kind = random.choice(list(CLINICAL_RECORD_TEMPLATES.keys()))
         card_data = CLINICAL_RECORD_TEMPLATES[rec_kind]
@@ -10019,6 +10313,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.2. ОБРАБОТЧИКИ ЭКСПРЕСС-ГАЙДЛАЙНОВ СОМАТИЧЕСКИХ РИСКОВ rx:*
     if data_str.startswith("rx:"):
         rx_kind = data_str.split(":", 1)[1]
+        if rx_kind == "ai" or rx_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "rx", rx_kind)
+            return
         if rx_kind in ("random", "next", "shuffle") or rx_kind not in RX_RISK_CARDS:
             rx_kind = random.choice(list(RX_RISK_CARDS.keys()))
         card_data = RX_RISK_CARDS[rx_kind]
@@ -10030,6 +10327,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.3. ОБРАБОТЧИК КЛИНИЧЕСКИХ КОНСИЛИУМОВ concilium:*
     if data_str.startswith("concilium:"):
         conc_kind = data_str.split(":", 1)[1]
+        if conc_kind == "ai" or conc_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "concilium", conc_kind)
+            return
         if conc_kind in ("random", "next", "shuffle") or conc_kind not in CONCILIUM_CARDS:
             conc_kind = random.choice(list(CONCILIUM_CARDS.keys()))
         card_data = CONCILIUM_CARDS[conc_kind]
@@ -10041,6 +10341,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.4. ОБРАБОТЧИКИ ЭКСТРЕННЫХ КЛИНИЧЕСКИХ ПРОТОКОЛОВ sos:*
     if data_str.startswith("sos:"):
         sos_kind = data_str.split(":", 1)[1]
+        if sos_kind == "ai" or sos_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "sos", sos_kind)
+            return
         if sos_kind in ("random", "next", "shuffle") or sos_kind not in CLINICAL_SOS_CARDS:
             sos_kind = random.choice(list(CLINICAL_SOS_CARDS.keys()))
         card_data = CLINICAL_SOS_CARDS[sos_kind]
@@ -10052,6 +10355,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.5. ОБРАБОТЧИКИ ПЕРЕВОДЧИКА С «ПАЦИЕНТСКОГО» trans:*
     if data_str.startswith("trans:"):
         trans_kind = data_str.split(":", 1)[1]
+        if trans_kind == "ai" or trans_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "trans", trans_kind)
+            return
         if trans_kind in ("random", "next", "shuffle") or trans_kind not in PATIENT_TRANSLATION_CARDS:
             trans_kind = random.choice(list(PATIENT_TRANSLATION_CARDS.keys()))
         card_data = PATIENT_TRANSLATION_CARDS[trans_kind]
@@ -10063,6 +10369,9 @@ async def handle_quiz_callback(bot_client, event):
     # 1.6. ОБРАБОТЧИКИ БАТЛОВ МАТЕРИАЛОВ vs:*
     if data_str.startswith("vs:"):
         vs_kind = data_str.split(":", 1)[1]
+        if vs_kind == "ai" or vs_kind.startswith("ai:"):
+            await handle_clinical_ai_generation(bot_client, event, "vs", vs_kind)
+            return
         if vs_kind in ("random", "next", "shuffle") or vs_kind not in MATERIAL_BATTLE_CARDS:
             vs_kind = random.choice(list(MATERIAL_BATTLE_CARDS.keys()))
         card_data = MATERIAL_BATTLE_CARDS[vs_kind]
