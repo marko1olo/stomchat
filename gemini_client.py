@@ -831,7 +831,8 @@ def generate_text(prompt, status_context=None, timeout=None):
 
                 if can_vision and image_urls:
                     user_content = [{"type": "text", "text": prompt}]
-                    for iu in image_urls[:3]:
+                    max_imgs = 6 if provider == "gemini" else 3
+                    for iu in image_urls[:max_imgs]:
                         user_content.append({"type": "image_url", "image_url": {"url": iu}})
                     messages_payload = [{"role": "user", "content": user_content}]
                 else:

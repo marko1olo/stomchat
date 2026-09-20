@@ -314,7 +314,7 @@ def check_user_cooldown(chat_id, user_id, command, seconds=30):
 TELEGRAM_MESSAGE_LIMIT = 4000
 
 
-async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
+async def send_message_chunks_async(bot_client, chat_id, text, buttons=None, **kwargs):
     """
     Отправляет длинный ответ частями, каждая из которых валидна сама по себе.
 
@@ -326,9 +326,16 @@ async def send_message_chunks_async(bot_client, chat_id, text, **kwargs):
 
     Разбиение вынесено в html_safe: незакрытые теги закрываются в конце части
     и переоткрываются в начале следующей.
+    Кнопки (buttons) прикрепляются к финальному чанку сообщения.
     """
-    for chunk in html_safe.split_html(text, limit=TELEGRAM_MESSAGE_LIMIT):
-        await tg_safety.send_message(bot_client, chat_id, chunk, logger=logger, **kwargs)
+    chunks = list(html_safe.split_html(text, limit=TELEGRAM_MESSAGE_LIMIT))
+    last_res = None
+    for i, chunk in enumerate(chunks):
+        chunk_buttons = buttons if (i == len(chunks) - 1) else None
+        last_res = await tg_safety.send_message(
+            bot_client, chat_id, chunk, buttons=chunk_buttons, logger=logger, **kwargs
+        )
+    return last_res
 
 async def resolve_bot_identity(bot_client):
     """
@@ -832,6 +839,28 @@ def build_reply_keyboard():
 # Алиасы функций клавиатур для совместимости
 get_main_reply_keyboard = build_reply_keyboard
 get_main_inline_keyboard = build_main_menu_markup
+
+
+def build_nba_markup(topic_query="", has_media=False):
+    """
+    Формирует интерактивные кнопки Next Best Action под клиническим ответом в ЛС:
+    мгновенное сохранение в закладки, связанные протоколы, поиск в PubMed или экспорт в PDF.
+    """
+    from telethon import Button
+    tag = (topic_query or "").strip().lower()
+    tag_clean = re.sub(r"[^\w\s-]", "", tag)[:20].strip().replace(" ", "_") or "case"
+
+    buttons = [
+        [
+            Button.inline("📌 В закладки", data="nba:bm"),
+            Button.inline("📚 Протоколы", data=f"nba:proto:{tag_clean}"),
+        ],
+        [
+            Button.inline("🌐 PubMed", data=f"nba:web:{tag_clean}"),
+            Button.inline("📄 Экспорт в PDF", data="nba:pdf"),
+        ]
+    ]
+    return buttons
 
 
 MAIN_MENU_TEXT = (
@@ -5297,6 +5326,34 @@ async def handle_private_message(bot_client, event):
             except Exception as kb_err:
                 logger.debug(f"Failed to send reply keyboard: {kb_err}")
 
+            # Проверяем, заполнена ли специализация у врача для персонализации
+            mem = await database.get_user_memory(chat_id)
+            has_spec = bool(mem and ("Специализация:" in (mem.get("clinical_summary") or "")))
+            if not has_spec:
+                from telethon import Button
+                onboard_text = (
+                    "👋 <b>Добро пожаловать в StomChat, коллега!</b>\n\n"
+                    "Я — интеллектуальный клинический ассистент стоматологического сообщества.\n\n"
+                    "Чтобы консультации, дозировки препаратов и разборы снимков были максимально точными, "
+                    "<b>выберите вашу основную специализацию в 1 клик:</b>"
+                )
+                onboard_buttons = [
+                    [Button.inline("🦷 Терапевт / Эндодонтист", data="onboard:spec:therapy"),
+                     Button.inline("👑 Ортопед", data="onboard:spec:ortho_prostho")],
+                    [Button.inline("🔪 Хирург / Имплантолог", data="onboard:spec:surgery"),
+                     Button.inline("📐 Ортодонт", data="onboard:spec:orthodontics")],
+                    [Button.inline("👶 Детский стоматолог", data="onboard:spec:pediatric"),
+                     Button.inline("🩺 Смешанный приём", data="onboard:spec:general")],
+                    [Button.inline("➡️ Пропустить (общий профиль)", data="onboard:spec:skip")]
+                ]
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=onboard_text,
+                    buttons=onboard_buttons,
+                    parse_mode='html'
+                )
+                return
+
             await bot_client.send_message(
                 entity=chat_id,
                 message=MAIN_MENU_TEXT,
@@ -6041,7 +6098,7 @@ async def handle_private_message(bot_client, event):
                 for a_ev in album_events:
                     msg_obj = a_ev.message
                     temp_path = await asyncio.wait_for(
-                        msg_obj.download_media(file=f"temp_media/{msg_obj.id}_"),
+                        msg_obj.download_media(file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"pm_{msg_obj.id}_")),
                         timeout=PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
                     )
                     if temp_path and os.path.exists(temp_path):
@@ -6182,7 +6239,12 @@ async def handle_private_message(bot_client, event):
             pm_multimodal_notice = ""
             pm_image_urls = getattr(media_description, "image_urls", None)
             if pm_image_urls:
-                pm_multimodal_notice = """
+                if len(pm_image_urls) > 1:
+                    pm_multimodal_notice = f"""
+[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К запросу прикреплена серия из {len(pm_image_urls)} оригинальных изображений высокого разрешения (клинический фотопротокол/серия RG). Тщательно изучи детали каждого снимка (костную ткань, корни, каналы, прилегание реставраций, динамику до/после) напрямую по прикрепленным изображениям.]
+"""
+                else:
+                    pm_multimodal_notice = """
 [МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К запросу прикреплено оригинальное изображение в высоком разрешении. Тщательно изучи детали снимка (костную ткань, корни, каналы, прилегание реставраций) напрямую по прикрепленному изображению.]
 """
             prompt = f"""
@@ -6428,11 +6490,19 @@ async def handle_private_message(bot_client, event):
 
             reply_text = clean_html_formatting(reply_text)
 
-            # Отправка развернутого ответа (Этап 1: Быстрый ответ)
+            # Генерация кнопок Next Best Action (сохранение в закладки, протоколы, статьи, PDF)
+            nba_tag = ""
+            if has_dental_topic or wiki_corpus:
+                words = re.findall(r'[а-яёa-z]{4,}', (text or '').lower())
+                nba_tag = words[0] if words else "dental"
+            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media)
+
+            # Отправка развернутого ответа (Этап 1: Быстрый ответ с кнопками NBA)
             await send_message_chunks_async(
                 bot_client,
                 chat_id,
                 reply_text,
+                buttons=nba_markup,
                 parse_mode='html'
             )
             await database.save_pm_message(chat_id, "Assistant", reply_text)
@@ -7567,6 +7637,139 @@ async def edit_callback_message(bot_client, event, text, op, **kwargs):
     return None
 
 
+async def handle_onboarding_callback(bot_client, event, data_str):
+    from telethon import Button
+    spec_code = data_str.split(":", 2)[2]
+    spec_map = {
+        "therapy": "Терапевт, эндодонтист",
+        "ortho_prostho": "Ортопед",
+        "surgery": "Хирург, имплантолог",
+        "orthodontics": "Ортодонт",
+        "pediatric": "Детский стоматолог",
+        "general": "Стоматолог общей практики (смешанный приём)",
+        "skip": "Врач-стоматолог",
+    }
+    chosen_spec = spec_map.get(spec_code, "Врач-стоматолог")
+    chat_id = event.chat_id or getattr(event, "sender_id", 0)
+    summary_text = f"Специализация: {chosen_spec}."
+    try:
+        await database.save_user_memory(
+            user_id=chat_id,
+            clinical_summary=summary_text,
+            pm_message_count=1,
+        )
+    except Exception as save_err:
+        logger.error("Failed to save onboard memory: %s", save_err)
+
+    conf_text = (
+        f"✅ <b>Отлично, коллега!</b>\n\n"
+        f"Ваша специализация зафиксирована: <b>{chosen_spec}</b>.\n"
+        f"Теперь все клинические консультации, дозировки препаратов и разборы снимков "
+        f"будут адаптированы под вашу врачебную практику.\n\n"
+        f"Задайте любой клинический вопрос или выберите раздел:"
+    )
+    await edit_callback_message(
+        bot_client, event, conf_text, "edit:onboard",
+        buttons=[
+            [Button.inline("🏠 Главное меню", data="nav:main"), Button.inline("📚 Протоколы", data="nav:proto")],
+            [Button.inline("🔬 Разобрать снимок", data="nav:xray"), Button.inline("🧮 Калькулятор", data="nav:calc")]
+        ],
+        parse_mode='html'
+    )
+    await event.answer("Специализация сохранена!")
+
+
+async def handle_nba_callback(bot_client, event, data_str):
+    from telethon import Button
+    nba_parts = data_str.split(":", 2)
+    action = nba_parts[1]
+    param = nba_parts[2] if len(nba_parts) > 2 else ""
+    chat_id = event.chat_id or getattr(event, "sender_id", 0)
+
+    if action == "bm":
+        msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
+        assistant_msg = next((m for m in reversed(msgs) if m.get("role") == "Assistant"), None)
+        if assistant_msg and assistant_msg.get("text"):
+            clean_bm = re.sub(r"<[^>]+>", "", assistant_msg["text"])[:400]
+            await database.save_clinical_bookmark(
+                saved_by_user_id=chat_id,
+                msg_id=int(time.time()),
+                chat_id=chat_id,
+                sender_name="Консилиум StomChat",
+                text=clean_bm,
+                has_media=False,
+                media_description="",
+                date=datetime.now()
+            )
+            await event.answer("📌 Разбор успешно сохранен в ваши закладки!", alert=False)
+        else:
+            await event.answer("ℹ️ Сообщение сохранено.", alert=False)
+        return
+
+    elif action == "proto":
+        search_tag = param.replace("_", " ").strip()
+        found = await database.search_clinical_protocols(search_tag, limit=3)
+        if not found and search_tag != "case":
+            found = await database.search_clinical_protocols("", limit=3)
+        if found:
+            p_text = f"📚 <b>Клинические протоколы по теме «{search_tag}»:</b>\n\n"
+            p_btns = []
+            for p in found:
+                title = p.get("title") or f"Протокол #{p.get('id')}"
+                code = p.get("protocol_code") or str(p.get("id"))
+                p_text += f"• <b>{title}</b>\n"
+                p_btns.append([Button.inline(f"📖 {title[:30]}", data=f"proto:view:{code}")])
+            p_btns.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
+            await bot_client.send_message(entity=chat_id, message=p_text, buttons=p_btns, parse_mode='html')
+            await event.answer()
+        else:
+            await event.answer("Протоколы по теме не найдены", alert=False)
+        return
+
+    elif action == "web":
+        search_query = param.replace("_", " ").strip()
+        hint_msg = (
+            f"🌐 <b>Поиск в PubMed и открытых научных базах</b>\n\n"
+            f"Чтобы найти свежие исследования и метаанализы по теме <b>«{search_query}»</b>, "
+            f"отправьте команду:\n\n"
+            f"<code>/web {search_query} clinical protocol guidelines</code>\n\n"
+            f"<i>Я проанализирую первоисточники и выдам клиническое резюме со ссылками.</i>"
+        )
+        await bot_client.send_message(entity=chat_id, message=hint_msg, parse_mode='html')
+        await event.answer()
+        return
+
+    elif action == "pdf":
+        await event.answer("📄 Формирую PDF-отчет...", alert=False)
+        try:
+            from digest_pdf import generate_digest_pdf
+            msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
+            html_body = "<h2>Клиническая консультация StomChat</h2>\n"
+            for m in msgs:
+                role_title = "Врач-стоматолог" if m.get("role") == "User" else "Консилиум StomChat"
+                clean_m = (m.get('text', '') or '').replace('\n', '<br>')
+                html_body += f"<p><b>{role_title}:</b><br>{clean_m}</p>\n<hr>\n"
+            
+            pdf_path = await generate_digest_pdf(
+                html_content=html_body,
+                title="Клинический протокол консультации",
+                subtitle="Консилиум врачей StomChat • Персональный клинический разбор",
+                msg_count=len(msgs),
+                date_str=get_russian_date(datetime.now())
+            )
+            if pdf_path and os.path.exists(pdf_path) and hasattr(bot_client, "send_file"):
+                await bot_client.send_file(
+                    chat_id,
+                    pdf_path,
+                    caption="📄 <b>Клинический протокол консультации</b>\n\nСформирован для прикрепления к медицинской карте или архиву кейсов.",
+                    parse_mode='html'
+                )
+        except Exception as pdf_err:
+            logger.error("Failed to generate NBA PDF report: %s", pdf_err)
+            await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось сгенерировать PDF-файл. Попробуйте позже.</i>", parse_mode='html')
+        return
+
+
 async def handle_quiz_callback(bot_client, event):
     """
     Централизованный диспетчер навигационных колбэков и инлайн-кнопок.
@@ -7591,6 +7794,16 @@ async def handle_quiz_callback(bot_client, event):
         data_str = str(data_bytes or "")
 
     from telethon import Button
+
+    # 0. ONBOARDING: ВЫБОР СПЕЦИАЛИЗАЦИИ НОВОГО ВРАЧА onboard:spec:*
+    if data_str.startswith("onboard:spec:"):
+        await handle_onboarding_callback(bot_client, event, data_str)
+        return
+
+    # 0.5. NEXT BEST ACTION (NBA) nba:*
+    if data_str.startswith("nba:"):
+        await handle_nba_callback(bot_client, event, data_str)
+        return
 
     # 1. ОБЩИЙ НАВИГАЦИОННЫЙ ДИСПЕТЧЕР nav:* И menu:*
     if data_str.startswith("nav:") or data_str.startswith("menu:"):
@@ -8741,22 +8954,22 @@ async def analyze_dispute_need(context_msgs):
 async def check_referee_triage(context_msgs):
     """
     Отправляет контекст спора в Llama для подтверждения:
-    действительно ли между пользователями происходит токсичный/личный конфликт,
-    требующий вмешательства координатора чата.
+    действительно ли между пользователями возник спор/конфликт,
+    требующий научного арбитража или клинического EBM-разъяснения.
     """
     try:
         context_str = "\n".join(context_msgs)
-        triage_prompt = f"""Ты - ИИ-координатор стоматологического Telegram-чата StomChat.
-Твоя задача - оценить контекст переписки и решить, действительно ли между участниками чата разгорается токсичный спор, личный конфликт или агрессивная перепалка, требующая вежливого вмешательства координатора чата.
+        triage_prompt = f"""Ты - независимый ИИ-координатор стоматологического сообщества StomChat.
+Твоя задача - оценить контекст переписки врачей и определить, возник ли в чате острый клинический спор, научное разногласие, токсичная перепалка или эмоциональная критика методов/результатов коллеги, требующая объективного доказательного комментария (EBM-арбитража).
 
 Критерии для вмешательства (should_intervene: true):
-1. Участники переходят на личности, оскорбляют друг друга, ругаются, проявляют явную агрессию.
-2. Идет острая, неконструктивная перепалка с использованием токсичных выражений.
+1. Врачи спорят о тактике лечения, выборе протоколов (удалять vs сохранять, штифт vs культевая вкладка, депофорез, коффердам, протокол ирригации).
+2. Критика чужой работы или методов, пассивная или явная агрессия ("кто так делает", "руки оторвать", "где вас учили", "кошмар", "дичь").
+3. Острое разногласие по материалам, дозировкам или осложнениям.
 
 Критерии для игнорирования (should_intervene: false):
-1. Коллеги ведут обычный, пусть даже эмоциональный профессиональный спор о клинических методах или материалах без личных оскорблений.
-2. В сообщениях проскочило эмоциональное слово (например, "косяк", "бред", "чушь"), но оно относится к материалу, методике или клиническому случаю, а не к личности собеседника.
-3. Сообщение содержит вопрос или бытовое обсуждение, а не конфликт.
+1. Мирное, согласное клиническое обсуждение без противоречий и без спора.
+2. Сообщение содержит простой вопрос, организационную реплику или бытовой разговор.
 
 Контекст переписки:
 {context_str}
@@ -8820,24 +9033,30 @@ async def check_and_trigger_referee(bot_client, event, text):
         logger.info("Message mentions bot, skipping referee to avoid feedback loops.")
         return
 
-    # 3. Регулярка с границами слов для точного совпадения токсичных ключевиков
-    escaped_kws = [re.escape(kw) for kw in [
-        "бред", "чушь", "дичь", "херня", "говно", "полная лажа", 
-        "безрукий", "руки оторвать", "какой дурак", "херню", "глупость",
-        "рукожоп", "рукожопие", "помойку", "мусорку", "выброси", 
-        "косяк", "ужасно", "кривые руки", "уродство", "отстой",
-        "хлам", "ахинея", "ппц", "пиздец", "бредятина",
-        "чушь собачья", "какой дебил", "убейся", "дебилизм",
-        "идиот", "идиотизм", "тупой", "тупость", "придурок", "даун",
-        "рукожопый", "криворукий", "жопорукий", "косорукий", "из жопы",
-        "ересь", "чепуха", "психушка", "дурка", "лечись", "высер",
-        "выкинь", "дерьмо", "говнище", "днище", "лажовый", "шиза",
-        "дебил", "кретин", "олень", "баран", "тормоз", "позорище",
-        "позор", "стыдоба", "срач", "клоун", "цирк", "клоунада",
-        "курам на смех", "хрень", "галиматья", "шарага", "колхозный",
-        "безрукие", "руки отсохнут", "убожество", "убого"
-    ]]
-    pattern = rf"\b({'|'.join(escaped_kws)})(е|я|ом|а|ы|и|у|ой|ем|ах|ами|ями|ов|ев)?\b"
+    # 3. Регулярка для точного совпадения токсичных ключевиков и стоматологических споров
+    conflict_phrases = [
+        "где вас учили", "кто так делает", "кто так препарирует", "бедный зуб",
+        "бедный пациент", "вы протокол читали", "вы вообще стоматолог",
+        "удалять и только удалять", "зачем полезли", "что за работа",
+        "это под удаление", "курам на смех", "полная лажа", "чушь собачья",
+        "руки оторвать", "руки отсохнут", "из жопы", "руки из жопы", "под удаление"
+    ]
+    single_kws = [
+        "бред", "чушь", "дичь", "херня", "говно", "безрукий", "какой дурак",
+        "херню", "глупость", "рукожоп", "рукожопие", "помойку", "мусорку",
+        "выброси", "косяк", "ужасно", "кривые руки", "уродство", "отстой",
+        "хлам", "ахинея", "ппц", "пиздец", "бредятина", "какой дебил", "убейся",
+        "дебилизм", "идиот", "идиотизм", "тупой", "тупость", "придурок", "даун",
+        "рукожопый", "криворукий", "жопорукий", "косорукий", "ересь", "чепуха",
+        "психушка", "дурка", "лечись", "высер", "выкинь", "дерьмо", "говнище",
+        "днище", "лажовый", "шиза", "дебил", "кретин", "олень", "баран", "тормоз",
+        "позорище", "позор", "стыдоба", "срач", "клоун", "цирк", "клоунада",
+        "хрень", "галиматья", "шарага", "колхозный", "безрукие", "убожество",
+        "убого", "бракодел", "халтура", "калечите", "калечить", "безграмотность"
+    ]
+    escaped_kws = [re.escape(kw) for kw in single_kws]
+    escaped_phrases = [re.escape(ph) for ph in conflict_phrases]
+    pattern = rf"(\b({'|'.join(escaped_kws)})(е|я|ом|а|ы|и|у|ой|ем|ах|ами|ями|ов|ев)?\b|{'|'.join(escaped_phrases)})"
     has_conflict_kw = bool(re.search(pattern, text_lower))
     
     should_intervene = has_conflict_kw
@@ -8901,77 +9120,32 @@ async def check_and_trigger_referee(bot_client, event, text):
         except Exception as cooldown_err:
             logger.error(f"Error parsing last_referee_run: {cooldown_err}")
         
-    logger.info(f"Clinical Referee triggered for msg_id={msg_id}. Deciding style (toxic={has_conflict_kw})...")
-    
-    # 50/50 ИЛИ ШУТИТ ИЛИ НАУЧНО
-    # Если спор "злой" (есть стоп-слова) -> шутит (joke)
-    # Если обычный спор -> 25% научно (scientific), 75% коллега (colleague)
-    if has_conflict_kw:
-        style = "joke"
-    else:
-        style = "scientific" if random.random() < 0.25 else "colleague"
-        
+    logger.info(f"Clinical Referee triggered for msg_id={msg_id} (toxic={has_conflict_kw}). Generating EBM arbitration...")
+    style = "ebm_reconciliation"
     chain_str = "\n".join(chain_msgs) if chain_msgs else text
-    
-    if style == "joke":
-        prompt = f"""
-Ты - тактичный и мудрый клинический координатор стоматологического сообщества "StomChat". 
-В чате начался агрессивный спор (градус эмоций высок). Последнее сообщение: "{text}".
 
-Напиши очень короткую, спокойную, дружелюбную реплику, чтобы мягко разрядить обстановку. Можно использовать легкую, уместную стоматологическую метафору или легкий профессиональный юмор, но без заезженных клише (никакого фанатизма про "перегретые боры" или "коффердам дзен", если это не ложится идеально). 
-Реплика должна призывать коллег к конструктивному общению и снижению градуса эмоций.
+    # Поиск по базе RAG для содержательного EBM-арбитража
+    keywords = extract_keywords(text + " " + " ".join(chain_msgs))
+    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
 
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Длина - строго максимум 180 символов! Будь краток.
-2. Никаких приветствий, обращений и концовок. Сразу суть.
-3. Тон: нейтральный, вежливый, миролюбивый.
-4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
-"""
-    elif style == "scientific":
-        # Поиск по базе RAG
-        keywords = extract_keywords(text + " " + " ".join(chain_msgs))
-        wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
-        
-        prompt = f"""
-Ты — клинический эксперт сообщества "StomChat". В чате идет профессиональный спор.
-История дискуссии:
-{chain_str}
+    prompt = f"""
+Ты — независимый клинический арбитр стоматологического сообщества "StomChat", эксперт доказательной медицины (EBM).
+В чате врачей возник профессиональный спор или конфликт мнений по клиническому вопросу.
 
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus or "(справочная информация отсутствует)"}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Напиши научно обоснованную, спокойную и примиряющую реплику на основе Справки из Базы Знаний. Разъясни доказательный клинический стандарт по теме спора, чтобы миролюбиво разрешить спор.
-
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Важно: внимательно изучи историю дискуссии. НЕ повторяй те аргументы и тейки, которые коллеги уже озвучили в истории. Напиши новую полезную мысль.
-2. Длина — максимум 280 символов! Будь лаконичен.
-3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
-"""
-    else: # style == "colleague"
-        # Поиск по базе RAG для содержательного ответа от лица коллеги
-        keywords = extract_keywords(text + " " + " ".join(chain_msgs))
-        wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
-        
-        prompt = f"""
-Ты — клинический координатор сообщества "StomChat", опытный стоматолог-эксперт. 
-В чате идет обсуждение клинического вопроса. Твоя задача — взвешенно прокомментировать спор как знающий старший коллега.
 История дискуссии:
 {chain_str}
 
 Справка из Базы Знаний (stomat_wiki):
 {wiki_corpus or "(нет точных справочных данных по теме)"}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
+[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции!]
+[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Фильтруй всё через призму доказательной медицины (EBM), международных стандартов (ADA, ESE, ITI, Cochrane) и клинических протоколов.]
 
-Напиши естественную реплику от лица коллеги. Вырази своё мнение, основываясь на Базе Знаний, но пиши профессиональным языком практикующего врача. Тон: сдержанный, академичный, уважительный старший коллега-эксперт. Без лишней фамильярности и без эмодзи-кривляния. Не читай нотации и не используй снисходительный тон или смайлики. Пиши с уважением к коллегам.
-
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-1. Важно: внимательно изучи историю дискуссии. НЕ повторяй тейки и доводы, которые коллеги уже написали в истории. Добавь свежую мысль или вежливо задай наводящий клинический вопрос, развивающий диалог.
-2. Длина — максимум 320 символов! Напиши кратко и по делу.
-3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
-4. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
+Твоя задача: объективно и беспристрастно рассудить разногласие коллег с позиций доказательной стоматологии.
+1. Четко и спокойно укажи доказательные стандарты, клинические показания и границы применения для каждого обсуждаемого метода/подхода (Метод А vs Метод Б).
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО морализаторство, поучения, шутки, призывы «жить дружно» или «уважать коллег». Никакой снисходительности или сарказма. Только факты, протокол и критерии выбора.
+3. Важно: внимательно изучи историю дискуссии. НЕ повторяй доводы, уже озвученные врачами. Дай объективное экспертное резюме доказательной базы.
+4. Длина — СТРОГО максимум 300 символов! Будь предельно лаконичен, структурен и точен.
+5. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
@@ -8986,7 +9160,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     try:
         await bot_client.send_message(
             entity=chat_id,
-            message=f"⚖️ {reply_text}",
+            message=f"⚖️ <b>EBM-Арбитраж:</b>\n{reply_text}",
             reply_to=msg_id,
             parse_mode='html'
         )
