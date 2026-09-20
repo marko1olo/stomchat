@@ -214,16 +214,21 @@ class TestClinicalSuperpowers(unittest.TestCase):
         asyncio.run(run_nav_tests())
 
     def test_04_record_templates_callbacks(self):
-        print("\n[4] Клинические шаблоны Формы 043/у (record:*)")
+        print("\n[4] Клинические шаблоны Формы 043/у (8 шаблонов + record:random + кросс-линки)")
         bot = FakeBot()
 
         async def run_record_tests():
-            for kind, label, expected_icd, expected_text in [
+            cases = [
                 ("therapy", "Терапия", "K02.1", "коффердам"),
-                ("ortho", "Ортопедия", "K08.8", "уступа"),
+                ("ortho", "Ортопедия", "K08.8", "уступ"),
                 ("surgery", "Хирургия", "K01.1", "ретинированного"),
-                ("perio", "Пародонтология", "K05.3", "Root Planing")
-            ]:
+                ("perio", "Пародонтология", "K05.3", "Root Planing"),
+                ("endo", "Эндодонтия", "K04.0", "MB2"),
+                ("implant", "Имплантация", "K08.1", "имплантат"),
+                ("pediatric", "Детство", "K04.0", "Biodentine"),
+                ("complication", "Осложнение", "Y60.8", "Bypass")
+            ]
+            for kind, label, expected_icd, expected_text in cases:
                 cb = FakeCallbackEvent(f"record:{kind}")
                 await assistant.handle_quiz_callback(bot, cb)
                 check(f"record:{kind} вызвал answer", cb.answered_count >= 1)
@@ -232,45 +237,97 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 check(f"record:{kind} содержит МКБ {expected_icd}", expected_icd in msg)
                 check(f"record:{kind} содержит клинический протокол ({expected_text})", expected_text.lower() in msg.lower())
 
+                # Проверка кнопки ротации и связанных кросс-линков
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"record:{kind} снабжен кнопкой ротации record:random", "record:random" in btn_datas)
+                has_crosslink = any(d.startswith(("rx:", "vs:", "sos:", "trans:", "concilium:")) for d in btn_datas)
+                check(f"record:{kind} содержит сквозные клинические кросс-линки", has_crosslink)
+
+            # Проверка динамического случайного выбора
+            cb_rnd = FakeCallbackEvent("record:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("record:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("record:random вернул карточку Формы 043/у", "Шаблон 043/у" in msg_rnd)
+
         asyncio.run(run_record_tests())
 
     def test_05_rx_guidelines_callbacks(self):
-        print("\n[5] Экспресс-гайдлайны соматических рисков (rx:*)")
+        print("\n[5] Экспресс-гайдлайны соматических рисков (8 рисков + rx:random + кросс-линки)")
         bot = FakeBot()
 
         async def run_rx_tests():
-            for kind, expected_kw in [
+            cases = [
                 ("mronj", "s-CTX"),
                 ("anticoag", "МНО"),
                 ("cardio", "Мепивакаин"),
-                ("endo", "Амоксициллин")
-            ]:
+                ("endo", "Амоксициллин"),
+                ("pregnancy", "триместр"),
+                ("diabetes", "HbA1c"),
+                ("asthma_allergy", "Видаля"),
+                ("renal_liver", "гемодиализ")
+            ]
+            for kind, expected_kw in cases:
                 cb = FakeCallbackEvent(f"rx:{kind}")
                 await assistant.handle_quiz_callback(bot, cb)
                 check(f"rx:{kind} вызвал answer", cb.answered_count >= 1)
                 check(f"rx:{kind} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
                 msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-                check(f"rx:{kind} содержит маркер безопасности «{expected_kw}»", expected_kw in msg)
+                check(f"rx:{kind} содержит маркер безопасности «{expected_kw}»", expected_kw.lower() in msg.lower())
+
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"rx:{kind} снабжен кнопкой ротации rx:random", "rx:random" in btn_datas)
+                has_crosslink = any(d.startswith(("record:", "sos:", "calc:", "trans:", "vs:")) for d in btn_datas)
+                check(f"rx:{kind} содержит сквозные клинические кросс-линки", has_crosslink)
+
+            # Проверка динамического случайного выбора
+            cb_rnd = FakeCallbackEvent("rx:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("rx:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("rx:random вернул карточку соматических рисков", "EBM-Гайдлайн" in msg_rnd)
 
         asyncio.run(run_rx_tests())
 
     def test_06_concilium_example_callback(self):
-        print("\n[6] Демонстрационный консилиум (concilium:example)")
+        print("\n[6] Мультидисциплинарный консилиум (3 консилиума + concilium:random + кросс-линки)")
         bot = FakeBot()
 
         async def run_concilium_tests():
-            cb = FakeCallbackEvent("concilium:example")
-            await assistant.handle_quiz_callback(bot, cb)
-            check("concilium:example вызвал answer", cb.answered_count >= 1)
-            check("concilium:example обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
-            msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-            check("Консилиум включает Эндодонтиста", "Эндодонтист" in msg)
-            check("Консилиум включает Хирурга-имплантолога", "Хирург" in msg)
-            check("Консилиум включает Ортодонта", "Ортодонт" in msg)
-            check("Консилиум включает Ортопеда-гнатолога", "Ортопед" in msg)
-            check("Консилиум включает пошаговый Roadmap лечения", "Roadmap" in msg)
+            cases = [
+                ("example", ["Эндодонтист", "Хирург", "Ортодонт", "Ортопед", "Roadmap"]),
+                ("endo_perio", ["Эндодонтист", "Пародонтолог", "Хирург", "Ортопед", "Roadmap"]),
+                ("ortho_implant", ["Ортодонт", "Хирург", "Ортопед", "Roadmap"])
+            ]
+            for kind, kw_list in cases:
+                cb = FakeCallbackEvent(f"concilium:{kind}")
+                await assistant.handle_quiz_callback(bot, cb)
+                check(f"concilium:{kind} вызвал answer", cb.answered_count >= 1)
+                check(f"concilium:{kind} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
+                msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+                for kw in kw_list:
+                    check(f"concilium:{kind} включает «{kw}»", kw.lower() in msg.lower())
+
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"concilium:{kind} снабжен кнопкой ротации concilium:random", "concilium:random" in btn_datas)
+                has_crosslink = any(d.startswith(("record:", "vs:", "rx:", "sos:")) for d in btn_datas)
+                check(f"concilium:{kind} содержит сквозные клинические кросс-линки", has_crosslink)
+
+            # Проверка динамического случайного выбора
+            cb_rnd = FakeCallbackEvent("concilium:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("concilium:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("concilium:random вернул карточку консилиума", "Клинический консилиум" in msg_rnd)
 
         asyncio.run(run_concilium_tests())
+
 
     def test_07_sos_callbacks_and_random(self):
         print("\n[7] Расширенные протоколы осложнений у кресла (10 кейсов + sos:random)")
@@ -302,6 +359,8 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                              for row in (last_btns or []) for b in row if hasattr(b, "data")]
                 check(f"{action} снабжен кнопкой ротации sos:random", "sos:random" in btn_datas)
+                has_crosslink = any(d.startswith(("record:", "vs:", "rx:", "trans:", "calc:", "concilium:")) for d in btn_datas)
+                check(f"{action} содержит сквозные клинические кросс-линки", has_crosslink)
 
             # Проверка динамического случайного выбора sos:random
             cb_rnd = FakeCallbackEvent("sos:random")
@@ -343,6 +402,8 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                              for row in (last_btns or []) for b in row if hasattr(b, "data")]
                 check(f"{action} снабжен кнопкой ротации trans:random", "trans:random" in btn_datas)
+                has_crosslink = any(d.startswith(("record:", "vs:", "rx:", "sos:", "calc:", "concilium:")) for d in btn_datas)
+                check(f"{action} содержит сквозные клинические кросс-линки", has_crosslink)
 
             # Проверка динамического случайного выбора trans:random
             cb_rnd = FakeCallbackEvent("trans:random")
@@ -382,6 +443,9 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                              for row in (last_btns or []) for b in row if hasattr(b, "data")]
                 check(f"{action} снабжен кнопкой ротации vs:random", "vs:random" in btn_datas)
+                has_crosslink = any(d.startswith(("record:", "vs:", "rx:", "sos:", "trans:", "calc:", "concilium:")) for d in btn_datas)
+                check(f"{action} содержит сквозные клинические кросс-линки", has_crosslink)
+
 
             # Проверка динамического случайного выбора vs:random
             cb_rnd = FakeCallbackEvent("vs:random")
