@@ -1,24 +1,25 @@
 """
-Тестовый сьют для 6 уникальных клинических суперсил StomChat:
+Тестовый сьют для 6 уникальных клинических суперсил StomChat (расширенная динамическая база):
   1. Генератор записи в амбулаторную карту (Форма № 043/у) — /record (/043, /дневник, /карта)
   2. Клинический чекер соматических рисков и фармакологии — /rx (/риск, /риски, /соматика)
   3. Виртуальный мультидисциплинарный консилиум — /concilium (/консилиум, /план)
-  4. Протоколы действий при осложнениях у кресла (Chairside Rescue) — /sos (/осложнение, /факап, /спасите)
+  4. Экстренные протоколы при осложнениях у кресла (Chairside Rescue) — /sos (/осложнение, /факап, /спасите)
   5. Переводчик с «пациентского» на клинический язык — /translate (/переводчик, /пациент, /сленг)
   6. Батл стоматологических материалов и протоколов (Material Match) — /vs (/сравнить, /материал, /выбор)
 
 Проверяет:
   - Поверхность команд (меню BotCommandScopeDefault, текст /help, все синонимы, Правило 11 в промпте)
   - Инлайн-кнопки Главного меню (nav:record, nav:rx, nav:concilium, nav:sos, nav:translate, nav:vs) и MAIN_MENU_TEXT
-  - Поведение при вызове команд без аргументов (интерактивные памятки с кнопками)
-  - Поведение при вызове команд с аргументами (трансформация в структурированные EBM-промпты)
+  - Поведение при вызове команд без аргументов (интерактивные памятки с кнопками и случайным выбором)
+  - Поведение при вызове команд с аргументами (трансформация в практические, неакадемические EBM-промпты)
   - Колбэки навигации (nav:*)
   - Колбэки шаблонов 043/у (record:*)
   - Колбэки гайдлайнов соматических рисков (rx:*)
   - Колбэк демонстрационного консилиума (concilium:example)
-  - Колбэки экстренной помощи при осложнениях (sos:*)
-  - Колбэки переводчика с пациентского (trans:*)
-  - Колбэки батлов материалов (vs:*)
+  - Все 10 экстренных протоколов Chairside Rescue (sos:*) + динамическая ротация (sos:random)
+  - Все 12 пациентских перлов и скриптов (trans:*) + динамическая ротация (trans:random)
+  - Все 10 батлов стоматологических материалов (vs:*) + динамическая ротация (vs:random)
+  - Наличие кнопок быстрой ротации «🔄 Другой вариант» на каждой карточке
 
 Запуск: python -X utf8 test_clinical_superpowers.py
 """
@@ -271,8 +272,8 @@ class TestClinicalSuperpowers(unittest.TestCase):
 
         asyncio.run(run_concilium_tests())
 
-    def test_07_sos_callbacks(self):
-        print("\n[7] Протоколы экстренных осложнений у кресла (sos:*)")
+    def test_07_sos_callbacks_and_random(self):
+        print("\n[7] Расширенные протоколы осложнений у кресла (10 кейсов + sos:random)")
         bot = FakeBot()
 
         async def run_sos_tests():
@@ -280,7 +281,13 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 ("sos:file", ["Bypass", "C-Pilot", "EDTA", "Деэскалация"]),
                 ("sos:perf", ["MTA", "Biodentine", "перфорация", "коллаген"]),
                 ("sos:sealer", ["NaOCl accident", "Дексаметазон", "нижнечелюстной канал"]),
-                ("sos:bleed", ["Транексамовой", "кюретаж", "ушивание", "давление"])
+                ("sos:bleed", ["Транексамовой", "кюретаж", "ушивание", "давление"]),
+                ("sos:aspiration", ["Геймлиха", "Тренделенбурга", "бронхоскопия"]),
+                ("sos:anesthesia_failure", ["пульпит", "Gow-Gates", "PDL", "Citoject"]),
+                ("sos:emphysema", ["крепитация", "хруст", "Амоксиклав"]),
+                ("sos:sinus_perf", ["Вальсальвы", "соустья", "сморкания"]),
+                ("sos:torque_loss", ["Spinning", "торк", "Undersizing"]),
+                ("sos:dislocation", ["Гиппократа", "ВНЧС", "повязк"])
             ]
             for action, keywords in cases:
                 cb = FakeCallbackEvent(action)
@@ -290,11 +297,23 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
                 for kw in keywords:
                     check(f"{action} содержит ключевой протокол «{kw}»", kw.lower() in msg.lower())
+                # Проверяем наличие кнопки быстрой ротации
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"{action} снабжен кнопкой ротации sos:random", "sos:random" in btn_datas)
+
+            # Проверка динамического случайного выбора sos:random
+            cb_rnd = FakeCallbackEvent("sos:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("sos:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("sos:random вернул полноценный протокол спасения", "SOS-Протокол" in msg_rnd)
 
         asyncio.run(run_sos_tests())
 
-    def test_08_translate_callbacks(self):
-        print("\n[8] Переводчик с «пациентского» на клинический (trans:*)")
+    def test_08_translate_callbacks_and_random(self):
+        print("\n[8] Расширенный переводчик с «пациентского» (12 перлов + trans:random)")
         bot = FakeBot()
 
         async def run_trans_tests():
@@ -302,7 +321,15 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 ("trans:arsenic", ["K04.0", "As2O3", "мышьяк", "Рекорд"]),
                 ("trans:laser", ["K02.1", "фотополимеризационн", "лазер", "длина волны"]),
                 ("trans:bone", ["K05.3", "резорбция", "кость", "SRP"]),
-                ("trans:nerve", ["K04.0", "сквозняк", "нерв", "пульпы"])
+                ("trans:nerve", ["K04.0", "сквозняк", "нерв", "пульпы"]),
+                ("trans:calcium", ["K02.1", "кальций", "беременност", "токсикоз"]),
+                ("trans:milk_teeth", ["молочный", "зачаток", "фолликул"]),
+                ("trans:adrenalin_allergy", ["адреналин", "паническ", "аспирационн"]),
+                ("trans:vodka_garlic", ["чеснок", "ожог", "спирт"]),
+                ("trans:cement_forever", ["Силидонт", "цемент", "ортофосфорн"]),
+                ("trans:why_so_expensive", ["коффердам", "стерилизаци", "ламп"]),
+                ("trans:ultrasound_enamel", ["Моос", "кавитаци", "камень"]),
+                ("trans:crown_superglue", ["Момент", "цианакрилат", "культ"])
             ]
             for action, keywords in cases:
                 cb = FakeCallbackEvent(action)
@@ -312,11 +339,22 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
                 for kw in keywords:
                     check(f"{action} содержит термин/юмор «{kw}»", kw.lower() in msg.lower())
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"{action} снабжен кнопкой ротации trans:random", "trans:random" in btn_datas)
+
+            # Проверка динамического случайного выбора trans:random
+            cb_rnd = FakeCallbackEvent("trans:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("trans:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("trans:random вернул карточку переводчика", "Клинический декодер" in msg_rnd)
 
         asyncio.run(run_trans_tests())
 
-    def test_09_vs_callbacks(self):
-        print("\n[9] Батлы материалов и протоколов (vs:*)")
+    def test_09_vs_callbacks_and_random(self):
+        print("\n[9] Расширенные батлы материалов (10 батлов + vs:random)")
         bot = FakeBot()
 
         async def run_vs_tests():
@@ -324,7 +362,13 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 ("vs:ceramics", ["1200 МПа", "E.max", "10-MDP", "плавиковой"]),
                 ("vs:adhesion", ["OptiBond FL", "Universal", "35–42 МПа", "10-MDP"]),
                 ("vs:sealer", ["AH Plus", "BioRoot", "силикат кальция", "Single-Cone"]),
-                ("vs:mta", ["MTA", "Biodentine", "12 минут", "дисколорит"])
+                ("vs:mta", ["MTA", "Biodentine", "12 минут", "дисколорит"]),
+                ("vs:bopt", ["BOPT", "уступ", "десн", "биотип"]),
+                ("vs:post", ["вкладка", "СВШ", "феррул", "200 ГПа"]),
+                ("vs:implant_retention", ["винтовая", "цементн", "периимплантит"]),
+                ("vs:airflow", ["сода", "эритритол", "глицин", "14 мкм"]),
+                ("vs:isolation", ["коффердам", "слюн", "35–40 МПа"]),
+                ("vs:gi_composite", ["СИЦ", "композит", "Fuji", "фтор"])
             ]
             for action, keywords in cases:
                 cb = FakeCallbackEvent(action)
@@ -334,6 +378,17 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
                 for kw in keywords:
                     check(f"{action} содержит EBM-факт «{kw}»", kw.lower() in msg.lower())
+                last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
+                btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
+                             for row in (last_btns or []) for b in row if hasattr(b, "data")]
+                check(f"{action} снабжен кнопкой ротации vs:random", "vs:random" in btn_datas)
+
+            # Проверка динамического случайного выбора vs:random
+            cb_rnd = FakeCallbackEvent("vs:random")
+            await assistant.handle_quiz_callback(bot, cb_rnd)
+            check("vs:random вызвал answer", cb_rnd.answered_count >= 1)
+            msg_rnd = cb_rnd.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
+            check("vs:random вернул карточку батла материалов", "Material Battle" in msg_rnd)
 
         asyncio.run(run_vs_tests())
 
@@ -376,10 +431,10 @@ class TestClinicalSuperpowers(unittest.TestCase):
             check("/sos без аргументов отправляет меню SOS", len(bot.sent_messages) >= 1)
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                          for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/sos содержит кнопку sos:random", "sos:random" in btn_datas)
             check("/sos содержит кнопку sos:file", "sos:file" in btn_datas)
-            check("/sos содержит кнопку sos:perf", "sos:perf" in btn_datas)
-            check("/sos содержит кнопку sos:sealer", "sos:sealer" in btn_datas)
-            check("/sos содержит кнопку sos:bleed", "sos:bleed" in btn_datas)
+            check("/sos содержит кнопку sos:aspiration", "sos:aspiration" in btn_datas)
+            check("/sos содержит кнопку sos:anesthesia_failure", "sos:anesthesia_failure" in btn_datas)
 
             # 5. /translate (пустая)
             bot.sent_messages.clear()
@@ -388,10 +443,10 @@ class TestClinicalSuperpowers(unittest.TestCase):
             check("/translate без аргументов отправляет меню переводчика", len(bot.sent_messages) >= 1)
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                          for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/translate содержит кнопку trans:random", "trans:random" in btn_datas)
             check("/translate содержит кнопку trans:arsenic", "trans:arsenic" in btn_datas)
-            check("/translate содержит кнопку trans:laser", "trans:laser" in btn_datas)
-            check("/translate содержит кнопку trans:bone", "trans:bone" in btn_datas)
-            check("/translate содержит кнопку trans:nerve", "trans:nerve" in btn_datas)
+            check("/translate содержит кнопку trans:calcium", "trans:calcium" in btn_datas)
+            check("/translate содержит кнопку trans:milk_teeth", "trans:milk_teeth" in btn_datas)
 
             # 6. /vs (пустая)
             bot.sent_messages.clear()
@@ -400,17 +455,17 @@ class TestClinicalSuperpowers(unittest.TestCase):
             check("/vs без аргументов отправляет меню батлов", len(bot.sent_messages) >= 1)
             btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                          for row in (bot.sent_messages[-1].get("buttons") or []) for b in row if hasattr(b, "data")]
+            check("/vs содержит кнопку vs:random", "vs:random" in btn_datas)
             check("/vs содержит кнопку vs:ceramics", "vs:ceramics" in btn_datas)
-            check("/vs содержит кнопку vs:adhesion", "vs:adhesion" in btn_datas)
-            check("/vs содержит кнопку vs:sealer", "vs:sealer" in btn_datas)
-            check("/vs содержит кнопку vs:mta", "vs:mta" in btn_datas)
+            check("/vs содержит кнопку vs:bopt", "vs:bopt" in btn_datas)
+            check("/vs содержит кнопку vs:post", "vs:post" in btn_datas)
 
         asyncio.run(run_pm_tests())
 
 
 def run_tests():
     print("=" * 65)
-    print("ТЕСТИРОВАНИЕ КЛИНИЧЕСКИХ СУПЕРСИЛ STOMCHAT (6 SUPERPOWERS)")
+    print("ТЕСТИРОВАНИЕ КЛИНИЧЕСКИХ СУПЕРСИЛ STOMCHAT (EXPANDED DYNAMIC)")
     print("=" * 65)
 
     suite = unittest.TestLoader().loadTestsFromTestCase(TestClinicalSuperpowers)
