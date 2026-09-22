@@ -1920,10 +1920,6 @@ async def forward_to_mirror(event_msg, target_chat_id):
         except Exception as exc:
             logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
 
-
-LAST_BOT_PASSIVE_REPLY_TS = {}  # {user_id: timestamp_float}
-
-
 @client.on(events.NewMessage(chats=WATCHED_CHATS))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
@@ -2309,31 +2305,16 @@ async def handle_new_message(event):
                 except Exception:
                     pass
 
-                # Защита от дуплетов: если бот пассивно ответил этому врачу менее 60 секунд назад,
-                # и нет прямого обращения к боту — пропускаем пассивный триггер, давая живым коллегам ответить
-                now_ts = time.time()
-                last_reply_ts = LAST_BOT_PASSIVE_REPLY_TS.get(sender_id, 0)
-                is_direct_call = bool(text and ("@docendobot" in text.lower() or text.strip().lower().startswith("бот")))
-                allow_passive = (now_ts - last_reply_ts >= 60.0) or is_direct_call
-
-                replied = False
-                if allow_passive:
-                    replied = await assistant.check_and_trigger_assistant(
-                        bot_client, event, msg_id, text, reply_to_msg_id,
-                        sender_first_name=sender_first_name
-                    )
-                    if replied:
-                        LAST_BOT_PASSIVE_REPLY_TS[sender_id] = now_ts
-                else:
-                    logger.info("Anti-duplet throttle: bot already replied to user %s %.1fs ago. Skipping passive trigger.", sender_id, now_ts - last_reply_ts)
-
+                # Запускаем авто-ассистента (диалог, цитирование бота или пассивный триггер с защитой EBM)
+                replied = await assistant.check_and_trigger_assistant(
+                    bot_client, event, msg_id, text, reply_to_msg_id,
+                    sender_first_name=sender_first_name
+                )
                 if not replied:
                     replied_mention = await assistant.check_bot_mention_trigger(
                         bot_client, event, msg_id, text, sender_first_name=sender_first_name
                     )
-                    if replied_mention:
-                        LAST_BOT_PASSIVE_REPLY_TS[sender_id] = time.time()
-                    elif allow_passive:
+                    if not replied_mention:
                         await assistant.check_and_trigger_referee(bot_client, event, text)
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
