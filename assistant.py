@@ -2145,7 +2145,10 @@ def clean_html_formatting(text):
 
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    # Convert unsupported HTML lists (ul/ol/li) to clean bullet points before tag escaping
+    # Convert unsupported HTML lists (ul/ol/li) and paragraphs/breaks before tag escaping
+    text = re.sub(r'</p\s*>', '\n\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<p[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</?(?:ul|ol)[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<li[^>]*>', '\n• ', text, flags=re.IGNORECASE)
     text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
@@ -2421,10 +2424,11 @@ async def check_llm_triage(context_msgs):
 1. Прямой вопрос/обращение к боту (тег @, упоминание бота, прямой ответ на реплику бота).
 2. Конкретный клинический вопрос/кейс от врача, на который в чате никто не ответил (висит без ответа, врачу нужна помощь).
 3. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения — бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True).
+4. Вопросы по стоматологическому софту и цифровой диагностике (КТ, 3D, КЛКТ, DICOM, Invivo, Romexis, Ez3D, OnDemand3D, Exocad, 3Shape, сшивка сканов, навигационные шаблоны, печать) — это ПОЛНОЦЕННЫЕ КЛИНИЧЕСКИЕ ВОПРОСЫ цифровой стоматологии! На них нужно отвечать (should_reply: true), если врачу требуется помощь.
 
 Когда КАТЕГОРИЧЕСКИ ИГНОРИРОВАТЬ (should_reply: false):
-1. ИДЕТ ЖИВОЙ КОНСИЛИУМ: Запрет на вмешательство действует ТОЛЬКО если коллеги УЖЕ ведут содержательный клинический консилиум и дали полный протокол. Если коллеги ответили односложно или неполно (например, 'снимок?', '+', 'удали'), а вопрос врача требует развернутого клинического протокола лечения, бот МОЖЕТ и ДОЛЖЕН дать доказательную справку (возвращать True). Не вмешиваться, если двое или более врачей уже ведут содержательный клинический консилиум и дали исчерпывающий клинический протокол.
-2. Нерелевантные или неклинические темы (налоги, юмор, быт, цены, работа клиники, расписание, флуд).
+1. ИДЕТ ЖИВОЙ КОНСИЛИУМ: Запрет на вмешательство действует ТОЛЬКО если коллеги УЖЕ ведут содержательный клинический консилиум и дали полный протокол. Не вмешиваться, если двое или более врачей уже ведут содержательный клинический консилиум и дали исчерпывающий клинический протокол.
+2. Нерелевантные нестоматологические темы (налоги, политика, немедицинский быт, цены на бензин, флуд).
 3. Короткие эмоциональные реплики, шутки, сарказм, мысли вслух, междометия.
 4. Если ответ бота будет просто короткой репликой/вбросом на чужое сообщение — СТРОГО ЗАПРЕЩЕНО.
 
@@ -6732,9 +6736,14 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
 
 Задачи на этот шаг (Шаг {current_step + 1} из {CASE_TOTAL_STEPS}):
-1. Оцени последнее действие врача. Коротко укажи, насколько оно корректно и логично (опирайся на стандарты из Базы Знаний, если применимо).
-2. Предоставь новые клинические данные, соответствующие его действию (например, если врач назначил КТ — опиши, что видно на КТ; если сделал анестезию — опиши начало действия и следующий этап работы).
+1. Оцени последнее действие врача / выбранный вариант. Коротко укажи, насколько оно корректно и логично (опирайся на стандарты EBM и Базу Знаний).
+2. Предоставь новые клинические данные, соответствующие его действию (динамика случая, реакция тканей, результаты теста).
 3. Задай следующий конкретный вопрос о дальнейшей тактике.
+4. Предложи ровно 4 варианта дальнейших действий (A, B, C, D):
+   A) [Тактика 1]
+   B) [Тактика 2]
+   C) [Тактика 3]
+   D) [Тактика 4]
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Тон: экспертный, конструктивный.
@@ -6804,7 +6813,11 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             case_id="dynamic",
             history=json.dumps(history_payload, ensure_ascii=False)
         )
-        step_buttons = [[Button.inline("⏹️ Завершить симулятор", data="case:abort")]]
+        step_buttons = [
+            [Button.inline("🔘 Вариант A", data="case:opt:A"), Button.inline("🔘 Вариант B", data="case:opt:B")],
+            [Button.inline("🔘 Вариант C", data="case:opt:C"), Button.inline("🔘 Вариант D", data="case:opt:D")],
+            [Button.inline("⏹️ Завершить симулятор", data="case:abort")]
+        ]
         await bot_client.send_message(entity=chat_id, message=reply_text, buttons=step_buttons, parse_mode='html')
 
     # Реплика экзаменатора уходит и в историю ЛС, а не только в state кейса.
@@ -7595,6 +7608,13 @@ async def handle_private_message(bot_client, event):
             return
 
         # 1. Обработка базовых команд
+        if text.lower().startswith("/start "):
+            _start_arg = text[7:].strip().lower()
+            if _start_arg == "profile" or _start_arg.startswith("profile "):
+                text = "/profile"
+            elif _start_arg == "protocols" or _start_arg.startswith("protocols "):
+                text = "/protocols"
+
         if text.lower().startswith(("/start consult", "/start_consult")):
             consult_welcome = (
                 "👨‍⚕️ <b>Клинический консилиум StomChat</b>\n\n"
@@ -8753,6 +8773,34 @@ async def handle_private_message(bot_client, event):
                     )
                 return
 
+        # Проверка намерения записи на консультацию / связи с куратором (Адиля / администрация)
+        text_lower = (text or "").lower()
+        booking_keywords = (
+            "куратор", "адиля", "адиле", "адилю",
+            "записаться на консультацию", "запись на консультацию",
+            "записаться на прием", "запись на приём", "записаться на очный",
+            "очная консультация", "очный разбор", "хочу на консультацию",
+            "как записаться", "как попасть на прием", "как попасть на консультацию",
+            "связаться с администратором", "контакты администратора"
+        )
+        if any(k in text_lower for k in booking_keywords) and not (event.photo or event.video):
+            booking_reply = (
+                "👋 <b>Запись на консультацию и связь с куратором StomChat</b>\n\n"
+                "Доктор, по вопросам очных консультаций, разборов сложных случаев, участия в курсах "
+                "и записи в клинику вы можете напрямую связаться с нашим куратором:\n\n"
+                "👩‍⚕️ <b>Куратор сообщества:</b> Адиля (@adilyastom)\n"
+                "💬 <b>Формат:</b> напишите в ЛС куратору, чтобы согласовать дату, время и формат разбора.\n\n"
+                "<i>Если вам требуется разобрать снимок или получить EBM-протокол онлайн прямо сейчас — "
+                "просто пришлите рентген или опишите клиническую картину зуба сюда в чат.</i>"
+            )
+            from telethon import Button
+            booking_buttons = [
+                [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("💬 Клинический вопрос", data="nav:chat")],
+                [Button.inline("🏠 Главное меню", data="nav:main")]
+            ]
+            await bot_client.send_message(entity=chat_id, message=booking_reply, buttons=booking_buttons, parse_mode='html')
+            return
+
         # Получаем стиль и долговременную клиническую память пользователя из БД (до 64 КБ)
         user_profile = await database.get_user_profile(chat_id)
         selected_style = user_profile.get("selected_style", "colleague_friendly")
@@ -8899,8 +8947,8 @@ async def handle_private_message(bot_client, event):
 7. СМАЙЛИКИ: Никаких смайликов и эмодзи.
 8. НАУЧНАЯ ТОЧНОСТЬ: Опирайся на золотые стандарты стоматологии и доказательную медицину.
 9. КОНТЕКСТ: Учитывай всю историю диалога.
-10. АКТИВНОЕ ВЕДЕНИЕ КОНСИЛИУМА (MULTI-TURN RETENTION):
-    - В конце разбора сложного клинического протокола задай 1 точечный профессиональный вопрос коллеге по применяемым материалам или этапам (например, марка цемента, дизайн уступа, толщина композитной стенки).
+10. АКТИВНОЕ ВЕДЕНИЕ КОНСИЛИУМА:
+    - Задавай уточняющий вопрос собеседнику ТОЛЬКО тогда, когда это действительно необходимо для дифдиагноза или выбора тактики. Если вопрос коллеги простой или ответ уже исчерпывающий — НЕ задавай искусственных экзаменационных вопросов (например, про цементы или уступы)! Отвечай строго по существу.
 11. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата."""
             else:
                 system_role = f"""Ты — врач-стоматолог из чата "StomChat", ведёшь диалог с коллегой в личных сообщениях.
@@ -9316,6 +9364,73 @@ NO — если это случайное упоминание, обсужден
 
     except Exception as e:
         logger.exception(f"Unexpected error in check_bot_mention_trigger: {e}")
+
+
+async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
+    """Перехватывает команды ЛС (/profile, /protocols), отправленные в группу, и перенаправляет в ЛС."""
+    if not cmd:
+        return False
+    cmd_clean = cmd.strip().lower()
+    first_word = cmd_clean.split()[0] if cmd_clean else ""
+    cmd_name = first_word.split("@")[0]
+
+    is_profile = cmd_name in ("/profile", "/me", "/профиль")
+    is_protocols = cmd_name in ("/protocols",)
+
+    if not (is_profile or is_protocols):
+        return False
+
+    from telethon import Button
+    username = (BOT_USERNAME or os.getenv("STOMCHAT_BOT_USERNAME", "docendobot")).lstrip("@")
+    reply_to = getattr(event, "id", None) or getattr(getattr(event, "message", None), "id", None)
+
+    if is_profile:
+        msg_text = f"Доктор, чтобы не спамить в чат, ваш профиль открыт в ЛС: @{username}"
+        btn_text = "👤 Открыть профиль в ЛС"
+        start_param = "profile"
+    else:
+        msg_text = f"Доктор, чтобы не спамить в чат, протоколы открыты в ЛС: @{username}"
+        btn_text = "📚 Открыть протоколы в ЛС"
+        start_param = "protocols"
+
+    url = f"https://t.me/{username}?start={start_param}"
+    buttons = [[Button.url(btn_text, url)]]
+
+    try:
+        await bot_client.send_message(
+            entity=event.chat_id,
+            message=msg_text,
+            reply_to=reply_to,
+            buttons=buttons,
+        )
+    except Exception as e:
+        logger.error(f"Failed to send group PM redirect message: {e}")
+
+    # Пробуем также сразу доставить карточку в ЛС, если пользователь уже запускал бота
+    try:
+        sender_id = getattr(event, "sender_id", None)
+        if sender_id:
+            if is_profile:
+                sender = await event.get_sender()
+                display_name = (
+                    (getattr(sender, "first_name", "") or "") +
+                    (" " + getattr(sender, "last_name", "") if getattr(sender, "last_name", "") else "")
+                ).strip() or getattr(sender, "username", "") or f"Доктор #{sender_id}"
+                memory = await database.get_user_memory(sender_id)
+                profile_card = user_memory.format_user_profile_card(memory, display_name)
+                profile_buttons = [
+                    [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("⭐ Закладки", data="nav:bookmarks")],
+                    [Button.inline("🏠 Главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(entity=sender_id, message=profile_card, buttons=profile_buttons, parse_mode='html')
+            else:
+                all_protos = await database.get_clinical_protocols(limit=20)
+                msg_proto, proto_btns = protocol_extractor.format_protocol_catalog(all_protos)
+                await bot_client.send_message(entity=sender_id, message=msg_proto, buttons=proto_btns, parse_mode='html')
+    except Exception as dm_err:
+        logger.debug(f"Proactive DM redirect send skipped/failed: {dm_err}")
+
+    return True
 
 
 async def handle_group_summary(bot_client, event, reply_to_msg_id):
@@ -11229,6 +11344,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=record action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "record", ai_tag or "ai")
@@ -11252,6 +11368,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=rx action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "rx", ai_tag or "ai")
@@ -11275,6 +11392,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=concilium action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "concilium", ai_tag or "ai")
@@ -11298,6 +11416,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=sos action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "sos", ai_tag or "ai")
@@ -11321,6 +11440,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=trans action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "trans", ai_tag or "ai")
@@ -11344,6 +11464,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         sub_action = parts[1] if len(parts) > 1 else ""
         sub_var = parts[2] if len(parts) > 2 else None
+        logger.info("clinical_superpower_click user_id=%s section=vs action=%s variant=%s is_ai=%s", getattr(event, "sender_id", None), sub_action, sub_var, sub_action == "ai")
         if sub_action == "ai":
             ai_tag = ":".join(parts[2:]) if len(parts) > 2 else ""
             await handle_clinical_ai_generation(bot_client, event, "vs", ai_tag or "ai")
@@ -11675,12 +11796,20 @@ async def handle_quiz_callback(bot_client, event):
 Ты — старший стоматолог-экзаменатор. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
 Напиши:
 1. Жалобы пациента и анамнез.
-2. Данные визуального осмотра.
-3. Задай ровно один конкретный вопрос о первом действии врача (например, какие дополнительные исследования назначить, или какой инструмент выбрать).
+2. Данные визуального осмотра и тестов.
+3. Задай ровно один конкретный вопрос о первом действии врача.
+4. Предложи ровно 4 варианта тактики (A, B, C, D):
+   - 1-2 из них должны быть клинически обоснованными (EBM).
+   - Остальные — распространенными ошибками или субоптимальными решениями.
+   Формат:
+   A) [Тактика 1]
+   B) [Тактика 2]
+   C) [Тактика 3]
+   D) [Тактика 4]
 
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Будь лаконичен, профессионален.
-2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
+2. Не раскрывай, какой вариант верный!
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
@@ -11691,7 +11820,11 @@ async def handle_quiz_callback(bot_client, event):
                     "🎮 <b>Клинический случай [Эндодонтия / Терапия]:</b>\n\n"
                     "<b>Пациент:</b> 34 года, жалобы на самопроизвольные приступообразные ночные боли в зубе 2.6 с иррадиацией в висок.\n"
                     "<b>Осмотр:</b> глубокая кариозная полость на медиально-окклюзионной поверхности, зондирование дна резко болезненно, перкуссия слабо болезненна, термопроба резко положительная с длительным болевым ответом (>1 мин).\n\n"
-                    "❓ <b>Вопрос экзаменатора:</b> Какой предварительный диагноз и каков ваш первый шаг при инструментальной и медикаментозной обработке?"
+                    "❓ <b>Вопрос экзаменатора:</b> Какой предварительный диагноз и каков ваш первый шаг при инструментальной и медикаментозной обработке?\n\n"
+                    "A) Необратимый пульпит. Анестезия, коффердам, раскрытие, экстирпация, NaOCl 3%.\n"
+                    "B) Обратимый пульпит. Прямое покрытие пульпы МТА и постоянная пломба в 1 визит.\n"
+                    "C) Острый периодонтит. Оставить зуб открытым на 3 дня под содовые полоскания.\n"
+                    "D) Назначить системные антибиотики и отправить на КТ без вскрытия полости."
                 )
                 starting_text = fallback_case
             else:
@@ -11710,20 +11843,32 @@ async def handle_quiz_callback(bot_client, event):
             )
             
             buttons = [
+                [Button.inline("🔘 Вариант A", data="case:opt:A"), Button.inline("🔘 Вариант B", data="case:opt:B")],
+                [Button.inline("🔘 Вариант C", data="case:opt:C"), Button.inline("🔘 Вариант D", data="case:opt:D")],
                 [Button.inline("⏹️ Сбросить симулятор", data="case:abort")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
             case_display = (
-                f"🎮 <b>Клинический симулятор (Шаг 1):</b>\n\n"
+                f"🎮 <b>Клинический симулятор (Шаг 1 из {CASE_TOTAL_STEPS}):</b>\n\n"
                 f"{starting_text}\n\n"
-                f"<i>Ответьте на вопрос сообщением (текстом или голосом) в этот диалог. Для сброса используйте кнопку ниже или команду /abort.</i>"
+                f"<i>Выберите вариант кнопкой ниже (или ответьте текстом / голосом). Для сброса: /abort.</i>"
             )
             await edit_callback_message(bot_client, event, case_display,
                                        "edit_message:case_start", buttons=buttons,
                                        parse_mode='html')
             await event.answer()
             return
-            
+
+        elif case_sub == "opt":
+            opt_letter = parts[2] if len(parts) > 2 else "A"
+            user_state = await database.get_user_interactive_state(event.sender_id)
+            if not user_state or user_state.get("state_type") != "case":
+                await event.answer("Кейс уже завершен или устарел. Нажмите «🚀 Начать клинический кейс».", alert=True)
+                return
+            await event.answer(f"Выбран вариант {opt_letter}")
+            await handle_interactive_case_step(bot_client, event.sender_id, f"Выбираю вариант {opt_letter}", user_state)
+            return
+
         elif case_sub in ("abort", "exit"):
             await database.clear_user_interactive_state(event.sender_id)
             abort_text = (

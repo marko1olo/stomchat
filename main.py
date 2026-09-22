@@ -66,6 +66,7 @@ FALLBACK_BOT_ID = _env_int("STOMCHAT_BOT_ID", 7971556097)
 # соседняя проверка f"@{assistant.BOT_ID}" сравнивала текст с числовым id и
 # не срабатывала никогда.
 FALLBACK_BOT_USERNAME = os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot").lstrip("@").lower()
+MIRROR_CHAT_ID = _env_int("MIRROR_CHAT_ID", -1004326633527)
 
 HEALTH_CHECK_INTERVAL_SECONDS = 300
 HEALTH_FAILURE_LIMIT = 3
@@ -1880,6 +1881,41 @@ if not config.SOURCE_CHAT_ID:
         "Проверьте .env, иначе бот будет работать только в тестовом чате."
     )
 
+# --- Зеркалирование сообщений в реальном времени ---
+_mirror_album_lock = asyncio.Lock()
+_mirror_album_buffer = {}
+_mirror_album_tasks = {}
+
+async def _flush_mirror_album(grouped_id, target_chat_id):
+    await asyncio.sleep(1.5)
+    async with _mirror_album_lock:
+        msgs = _mirror_album_buffer.pop(grouped_id, [])
+        _mirror_album_tasks.pop(grouped_id, None)
+    if msgs:
+        try:
+            await bot_client.forward_messages(target_chat_id, msgs)
+            logger.info("Mirror forwarded album grouped_id=%s (%d msgs) to %s", grouped_id, len(msgs), target_chat_id)
+        except Exception as exc:
+            logger.warning("Failed to forward mirror album %s: %s", grouped_id, exc)
+
+async def forward_to_mirror(event_msg, target_chat_id):
+    if not target_chat_id:
+        return
+    grouped_id = getattr(event_msg, "grouped_id", None)
+    if grouped_id:
+        async with _mirror_album_lock:
+            if grouped_id not in _mirror_album_buffer:
+                _mirror_album_buffer[grouped_id] = []
+                task = asyncio.create_task(_flush_mirror_album(grouped_id, target_chat_id))
+                _mirror_album_tasks[grouped_id] = task
+            _mirror_album_buffer[grouped_id].append(event_msg)
+    else:
+        try:
+            await bot_client.forward_messages(target_chat_id, event_msg)
+            logger.info("Mirror forwarded msg_id=%s to %s", event_msg.id, target_chat_id)
+        except Exception as exc:
+            logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
+
 
 @client.on(events.NewMessage(chats=WATCHED_CHATS))
 async def handle_new_message(event):
@@ -1896,6 +1932,11 @@ async def handle_new_message(event):
         PROCESSED_MSG_IDS.append(key)
         if len(PROCESSED_MSG_IDS) > 1000:
             PROCESSED_MSG_IDS.pop(0)
+
+        # Пересылка в зеркало в реальном времени (не блокирует основной поток)
+        if MIRROR_CHAT_ID and chat_id == config.SOURCE_CHAT_ID:
+            asyncio.create_task(forward_to_mirror(event.message, MIRROR_CHAT_ID))
+
         sender_id = event.sender_id
         
         # Флаг, является ли отправителем сам бот
@@ -2146,6 +2187,10 @@ async def handle_new_message(event):
                 cmd = text.strip()
                 cmd_lower = cmd.lower()
                 
+                # Перехват команд лички с перенаправлением в ЛС
+                if await assistant.handle_group_pm_redirect(bot_client, event, cmd):
+                    return True
+
                 # 0. Экстренное удаление сообщений (админское)
                 if cmd_lower in ("/wipe", "/delete", "/del") and reply_to_msg_id:
                     try:

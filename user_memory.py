@@ -694,6 +694,13 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             current_group_summary = mem.get("group_summary", "")
             current_spec = mem.get("specialty", "")
             last_analyzed = mem.get("last_group_analyzed_id", 0)
+            facts_raw = mem.get("facts_json") or "[]"
+            try:
+                current_facts = json.loads(facts_raw) if isinstance(facts_raw, str) else list(facts_raw)
+                if not isinstance(current_facts, list):
+                    current_facts = []
+            except Exception:
+                current_facts = []
 
             # Получаем свежие сообщения пользователя из лога/дампа чата
             msgs = await database.get_user_messages_since(user_id, since_msg_id=last_analyzed, limit=25)
@@ -704,7 +711,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 
             # Промпт для дешёвой нейронки
             prompt = f"""Ты — клинический аналитик сообщества StomChat.
-Проанализируй реплики врача в стоматологическом чате и обнови его клинический профиль для беседы.
+Проанализируй реплики врача в стоматологическом чате и обнови его клинический профиль и ключевые факты.
 
 Врач: {sender_name} (@{sender_username})
 Текущий профиль по беседе:
@@ -720,11 +727,13 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
    - Специализация врача.
    - Клинические взгляды, протоколы, используемые бренды и материалы, которые он упоминает.
    - Характерные клинические случаи и позиция в дискуссиях.
-2. Формат: емкий связный текст (1-2 абзаца, строго до 8 КБ).
-3. Верни JSON:
+2. Извлеки ключевые факты о враче (используемое оборудование, микроскоп, протоколы, любимые материалы, стаж/город, если упоминал).
+3. Формат: емкий связный текст (1-2 абзаца, строго до 8 КБ).
+4. Верни JSON:
 {{
   "specialty": "специализация (если понятна)",
-  "group_summary": "актуализированный профиль врача для беседы (до 8 КБ)"
+  "group_summary": "актуализированный профиль врача для беседы (до 8 КБ)",
+  "new_facts": ["факт 1", "факт 2"]
 }}
 """
 
@@ -742,6 +751,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 
             new_spec = parsed.get("specialty", "").strip()
             new_grp_summary = parsed.get("group_summary", "").strip()
+            new_facts = parsed.get("new_facts", [])
 
             is_spec_valid = (
                 new_spec
@@ -752,6 +762,14 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             final_spec = new_spec if is_spec_valid else current_spec
             final_grp_summary = new_grp_summary if new_grp_summary else current_group_summary
 
+            if isinstance(new_facts, list):
+                for f in new_facts:
+                    f_str = str(f).strip()
+                    if f_str and f_str not in current_facts:
+                        current_facts.append(f_str)
+            if len(current_facts) > 30:
+                current_facts = current_facts[-30:]
+
             # Жесткий потолок 8 КБ для беседы
             if len(final_grp_summary) > GROUP_USER_MEMORY_LIMIT:
                 final_grp_summary = final_grp_summary[:GROUP_USER_MEMORY_LIMIT]
@@ -760,6 +778,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
                 user_id=user_id,
                 specialty=final_spec,
                 group_summary=final_grp_summary,
+                facts_json=json.dumps(current_facts, ensure_ascii=False),
                 group_message_count=mem.get("group_message_count", 0) + len(msgs),
                 last_group_analyzed_id=max_id,
                 username=sender_username,
@@ -767,7 +786,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             )
             logger.info(
                 f"Daemon updated group memory for doctor {user_id} ({sender_name}): "
-                f"len={len(final_grp_summary)}, max_msg_id={max_id}"
+                f"len={len(final_grp_summary)}, facts={len(current_facts)}, max_msg_id={max_id}"
             )
 
             # Пауза между пользователями (cooldown 2.5с для бережного отношения к API ключам)
