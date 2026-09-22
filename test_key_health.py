@@ -357,7 +357,7 @@ check("удача по живому ключу чужих пометок не с
 # последнюю забаненную, она отвечает — значит забанена она напрасно.
 _assistant_models = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                      "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
-                     "qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "openai/gpt-oss-120b",
+                     "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
                      "llama-3.3-70b-versatile")
 _last_model = "openai/gpt-oss-120b"
 reset({_last_model: "ответ резервной", "llama-3.3-70b-versatile": "ответ резервной"})
@@ -566,7 +566,7 @@ reset({name: _heavy_error for name in ("gemini-3.8-flash", "gemini-3.7-flash",
                                        "gemini-3.6-flash", "gemini-3.5-flash",
                                        "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
                                        "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
-                                       "qwen/qwen3.6-27b", "llama-3.3-70b-versatile")})
+                                       "llama-3.3-70b-versatile")})
 gc.get_openai_client = clock_client_maker
 gc.time.monotonic = lambda: _CLOCK[0]
 try:

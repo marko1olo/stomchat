@@ -389,6 +389,10 @@ async def runtime_telemetry_task():
                 )
         except Exception as exc:
             logger.warning("runtime_memory_error %s", exc)
+        try:
+            await database.cleanup_stale_interactive_states()
+        except Exception as st_err:
+            logger.warning("cleanup_stale_interactive_states error: %s", st_err)
         cleanup_temp_media()
         await asyncio.sleep(900)
 
@@ -1917,6 +1921,9 @@ async def forward_to_mirror(event_msg, target_chat_id):
             logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
 
 
+LAST_BOT_PASSIVE_REPLY_TS = {}  # {user_id: timestamp_float}
+
+
 @client.on(events.NewMessage(chats=WATCHED_CHATS))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
@@ -2129,12 +2136,26 @@ async def handle_new_message(event):
                         )
                         
                         confirm_text = "📌 <b>Клинический пост сохранен в ваши закладки!</b>\nВы можете просмотреть и найти его в ЛС бота по команде /bookmarks."
-                        await bot_client.send_message(
-                            entity=event.chat_id,
-                            message=confirm_text,
-                            reply_to=msg_id,
-                            parse_mode='html'
-                        )
+                        # Отправляем подтверждение лично доктору в ЛС, чтобы не спамить в общий чат на 800+ врачей
+                        pm_delivered = False
+                        try:
+                            await bot_client.send_message(
+                                entity=sender_id,
+                                message=confirm_text,
+                                parse_mode='html'
+                            )
+                            pm_delivered = True
+                        except Exception as pm_err:
+                            logger.info("Could not deliver bookmark confirmation in PM: %s", pm_err)
+
+                        # Если в ЛС доставить не удалось — отправляем короткий ответ в чат
+                        if not pm_delivered:
+                            await bot_client.send_message(
+                                entity=event.chat_id,
+                                message=confirm_text,
+                                reply_to=msg_id,
+                                parse_mode='html'
+                            )
                 except Exception as bookmark_exc:
                     logger.error(f"Failed to save clinical bookmark: {bookmark_exc}")
 
@@ -2277,24 +2298,42 @@ async def handle_new_message(event):
                 # пропускаем текстовый триггер — его обработает медиа-ассистент.
                 if event.photo or event.video or snapshot_document is not None:
                     return
-                # Запускаем авто-ассистента. Если он сработал и ответил (вернул True), то mention_trigger пропускаем, чтобы не было двойных ответов
-                replied = await assistant.check_and_trigger_assistant(
-                    bot_client, event, msg_id, text, reply_to_msg_id,
-                    sender_first_name=sender_first_name
-                )
+
+                # Сбрасываем счетчик неотвеченных групповых пингов при активности врача
+                try:
+                    assistant.commit_pm_ping(
+                        sender_id,
+                        unanswered_group_pings=0,
+                        last_activity=datetime.now().isoformat()
+                    )
+                except Exception:
+                    pass
+
+                # Защита от дуплетов: если бот пассивно ответил этому врачу менее 60 секунд назад,
+                # и нет прямого обращения к боту — пропускаем пассивный триггер, давая живым коллегам ответить
+                now_ts = time.time()
+                last_reply_ts = LAST_BOT_PASSIVE_REPLY_TS.get(sender_id, 0)
+                is_direct_call = bool(text and ("@docendobot" in text.lower() or text.strip().lower().startswith("бот")))
+                allow_passive = (now_ts - last_reply_ts >= 60.0) or is_direct_call
+
+                replied = False
+                if allow_passive:
+                    replied = await assistant.check_and_trigger_assistant(
+                        bot_client, event, msg_id, text, reply_to_msg_id,
+                        sender_first_name=sender_first_name
+                    )
+                    if replied:
+                        LAST_BOT_PASSIVE_REPLY_TS[sender_id] = now_ts
+                else:
+                    logger.info("Anti-duplet throttle: bot already replied to user %s %.1fs ago. Skipping passive trigger.", sender_id, now_ts - last_reply_ts)
+
                 if not replied:
-                    # Обращение по имени. Комментарий здесь говорил «always shadow
-                    # mode until promoted», и это УЖЕ НЕВЕРНО: в assistant.py стоит
-                    # BOT_MENTION_SHADOW_MODE = False с пометкой «выкачено в
-                    # боевой», то есть ответ уходит врачу, а не в теневой журнал.
-                    # Цена расхождения не в поведении, а в следующем читателе: он
-                    # либо пойдёт искать непромотированный режим, которого нет,
-                    # либо поверит комментарию и решит, что врач ответа не видит.
                     replied_mention = await assistant.check_bot_mention_trigger(
                         bot_client, event, msg_id, text, sender_first_name=sender_first_name
                     )
-                    # Если бот не ответил ни как пассивный, ни по упоминанию, проверяем рефери!
-                    if not replied_mention:
+                    if replied_mention:
+                        LAST_BOT_PASSIVE_REPLY_TS[sender_id] = time.time()
+                    elif allow_passive:
                         await assistant.check_and_trigger_referee(bot_client, event, text)
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
@@ -3061,7 +3100,37 @@ async def start_bot():
     finally:
         await stop_media_analysis_workers()
         runtime_guard.stop_watchdog()
+
+
+def acquire_single_instance_lock():
+    """Гарантирует запуск только одного экземпляра бота (Single Instance Lock)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
+            ERROR_ALREADY_EXISTS = 183
+            mutex = kernel32.CreateMutexW(None, False, mutex_name)
+            last_err = kernel32.GetLastError()
+            if last_err == ERROR_ALREADY_EXISTS:
+                logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+                sys.exit(0)
+            return mutex
+        except Exception as e:
+            logger.warning(f"Failed to create Windows named mutex: {e}. Falling back to lockfile.")
+
+    try:
+        import fcntl
+        lock_file = open("bot_instance.lock", "w")
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except Exception:
+        pass
+    return None
+
+
 if __name__ == '__main__':
+    _instance_lock = acquire_single_instance_lock()
     try:
         client.loop.run_until_complete(start_bot())
     except KeyboardInterrupt:

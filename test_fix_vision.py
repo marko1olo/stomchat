@@ -76,9 +76,8 @@ def check(name, cond, detail=""):
 M35 = "gemini-3.5-flash-lite"
 M31 = "gemini-3.1-flash-lite"
 MQW38 = "qwen/qwen3.8-27b"
-MQW36 = "qwen/qwen3.6-27b"
 MQW = MQW38
-ALL_MODELS = (M35, M31, MQW38, MQW36)
+ALL_MODELS = (M35, M31, MQW38)
 
 RUSSIAN_OK = "Прицельный снимок 36 зуба, краевая щель под коронкой."
 ENGLISH_ONLY = "The image shows a periapical radiograph of tooth 36."
@@ -219,8 +218,7 @@ async def run():
     print("\n[6] Приоритет не сузил каскад: резервные модели остались доступны")
     reset({M35: Exception("400 invalid_request: unsupported image"),
            M31: Exception("400 invalid_request: unsupported image"),
-           MQW38: Exception("400 invalid_request: unsupported image"),
-           MQW36: RUSSIAN_OK})
+           MQW38: RUSSIAN_OK})
     result = await vision.describe_image(["/tmp/fake.jpg"], is_passive=False)
     check("ответ получен от последней модели пула", result == RUSSIAN_OK, f"got {result!r}")
     check("порядок обхода — от старшей к младшей", models_in_order() == list(ALL_MODELS),

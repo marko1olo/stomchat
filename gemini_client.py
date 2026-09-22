@@ -381,9 +381,11 @@ def active_models(cascade):
         seen.add(model_name)
         ban_until = banned.get(model_name, 0)
         if ban_until > now:
+            remaining = int(ban_until - now)
+            reason = "(404/not_found)" if remaining > 3600 else "due to 503/504"
             logger.info(
-                f"Model {model_name} is temporarily banned due to 503/504 for "
-                f"another {int(ban_until - now)}s. Skipping."
+                f"Model {model_name} is temporarily banned {reason} for "
+                f"another {remaining}s. Skipping."
             )
             continue
         active.append(entry)
@@ -650,7 +652,6 @@ def generate_text(prompt, status_context=None, timeout=None):
         models_cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("qwen/qwen3.6-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.8-flash", "gemini"),
@@ -664,7 +665,6 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("qwen/qwen3.6-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
         ]
@@ -675,7 +675,6 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
-            ("qwen/qwen3.6-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
         ]
@@ -689,7 +688,6 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
-            ("qwen/qwen3.6-27b", "groq"),
         ]
 
     # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
@@ -1532,7 +1530,6 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
     cascade = [
         ("qwen/qwen3.8-27b", "groq"),
         ("openai/gpt-oss-120b", "groq"),
-        ("qwen/qwen3.6-27b", "groq"),
         ("gemini-3.8-flash", "gemini"),
         ("gemini-3.7-flash", "gemini"),
     ]

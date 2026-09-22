@@ -180,7 +180,7 @@ for kind, budget in (("assistant", 90), ("pm_chat", 90), ("bot_mention_reply", 6
                      ("transcription_corrector", 20)):
     reset({m: ANY_FAIL for m in (
         "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile",
+        "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile",
         "openai/gpt-oss-120b")})
     res = gc.generate_text("вопрос", {"kind": kind, "thinking_level": "HIGH"}, timeout=budget)
     spent = CLOCK.t
@@ -323,7 +323,7 @@ print("\n[6] После последней попытки последней м�
 # Сон 8-10 с стоял перед самым `return None`: повторять было уже нечем, а врач
 # ждал эти секунды впустую.
 reset({m: Exception("connection reset by peer") for m in (
-    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b", "llama-3.3-70b-versatile")}, spend_full_timeout=False)
 res = gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("каскад провалился (условия проверки соблюдены)", res is None and len(REQUESTS) >= 2,
@@ -335,7 +335,7 @@ check("снов ровно на один меньше числа запросо�
 
 # Тот же случай без бюджета: сон перед возвратом None не нужен и здесь.
 reset({m: Exception("connection reset by peer") for m in (
-    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b", "llama-3.3-70b-versatile")}, spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"})
 check("без бюджета тоже не спит перед сдачей", EVENTS[-1][0] == "req",
@@ -364,7 +364,7 @@ check("стадия помечена исчерпанием каскада", sta
       f"got {status().get('stage')}")
 
 reset({m: Exception("400 The input token count exceeds the maximum number of tokens allowed")
-       for m in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b",
+       for m in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b",
                  "openai/gpt-oss-120b")}, spend_full_timeout=False)
 res = gc.generate_text("очень длинный промпт", {"kind": "pm_chat", "thinking_level": "HIGH"},
                        timeout=90)
@@ -385,7 +385,7 @@ check("после успеха причина провала сброшена",
 # Ключ — секрет: он не должен просочиться в файл статуса вместе с причиной.
 leaky_key = GOOGLE_KEYS[0]
 reset({m: Exception(f"401 invalid api key {leaky_key} rejected")
-       for m in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b",
+       for m in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b",
                  "openai/gpt-oss-120b")}, spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "pm_chat", "thinking_level": "HIGH"}, timeout=90)
 leaked = (gc.get_last_failure() or {}).get("detail", "")
@@ -394,7 +394,7 @@ check("ключ из текста ошибки вырезан", leaky_key not in
 print("\n[8] Бюджет не тратится на попытки, которые не успеют завершиться")
 reset({m: Exception("504 gateway timeout") for m in ()}, spend_full_timeout=True)
 _behaviour.update({m: Exception("connection reset") for m in (
-    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b")})
 gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("каскад остановился внутри бюджета", CLOCK.t <= 90.0, f"got {CLOCK.t:.1f}s")

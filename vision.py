@@ -248,12 +248,11 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать на английском языке, выводить черновики, шаги размышления (Reasoning/Thinking) или теги <think>."
             )
             
-            # Load balancing pool: Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.8 27B, Qwen 3.6 27B
+            # Load balancing pool: Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.8 27B
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
                 ("qwen/qwen3.8-27b", "groq"),
-                ("qwen/qwen3.6-27b", "groq"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()

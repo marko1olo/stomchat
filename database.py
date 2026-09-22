@@ -5,6 +5,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import timezone
+import time
 
 import config
 
@@ -953,6 +954,37 @@ async def clear_user_interactive_state(user_id):
                 "DELETE FROM user_interactive_states WHERE user_id = ?",
                 (user_id,),
             )
+    return await _run_db(operation)
+
+
+async def cleanup_stale_interactive_states(max_age_seconds=7200):
+    """Удаляет зависшие интерактивные сессии (старше max_age_seconds)."""
+    now = time.time()
+    def operation():
+        with _connection() as db:
+            rows = db.execute("SELECT user_id, history FROM user_interactive_states").fetchall()
+            deleted = 0
+            for user_id, hist_raw in rows:
+                is_stale = False
+                try:
+                    if not hist_raw:
+                        is_stale = True
+                    else:
+                        data = json.loads(hist_raw)
+                        if isinstance(data, dict):
+                            ts = data.get("last_updated") or 0
+                            if ts and (now - float(ts) > max_age_seconds):
+                                is_stale = True
+                        elif isinstance(data, list):
+                            # Устаревший формат списка без временной метки
+                            is_stale = True
+                except Exception:
+                    is_stale = True
+
+                if is_stale:
+                    db.execute("DELETE FROM user_interactive_states WHERE user_id = ?", (user_id,))
+                    deleted += 1
+            return deleted
     return await _run_db(operation)
 
 

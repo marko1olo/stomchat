@@ -139,8 +139,7 @@ check("сделан ровно один запрос", len(REQUESTS) == 1, f"got
 print("\n[5] Все ключи провайдера на кулдауне — каскад идёт дальше, а не молчит")
 reset({"gemini-3.5-flash": None, "gemini-3.7-flash": None, "gemini-3.6-flash": None,
        "gemini-3.8-flash": None, "gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
-       "llama-3.3-70b-versatile": "ответ от groq", "qwen/qwen3.8-27b": "ответ от groq",
-       "qwen/qwen3.6-27b": "ответ от groq"})
+       "llama-3.3-70b-versatile": "ответ от groq", "qwen/qwen3.8-27b": "ответ от groq"})
 for key in GOOGLE_KEYS:
     gc.set_key_cooldown("gemini", key, seconds=300)
 
