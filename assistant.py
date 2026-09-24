@@ -13002,11 +13002,9 @@ async def check_and_trigger_referee(bot_client, event, text):
     chat_id = event.chat_id
     msg_id = event.message.id
     
-    # 1. Проверяем тишину и флаг активности
+    # 1. Проверяем тишину
     state = load_state()
     if is_silenced(state, "referee trigger"):
-        return
-    if not ENABLE_REFEREE:
         return
 
     text_lower = text.lower()
@@ -13066,9 +13064,12 @@ async def check_and_trigger_referee(bot_client, event, text):
         except Exception as chain_err:
             logger.error(f"Error fetching dynamic context for referee: {chain_err}")
 
-    # Автодетект по числу реплаев отключен: мирные клинические дискуссии врачей
-    # не должны прерываться роботом-арбитром без явных токсичных маркеров конфликта.
-    pass
+    # Автодетект споров по длинным цепочкам реплаев
+    if not should_intervene and context_msgs:
+        if len(context_msgs) >= 4:
+            should_intervene = await analyze_dispute_need(context_msgs)
+            if should_intervene:
+                logger.info(f"Dispute auto-detected from reply chain in msg_id={msg_id}.")
 
     if not should_intervene:
         return
@@ -13117,10 +13118,8 @@ async def check_and_trigger_referee(bot_client, event, text):
     wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
 
     prompt = f"""
-Ты — независимый клинический арбитр стоматологического сообщества "StomChat", эксперт доказательной медицины (EBM).
-В чате врачей возник профессиональный спор или конфликт мнений по клиническому вопросу.
-
-История дискуссии:
+Ты — опытный врач-стоматолог, коллега у кресла в профессиональном сообществе "StomChat". Говоришь на равных, емко и строго по делу, как врач врачу.
+Коллеги обсуждают сложный клинический вопрос или тактику лечения:
 {chain_str}
 
 Справка из Базы Знаний (stomat_wiki):
@@ -13128,11 +13127,12 @@ async def check_and_trigger_referee(bot_client, event, text):
 [КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции!]
 [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Фильтруй всё через призму доказательной медицины (EBM), международных стандартов (ADA, ESE, ITI, Cochrane) и клинических протоколов.]
 
-Твоя задача: объективно и беспристрастно рассудить разногласие коллег с позиций доказательной стоматологии.
-1. Четко и спокойно укажи доказательные стандарты, клинические показания и границы применения для каждого обсуждаемого метода/подхода (Метод А vs Метод Б).
-2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО морализаторство, поучения, шутки, призывы «жить дружно» или «уважать коллег». Никакой снисходительности или сарказма. Только факты, протокол и критерии выбора.
-3. Важно: внимательно изучи историю дискуссии. НЕ повторяй доводы, уже озвученные врачами. Дай объективное экспертное резюме доказательной базы.
-4. Длина — СТРОГО максимум 300 символов! Будь предельно лаконичен, структурен и точен.
+Твоя задача: спокойно и емко поделиться клинической доказательной базой и критериями выбора, как опытный врач коллегам у кресла.
+ТРЕБОВАНИЯ:
+1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вставлять в текст ответа слова 'Вердикт:', 'EBM-Арбитраж:', 'Арбитраж:', 'Решение:', 'Заключение:' или любые судейские/канцелярские штампы! Пиши сразу по клинической сути.
+2. Ты — практикующий врач, а не судья и не скрипт. Никакого менторского тона, морализаторства или призывов 'жить дружно'.
+3. Четко и объективно укажи клинические показания, анатомические условия и доказательные границы применения каждого метода.
+4. Будь лаконичен (СТРОГО до 300–350 символов), структурен и точен.
 5. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
 
@@ -13144,21 +13144,28 @@ async def check_and_trigger_referee(bot_client, event, text):
         
     reply_text = response.text.strip()
     reply_text = clean_html_formatting(reply_text)
+    # Срезаем любые просочившиеся служебные штампы и заголовки арбитража/вердикта
+    reply_text = re.sub(
+        r"^(?:⚖️\s*)?(?:(?:EBM[- ]?)?Арбитраж|Вердикт|Заключение|Решение|Резюме)[:\s—–-]*",
+        "",
+        reply_text,
+        flags=re.IGNORECASE
+    ).strip()
 
-    # [MED-05] Validate referee EBM arbitration before sending to group
+    # [MED-05] Validate referee EBM reply before sending to group
     _ref_ok, _ref_reason = await check_response_quality(
         context_msgs[-5:] if context_msgs else [text],
         reply_text,
         invited=True,
     )
     if not _ref_ok:
-        logger.warning("Referee validator rejected arbitration: %s. Suppressing referee send.", _ref_reason)
+        logger.warning("Referee validator rejected response: %s. Suppressing referee send.", _ref_reason)
         return
 
     try:
         await bot_client.send_message(
             entity=chat_id,
-            message=f"⚖️ <b>EBM-Арбитраж:</b>\n{reply_text}",
+            message=reply_text,
             reply_to=msg_id,
             parse_mode='html'
         )
