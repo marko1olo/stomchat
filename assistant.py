@@ -13103,8 +13103,8 @@ async def check_and_trigger_referee(bot_client, event, text):
     if last_referee_run_str:
         try:
             last_referee_run = datetime.fromisoformat(last_referee_run_str)
-            if datetime.now() - last_referee_run < timedelta(minutes=5):
-                logger.info("Referee cooldown: within 5 minutes. Skipping.")
+            if datetime.now() - last_referee_run < timedelta(minutes=60):
+                logger.info("Referee cooldown: within 60 minutes. Skipping.")
                 return
         except Exception as cooldown_err:
             logger.error(f"Error parsing last_referee_run: {cooldown_err}")
