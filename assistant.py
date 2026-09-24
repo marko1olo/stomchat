@@ -13098,13 +13098,13 @@ async def check_and_trigger_referee(bot_client, event, text):
         logger.info("Llama referee triage decided NOT to intervene. Cancelling referee trigger.")
         return
         
-    # Разрешаем интервенции не чаще одного раза в 5 минут
+    # Разрешаем интервенции не чаще одного раза в 15 минут
     last_referee_run_str = state.get("last_referee_run")
     if last_referee_run_str:
         try:
             last_referee_run = datetime.fromisoformat(last_referee_run_str)
-            if datetime.now() - last_referee_run < timedelta(minutes=60):
-                logger.info("Referee cooldown: within 60 minutes. Skipping.")
+            if datetime.now() - last_referee_run < timedelta(minutes=15):
+                logger.info("Referee cooldown: within 15 minutes. Skipping.")
                 return
         except Exception as cooldown_err:
             logger.error(f"Error parsing last_referee_run: {cooldown_err}")
