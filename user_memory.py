@@ -41,7 +41,12 @@ GROUP_MEMORY_DAEMON_INTERVAL = 14400  # 4 часа
 
 # Cooldown между вызовами нейросети для обновления памяти одного юзера (защита квот)
 _PM_MEMORY_COOLDOWN = 15.0
-_LAST_PM_UPDATE_TS: Dict[int, float] = {}
+# [SYS-05 FIX] Was plain dict — leaked for every doctor who ever wrote a PM.
+try:
+    from cachetools import TTLCache as _UMTTLCache
+    _LAST_PM_UPDATE_TS = _UMTTLCache(maxsize=5000, ttl=3600)  # type: ignore[assignment]
+except ImportError:
+    _LAST_PM_UPDATE_TS: Dict[int, float] = {}
 
 
 def reset_pm_memory_cooldown(user_id: Optional[int] = None) -> None:

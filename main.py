@@ -158,6 +158,13 @@ MEDIA_UNAVAILABLE_MARK = "[медиа — файл не получен]"
 _media_queue = None
 _media_worker_tasks = []
 _pending_albums = {}
+# [SYS-03 FIX] Tracks already-processed album IDs to prevent late-arriving frames
+# from spawning a second analysis task or being silently erased by the first task's finally block.
+try:
+    from cachetools import TTLCache as _TTLCache
+    _processed_album_ids = _TTLCache(maxsize=1000, ttl=300)
+except ImportError:
+    _processed_album_ids = {}
 
 # Что уже поставлено в очередь разбора В ЭТОМ процессе.
 #
@@ -1938,7 +1945,7 @@ async def handle_new_message(event):
 
         # Пересылка в зеркало в реальном времени (не блокирует основной поток)
         if MIRROR_CHAT_ID and chat_id == config.SOURCE_CHAT_ID:
-            asyncio.create_task(forward_to_mirror(event.message, MIRROR_CHAT_ID))
+            runtime_guard.create_task(forward_to_mirror(event.message, MIRROR_CHAT_ID), name=f"mirror_{event.message.id}")  # [SYS-06 FIX]
 
         sender_id = event.sender_id
         
@@ -2164,38 +2171,42 @@ async def handle_new_message(event):
 
             if (event.photo or event.video or snapshot_document is not None) and not is_media_command:
                 if getattr(event, "grouped_id", None):
-                    if event.grouped_id not in _pending_albums:
-                        _pending_albums[event.grouped_id] = []
-                        
-                        async def _process_album_after_delay(g_id, b_client):
-                            last_len = 0
-                            while True:
-                                await asyncio.sleep(3.0)
-                                current_len = len(_pending_albums.get(g_id, []))
-                                if current_len == 0 or current_len == last_len:
-                                    break
-                                last_len = current_len
-                                
-                            msgs = _pending_albums.pop(g_id, [])
-                            if msgs:
-                                # .message, а не .text: Message.text отдаёт текст С
-                                # РАЗМЕТКОЙ клиентского parse_mode (у telethon по
-                                # умолчанию markdown). Прогон разведки: .text даёт
-                                # "**Кейс**: перфорация", .message — "Кейс:
-                                # перфорация". Остальной код (handle_new_message,
-                                # sync_history, догон) берёт .message, и подпись
-                                # альбома выбивалась из общего правила: разметка
-                                # уходила в промпт зрения как «контекст от автора»
-                                # и участвовала в решении is_passive по вхождению
-                                # «бот»/«@». Отдельно: у сообщения без привязанного
-                                # клиента .text возвращает None, и подпись альбома
-                                # терялась целиком.
-                                combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
-                                await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
-                                
-                        runtime_guard.create_task(_process_album_after_delay(event.grouped_id, bot_client), name=f"album_{event.grouped_id}")
-                        
-                    _pending_albums[event.grouped_id].append(event.message)
+                    # [SYS-03 FIX] Guard against late-arriving frames after album was already processed.
+                    g_id = event.grouped_id
+                    if g_id in _processed_album_ids:
+                        logger.info("Late media for already-processed album %s ignored", g_id)
+                        return
+
+                    if g_id not in _pending_albums:
+                        _pending_albums[g_id] = []
+
+                        async def _process_album_after_delay(target_gid):
+                            try:
+                                last_len = 0
+                                # Wait for album to stabilize (up to 10s, 5 intervals of 2s)
+                                for _ in range(5):
+                                    await asyncio.sleep(2.0)
+                                    curr = len(_pending_albums.get(target_gid, []))
+                                    if curr > 0 and curr == last_len:
+                                        break
+                                    last_len = curr
+
+                                msgs = _pending_albums.pop(target_gid, [])
+                                # Mark as processed BEFORE enqueue so late frames are rejected,
+                                # not silently erased by our own finally block.
+                                _processed_album_ids[target_gid] = True
+                                if msgs:
+                                    combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
+                                    await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
+                            except Exception as album_err:
+                                logger.error(f"Error processing album {target_gid}: {album_err}")
+                            finally:
+                                # Only remove our own slot — not a newly arrived frame
+                                _pending_albums.pop(target_gid, None)
+
+                        runtime_guard.create_task(_process_album_after_delay(g_id), name=f"album_{g_id}")
+
+                    _pending_albums[g_id].append(event.message)
                 else:
                     await enqueue_media_analysis([event.message], msg_id, text)
         # Групповые команды и модерация
@@ -2342,6 +2353,19 @@ async def handle_new_message(event):
                         )
                 except Exception as proto_e:
                     logger.warning("Protocol extractor check failed msg_id=%s: %s", msg_id, proto_e)
+
+            # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
+            # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
+            is_direct_bot_call = (
+                "@" in text
+                or (assistant.BOT_USERNAME and assistant.BOT_USERNAME.lower() in text.lower())
+                or "бот" in text.lower()
+            )
+            if event.chat_id == config.SOURCE_CHAT_ID and text and not is_direct_bot_call:
+                runtime_guard.create_task(
+                    assistant.check_and_react_standalone(event, msg_id, text, sender_name or "Коллега"),
+                    name=f"react_{msg_id}"
+                )
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -2521,18 +2545,34 @@ async def handle_private_message(event):
                         break
                     last_len = current_len
 
-                burst = _PM_PENDING_QUEUES.pop(chat_id, [])
-                if not burst:
-                    return
+                # [SYS-01 FIX] Loop drains queue after each generation.
+                # Previously: worker popped queue once, then started LLM (5-15s).
+                # Any message arriving during generation was left in queue forever
+                # because worker finished and removed itself without re-checking.
+                while True:
+                    burst = _PM_PENDING_QUEUES.pop(chat_id, [])
+                    if not burst:
+                        break
 
-                if len(burst) == 1:
-                    await assistant.handle_private_message(bot_client, burst[0])
-                else:
-                    await assistant.handle_private_message_bundle(bot_client, burst)
+                    if len(burst) == 1:
+                        await assistant.handle_private_message(bot_client, burst[0])
+                    else:
+                        await assistant.handle_private_message_bundle(bot_client, burst)
+
+                    # Check if new messages arrived during generation
+                    if not _PM_PENDING_QUEUES.get(chat_id):
+                        break
+                    # Small debounce if user is still typing
+                    await asyncio.sleep(0.5)
         except Exception as e:
             logger.exception(f"Unexpected error in PM burst worker: {e}")
         finally:
             _PM_BURST_WORKERS.pop(chat_id, None)
+            # Race guard: if a message landed exactly at exit window, rearm worker
+            if _PM_PENDING_QUEUES.get(chat_id):
+                import runtime_guard as _rg
+                task = _rg.create_task(run_burst_worker(), name=f"pm_burst_rearm_{chat_id}")
+                _PM_BURST_WORKERS[chat_id] = task
 
     task = runtime_guard.create_task(run_burst_worker(), name=f"pm_burst_{chat_id}")
     _PM_BURST_WORKERS[chat_id] = task
