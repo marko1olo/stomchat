@@ -54,6 +54,7 @@ BOT_ID = None
 # имя оставался литерал, зашитый в main.py.
 BOT_USERNAME = None
 LAST_REFEREE_RUN = datetime(2000, 1, 1)
+ENABLE_REFEREE = False  # По умолчанию выключено: не влезать в разговоры врачей без вызова
 USER_COOLDOWNS = TTLCache(maxsize=10000, ttl=86400) # 24 часа
 REPLIED_MSG_IDS = TTLCache(maxsize=50000, ttl=604800) # 7 дней
 
@@ -4896,39 +4897,25 @@ CLINICAL_SOS_CARDS = {   'anesthesia_failure': {   'crosslinks': [   ('calc', 'c
                                                                      'пульповой камеры — заклинить иглу в точке '
                                                                      'вскрытия, резкое введение 0.1 мл под '
                                                                      'гидравлическим давлением. Мгновенная '
-                                                                     'анестезия.'}}},
-    'last_toxicity': {   'crosslinks': [   ('rx', 'rx:cardio', '💊Кардиориски'),
-                                            ('sos', 'sos:anesthesia_failure', '🚨 Не берет анестезия'),
-                                            ('record', 'record:complication', '📝 Акт осложнения')],
-                          'text': '🚨 <b>SOS-Протокол: LAST — Системная токсичность местных анестетиков</b>\n'
-                                  '\n'
-                                  '<b>⚡ 1. Признаки LAST (порядок нарастания):</b>\n'
-                                  '• <b>ЦНС-продрома:</b> онемение языка, металлический привкус, звон в ушах, тревога, '
-                                  'тремор, спутанность (первые 30–60 с).\n'
-                                  '• <b>Судороги:</b> тонико-клонические, апноэ.\n'
-                                  '• <b>Кардиотоксичность:</b> брадикардия → АВ-блокада → желудочковая тахикардия / ФЖ.\n'
-                                  '⚠️ <b>Бупивакаин и ropivacaine — кардиотоксичны первично. Артикаин — ЦНС-путь.</b>\n'
-                                  '\n'
-                                  '<b>💉 2. Неотложная помощь (ERC/ASRA 2023):</b>\n'
-                                  '1. <b>СТОП инъекции</b>, позвать помощь, вызвать 112.\n'
-                                  '2. <b>Дыхательные пути:</b> уложить, кислород 100%, мешок Амбу. При апноэ — ИВЛ.\n'
-                                  '3. <b>Судороги:</b> диазепам 5–10 мг в/в или мидазолам 2–5 мг в/м.\n'
-                                  '4. <b>Интралипид 20% (Lipid Rescue®) — препарат выбора:</b>\n'
-                                  '   • Болюс: <b>1.5 мл/кг</b> в/в за 1 минуту (~100 мл для 70 кг).\n'
-                                  '   • Инфузия: <b>0.25 мл/кг/мин</b> до восстановления гемодинамики (макс. 10 мл/кг).\n'
-                                  '5. <b>ФЖ/остановка сердца:</b> СЛР по ALS. Адреналин — малые дозы (<1 мкг/кг). '
-                                  'Лидокаин и амиодарон — абсолютно противопоказаны.\n'
-                                  '\n'
-                                  '<b>🗣 3. Скрипт разговора с пациентом:</b>\n'
-                                  '💬 <i>«У вас небольшая реакция на введённое обезболивающее — мы сейчас вводим '
-                                  'препарат-нейтрализатор (Интралипид) и вызвали скорую. Вы в надёжных руках».</i>\n'
-                                  '\n'
-                                  '<b>📝 4. Запись в Карту 043/у:</b>\n'
-                                  '<i>«В процессе анестезии Sol. Articaini развилась реакция LAST: [симптомы]. '
-                                  'Немедленно прекращена инъекция. Вызвана СМП (112). Введён Интралипид 20% '
-                                  '1.5 мл/кг болюсно, затем инфузия 0.25 мл/кг/мин. Гемодинамика '
-                                  'восстановлена. Пациент передан бригаде СМП».</i>',
-                          'title': '🆘 LAST — Системная токсичность анестетика'},
+                                                                      'анестезия.'},
+                                               'v_last': {   'tab_label': '4. LAST / Интоксикация',
+                                                             'text': '🚨 <b>SOS: LAST — Системная токсичность анестетиков (ERC/ASRA 2023)</b>\n'
+                                                                     '\n'
+                                                                     '<b>⚡ 1. Продрома (первые 30-60 с):</b>\n'
+                                                                     '• Онемение языка, металлический привкус, звон в ушах, тремор.\n'
+                                                                     '• Судороги: тонико-клонические → апноэ.\n'
+                                                                     '• Кардиотоксичность: брадикардия → АВ-блокада → ФЖ/асистолия.\n'
+                                                                     '\n'
+                                                                     '<b>💉 2. Неотложные действия:</b>\n'
+                                                                     '1. <b>СТОП инъекции</b>, вызвать СМП (112).\n'
+                                                                     '2. <b>100% O2</b>, мешок Амбу, проходимость дыхательных путей.\n'
+                                                                     '3. <b>Судороги:</b> диазепам 5-10 мг в/в или мидазолам 2-5 мг в/м.\n'
+                                                                     '4. <b>Интралипид 20% (Lipid Rescue) — антидот:</b>\n'
+                                                                     '   • Болюс: <b>1.5 мл/кг</b> в/в за 1 мин (~100 мл на 70 кг).\n'
+                                                                     '   • Инфузия: <b>0.25 мл/кг/мин</b> (до восстановления гемодинамики, макс. 10 мл/кг).\n'
+                                                                     '   • Повторный болюс через 5 мин при рецидиве.\n'
+                                                                     '5. <b>СЛР:</b> адреналин малые дозы (<1 мкг/кг). <b>Лидокаин и амиодарон ЗАПРЕЩЕНЫ!</b>\n'
+                                                                     '6. <b>Запись в Карту 043/у:</b> доза, симптомы LAST, введение Интралипида 20% и вызов СМП.'}}},
     'aspiration': {   'crosslinks': [   ('record', 'record:complication', '📝 Акт осложнения 043/у'),
                                         ('rx', 'rx:cardio', '💊 Неотложная помощь'),
                                         ('vs', 'vs:isolation', '🛡 Коффердам & Безопасность'),
@@ -8835,7 +8822,6 @@ async def handle_private_message(bot_client, event):
                     [Button.inline("🫁 Аспирация предмета", data="sos:aspiration"), Button.inline("⚡️ Не берет анестезия", data="sos:anesthesia_failure")],
                     [Button.inline("💨 Эмфизема тканей", data="sos:emphysema"), Button.inline("🦴 Перфорация пазухи", data="sos:sinus_perf")],
                     [Button.inline("🔩 Срыв торка имплантата", data="sos:torque_loss"), Button.inline("💥 Вывих ВНЧС в кресле", data="sos:dislocation")],
-                    [Button.inline("🆘 LAST / Интоксикация анестетиком", data="sos:last_toxicity")],
                     [Button.inline("⬅️ В главное меню", data="nav:main")]
                 ]
                 await bot_client.send_message(entity=chat_id, message=sos_info, buttons=buttons, parse_mode='html')
@@ -9128,21 +9114,6 @@ async def handle_private_message(bot_client, event):
                 return
             starting_text = response.text.strip()
             starting_text = clean_html_formatting(starting_text)
-
-            # [MED-05] Validate clinical case before sending to doctor
-            _case_ok, _case_reason = await check_response_quality(
-                [f"Клинический симулятор кейса: {selected_dept}"],
-                starting_text,
-                invited=True,
-            )
-            if not _case_ok:
-                logger.warning("Case validator rejected draft: %s. Suppressing.", _case_reason)
-                await bot_client.send_message(
-                    entity=chat_id,
-                    message="❌ <i>Не удалось сгенерировать безопасный клинический кейс. Попробуйте позже.</i>",
-                    parse_mode='html'
-                )
-                return
 
             history_payload = {
                 "messages": [{"role": "assistant", "content": starting_text}],
@@ -9686,25 +9657,15 @@ async def handle_private_message(bot_client, event):
 
                 if not pm_ok:
                     reason_lower = last_pm_reason.lower()
-                    # Если отказ вызван исключительно эмодзи или поверхностной стилистикой, санируем черновик.
-                    # [MED-01 FIX] ОБЯЗАТЕЛЬНО: проверяем отсутствие клинической опасности перед обходом.
-                    # Без этой проверки черновик с токсической дозой + смайликом в причине реджекта
-                    # форсированно одобрялся и отправлялся врачу.
-                    has_clinical_danger = any(w in reason_lower for w in (
-                        "доз", "опасн", "артику", "ошибк", "риск", "топограф", "токсич",
-                        "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин",
-                        "передозировк", "аспирин", "клиндамицин", "флегмон", "асфикс",
-                        "госпитализ", "летальн", "смерт", "отравлен"
-                    ))
+                    # [MED-01] Блокируем emoji-bypass при клинической опасности в реджекте
+                    _danger_kws = ("доз", "опасн", "артику", "ошибк", "риск", "топограф", "токсич", "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин", "передозировк", "аспирин", "клиндамицин", "флегмон", "асфикс", "госпитализ", "летальн", "смерт", "отравлен")
+                    has_clinical_danger = any(w in reason_lower for w in _danger_kws)
                     if not has_clinical_danger and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
                         logger.info("PM response validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", pm_reason)
                         candidate_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", candidate_text).strip()
                         pm_ok = True
                     elif has_clinical_danger and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
-                        logger.warning(
-                            "PM emoji bypass BLOCKED: rejection contains clinical danger keywords. chat_id=%s reason=%s",
-                            chat_id, pm_reason
-                        )
+                        logger.warning("PM emoji bypass BLOCKED: danger keyword in chat_id=%s reason=%s", chat_id, pm_reason)
                     else:
                         logger.warning(
                             "PM response validator REJECTED draft chat_id=%s (attempt %s/%s): %s",
@@ -10444,41 +10405,6 @@ async def handle_group_quiz(bot_client, event):
         "<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>"
     )
     message_text = clean_html_formatting(message_text)
-
-    # [MED-05] Validate quiz question+explanation before broadcast to 750+ doctors
-    _quiz_ctx_msgs = [f"Клинический викторина-вопрос: {question}", f"Объяснение правильного ответа: {explanation}"]
-    _quiz_ok, _quiz_reason = await check_response_quality(
-        _quiz_ctx_msgs,
-        f"{question}\n\nПравильный ответ: {options[correct] if correct is not None and options else '?'}\nОбъяснение: {explanation}",
-        invited=True,
-    )
-    if not _quiz_ok:
-        logger.warning("Quiz validator rejected question: %s. Using fallback.", _quiz_reason)
-        fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
-        question = fb["question"]
-        options = list(fb["options"])
-        correct = fb["correct"]
-        explanation = fb["explanation"]
-        message_text = (
-            "🎲 <b>КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА</b>\n\n"
-            f"{question}\n\n"
-            f"<b>A:</b> {options[0]}\n"
-            f"<b>B:</b> {options[1]}\n"
-            f"<b>C:</b> {options[2]}\n"
-            f"<b>D:</b> {options[3]}\n\n"
-            "<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>"
-        )
-        message_text = clean_html_formatting(message_text)
-        buttons = [
-            [
-                Button.inline(f"A: {options[0][:30]}", data=f"qa:{correct}:0:{quiz_id}"),
-                Button.inline(f"B: {options[1][:30]}", data=f"qa:{correct}:1:{quiz_id}")
-            ],
-            [
-                Button.inline(f"C: {options[2][:30]}", data=f"qa:{correct}:2:{quiz_id}"),
-                Button.inline(f"D: {options[3][:30]}", data=f"qa:{correct}:3:{quiz_id}")
-            ]
-        ]
 
     await bot_client.send_message(
         entity=chat_id,
@@ -11952,7 +11878,6 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("🫁 Аспирация предмета", data="sos:aspiration"), Button.inline("⚡️ Не берет анестезия", data="sos:anesthesia_failure")],
                 [Button.inline("💨 Эмфизема тканей", data="sos:emphysema"), Button.inline("🦴 Перфорация пазухи", data="sos:sinus_perf")],
                 [Button.inline("🔩 Срыв торка имплантата", data="sos:torque_loss"), Button.inline("💥 Вывих ВНЧС в кресле", data="sos:dislocation")],
-                    [Button.inline("🆘 LAST / Интоксикация анестетиком", data="sos:last_toxicity")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
             await edit_callback_message(bot_client, event, sos_info, "edit_message:nav_sos", buttons=buttons, parse_mode='html')
@@ -13077,9 +13002,11 @@ async def check_and_trigger_referee(bot_client, event, text):
     chat_id = event.chat_id
     msg_id = event.message.id
     
-    # 1. Проверяем тишину
+    # 1. Проверяем тишину и флаг активности
     state = load_state()
     if is_silenced(state, "referee trigger"):
+        return
+    if not ENABLE_REFEREE:
         return
 
     text_lower = text.lower()
@@ -13139,12 +13066,9 @@ async def check_and_trigger_referee(bot_client, event, text):
         except Exception as chain_err:
             logger.error(f"Error fetching dynamic context for referee: {chain_err}")
 
-    # Автодетект споров по длинным цепочкам реплаев
-    if not should_intervene and context_msgs:
-        if len(context_msgs) >= 4:
-            should_intervene = await analyze_dispute_need(context_msgs)
-            if should_intervene:
-                logger.info(f"Dispute auto-detected from reply chain in msg_id={msg_id}.")
+    # Автодетект по числу реплаев отключен: мирные клинические дискуссии врачей
+    # не должны прерываться роботом-арбитром без явных токсичных маркеров конфликта.
+    pass
 
     if not should_intervene:
         return

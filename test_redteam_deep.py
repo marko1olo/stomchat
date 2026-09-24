@@ -139,8 +139,8 @@ class TestClass1ConcurrencyAndRaceConditions(unittest.TestCase):
         """
         chat_id = -1001820467444
         thread_anchor = 177380
-        debounce_window = getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", 35)
-        self.assertEqual(debounce_window, 35, "Configured debounce window should be 35 seconds")
+        debounce_window = getattr(config, "DIALOGUE_THREAD_DEBOUNCE_SECONDS", 5)
+        self.assertEqual(debounce_window, 5, "Configured debounce window should be 5 seconds")
 
         # Clear cooldown for this key
         key = (chat_id, thread_anchor, "dialogue_thread")
@@ -152,22 +152,22 @@ class TestClass1ConcurrencyAndRaceConditions(unittest.TestCase):
             cd0 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
             self.assertEqual(cd0, 0, "Initial message at t=0 must proceed without cooldown")
 
-            # 18 seconds later (simulating msg 177389)
-            mock_dt.now.return_value = t0 + timedelta(seconds=18)
-            cd_18 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
-            self.assertGreater(cd_18, 0, "Message at t=18s must be blocked by debounce")
-            self.assertEqual(cd_18, 17, "Remaining cooldown at 18s must be exactly 35 - 18 = 17s")
+            # 2 seconds later (burst / double-click)
+            mock_dt.now.return_value = t0 + timedelta(seconds=2)
+            cd_2 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
+            self.assertGreater(cd_2, 0, "Message at t=2s must be blocked by debounce")
+            self.assertEqual(cd_2, 3, "Remaining cooldown at 2s must be exactly 5 - 2 = 3s")
 
-            # 30 seconds later
-            mock_dt.now.return_value = t0 + timedelta(seconds=30)
-            cd_30 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
-            self.assertGreater(cd_30, 0, "Message at t=30s must be blocked by debounce")
-            self.assertEqual(cd_30, 5, "Remaining cooldown at 30s must be exactly 35 - 30 = 5s")
+            # 4 seconds later
+            mock_dt.now.return_value = t0 + timedelta(seconds=4)
+            cd_4 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
+            self.assertGreater(cd_4, 0, "Message at t=4s must be blocked by debounce")
+            self.assertEqual(cd_4, 1, "Remaining cooldown at 4s must be exactly 5 - 4 = 1s")
 
-            # 36 seconds later (window expired)
-            mock_dt.now.return_value = t0 + timedelta(seconds=36)
-            cd_36 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
-            self.assertEqual(cd_36, 0, "Message after 35s window must be allowed")
+            # 6 seconds later (window expired)
+            mock_dt.now.return_value = t0 + timedelta(seconds=6)
+            cd_6 = assistant.check_user_cooldown(chat_id, thread_anchor, "dialogue_thread", seconds=debounce_window)
+            self.assertEqual(cd_6, 0, "Message after 5s window must be allowed")
 
     def test_in_flight_thread_lock_prevents_duplicate_parallel_tasks(self):
         """

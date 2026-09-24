@@ -510,12 +510,21 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         _record_failure("model_not_found", error_text, api_key)
         return "model_not_found"
 
-    if "403" in err_msg or "permission" in err_msg:
-        if provider == "gemini":
-            set_key_cooldown(provider, api_key, 31536000) # 365 days
-            logger.warning(f"{provider.capitalize()} key permanently denied (403). Banned for 365 days.")
+    if "403" in err_msg or "permission" in err_msg or "forbidden" in err_msg:
+        # Проверяем, является ли это постоянным отказом самого API (отозванный/невалидный ключ)
+        # или транзиентным сетевым сбоем (прокси, Cloudflare, gateway).
+        is_api_permanent = any(m in err_msg for m in (
+            "api_key_invalid", "permission_denied", "consumer_invalid",
+            "key has been revoked", "unregistered_callers", "not registered"
+        ))
+        if is_api_permanent:
+            ban_duration = 31536000 if provider == "gemini" else 86400  # 365 days for google, 24h for groq
+            set_key_cooldown(provider, api_key, ban_duration)
+            logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
         else:
-            logger.warning(f"{provider.capitalize()} key denied (403).")
+            # Транзиентный 403 от шлюза/прокси/Cloudflare — кулдаун максимум на 1 час (3600 с) вместо 1 года!
+            set_key_cooldown(provider, api_key, 3600)
+            logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
         _record_failure("key_denied", error_text, api_key)
         return "key_denied"
 
@@ -538,6 +547,7 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
 TRIAGE_KINDS = frozenset({
     "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
     "group_ping_hot_check", "protocol_extraction",
+    "react_standalone_triage", "react_triage",  # реакции — дешёвый lite-каскад
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
 CHAT_KINDS = frozenset({
