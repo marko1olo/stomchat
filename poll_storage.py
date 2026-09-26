@@ -497,6 +497,23 @@ async def close_stale_polls_silently(chat_id: int, db_path: Optional[str] = None
         return cursor.rowcount
 
 
+async def close_all_active_polls_silently(chat_id: int, db_path: Optional[str] = None) -> int:
+    """Молча закрывает в БД абсолютно все незакрытые опросы (и прошлые, и текущие), предотвращая ночные спонтанные разборы."""
+    async with get_db_connection(db_path) as db:
+        cursor = await db.execute(
+            """
+            UPDATE daily_polls
+            SET is_closed = 1,
+                closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP)
+            WHERE chat_id = ?
+              AND is_closed = 0
+            """,
+            (int(chat_id),),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
 async def has_poll_today(chat_id: int, db_path: Optional[str] = None) -> bool:
     """
     Проверяет наличие опроса за сегодняшние календарные сутки по московскому времени (UTC+3).

@@ -610,6 +610,15 @@ class TestPollStorage(unittest.IsolatedAsyncioTestCase):
         assert p_today is not None
         self.assertFalse(p_today["is_closed"])
 
+        # Вызываем тихое закрытие ВСЕХ активных опросов (например, в ночное время после 22:00 МСК)
+        all_closed = await poll_storage.close_all_active_polls_silently(chat_id, db_path=self.db_path)
+        self.assertEqual(all_closed, 1)
+
+        # Теперь и сегодняшний опрос закрыт, ночных случайных разборов не произойдет
+        p_today_after = await poll_storage.get_poll(8002, db_path=self.db_path)
+        assert p_today_after is not None
+        self.assertTrue(p_today_after["is_closed"])
+
 
 def run_tests() -> int:
     """Запуск набора тестов с человекочитаемым форматированием."""

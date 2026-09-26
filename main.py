@@ -836,7 +836,7 @@ async def scheduler_task(bot_client):
             now_msk = datetime.now(timezone.utc).astimezone(msk_tz)
             poll_hour = getattr(config, "DAILY_POLL_HOUR", 13)
             poll_minute = getattr(config, "DAILY_POLL_MINUTE", 30)
-            cutoff_hour = getattr(config, "DAILY_POLL_CUTOFF_HOUR", 18)
+            cutoff_hour = getattr(config, "DAILY_POLL_CUTOFF_HOUR", 16)
             is_after_start = (now_msk.hour > poll_hour) or (now_msk.hour == poll_hour and now_msk.minute >= poll_minute)
             is_before_cutoff = now_msk.hour < cutoff_hour
             is_poll_time = is_after_start and is_before_cutoff
@@ -911,11 +911,19 @@ async def scheduler_task(bot_client):
                                 case_msg_id = intro_msg.id
 
                         poll_reply_to = case_msg_id if case_msg_id else tgt_topic
-                        poll_msg = await bot_client.send_message(
-                            entity=tgt_chat,
-                            file=media,
-                            reply_to=poll_reply_to
-                        )
+                        try:
+                            poll_msg = await bot_client.send_message(
+                                entity=tgt_chat,
+                                file=media,
+                                reply_to=poll_reply_to
+                            )
+                        except Exception as poll_send_err:
+                            if case_msg_id:
+                                try:
+                                    await bot_client.delete_messages(tgt_chat, [case_msg_id])
+                                except Exception:
+                                    pass
+                            raise poll_send_err
 
                         if poll_msg and hasattr(poll_msg, 'media') and hasattr(poll_msg.media, 'poll'):
                             poll_id = poll_msg.media.poll.id
@@ -937,9 +945,9 @@ async def scheduler_task(bot_client):
                     except Exception as poll_exc:
                         logger.exception("Ошибка при отправке ежедневного опроса в чат %s: %s", tgt_chat, poll_exc)
 
-            # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 - 23:00 MSK)
+            # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 - 22:00 MSK)
             resolution_hour = getattr(config, "DAILY_POLL_RESOLUTION_HOUR", 21)
-            resolution_cutoff_hour = getattr(config, "DAILY_POLL_RESOLUTION_CUTOFF_HOUR", 23)
+            resolution_cutoff_hour = getattr(config, "DAILY_POLL_RESOLUTION_CUTOFF_HOUR", 22)
             is_resolution_time = resolution_hour <= now_msk.hour < resolution_cutoff_hour
 
             if is_resolution_time:
@@ -1001,14 +1009,14 @@ async def scheduler_task(bot_client):
                     except Exception as res_exc:
                         logger.exception("Ошибка при вечернем закрытии опросов в чате %s: %s", tgt_chat, res_exc)
 
-            elif now_msk.hour >= resolution_cutoff_hour:
-                # Ночью (после 23:00 МСК) чат спит: никаких разборов, закрываем любые висящие опросы строго молча
+            elif now_msk.hour >= resolution_cutoff_hour or now_msk.hour < 8:
+                # В нерабочие часы и ночью (22:00 - 08:00 МСК) чат спит: никаких разборов, закрываем любые висящие опросы строго молча
                 for target in targets:
                     tgt_chat = target.get('chat_id')
                     if tgt_chat:
                         try:
                             import poll_storage
-                            await poll_storage.close_stale_polls_silently(tgt_chat)
+                            await poll_storage.close_all_active_polls_silently(tgt_chat)
                         except Exception:
                             pass
 
@@ -2464,13 +2472,30 @@ async def handle_new_message(event):
                 # генерация и заметный шум в чате 749 врачей. Совпадение было
                 # точное, не по подстроке, поэтому цена ниже, чем у сводки, но
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
-                # 3. Нативные опросы и викторины в группе (через poll_engine)
-                if cmd_lower in ("/poll", "/опрос", "/батл"):
-                    await assistant.handle_native_group_poll(bot_client, event, force_type="regular")
-                    return True
+                # 3. Нативные опросы и викторины в группе (через poll_engine) — строго для админов!
+                # Обычные врачи решают кейсы в ЛС бота: @docendobot (/quiz), чтобы не спамить в чат 750 человек.
+                if cmd_lower in ("/poll", "/опрос", "/батл", "/quiz", "/кейс", "/викторина"):
+                    is_admin_user = False
+                    if event.sender_id in (7716348189, 1890028643):
+                        is_admin_user = True
+                    else:
+                        try:
+                            perms = await event.client.get_permissions(event.chat_id, event.sender_id)
+                            if perms and perms.is_admin:
+                                is_admin_user = True
+                        except Exception:
+                            is_admin_user = False
 
-                if cmd_lower in ("/quiz", "/кейс", "/викторина"):
-                    await assistant.handle_native_group_poll(bot_client, event, force_type="quiz")
+                    if not is_admin_user:
+                        await bot_client.send_message(
+                            entity=event.chat_id,
+                            message="💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @docendobot (команда /quiz).",
+                            reply_to=msg_id
+                        )
+                        return True
+
+                    force_poll = "regular" if cmd_lower in ("/poll", "/опрос", "/батл") else "quiz"
+                    await assistant.handle_native_group_poll(bot_client, event, force_type=force_poll)
                     return True
                 
                 # 4. Толковый словарь (объяснение терминов)

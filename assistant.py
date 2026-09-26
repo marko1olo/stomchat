@@ -10483,6 +10483,16 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
     chat_id = event.chat_id
     msg_id = event.message.id
 
+    import config
+    is_prod = (chat_id == getattr(config, "SOURCE_CHAT_ID", None) or chat_id == -1001820467444)
+    if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
+        await bot_client.send_message(
+            entity=chat_id,
+            message="🛡️ Опросы в основном канале отключены (POLL_PROD_ENABLED=False). Тестирование доступно в тест-канале.",
+            reply_to=msg_id
+        )
+        return
+
     cooldown = check_user_cooldown(chat_id, event.sender_id, "native_poll", seconds=30)
     if cooldown > 0:
         await bot_client.send_message(
@@ -10543,11 +10553,19 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
                 case_msg_id = intro_msg.id
 
         poll_reply_to = case_msg_id if case_msg_id else msg_id
-        poll_msg = await bot_client.send_message(
-            entity=chat_id,
-            file=media,
-            reply_to=poll_reply_to
-        )
+        try:
+            poll_msg = await bot_client.send_message(
+                entity=chat_id,
+                file=media,
+                reply_to=poll_reply_to
+            )
+        except Exception as poll_send_err:
+            if case_msg_id:
+                try:
+                    await bot_client.delete_messages(chat_id, [case_msg_id])
+                except Exception:
+                    pass
+            raise poll_send_err
 
         if poll_msg and hasattr(poll_msg, 'media') and hasattr(poll_msg.media, 'poll'):
             poll_id = poll_msg.media.poll.id
