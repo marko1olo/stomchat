@@ -937,9 +937,12 @@ async def scheduler_task(bot_client):
                     except Exception as poll_exc:
                         logger.exception("Ошибка при отправке ежедневного опроса в чат %s: %s", tgt_chat, poll_exc)
 
-            # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 MSK)
+            # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 - 23:00 MSK)
             resolution_hour = getattr(config, "DAILY_POLL_RESOLUTION_HOUR", 21)
-            if now_msk.hour >= resolution_hour:
+            resolution_cutoff_hour = getattr(config, "DAILY_POLL_RESOLUTION_CUTOFF_HOUR", 23)
+            is_resolution_time = resolution_hour <= now_msk.hour < resolution_cutoff_hour
+
+            if is_resolution_time:
                 for target in targets:
                     tgt_chat = target.get('chat_id')
                     tgt_topic = target.get('topic_id')
@@ -997,6 +1000,17 @@ async def scheduler_task(bot_client):
                                 logger.info("✅ Вечерний разбор опроса #%s опубликован в %s (msg_id=%s)", poll_id, tgt_chat, res_msg.id)
                     except Exception as res_exc:
                         logger.exception("Ошибка при вечернем закрытии опросов в чате %s: %s", tgt_chat, res_exc)
+
+            elif now_msk.hour >= resolution_cutoff_hour:
+                # Ночью (после 23:00 МСК) чат спит: никаких разборов, закрываем любые висящие опросы строго молча
+                for target in targets:
+                    tgt_chat = target.get('chat_id')
+                    if tgt_chat:
+                        try:
+                            import poll_storage
+                            await poll_storage.close_stale_polls_silently(tgt_chat)
+                        except Exception:
+                            pass
 
             await asyncio.sleep(600) # Проверка каждые 10 минут
 
