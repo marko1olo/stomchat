@@ -8183,11 +8183,60 @@ async def handle_private_message(bot_client, event):
 
         # 1. Обработка базовых команд
         if text.lower().startswith("/start "):
-            _start_arg = text[7:].strip().lower()
+            _start_raw = text[7:].strip()
+            _start_arg = _start_raw.lower()
             if _start_arg == "profile" or _start_arg.startswith("profile "):
                 text = "/profile"
             elif _start_arg == "protocols" or _start_arg.startswith("protocols "):
                 text = "/protocols"
+            elif _start_arg.startswith("quiz_"):
+                poll_id_str = _start_raw[5:].strip()
+                try:
+                    target_poll_id = int(poll_id_str)
+                    import poll_storage
+                    poll_data = await poll_storage.get_poll(target_poll_id)
+                    if not poll_data:
+                        await bot_client.send_message(entity=chat_id, message="⚠️ Клинический опрос не найден или устарел.")
+                        return
+
+                    existing_vote = await poll_storage.get_user_vote(target_poll_id, event.sender_id)
+                    if existing_vote:
+                        status_str = "✅ Вы уже решили этот кейс верно!" if existing_vote.get("is_correct") else "❌ Ранее вы ответили неверно."
+                        deep_text = poll_data.get('explanation_deep') or poll_data.get('explanation_brief') or "Разбор зафиксирован."
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message=(
+                                f"🩺 <b>Клинический кейс #{target_poll_id}</b>\n\n"
+                                f"{status_str}\n\n"
+                                f"🔬 <b>Научно обоснованный EBM-разбор:</b>\n{deep_text}\n\n"
+                                f"Ваша статистика специализации доступна по команде /profile."
+                            ),
+                            parse_mode='html'
+                        )
+                        return
+
+                    from telethon import Button
+                    options = poll_data.get("options", [])
+                    buttons = []
+                    for idx, opt_text in enumerate(options):
+                        opt_char = chr(65 + idx) if idx < 26 else str(idx)
+                        buttons.append([Button.inline(f"{opt_char}: {opt_text[:38]}", data=f"quiz_pm:{target_poll_id}:{idx}")])
+
+                    case_text = (
+                        f"🎯 <b>Клиническая задача #{target_poll_id}</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{poll_data.get('question')}\n\n"
+                    )
+                    for idx, opt_text in enumerate(options):
+                        opt_char = chr(65 + idx) if idx < 26 else str(idx)
+                        case_text += f"<b>{opt_char}:</b> {opt_text}\n"
+                    case_text += "\n<i>Выберите вариант ответа (приватно, результат запишется в ваш профиль):</i>"
+
+                    await bot_client.send_message(entity=chat_id, message=case_text, buttons=buttons, parse_mode='html')
+                    return
+                except Exception as e:
+                    logger.exception("Ошибка при открытии приватного квиза в ЛС: %s", e)
+
 
         if text.lower().startswith(("/start consult", "/start_consult")):
             consult_welcome = (
@@ -8347,7 +8396,13 @@ async def handle_private_message(bot_client, event):
             ).strip() or getattr(sender, "username", "") or f"Доктор #{chat_id}"
 
             memory = await database.get_user_memory(chat_id)
-            profile_card = user_memory.format_user_profile_card(memory, display_name)
+            quiz_stats = None
+            try:
+                import poll_storage
+                quiz_stats = await poll_storage.get_user_quiz_stats(chat_id)
+            except Exception:
+                pass
+            profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
 
             from telethon import Button
             profile_buttons = [
@@ -9631,14 +9686,13 @@ async def handle_private_message(bot_client, event):
                 
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
-                    if attempt == max_retries:
-                        await bot_client.send_message(
-                            entity=chat_id,
-                            message="❌ <i>Ошибка генерации ответа нейросетью. Пожалуйста, повторите запрос позже.</i>",
-                            parse_mode='html'
-                        )
-                        return
-                    continue
+                    # Если генерация упала после всех ретраев каскада (включая бэкофф 30с, 60с, 90с)
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message="❌ <i>Ошибка генерации ответа нейросетью. Пожалуйста, повторите запрос позже.</i>",
+                        parse_mode='html'
+                    )
+                    return
                     
                 candidate_text = getattr(response, "text", None)
                 if not candidate_text or not candidate_text.strip():
@@ -9892,7 +9946,8 @@ NO — если это случайное упоминание, обсужден
 Твой ответ — это естественная реакция именно на сообщение #{msg_id}!
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
-        reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=90)
+        async with bot_client.action(chat_id, 'typing'):
+            reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=90)
 
         if reply_err or not reply_resp:
             logger.warning(f"Bot mention reply generation failed: {reply_err}")
@@ -9998,7 +10053,13 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
                     (" " + getattr(sender, "last_name", "") if getattr(sender, "last_name", "") else "")
                 ).strip() or getattr(sender, "username", "") or f"Доктор #{sender_id}"
                 memory = await database.get_user_memory(sender_id)
-                profile_card = user_memory.format_user_profile_card(memory, display_name)
+                quiz_stats = None
+                try:
+                    import poll_storage
+                    quiz_stats = await poll_storage.get_user_quiz_stats(sender_id)
+                except Exception:
+                    pass
+                profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
                 profile_buttons = [
                     [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("⭐ Закладки", data="nav:bookmarks")],
                     [Button.inline("🏠 Главное меню", data="nav:main")]
@@ -10412,6 +10473,110 @@ async def handle_group_quiz(bot_client, event):
         buttons=buttons,
         parse_mode='html'
     )
+
+
+async def handle_native_group_poll(bot_client, event, force_type=None):
+    """
+    Генерация и отправка нативного Telegram-опроса / викторины в группу (через poll_engine).
+    force_type: 'quiz' | 'regular' | 'lifestyle' | None
+    """
+    chat_id = event.chat_id
+    msg_id = event.message.id
+
+    cooldown = check_user_cooldown(chat_id, event.sender_id, "native_poll", seconds=30)
+    if cooldown > 0:
+        await bot_client.send_message(
+            entity=chat_id,
+            message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией нового опроса.",
+            reply_to=msg_id
+        )
+        return
+
+    status_msg = await bot_client.send_message(
+        entity=chat_id,
+        message="🎲 <i>Формирую клинический опрос консилиума... Подождите.</i>",
+        reply_to=msg_id,
+        parse_mode='html'
+    )
+
+    try:
+        import poll_engine
+        import poll_storage
+
+        # Получаем недавние сообщения для контекстного триажа темы дня
+        recent_msgs = []
+        try:
+            recent_rows = await database.get_last_messages(chat_id, limit=25)
+            if recent_rows:
+                recent_msgs = [f"{r.get('sender_name', '')}: {r.get('text', '')}" for r in recent_rows if r.get('text')]
+        except Exception:
+            pass
+
+        enum_type = None
+        if force_type == "quiz":
+            enum_type = poll_engine.PollType.QUIZ
+        elif force_type == "regular":
+            enum_type = poll_engine.PollType.REGULAR
+        elif force_type == "lifestyle":
+            enum_type = poll_engine.PollType.LIFESTYLE
+
+        payload, media = await poll_engine.generate_poll(
+            chat_context=recent_msgs,
+            force_type=enum_type,
+            is_anonymous=True
+        )
+
+        try:
+            await bot_client.delete_messages(chat_id, status_msg.id)
+        except Exception:
+            pass
+
+        case_msg_id = None
+        if payload.case_intro:
+            intro_msg = await bot_client.send_message(
+                entity=chat_id,
+                message=payload.case_intro,
+                reply_to=msg_id,
+                parse_mode='html'
+            )
+            if intro_msg and hasattr(intro_msg, 'id'):
+                case_msg_id = intro_msg.id
+
+        poll_reply_to = case_msg_id if case_msg_id else msg_id
+        poll_msg = await bot_client.send_message(
+            entity=chat_id,
+            file=media,
+            reply_to=poll_reply_to
+        )
+
+        if poll_msg and hasattr(poll_msg, 'media') and hasattr(poll_msg.media, 'poll'):
+            poll_id = poll_msg.media.poll.id
+            await poll_storage.save_poll(
+                id=poll_id,
+                chat_id=chat_id,
+                case_msg_id=case_msg_id,
+                poll_msg_id=poll_msg.id,
+                poll_type=payload.poll_type.value,
+                topic=payload.topic,
+                question=payload.question,
+                options_json=json.dumps(payload.options, ensure_ascii=False),
+                correct_option_id=payload.correct_option_id,
+                explanation_brief=payload.explanation_brief,
+                explanation_deep=payload.explanation_deep
+            )
+
+
+    except Exception as e:
+        logger.exception(f"Error in handle_native_group_poll: {e}")
+        try:
+            await bot_client.delete_messages(chat_id, status_msg.id)
+        except Exception:
+            pass
+        await bot_client.send_message(
+            entity=chat_id,
+            message="⚠️ Не удалось сформировать опрос. Попробуйте еще раз через минуту.",
+            reply_to=msg_id
+        )
 
 
 # Сколько строк тянуть при запасном поиске по ключевым словам. Основной путь
@@ -11567,8 +11732,14 @@ async def handle_quiz_callback(bot_client, event):
             ).strip() or getattr(sender, "username", "") or f"Доктор #{event.sender_id}"
 
             memory = await database.get_user_memory(event.sender_id)
+            quiz_stats = None
+            try:
+                import poll_storage
+                quiz_stats = await poll_storage.get_user_quiz_stats(event.sender_id)
+            except Exception:
+                pass
             import user_memory
-            profile_card = user_memory.format_user_profile_card(memory, display_name)
+            profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
 
             from telethon import Button
             profile_buttons = [
@@ -12262,8 +12433,55 @@ async def handle_quiz_callback(bot_client, event):
             await event.answer()
             return
 
+    # 3.9. ПРИВАТНОЕ РЕШЕНИЕ КЛИНИЧЕСКОГО КВИЗА В ЛС quiz_pm:<poll_id>:<opt_idx>
+    if data_str.startswith("quiz_pm:"):
+        parts = data_str.split(":")
+        if len(parts) >= 3:
+            poll_id = int(parts[1])
+            selected_opt = int(parts[2])
+            user_id = event.sender_id
+
+            import poll_storage
+            poll_data = await poll_storage.get_poll(poll_id)
+            if not poll_data:
+                await event.answer("⚠️ Клинический опрос не найден или устарел.", alert=True)
+                return
+
+            sender = await event.get_sender()
+            user_name = getattr(sender, "first_name", "Врач") or "Врач"
+            is_correct = (selected_opt == poll_data.get("correct_option_id"))
+
+            await poll_storage.record_vote(
+                poll_id=poll_id,
+                user_id=user_id,
+                user_name=user_name,
+                selected_option=selected_opt,
+                is_correct=is_correct,
+                allow_update=True
+            )
+
+            header = "🎉 <b>ВЕРНО! Балл добавлен в ваш клинический профиль.</b>" if is_correct else "❌ <b>НЕВЕРНО.</b>"
+            deep_explanation = poll_data.get("explanation_deep") or poll_data.get("explanation_brief") or "Разбор сохранен."
+
+            opt_label = chr(65 + selected_opt) if selected_opt < 26 else str(selected_opt)
+            options = poll_data.get("options", [])
+            chosen_opt_text = options[selected_opt] if selected_opt < len(options) else ""
+
+            result_card = (
+                f"{header}\n\n"
+                f"📌 <b>Вопрос:</b> {poll_data.get('question')}\n"
+                f"👉 <b>Ваш ответ:</b> {opt_label}. {chosen_opt_text}\n\n"
+                f"💡 <b>Клинический разбор кейса:</b>\n{deep_explanation}\n\n"
+                f"📊 <i>Ваш обновленный рейтинг специализации доступен по команде /profile.</i>"
+            )
+            profile_btn = [[Button.inline("👤 Мой клинический профиль", data="nav:profile"), Button.inline("🏠 Меню", data="nav:main")]]
+            await edit_callback_message(bot_client, event, result_card, "edit_message:quiz_pm_done", buttons=profile_btn, parse_mode='html')
+            await event.answer("Ответ зафиксирован в профиле!", alert=False)
+            return
+
     # 4. ИНТЕРАКТИВНЫЙ КВИЗ quiz:*
     if data_str.startswith("quiz:"):
+
         quiz_sub = data_str.split(":", 1)[1]
         
         if quiz_sub in ("menu", "main"):

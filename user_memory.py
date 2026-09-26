@@ -816,20 +816,26 @@ async def group_memory_daemon_loop(interval_seconds: int = GROUP_MEMORY_DAEMON_I
         await asyncio.sleep(interval_seconds)
 
 
-def format_user_profile_card(memory: dict, display_name: str) -> str:
+def format_user_profile_card(memory: dict, display_name: str, quiz_stats: Optional[dict] = None) -> str:
     """
     Форматирует презентабельную клиническую карточку доктора для команды /profile и инлайн-меню.
-    Включает клиническую специализацию, сводку опыта из чата сообщества и ЛС.
+    Включает клиническую специализацию, статистику квизов, сводку опыта из чата сообщества и ЛС.
     """
     safe_name = html.escape(display_name or "Доктор")
     if not memory:
-        return (
-            f"👤 <b>Клинический профиль: {safe_name}</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "<i>Клинический профиль только формируется.</i>\n\n"
+        card = [
+            f"👤 <b>Клинический профиль: {safe_name}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━",
+            "<i>Клинический профиль только формируется.</i>\n",
             "По мере общения в сообществе и в личных сообщениях бот запоминает вашу специализацию, "
-            "любимые протоколы, используемые материалы и клинический почерк."
-        )
+            "любимые протоколы, используемые материалы и клинический почерк.",
+        ]
+        if quiz_stats and (quiz_stats.get("total_answers", 0) > 0 or quiz_stats.get("total_votes", 0) > 0):
+            total = quiz_stats.get("total_answers", 0)
+            correct = quiz_stats.get("correct_answers", 0)
+            acc = quiz_stats.get("accuracy_percent", 0.0)
+            card.append(f"\n🎯 <b>Клинические квизы:</b> решено {total} (точность {acc}%, верных: {correct})")
+        return "\n".join(card)
 
     specialty = html.escape(memory.get("specialty") or "Стоматолог общей практики / Врач-стоматолог")
     group_summary = (memory.get("group_summary") or "").strip()
@@ -842,6 +848,31 @@ def format_user_profile_card(memory: dict, display_name: str) -> str:
         "━━━━━━━━━━━━━━━━━━━━━",
         f"🩺 <b>Специализация:</b> {specialty}",
     ]
+
+    if quiz_stats and (quiz_stats.get("total_answers", 0) > 0 or quiz_stats.get("total_votes", 0) > 0):
+        total = quiz_stats.get("total_answers", 0)
+        correct = quiz_stats.get("correct_answers", 0)
+        acc = quiz_stats.get("accuracy_percent", 0.0)
+        lines.append(f"🎯 <b>Клинические квизы:</b> решено {total} (точность {acc}%, верных: {correct})")
+
+        topics = quiz_stats.get("by_topic") or quiz_stats.get("topics") or {}
+        if topics:
+            topic_labels = {
+                "endo": "Эндодонтия",
+                "ortho": "Ортопедия",
+                "surgery": "Хирургия",
+                "therapy": "Терапия",
+                "materials": "Материалы",
+                "lifestyle": "Лайфстайл",
+            }
+            top_strs = []
+            for t_key, t_info in topics.items():
+                if isinstance(t_info, dict) and t_info.get("total", 0) > 0:
+                    t_name = topic_labels.get(t_key, t_key)
+                    t_acc = t_info.get("accuracy_percent", 0.0)
+                    top_strs.append(f"{t_name}: {t_acc}%")
+            if top_strs:
+                lines.append(f"  └ <i>Точность по темам: {', '.join(top_strs)}</i>")
 
     if preferred_topics:
         lines.append(f"📌 <b>Интересующие темы:</b> {preferred_topics}")
@@ -857,3 +888,4 @@ def format_user_profile_card(memory: dict, display_name: str) -> str:
         lines.append(f"\n📊 <i>Активность в сообществе: {msg_count} сообщений</i>")
 
     return "\n".join(lines)
+

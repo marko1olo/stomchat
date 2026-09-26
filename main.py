@@ -13,7 +13,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 import logging
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon import utils as telethon_utils
 import config
 import runtime_guard
@@ -651,6 +651,8 @@ async def scheduler_task(bot_client):
     # одного: см. комментарий на присваивании generated_cache ниже.
     daily_cache_date = None
     daily_cache_text = None
+    daily_poll_cached_date = None
+    daily_poll_cached_payload = None
 
     while True:
         try:
@@ -828,8 +830,176 @@ async def scheduler_task(bot_client):
                     else:
                         missing_targets = [target_key for target_key in weekly_target_keys if target_key not in weekly_sent_targets]
                         logger.error("Weekly was not delivered to all targets; missing=%s scheduler state not advanced.", missing_targets)
-                
+
+            # 3. ЕЖЕДНЕВНЫЙ КЛИНИЧЕСКИЙ ОПРОС / КВИЗ (Daily Poll: 13:30 MSK)
+            msk_tz = timezone(timedelta(hours=3))
+            now_msk = datetime.now(timezone.utc).astimezone(msk_tz)
+            poll_hour = getattr(config, "DAILY_POLL_HOUR", 13)
+            poll_minute = getattr(config, "DAILY_POLL_MINUTE", 30)
+            cutoff_hour = getattr(config, "DAILY_POLL_CUTOFF_HOUR", 18)
+            is_after_start = (now_msk.hour > poll_hour) or (now_msk.hour == poll_hour and now_msk.minute >= poll_minute)
+            is_before_cutoff = now_msk.hour < cutoff_hour
+            is_poll_time = is_after_start and is_before_cutoff
+
+            if is_poll_time:
+                # Сброс кэша опроса при наступлении новых суток по МСК
+                if daily_poll_cached_date != now_msk.date():
+                    daily_poll_cached_date = now_msk.date()
+                    daily_poll_cached_payload = None
+
+                for target in targets:
+                    tgt_chat = target.get('chat_id')
+                    tgt_topic = target.get('topic_id')
+                    if not tgt_chat:
+                        continue
+
+                    # PROD LOCKDOWN: опросы в прод-чат (SOURCE_CHAT_ID / -1001820467444) СТРОГО заблокированы!
+                    is_prod = (tgt_chat == getattr(config, "SOURCE_CHAT_ID", None) or tgt_chat == -1001820467444)
+                    if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
+                        logger.debug("🛡️ PROD LOCKDOWN: опрос в прод-чат %s заблокирован (POLL_PROD_ENABLED=False). Тестирование только в тест-канале.", tgt_chat)
+                        continue
+
+                    try:
+                        import poll_storage
+                        if await poll_storage.has_poll_today(tgt_chat):
+                            continue
+
+                        # Activity Guard: проверяем активность чата за последние 5 минут
+                        recent_activity = await database.check_recent_chat_activity(minutes=5)
+                        if recent_activity > 5:
+                            logger.info(
+                                "⏳ Activity Guard: в чате %s идет активная дискуссия (%d сообщений за 5 мин). Опрос отложен на 10 минут.",
+                                tgt_chat, recent_activity
+                            )
+                            continue
+
+                        import poll_engine
+                        # Кэширование сгенерированного опроса на день (один опрос на все чаты-цели)
+                        if daily_poll_cached_payload is None:
+                            logger.info("🎲 Формирование ежедневного клинического опроса...")
+                            recent_rows = await database.get_last_n_messages(limit=25)
+                            chat_context = []
+                            if recent_rows:
+                                chat_context = [f"{r[1]}: {r[3]}" for r in recent_rows if r[3]]
+
+                            payload, media = await poll_engine.generate_poll(
+                                chat_context=chat_context,
+                                force_type=None,
+                                is_anonymous=True  # MTProto Anonymous Dilemma: анонимный опрос в группе
+                            )
+                            daily_poll_cached_payload = (payload, media)
+                        else:
+                            payload, _ = daily_poll_cached_payload
+                            media = poll_engine.build_poll_media(
+                                question=payload.question,
+                                options=payload.options,
+                                poll_type=payload.poll_type.value,
+                                correct_idx=payload.correct_option_id if payload.correct_option_id is not None else 0,
+                                explanation=payload.explanation_brief,
+                                is_anonymous=True
+                            )
+
+                        case_msg_id = None
+                        if payload.case_intro:
+                            intro_msg = await bot_client.send_message(
+                                entity=tgt_chat,
+                                message=payload.case_intro,
+                                reply_to=tgt_topic,
+                                parse_mode='html'
+                            )
+                            if intro_msg and hasattr(intro_msg, 'id'):
+                                case_msg_id = intro_msg.id
+
+                        poll_reply_to = case_msg_id if case_msg_id else tgt_topic
+                        poll_msg = await bot_client.send_message(
+                            entity=tgt_chat,
+                            file=media,
+                            reply_to=poll_reply_to
+                        )
+
+                        if poll_msg and hasattr(poll_msg, 'media') and hasattr(poll_msg.media, 'poll'):
+                            poll_id = poll_msg.media.poll.id
+                            await poll_storage.save_poll(
+                                id=poll_id,
+                                chat_id=tgt_chat,
+                                case_msg_id=case_msg_id,
+                                poll_msg_id=poll_msg.id,
+                                poll_type=payload.poll_type.value,
+                                topic=payload.topic,
+                                question=payload.question,
+                                options_json=json.dumps(payload.options, ensure_ascii=False),
+                                correct_option_id=payload.correct_option_id,
+                                explanation_brief=payload.explanation_brief,
+                                explanation_deep=payload.explanation_deep
+                            )
+                            logger.info("✅ Ежедневный клинический опрос #%s успешно отправлен в %s", poll_id, tgt_chat)
+
+                    except Exception as poll_exc:
+                        logger.exception("Ошибка при отправке ежедневного опроса в чат %s: %s", tgt_chat, poll_exc)
+
+            # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 MSK)
+            resolution_hour = getattr(config, "DAILY_POLL_RESOLUTION_HOUR", 21)
+            if now_msk.hour >= resolution_hour:
+                for target in targets:
+                    tgt_chat = target.get('chat_id')
+                    tgt_topic = target.get('topic_id')
+                    if not tgt_chat:
+                        continue
+
+                    # PROD LOCKDOWN
+                    is_prod = (tgt_chat == getattr(config, "SOURCE_CHAT_ID", None) or tgt_chat == -1001820467444)
+                    if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
+                        continue
+
+                    try:
+                        import poll_storage
+                        # Закрываем молча любые устаревшие опросы из прошлых суток без спама в чат
+                        await poll_storage.close_stale_polls_silently(tgt_chat)
+
+                        # Получаем активный опрос СТРОГО за сегодняшние календарные сутки (максимум 1)
+                        active_polls = await poll_storage.get_active_polls_today(tgt_chat)
+                        for poll_data in active_polls[:1]:
+                            poll_id = poll_data["id"]
+                            poll_msg_id = poll_data.get("poll_msg_id")
+                            deep_exp = poll_data.get("explanation_deep")
+                            if not deep_exp or poll_data.get("resolution_msg_id"):
+                                continue
+
+                            res_text = (
+                                f"🏁 <b>Клинический разбор кейса:</b>\n\n"
+                                f"{deep_exp}"
+                            )
+                            res_reply_to = poll_msg_id if poll_msg_id else tgt_topic
+                            try:
+                                res_msg = await bot_client.send_message(
+                                    entity=tgt_chat,
+                                    message=res_text,
+                                    reply_to=res_reply_to,
+                                    parse_mode='html'
+                                )
+                            except Exception as send_err:
+                                if res_reply_to != tgt_topic:
+                                    logger.warning(
+                                        "Reply к poll_msg_id=%s не удался (%s, возможно опрос удален). Отправка разбора в топик/чат %s...",
+                                        res_reply_to, send_err, tgt_topic
+                                    )
+                                    res_msg = await bot_client.send_message(
+                                        entity=tgt_chat,
+                                        message=res_text,
+                                        reply_to=tgt_topic,
+                                        parse_mode='html'
+                                    )
+                                else:
+                                    raise
+
+                            if res_msg and hasattr(res_msg, 'id'):
+                                await poll_storage.save_poll_resolution(poll_id, res_msg.id)
+                                logger.info("✅ Вечерний разбор опроса #%s опубликован в %s (msg_id=%s)", poll_id, tgt_chat, res_msg.id)
+                    except Exception as res_exc:
+                        logger.exception("Ошибка при вечернем закрытии опросов в чате %s: %s", tgt_chat, res_exc)
+
             await asyncio.sleep(600) # Проверка каждые 10 минут
+
         except Exception as e:
             logger.error(f"Ошибка планировщика: {e}")
             await asyncio.sleep(60)
@@ -2280,8 +2450,13 @@ async def handle_new_message(event):
                 # генерация и заметный шум в чате 749 врачей. Совпадение было
                 # точное, не по подстроке, поэтому цена ниже, чем у сводки, но
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
-                if cmd_lower in ("/poll", "/кейс"):
-                    await assistant.handle_group_quiz(bot_client, event)
+                # 3. Нативные опросы и викторины в группе (через poll_engine)
+                if cmd_lower in ("/poll", "/опрос", "/батл"):
+                    await assistant.handle_native_group_poll(bot_client, event, force_type="regular")
+                    return True
+
+                if cmd_lower in ("/quiz", "/кейс", "/викторина"):
+                    await assistant.handle_native_group_poll(bot_client, event, force_type="quiz")
                     return True
                 
                 # 4. Толковый словарь (объяснение терминов)
@@ -2627,7 +2802,64 @@ async def handle_callback_query(event):
                                "кнопка крутится до таймаута клиента",
                                type(exc).__name__, exc)
 
+
+@bot_client.on(events.Raw(types.UpdateMessagePollVote))
+async def handle_poll_vote(event):
+    """Слушатель голосов в нативных опросах и квизах Telegram."""
+    try:
+        poll_id = getattr(event, "poll_id", None)
+        if not poll_id or not getattr(event, "options", None):
+            return
+
+        selected_option = int(event.options[0].decode("utf-8"))
+        user_id = telethon_utils.get_peer_id(event.peer)
+
+        user_name = "Врач"
+        try:
+            entity = await bot_client.get_entity(event.peer)
+            first_name = getattr(entity, "first_name", "") or ""
+            last_name = getattr(entity, "last_name", "") or ""
+            full_name = f"{first_name} {last_name}".strip()
+            if full_name:
+                user_name = full_name
+            elif getattr(entity, "username", None):
+                user_name = f"@{entity.username}"
+        except Exception:
+            pass
+
+        import poll_storage
+        saved = await poll_storage.record_vote(
+            poll_id=poll_id,
+            user_id=user_id,
+            user_name=user_name,
+            selected_option=selected_option,
+        )
+        if saved:
+            logger.info(
+                "📊 Записан голос врача %s (id=%s) в опросе %s: опция %s",
+                user_name, user_id, poll_id, selected_option
+            )
+    except Exception as e:
+        logger.error("Ошибка при обработке голоса в опросе: %s", e, exc_info=True)
+
+
+@bot_client.on(events.Raw(types.UpdateMessagePoll))
+async def handle_poll_update(event):
+    """Слушатель изменений статуса опроса (закрытие, обновление)."""
+    try:
+        poll_id = getattr(event, "poll_id", None)
+        if not poll_id:
+            return
+        if getattr(event.poll, "closed", False):
+            import poll_storage
+            await poll_storage.close_poll(poll_id)
+            logger.info("🔒 Опрос %s закрыт в Telegram", poll_id)
+    except Exception as e:
+        logger.error("Ошибка при обновлении статуса опроса: %s", e, exc_info=True)
+
+
 @client.on(events.NewMessage(pattern=r'\.dump', outgoing=True))
+
 async def dump_handler(event):
     await event.edit("📦 <b>Начинаю тестовую выкачку истории...</b>", parse_mode='HTML')
     count = 0

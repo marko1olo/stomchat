@@ -809,6 +809,57 @@ async def get_messages_for_period(hours):
     return await _run_db(operation)
 
 
+async def check_recent_chat_activity(minutes=5):
+    """
+    Проверяет активность в чате за последние minutes минут (Activity Guard).
+    messages.date хранится СТРОГО В UTC, сравниваем строго с UTC datetime('now').
+    """
+    def operation():
+        with _connection() as db:
+            row = db.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE date >= datetime('now', ?)
+                """,
+                (f"-{minutes} minutes",),
+            ).fetchone()
+            return row[0] if row else 0
+
+    return await _run_db(operation)
+
+
+async def get_last_messages(chat_id=None, limit=25):
+    """
+    Алиас для совместимости с assistant.py и модулями интерактива.
+    Возвращает список словарей [{'msg_id': ..., 'sender_name': ..., 'text': ...}].
+    """
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                """
+                SELECT msg_id, sender_name, sender_username, text, date, has_media, media_type
+                FROM messages
+                ORDER BY date DESC, msg_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "msg_id": r[0],
+                    "sender_name": r[1] or "",
+                    "sender_username": r[2] or "",
+                    "text": r[3] or "",
+                    "date": r[4],
+                }
+                for r in reversed(rows)
+            ]
+
+    return await _run_db(operation)
+
+
+
+
 async def get_media_description(msg_id):
     def operation():
         with _connection() as db:

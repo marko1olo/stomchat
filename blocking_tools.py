@@ -738,6 +738,71 @@ def _restore_foreign_summary_status(snapshot):
         return False
 
 
+# Виды диалоговых задач для ЛС и группы, для которых при отказе/кулдауне всех ключей
+# активируется прогрессивный бэкофф: паузы 30с, 60с, 90с (3 последовательных шанса).
+EXHAUSTION_RETRY_KINDS = frozenset({
+    "assistant",
+    "assistant_media",
+    "bot_mention_reply",
+    "group_ask",
+    "group_explainer",
+    "group_quiz_gen",
+    "group_referee",
+    "pm_chat",
+    "pm_ping",
+    "pm_web_lookup",
+    "dialogue_fallback",
+    "media_fallback",
+    "transcription_corrector",
+})
+
+# Паузы между 3 шансами при вылете всех ключей/моделей
+EXHAUSTION_BACKOFF_DELAYS = (30.0, 60.0, 90.0)
+
+
+def _is_exhaustion_error(error, payload=None):
+    """
+    Проверяет, вызвана ли ошибка временным исчерпанием ключей или серверов:
+    - 429 / Rate Limit / Quota Exceeded / TPD исчерпан;
+    - 503 / Service Unavailable / High Demand (перегрузка серверов);
+    - все ключи на кулдауне / каскад исчерпан;
+    - таймаут ожидания сервера (504 / timeout).
+    """
+    if not error and not payload:
+        return False
+    reason = (payload.get("reason") if isinstance(payload, dict) else "") or ""
+    if reason in (
+        "cascade_exhausted",
+        "all_keys_on_cooldown",
+        "all_exhausted",
+        "model_overloaded",
+        "budget_exhausted",
+    ):
+        return True
+    err_lower = f"{error or ''} {reason}".lower()
+    exhaustion_keywords = (
+        "cascade exhausted",
+        "all_keys_on_cooldown",
+        "all ai attempts exhausted",
+        "ни одна модель не ответила",
+        "не ответила",
+        "остыва",
+        "исчерпан",
+        "cooldown",
+        "rate limit",
+        "rate_limit",
+        "429",
+        "503",
+        "504",
+        "service unavailable",
+        "high demand",
+        "overloaded",
+        "timed out",
+        "timeout",
+    )
+    return any(kw in err_lower for kw in exhaustion_keywords)
+
+
 async def generate_gemini_text_async(prompt, context, timeout=None):
     await _pace_gemini_calls()
 
@@ -747,19 +812,58 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
     # от своей уже не отличить, файл одноместный.
     foreign_summary = _foreign_summary_status(context)
 
-    try:
-        payload, error = await _run_json_tool(
-            "gemini-text",
-            {"prompt": prompt, "context": context, "timeout": effective_timeout},
-            timeout=effective_timeout,
-        )
-        if error:
-            return None, error
+    kind = context.get("kind") if isinstance(context, dict) else None
+    should_retry_exhaustion = (
+        context.get("retry_exhausted") is True
+        or (kind in EXHAUSTION_RETRY_KINDS and context.get("retry_exhausted") is not False)
+    ) if isinstance(context, dict) else False
 
-        text = payload.get("text")
-        if not text:
-            return None, "gemini-text returned empty text"
-        return TextResponse(text), None
+    backoff_delays = EXHAUSTION_BACKOFF_DELAYS if should_retry_exhaustion else ()
+
+    try:
+        last_error = None
+        for chance_idx in range(len(backoff_delays) + 1):
+            if chance_idx > 0:
+                delay = backoff_delays[chance_idx - 1]
+                logger.warning(
+                    "All AI keys/models exhausted for kind=%s (error: %s). "
+                    "Retry chance %d/%d: pausing for %.0fs before retrying...",
+                    kind, last_error, chance_idx, len(backoff_delays), delay
+                )
+                await asyncio.sleep(delay)
+                await _pace_gemini_calls()
+
+            payload, error = await _run_json_tool(
+                "gemini-text",
+                {"prompt": prompt, "context": context, "timeout": effective_timeout},
+                timeout=effective_timeout,
+            )
+            if not error and payload:
+                text = payload.get("text")
+                if text:
+                    if chance_idx > 0:
+                        logger.info(
+                            "Cascade successfully recovered on retry chance %d (after %.0fs pause) for kind=%s!",
+                            chance_idx, backoff_delays[chance_idx - 1], kind
+                        )
+                    return TextResponse(text), None
+
+            last_error = error or (payload.get("error") if isinstance(payload, dict) else None) or "empty response"
+
+            # Если ошибка не связана с вылетом ключей/моделей (например, синтаксис/длина), не ждем впустую
+            if not _is_exhaustion_error(last_error, payload):
+                logger.warning(
+                    "Non-exhaustion failure for kind=%s: %s. Not retrying.",
+                    kind, last_error
+                )
+                return None, last_error
+
+        # Если все 3 дополнительных шанса исчерпаны
+        logger.error(
+            "All AI attempts exhausted even after %d retry chances (%s backoff) for kind=%s: %s",
+            len(backoff_delays), backoff_delays, kind, last_error
+        )
+        return None, last_error
     finally:
         # Флаг взводит дочерний процесс, снимать его обязан родитель: ребёнок
         # мог не дожить до конца. Раньше здесь стоял безусловный active: False,
