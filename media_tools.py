@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 
 logger = logging.getLogger(__name__)
@@ -389,10 +390,35 @@ def clinical_media_kind(message):
     return None
 
 
+def _validate_image_url(url, timeout=5):
+    """Быстрая проверка доступности прямого URL изображения (200 OK, Content-Type image/*)."""
+    if not url or not url.startswith("http"):
+        return False
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        import requests
+        resp = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
+        if resp.status_code in (405, 501):
+            resp = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
+            resp.close()
+        if resp.status_code == 200:
+            final_url = getattr(resp, "url", url) or url
+            if "removed.png" in final_url.lower():
+                return False
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            return content_type.startswith("image/")
+    except Exception:
+        return False
+    return False
+
+
 def upload_clinical_image_sync(file_path):
     """
-    Загружает клиническое изображение на постоянный надежный CDN (Freeimage / iili.io),
-    возвращающий прямой URL image/jpeg без блокировки хотлинка и без срока сгорания.
+    Загружает клиническое изображение на постоянный надежный CDN (Pixhost.to с fallback),
+    не блокирующий медицинские снимки, не требующий регистрации и отдающий
+    прямой URL image/jpeg без цензуры, хотлинк-блокировки и срока сгорания.
     """
     if not file_path or not os.path.exists(file_path):
         return None
@@ -402,33 +428,116 @@ def upload_clinical_image_sync(file_path):
         if not img_bytes:
             return None
 
-        api_key = os.getenv("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
         import requests
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        r = requests.post(
-            "https://freeimage.host/api/1/upload",
-            data={
-                "key": api_key,
-                "action": "upload",
-                "format": "json"
-            },
-            files={"source": ("clinical_case.jpg", img_bytes, "image/jpeg")},
-            headers=headers,
-            timeout=20
-        )
 
-        if r.status_code == 200:
-            data = r.json()
-            direct_url = data.get("image", {}).get("url") or data.get("image", {}).get("display_url")
-            if direct_url:
-                return direct_url
-            logger.warning(f"Freeimage returned 200 but no image url: {data}")
-        else:
-            logger.warning(f"Freeimage upload failed HTTP {r.status_code}: {r.text[:200]}")
+        fname = os.path.basename(file_path) or "clinical_case.jpg"
+        if not (fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+            fname = f"{fname}.jpg"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+
+        # 1. Основной провайдер: Pixhost.to
+        pixhost_url = "https://api.pixhost.to/images"
+        pixhost_data = {"content_type": 0, "max_th_size": 420}
+        pixhost_files = {"img": (fname, img_bytes, "image/jpeg")}
+
+        try:
+            r = requests.post(
+                pixhost_url,
+                data=pixhost_data,
+                files=pixhost_files,
+                headers=headers,
+                timeout=20,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                show_url = data.get("show_url", "")
+                th_url = data.get("th_url", "")
+
+                candidates = []
+
+                # Кандидат 1: Прямой URL через реальный сервер хранения (imgN из th_url tN)
+                if th_url:
+                    tm = re.match(r"https?://t(\d+)\.pixhost\.to/thumbs/([^/]+)/(.+)", th_url)
+                    if tm:
+                        server_id, dir_id, filename = tm.groups()
+                        candidates.append(f"https://img{server_id}.pixhost.to/images/{dir_id}/{filename}")
+
+                # Кандидат 2: Прямой URL по регулярке из show_url (https://img{dir_id}.pixhost.to/images/{dir_id}/{filename})
+                if show_url:
+                    m = re.match(r"https?://(?:www\.)?pixhost\.to/show/([^/]+)/(.+)", show_url)
+                    if m:
+                        dir_id, filename = m.groups()
+                        candidates.append(f"https://img{dir_id}.pixhost.to/images/{dir_id}/{filename}")
+
+                # Валидация кандидатов: HEAD/GET (timeout=5), статус 200, Content-Type image/
+                for cand in candidates:
+                    if _validate_image_url(cand, timeout=5):
+                        logger.info("Pixhost direct image uploaded successfully: %s", cand)
+                        return cand
+
+                # Кандидат 3: Извлечение contentUrl напрямую из страницы show_url
+                if show_url:
+                    try:
+                        page_resp = requests.get(show_url, headers=headers, timeout=5)
+                        if page_resp.status_code == 200:
+                            html_m = re.search(r'"contentUrl"\s*:\s*"([^"]+)"', page_resp.text)
+                            if html_m:
+                                page_cand = html_m.group(1).replace(r"\/", "/")
+                                if _validate_image_url(page_cand, timeout=5):
+                                    logger.info("Pixhost direct image resolved via page: %s", page_cand)
+                                    return page_cand
+                    except Exception as page_err:
+                        logger.debug("Pixhost page parsing failed: %s", page_err)
+
+                # Кандидат 4: Превью (th_url), если полноразмерный CDN-сервер недоступен
+                if th_url and _validate_image_url(th_url, timeout=5):
+                    logger.info("Pixhost fallback to thumbnail URL: %s", th_url)
+                    return th_url
+
+                logger.warning("Pixhost returned 200 but candidate URLs failed validation: %s", data)
+            else:
+                logger.warning("Pixhost upload failed HTTP %s: %s", r.status_code, r.text[:200])
+        except Exception as pix_err:
+            logger.warning("Pixhost upload error for %s: %s", file_path, pix_err)
+
+        # 2. Fallback: Catbox.moe
+        catbox_hash = os.getenv("CATBOX_USER_HASH")
+        if not catbox_hash:
+            try:
+                from pathlib import Path
+                dvach_env = Path.home() / "Desktop" / "dvachbot" / ".env"
+                if dvach_env.exists():
+                    import dotenv
+                    catbox_hash = dotenv.dotenv_values(str(dvach_env)).get("CATBOX_USER_HASH")
+            except Exception:
+                pass
+
+        if catbox_hash:
+            try:
+                cb_resp = requests.post(
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload", "userhash": catbox_hash},
+                    files={"fileToUpload": (fname, img_bytes)},
+                    headers=headers,
+                    timeout=20,
+                )
+                if cb_resp.status_code == 200:
+                    link = cb_resp.text.strip()
+                    if link.startswith("http") and _validate_image_url(link, timeout=5):
+                        logger.info("Catbox fallback image uploaded successfully: %s", link)
+                        return link
+                    logger.warning("Catbox returned invalid link: %s", link[:150])
+                else:
+                    logger.warning("Catbox upload failed HTTP %s: %s", cb_resp.status_code, cb_resp.text[:200])
+            except Exception as cb_err:
+                logger.warning("Catbox upload fallback error for %s: %s", file_path, cb_err)
+
     except Exception as e:
-        logger.warning(f"Failed to upload clinical image {file_path}: {e}")
+        logger.warning("Failed to upload clinical image %s: %s", file_path, e)
     return None
 
 

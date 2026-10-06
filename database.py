@@ -369,7 +369,8 @@ async def init_db():
             db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_category ON clinical_protocols(category)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_title ON clinical_protocols(title)")
 
-    return await _run_db(operation)
+    await _run_db(operation)
+    await purge_broken_media_remote_urls()
 
 
 async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
@@ -748,6 +749,30 @@ async def update_media_remote_url(msg_id, url):
                 "UPDATE messages SET media_remote_url = ? WHERE msg_id = ?",
                 (url, msg_id),
             )
+
+    return await _run_db(operation)
+
+
+async def purge_broken_media_remote_urls():
+    """
+    Зачищает битые / заблокированные ссылки на CDN (iili.io / freeimage.host),
+    где клинические снимки были заблокированы как 'adult content' (403/404).
+    Возвращает количество очищенных записей.
+    """
+    def operation():
+        with _connection() as db:
+            cursor = db.execute(
+                """
+                UPDATE messages
+                SET media_remote_url = NULL
+                WHERE media_remote_url LIKE '%iili.io%'
+                   OR media_remote_url LIKE '%freeimage%'
+                """
+            )
+            count = cursor.rowcount or 0
+            if count > 0:
+                logger.info("purge_broken_media_remote_urls: очищено %s битых ссылок iili.io/freeimage", count)
+            return count
 
     return await _run_db(operation)
 

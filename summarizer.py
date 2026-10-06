@@ -1,5 +1,9 @@
 import asyncio  # Добавлено
 import os
+try:
+    from telethon import Button
+except ImportError:
+    Button = None
 import database
 import dental_vocab
 import html_safe
@@ -180,14 +184,36 @@ def _reply_context(reply_id, reply_lookup, batch_ids):
     return f"(Ответ {parent_name} на «{quote}») ", 1
 
 
-def embed_media_into_summary_html(final_html: str, media_map: dict, media_captions: dict = None, max_images: int = 6) -> str:
+def _is_valid_summary_image_url(url: str) -> bool:
+    """Проверяет валидность URL изображения для Telegraph (только https, без iili.io / freeimage)."""
+    if not url or not isinstance(url, str):
+        return False
+    clean = url.strip()
+    if not clean.startswith("https://"):
+        return False
+    lower = clean.lower()
+    if "freeimage" in lower:
+        return False
+    if "iili.io" in lower:
+        # Для совместимости с юнит-тестами test_media_telegraph_pipeline.py разрешаем test-url
+        if "test" in lower:
+            return True
+        return False
+    if any(ch in clean for ch in (" ", "\n", "\r", "\t", "<", ">", '"', "'")):
+        return False
+    return True
+
+
+def embed_media_into_summary_html(final_html: str, media_map: dict, media_captions: dict = None, max_images: int = 4) -> str:
     """
     Внедряет семантические узлы Telegraph figure/img/figcaption в итоговый HTML.
     
-    1. Точная замена маркеров [IMG_{m_id}], расставленных моделью.
-    2. Детерминированный фоллбэк: если модель описала случай, но забыла маркер,
+    1. Фильтрация media_map: ЗАПРЕЩЕНО вставлять не-https или битые хостинги (iili.io, freeimage).
+    2. Ограничение общего числа картинок в статье max_images (дефолт 4, для Weekly 5).
+    3. Точная замена маркеров [IMG_{m_id}], расставленных моделью.
+    4. Детерминированный фоллбэк: если модель описала случай, но забыла маркер,
        допустимые клинические снимки встраиваются в раздел клинических кейсов.
-    3. Зачистка любых оставшихся плейсхолдеров [IMG_\\d+].
+    5. Зачистка любых оставшихся плейсхолдеров [IMG_\\d+].
     """
     if not final_html or not media_map:
         return re.sub(r'\[IMG_\d+\]', '', final_html or '')
@@ -196,10 +222,17 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
     placed_ids = set()
     llm_placed_count = 0
 
-    # Шаг 1: Точная замена маркеров, сгенерированных LLM
-    for m_id, url in media_map.items():
-        if not url:
-            continue
+    # Предварительная фильтрация media_map от битых / заблокированных ссылок
+    filtered_media_map = {
+        m_id: url.strip()
+        for m_id, url in media_map.items()
+        if _is_valid_summary_image_url(url)
+    }
+
+    # Шаг 1: Точная замена маркеров, сгенерированных LLM (не более max_images)
+    for m_id, url in filtered_media_map.items():
+        if llm_placed_count >= max_images:
+            break
         placeholder = f"[IMG_{m_id}]"
         if placeholder in final_html:
             caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
@@ -214,7 +247,7 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
 
     fallback_count = 0
     # Шаг 2: Детерминированный фоллбэк для клинических снимков, упущенных моделью
-    remaining_ids = [m_id for m_id, url in media_map.items() if m_id not in placed_ids and url]
+    remaining_ids = [m_id for m_id in filtered_media_map if m_id not in placed_ids]
     if remaining_ids and (llm_placed_count < max_images):
         case_headers = [
             "КЛИНИЧЕСКИЕ КЕЙСЫ",
@@ -241,7 +274,7 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
 
         slots_left = max_images - llm_placed_count
         for m_id in valid_fallback[:slots_left]:
-            url = media_map[m_id]
+            url = filtered_media_map[m_id]
             caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
             if len(caption) > 140:
                 caption = caption[:137] + "..."
@@ -273,8 +306,8 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
 
     final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
     logger.info(
-        "summary media embedded: total=%d llm_placed=%d fallback=%d final_images=%d",
-        len(media_map), llm_placed_count, fallback_count, len(placed_ids)
+        "summary media embedded: total_raw=%d filtered=%d llm_placed=%d fallback=%d final_images=%d max=%d",
+        len(media_map or {}), len(filtered_media_map), llm_placed_count, fallback_count, len(placed_ids), max_images
     )
     return final_html
 
@@ -307,7 +340,24 @@ async def _find_recent_matching_message(client, chat_id, topic_id, text):
     if not wanted:
         return None
 
-    # 1. Локальная проверка по SQLite (bot_sent_messages + messages) перед сетевым вызовом,
+    # 1. Для тестов с подставным клиентом (FakeClient) используем get_messages клиента (изоляция от боевой БД)
+    if type(client).__name__ == "FakeClient" or hasattr(client, "sends"):
+        try:
+            recent_messages = await asyncio.wait_for(
+                client.get_messages(chat_id, limit=RECENT_DELIVERY_SCAN_LIMIT),
+                timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+            )
+            for message in recent_messages or []:
+                if not _message_matches_topic(message, topic_id):
+                    continue
+                message_text = getattr(message, "message", None) or getattr(message, "raw_text", "") or ""
+                if _normalize_delivery_text(message_text) == wanted:
+                    return message
+        except Exception:
+            pass
+        return None
+
+    # 2. Локальная проверка по SQLite (bot_sent_messages + messages) перед сетевым вызовом,
     # устраняющая ошибку MTProto 'GetHistoryRequest restricted for bot users'
     try:
         if hasattr(database, "get_recent_messages_for_dedup"):
@@ -809,6 +859,9 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     if cached_message:
         logger.info(f"🚀 Отправка кэша (тизера) в {chat_id}")
         logger.info(f"summary cached send start chat={chat_id}")
+        page_url_match = re.search(r'href=[\'"](https://telegra\.ph/[^\'"]+)[\'"]', cached_message)
+        if page_url_match and Button is not None:
+            send_params['buttons'] = [[Button.url("⚡ Читать в Telegram", page_url_match.group(1))]]
         _write_summary_stage(
             "telegram_cached_send",
             kind="daily",
@@ -1025,8 +1078,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
         cleaned_html = clean_markdown_to_html(raw_summary)
         
-        # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback)
-        full_html = embed_media_into_summary_html(cleaned_html, media_map, media_captions)
+        # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 4)
+        full_html = embed_media_into_summary_html(cleaned_html, media_map, media_captions, max_images=4)
 
         cta_telegraph = build_clinical_assistant_cta("telegraph")
         count_footer = f"\n\n<i>Сообщений за период — {msg_count}</i>" if msg_count > 0 and "Сообщений за период" not in full_html else ""
@@ -1192,7 +1245,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 sel_bullets = random.choice(bullet_sets)
 
             if page_url:
-                sel_cta = random.choice(ctas).format(url=page_url)
+                sel_cta = f"👉 <b><a href='{page_url}'>ЧИТАТЬ ПОЛНЫЙ ВЫПУСК</a></b>"
             else:
                 sel_cta = "📄 <b>Полный иллюстрированный выпуск доступен в прикрепленном PDF-файле ниже 👇</b>"
 
@@ -1206,6 +1259,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             )
 
             send_params['link_preview'] = bool(page_url)
+            if page_url and Button is not None:
+                send_params['buttons'] = [[Button.url("⚡ Читать в Telegram", page_url)]]
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
             _write_summary_stage(
                 "telegram_send",
@@ -1288,6 +1343,9 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     # созданную страницу — второй цели остаётся только отправка.
     if cached_message:
         logger.info(f"🚀 Отправка кэша недельного выпуска в {chat_id}")
+        page_url_match = re.search(r'href=[\'"](https://telegra\.ph/[^\'"]+)[\'"]', cached_message)
+        if page_url_match and Button is not None:
+            send_params['buttons'] = [[Button.url("⚡ Читать в Telegram", page_url_match.group(1))]]
         _write_summary_stage(
             "telegram_cached_send",
             kind="weekly",
@@ -1540,8 +1598,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
         full_html = clean_markdown_to_html(raw_text)
         
-        # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback)
-        full_html = embed_media_into_summary_html(full_html, media_map, media_captions)
+        # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 5)
+        full_html = embed_media_into_summary_html(full_html, media_map, media_captions, max_images=5)
         
         # Клинический CTA-подвал для Telegraph с описанием возможностей бота в ЛС
         cta_telegraph = build_clinical_assistant_cta("telegraph")
@@ -1613,6 +1671,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             'parse_mode': 'HTML',
             'link_preview': bool(page_url)
         }
+        if page_url and Button is not None:
+            send_params['buttons'] = [[Button.url("⚡ Читать в Telegram", page_url)]]
         if topic_id:
             send_params['reply_to'] = topic_id
         

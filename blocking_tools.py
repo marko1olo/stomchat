@@ -100,6 +100,78 @@ def _read_stdin_json():
     return json.loads(raw.decode("utf-8", errors="replace"))
 
 
+_ALLOWED_TELEGRAPH_TAGS = frozenset({
+    "a", "aside", "b", "blockquote", "br", "code", "em", "figcaption",
+    "figure", "h3", "h4", "hr", "i", "iframe", "img", "li", "ol", "p",
+    "pre", "s", "strong", "u", "ul", "video"
+})
+_DISCARD_TELEGRAPH_TAGS = frozenset({"script", "style", "meta", "link", "head"})
+
+
+def _clean_telegraph_html(html_text: str) -> str:
+    """Зачищает битые/заблокированные ссылки (iili.io, freeimage) из HTML статьи Telegraph."""
+    if not html_text:
+        return ""
+    # 1. Зачистка любых блоков figure с битыми хостингами картинок
+    html_text = re.sub(
+        r'<figure\b[^>]*>[\s\S]*?(?:iili\.io|freeimage)[\s\S]*?</figure>',
+        '',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    # 2. Зачистка одиночных тегов img с теми же доменами
+    html_text = re.sub(
+        r'<img\b[^>]*src=[\'"][^\'"]*(?:iili\.io|freeimage)[^\'"]*[\'"][^>]*>',
+        '',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    # 3. Зачистка ссылок на эти домены, оставляя читаемый текст ссылки
+    html_text = re.sub(
+        r'<a\b[^>]*href=[\'"][^\'"]*(?:iili\.io|freeimage)[^\'"]*[\'"][^>]*>(.*?)</a>',
+        r'\1',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    # 4. Зачистка пустых тегов абзацев
+    html_text = re.sub(r'<p>\s*</p>', '', html_text)
+    return html_text
+
+
+def _sanitize_telegraph_nodes(nodes):
+    """Рекурсивно валидирует узлы Telegraph, фильтруя недопустимые теги и битые медиа."""
+    sanitized = []
+    for node in nodes:
+        if isinstance(node, str):
+            sanitized.append(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        tag = node.get("tag", "").lower()
+        if tag in _DISCARD_TELEGRAPH_TAGS:
+            continue
+        if tag not in _ALLOWED_TELEGRAPH_TAGS:
+            children = node.get("children", [])
+            sanitized.extend(_sanitize_telegraph_nodes(children))
+            continue
+        if tag == "img":
+            src = (node.get("attrs") or {}).get("src", "")
+            if not src.startswith("https://") or "iili.io" in src.lower() or "freeimage" in src.lower():
+                continue
+        if tag == "figure":
+            children = _sanitize_telegraph_nodes(node.get("children", []))
+            has_valid_img = any(isinstance(c, dict) and c.get("tag") == "img" for c in children)
+            if not has_valid_img:
+                continue
+            node = dict(node)
+            node["children"] = children
+        elif "children" in node:
+            node = dict(node)
+            node["children"] = _sanitize_telegraph_nodes(node["children"])
+        sanitized.append(node)
+    return sanitized
+
+
 def _create_telegraph_page_sync(title, html_content):
     import config
     import json
@@ -123,12 +195,16 @@ def _create_telegraph_page_sync(title, html_content):
             else:
                 formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
 
+    # Зачищаем любые битые ссылки на iili.io / freeimage перед конвертацией и отправкой
+    formatted_body = _clean_telegraph_html(formatted_body)
+
     # Прямой UTF-8 транспорт через application/x-www-form-urlencoded:
     # Сервер Telegraph API валидирует сырую UTF-8 строку (2 байта на русский символ)
     # вместо экранированного JSON \uXXXX (6 байт на символ), поднимая лимит страницы
     # с 10 500 до 28 000+ символов кириллицы!
     try:
         nodes = convert_html_to_telegraph_format(formatted_body, clean_html=True, output_format=OutputFormat.PYTHON_LIST)
+        nodes = _sanitize_telegraph_nodes(nodes)
         content_str = json.dumps(nodes, ensure_ascii=False)
         resp = requests.post(
             "https://api.telegra.ph/createPage",
