@@ -16,6 +16,7 @@ import logging
 from telethon import TelegramClient, events, types
 from telethon import utils as telethon_utils
 import config
+import tg_safety
 import runtime_guard
 
 runtime_guard.configure_logging()
@@ -712,12 +713,23 @@ async def scheduler_task(bot_client):
                         start_time, end_time, last_sent_date,
                     )
 
+                    min_daily_msgs = getattr(config, "MIN_DAILY_SUMMARY_MESSAGES", 5)
+                    allow_backfill = getattr(config, "ALLOW_DAILY_SUMMARY_BACKFILL", False)
                     messages = await asyncio.wait_for(
                         database.get_messages_for_daily_summary(start_time, end_time, min_count=100),
                         timeout=30,
                     )
                     
-                    if messages:
+                    if len(messages) < min_daily_msgs:
+                        logger.info(
+                            "💤 Daily дайджест пропущен: низкая активность чата (%d сообщ. в окне при пороге %d). "
+                            "Сообщения сохранены для Еженедельной газеты (Weekly).",
+                            len(messages), min_daily_msgs
+                        )
+                        last_sent_date = now.date()
+                        save_scheduler_state(last_sent_date, last_weekly_date)
+                        _clear_summary_failure("daily", now)
+                    else:
                         logger.info(f"🔥 Daily контент готов ({len(messages)} шт). Рассылка...")
                         
                         # Кэш для текста (чтобы генерировать 1 раз на все чаты).
@@ -914,8 +926,8 @@ async def scheduler_task(bot_client):
                     if not tgt_chat:
                         continue
 
-                    # PROD LOCKDOWN: опросы в прод-чат (SOURCE_CHAT_ID / -1001820467444) СТРОГО заблокированы!
-                    is_prod = (tgt_chat == getattr(config, "SOURCE_CHAT_ID", None) or tgt_chat == -1001820467444)
+                    # PROD LOCKDOWN: опросы в реальные прод-чаты СТРОГО заблокированы!
+                    is_prod = tg_safety.is_prod_chat(tgt_chat)
                     if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
                         logger.debug("🛡️ PROD LOCKDOWN: опрос в прод-чат %s заблокирован (POLL_PROD_ENABLED=False). Тестирование только в тест-канале.", tgt_chat)
                         continue
@@ -972,7 +984,8 @@ async def scheduler_task(bot_client):
                                     explanation_deep=today_tpl.get('explanation_deep') or "",
                                     case_intro=case_intro,
                                     topic=today_tpl.get('topic') or "",
-                                    category=today_tpl.get('topic') or ""
+                                    category=today_tpl.get('topic') or "",
+                                    discussion_seed_question=today_tpl.get('discussion_seed_question')
                                 )
                                 media = poll_engine.build_poll_media(
                                     question=payload.question,
@@ -1047,7 +1060,8 @@ async def scheduler_task(bot_client):
                                 correct_option_id=payload.correct_option_id,
                                 explanation_brief=payload.explanation_brief,
                                 explanation_deep=payload.explanation_deep,
-                                case_intro=payload.case_intro
+                                case_intro=payload.case_intro,
+                                discussion_seed_question=payload.discussion_seed_question
                             )
                             logger.info("✅ Ежедневный клинический опрос #%s успешно отправлен в %s", poll_id, tgt_chat)
 
@@ -1067,12 +1081,13 @@ async def scheduler_task(bot_client):
                         continue
 
                     # PROD LOCKDOWN
-                    is_prod = (tgt_chat == getattr(config, "SOURCE_CHAT_ID", None) or tgt_chat == -1001820467444)
+                    is_prod = tg_safety.is_prod_chat(tgt_chat)
                     if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
                         continue
 
                     try:
                         import poll_storage
+                        import poll_engine
                         # Закрываем молча любые устаревшие опросы из прошлых суток без спама в чат
                         await poll_storage.close_stale_polls_silently(tgt_chat)
 
@@ -1085,9 +1100,18 @@ async def scheduler_task(bot_client):
                             if not deep_exp or poll_data.get("resolution_msg_id"):
                                 continue
 
-                            res_text = (
-                                f"🏁 <b>Клинический разбор кейса:</b>\n\n"
-                                f"{deep_exp}"
+                            seed_q = poll_data.get("discussion_seed_question")
+                            if not seed_q:
+                                for preset in poll_engine.POLL_FALLBACK_PRESETS:
+                                    if preset.get('question') == poll_data.get('question') or preset.get('topic') == poll_data.get('topic'):
+                                        seed_q = preset.get('discussion_seed_question')
+                                        break
+
+                            vote_stats = await poll_storage.get_poll_summary_stats(poll_id)
+                            res_text = poll_engine.generate_evening_poll_debrief(
+                                explanation_deep=deep_exp,
+                                discussion_seed_question=seed_q,
+                                vote_stats=vote_stats
                             )
                             res_reply_to = poll_msg_id if poll_msg_id else tgt_topic
                             try:
@@ -1114,6 +1138,7 @@ async def scheduler_task(bot_client):
 
                             if res_msg and hasattr(res_msg, 'id'):
                                 await poll_storage.save_poll_resolution(poll_id, res_msg.id)
+                                await poll_storage.close_poll(poll_id)
                                 logger.info("✅ Вечерний разбор опроса #%s опубликован в %s (msg_id=%s)", poll_id, tgt_chat, res_msg.id)
                     except Exception as res_exc:
                         logger.exception("Ошибка при вечернем закрытии опросов в чате %s: %s", tgt_chat, res_exc)
@@ -2125,6 +2150,8 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                         if cdn_url:
                             await database.update_media_remote_url(analyzed_id, cdn_url)
                             logger.info("media_cdn_saved msg_id=%s url=%s", analyzed_id, cdn_url)
+                        else:
+                            logger.warning("media_cdn_failed msg_id=%s: upload returned None for %s", analyzed_id, fpath)
                     except Exception as cdn_err:
                         logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
                 
@@ -2612,6 +2639,14 @@ async def handle_new_message(event):
                     term = cmd[6:].strip() if cmd_lower.startswith("/what ") else cmd[5:].strip()
                     if term:
                         await assistant.handle_term_explainer(bot_client, event, term)
+                    return True
+
+                # 5. Клинические калькуляторы и анестезия прямо в группе
+                cmd_no_mention = strip_bot_mention(cmd)[1].strip()
+                cmd_no_mention_lower = cmd_no_mention.lower()
+                if cmd_no_mention_lower == "/calc" or cmd_no_mention_lower.startswith("/calc "):
+                    calc_arg = cmd_no_mention[5:].strip() if cmd_no_mention_lower.startswith("/calc ") else ""
+                    await assistant.handle_group_calc(bot_client, event, calc_arg)
                     return True
 
                 pass

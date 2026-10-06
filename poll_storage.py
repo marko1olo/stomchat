@@ -109,6 +109,21 @@ async def init_poll_tables(db_path: Optional[str] = None) -> None:
         except Exception:
             pass
 
+        try:
+            await db.execute("ALTER TABLE daily_polls ADD COLUMN discussion_seed_question TEXT")
+        except Exception:
+            pass
+
+        try:
+            await db.execute("ALTER TABLE daily_polls ADD COLUMN total_voters INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        try:
+            await db.execute("ALTER TABLE daily_polls ADD COLUMN results_json TEXT")
+        except Exception:
+            pass
+
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS poll_votes (
@@ -159,6 +174,7 @@ async def save_poll(
     explanation_brief: Optional[str] = None,
     explanation_deep: Optional[str] = None,
     case_intro: Optional[str] = None,
+    discussion_seed_question: Optional[str] = None,
     is_closed: Optional[bool] = None,
     closed_at: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -189,6 +205,7 @@ async def save_poll(
         explanation_brief = data.get("explanation_brief", explanation_brief)
         explanation_deep = data.get("explanation_deep", explanation_deep)
         case_intro = data.get("case_intro", case_intro)
+        discussion_seed_question = data.get("discussion_seed_question", discussion_seed_question)
         is_closed = data.get("is_closed", is_closed)
         closed_at = data.get("closed_at", closed_at)
         created_at = data.get("created_at", created_at)
@@ -199,6 +216,8 @@ async def save_poll(
         poll_id = kwargs["id"]
     if case_intro is None and "case_intro" in kwargs:
         case_intro = kwargs["case_intro"]
+    if discussion_seed_question is None and "discussion_seed_question" in kwargs:
+        discussion_seed_question = kwargs["discussion_seed_question"]
 
     if poll_id is None:
         raise ValueError("Обязательный идентификатор poll_id не указан")
@@ -265,6 +284,9 @@ async def save_poll(
             if case_intro is not None:
                 update_fields.append("case_intro = ?")
                 params.append(case_intro)
+            if discussion_seed_question is not None:
+                update_fields.append("discussion_seed_question = ?")
+                params.append(discussion_seed_question)
             if is_closed is not None:
                 update_fields.append("is_closed = ?")
                 params.append(1 if is_closed else 0)
@@ -288,8 +310,8 @@ async def save_poll(
                 INSERT INTO daily_polls (
                     id, chat_id, case_msg_id, poll_msg_id, resolution_msg_id,
                     poll_type, topic, question, options_json, correct_option_id,
-                    explanation_brief, explanation_deep, case_intro, is_closed, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    explanation_brief, explanation_deep, case_intro, discussion_seed_question, is_closed, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             insert_params = (
                 target_poll_id,
@@ -305,6 +327,7 @@ async def save_poll(
                 explanation_brief,
                 explanation_deep,
                 case_intro,
+                discussion_seed_question,
                 closed_val,
                 closed_at,
             )
@@ -421,6 +444,28 @@ async def get_user_vote(poll_id: int, user_id: int, db_path: Optional[str] = Non
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+
+async def update_poll_aggregate_results(
+    poll_id: int,
+    total_voters: int,
+    results_by_option: Dict[int, int],
+    db_path: Optional[str] = None
+) -> bool:
+    """Обновляет суммарные результаты анонимного опроса из UpdateMessagePoll."""
+    target_poll_id = int(poll_id)
+    async with get_db_connection(db_path) as db:
+        res_json = json.dumps(results_by_option, ensure_ascii=False)
+        cursor = await db.execute(
+            """
+            UPDATE daily_polls
+            SET total_voters = ?, results_json = ?
+            WHERE id = ?
+            """,
+            (int(total_voters), res_json, target_poll_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def close_poll(poll_id: int, db_path: Optional[str] = None) -> bool:
@@ -663,6 +708,22 @@ async def get_poll_summary_stats(poll_id: int, db_path: Optional[str] = None) ->
     for v in votes:
         opt = int(v["selected_option"])
         votes_by_option[opt] = votes_by_option.get(opt, 0) + 1
+
+    # Fallback на анонимную агрегированную статистику Telegram
+    if total_votes == 0 and poll_meta:
+        agg_total = poll_meta.get("total_voters") or 0
+        agg_results = poll_meta.get("results_json")
+        if agg_total > 0 and agg_results:
+            try:
+                raw_dict = json.loads(agg_results)
+                votes_by_option = {int(k): int(v) for k, v in raw_dict.items()}
+                total_votes = agg_total
+                correct_opt = poll_meta.get("correct_option_id")
+                if correct_opt is not None:
+                    correct_votes = votes_by_option.get(int(correct_opt), 0)
+                    incorrect_votes = total_votes - correct_votes
+            except Exception as parse_err:
+                logger.warning("Failed to parse results_json for poll #%s: %s", target_poll_id, parse_err)
 
     accuracy_percent = 0.0
     if total_votes > 0:
