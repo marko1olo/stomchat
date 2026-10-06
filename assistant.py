@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import html
 import inspect
 import json
@@ -346,7 +346,14 @@ async def check_and_react_standalone(event, msg_id: int, text: str, sender_name:
 
     try:
         # 1. Базовые фильтры
-        if not text or len(text.strip()) < 50:
+        has_media = bool(
+            getattr(event, "photo", None)
+            or getattr(event, "video", None)
+            or getattr(event, "document", None)
+            or (hasattr(event, "message") and (getattr(event.message, "photo", None) or getattr(event.message, "video", None) or getattr(event.message, "document", None)))
+        )
+        min_text_len = 10 if has_media else 35
+        if not text or len(text.strip()) < min_text_len:
             return False
         if text.strip().startswith("/"):
             return False
@@ -360,8 +367,16 @@ async def check_and_react_standalone(event, msg_id: int, text: str, sender_name:
             logger.debug("standalone reaction: global slot pool full, skipping msg_id=%s", msg_id)
             return False
 
-        # 4. Вероятностный гейт — 10% сообщений доходит до LLM
-        if random.random() > 0.10:
+        # 4. Вероятностный гейт — в тихом чате (где сообщений мало) позволяем боту
+        # чаще оценивать клинические посты коллег (до 65%), чтобы чат не казался мертвым.
+        # В активном потоке держим 15%.
+        try:
+            vel = await get_recent_message_velocity(hours=1)
+            is_quiet = int(vel) < 10
+        except Exception:
+            is_quiet = True
+        gate_chance = 0.65 if is_quiet else 0.15
+        if random.random() > gate_chance:
             return False
 
         # 5. Оптимистическое бронирование слота (защита от пачечных гонок / TOCTOU)
@@ -1682,8 +1697,20 @@ async def calculate_dynamic_passive_cooldown(state: dict) -> tuple[int, str]:
         v_num = int(velocity)
     except (ValueError, TypeError):
         v_num = 25
-    v_eff = max(v_num, 5)
-    f_vel = (30.0 / v_eff) ** 0.40
+    # В малоактивных чатах (v_num <= 5 сообщ./час) прежняя формула раздувала кулдаун
+    # до 130-180 минут. В тихой группе врачи пишут редко: если после одного ответа
+    # замораживать бота на 2.5 часа, на следующий клинический вопрос он гарантированно
+    # промолчит. Для тихих чатов ставим активный, но не навязчивый кулдаун: ~25 минут днем.
+    if v_num <= 5:
+        f_vel = 0.38
+        min_mins = getattr(config, "PASSIVE_COOLDOWN_QUIET_MINUTES", 20)
+    elif v_num <= 15:
+        f_vel = 0.55
+        min_mins = getattr(config, "PASSIVE_COOLDOWN_MODERATE_MINUTES", 35)
+    else:
+        v_eff = max(v_num, 5)
+        f_vel = (30.0 / v_eff) ** 0.40
+        min_mins = getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45)
 
     if 10 <= msk_hour <= 18:
         f_time = 0.85
@@ -1696,7 +1723,6 @@ async def calculate_dynamic_passive_cooldown(state: dict) -> tuple[int, str]:
         time_desc = "night_rest"
 
     base_mins = getattr(config, "PASSIVE_COOLDOWN_BASE_MINUTES", 75)
-    min_mins = getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45)
     max_mins = getattr(config, "PASSIVE_COOLDOWN_MAX_MINUTES", 180)
 
     raw_cd = base_mins * f_vel * f_time
@@ -1714,7 +1740,20 @@ async def passive_gate_block_reason_async(state: dict) -> str | None:
     last_sent = _parse_state_dt(state.get("last_passive_text_run"))
     since_sent = now - last_sent
 
-    min_floor = timedelta(minutes=getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45))
+    velocity = await get_recent_message_velocity(hours=1)
+    try:
+        v_num = int(velocity)
+    except (ValueError, TypeError):
+        v_num = 25
+
+    if v_num <= 5:
+        floor_minutes = getattr(config, "PASSIVE_COOLDOWN_QUIET_FLOOR_MINUTES", 15)
+        volume_gate_threshold = getattr(config, "PASSIVE_VOLUME_GATE_QUIET_MSGS", 4)
+    else:
+        floor_minutes = getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45)
+        volume_gate_threshold = getattr(config, "PASSIVE_VOLUME_GATE_MSGS", 20)
+
+    min_floor = timedelta(minutes=floor_minutes)
     if since_sent < min_floor:
         mins_left = int((min_floor - since_sent).total_seconds() // 60) + 1
         return f"passive cooldown, at least {mins_left} min left (hard floor {min_floor.seconds // 60}m)"
@@ -1733,7 +1772,7 @@ async def passive_gate_block_reason_async(state: dict) -> str | None:
     if since_sent < full:
         # Volume gate bypass: если с момента прошлого ответа прошло много сообщений
         # (по умолчанию 20 сообщений — достаточно для смены клинической темы)
-        volume_gate = getattr(config, "PASSIVE_VOLUME_GATE_MSGS", 20)
+        volume_gate = volume_gate_threshold
         if since_sent >= min_floor and since_sent < timedelta(hours=12):
             ref_msg_id = state.get("last_passive_bot_msg_id") or state.get("last_case_bot_msg_id") or 0
             if ref_msg_id:
@@ -3792,22 +3831,36 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         max_allowed_minutes = 20.0
 
                     # Проверка по времени исходного сообщения
-                    try:
-                        ref_date_row = await query_db_async(
-                            "SELECT date FROM messages WHERE msg_id = ?",
-                            (ref_id,)
-                        )
-                        if ref_date_row and ref_date_row[0][0]:
-                            ref_dt = _parse_db_date(ref_date_row[0][0])
-                            elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
-                            if elapsed_min > max_allowed_minutes:
-                                logger.info(
-                                    f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
-                                    f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
-                                )
-                                return False
-                    except Exception as time_err:
-                        logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+                    ref_dt = None
+                    if direct_parent and getattr(direct_parent, "date", None):
+                        try:
+                            ref_dt = direct_parent.date
+                            if hasattr(ref_dt, "astimezone"):
+                                ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                        except Exception:
+                            pass
+
+                    if not ref_dt:
+                        try:
+                            ref_date_row = await query_db_async(
+                                "SELECT date FROM messages WHERE msg_id = ?",
+                                (ref_id,)
+                            )
+                            if ref_date_row and ref_date_row[0][0]:
+                                ref_dt = _parse_db_date(ref_date_row[0][0])
+                        except Exception as time_err:
+                            logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+
+                    if ref_dt:
+                        if hasattr(ref_dt, "tzinfo") and ref_dt.tzinfo is not None:
+                            ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                        elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
+                        if elapsed_min > max_allowed_minutes:
+                            logger.info(
+                                f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
+                                f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
+                            )
+                            return False
 
                     # Умный анализ продолжения диалога через триаж
                     recent_group_db = await database.get_last_n_messages(limit=5)
@@ -4510,6 +4563,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         pass
                 # Реакция — фоновая задача: не блокирует ответ и не ломает его при сбое
                 if _pending_reaction:
+                    import runtime_guard
                     runtime_guard.create_task(_try_send_reaction(event, msg_id, _pending_reaction), name=f"react_{msg_id}")
                 return True
             except Exception as e:
@@ -4593,7 +4647,46 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     is_passive = not (is_direct_reply or is_mentioned)
+
+    # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
+    msg_dt = getattr(message, 'date', None)
+    if not msg_dt:
+        try:
+            db_date_row = await query_db_async("SELECT date FROM messages WHERE msg_id = ?", (msg_id,))
+            if db_date_row and db_date_row[0][0]:
+                msg_dt = _parse_db_date(db_date_row[0][0])
+        except Exception as db_dt_err:
+            logger.debug("Error checking media message date: %s", db_dt_err)
+
+    if msg_dt:
+        try:
+            if hasattr(msg_dt, "astimezone"):
+                msg_dt_utc = msg_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            elif hasattr(msg_dt, "tzinfo") and msg_dt.tzinfo is not None:
+                msg_dt_utc = msg_dt.replace(tzinfo=None)
+            else:
+                msg_dt_utc = msg_dt
+            age_minutes = (datetime.utcnow() - msg_dt_utc).total_seconds() / 60.0
+        except Exception:
+            age_minutes = 0.0
+    else:
+        age_minutes = 0.0
+
+    try:
+        cnt_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE msg_id > ?", (msg_id,))
+        count_since = cnt_rows[0][0] if cnt_rows else 0
+    except Exception:
+        count_since = 0
+
     if is_passive:
+        # Для пассивных снимков: максимум 15 минут с момента отправки и не более 8 сообщений после него
+        if age_minutes > 15.0 or count_since > 8:
+            logger.info(
+                "Media Assistant: passive media msg_id=%s is stale (age=%.1fm > 15m, count=%s > 8). Skipping.",
+                msg_id, age_minutes, count_since,
+            )
+            return False
+
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
         if datetime.now() - last_run < timedelta(minutes=120):
             elapsed_min = int((datetime.now() - last_run).total_seconds() / 60)
@@ -4602,7 +4695,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 elapsed_min,
                 msg_id,
             )
-            return  # Within 2-hour cooldown, skip!
+            return False  # Within 2-hour cooldown, skip!
+    else:
+        # Для прямого обращения/упоминания: максимум 120 минут и не более 25 сообщений
+        if age_minutes > 120.0 or count_since > 25:
+            logger.info(
+                "Media Assistant: direct media msg_id=%s is stale (age=%.1fm > 120m, count=%s > 25). Skipping.",
+                msg_id, age_minutes, count_since,
+            )
+            return False
 
     # Construct a simple event-like object for direct compatibility
     class MediaEvent:
@@ -4705,7 +4806,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     # BUILD PROMPT
     has_text_desc = bool(media_description and str(media_description).strip())
     multimodal_notice = ""
-    if image_urls and not has_text_desc:
+    if image_urls:
         multimodal_notice = """
 [МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К твоему запросу прикреплено оригинальное изображение в высоком разрешении. Внимательно сопоставь описание модели зрения с реальным снимком, деталями рентгенограммы, анатомией зубов и клинической картиной. Опирайся в первую очередь на то, что ты реально видишь на прикрепленном снимке.]
 """
@@ -4835,6 +4936,19 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     reply_text = reply_text.strip()
     reply_text = clean_html_formatting(reply_text)
 
+    # Защитная зачистка любых случайных мета-фраз про ИИ/нейросети в клиническом ответе
+    if is_dental and reply_text:
+        reply_text = re.sub(
+            r'(?i)\b(?:если\s+отбросить|не\s+учитывая|без\s+учёта)?\s*фантази[ий]\s+нейросет[ией]\s*(?:про|относительно|насчет)?\s*',
+            '',
+            reply_text
+        ).strip()
+        reply_text = re.sub(r'(?i)\b(?:модел[ьи]\s+зрени\w*|нейросет\w*|искусственн\w+\s+интеллект\w*)\b', '', reply_text)
+        reply_text = re.sub(r'^[,\s—–-]+', '', reply_text)
+        reply_text = re.sub(r'\s{2,}', ' ', reply_text).strip()
+        if reply_text and reply_text[0].islower():
+            reply_text = reply_text[0].upper() + reply_text[1:]
+
     # Парсинг опциональной реакции из media-ответа (те же правила что в text-пути)
     _media_pending_reaction: str | None = None
     _media_react_match = re.search(r'(?:^|\n)\s*REACTION:\s*([^\n]+)', reply_text, re.IGNORECASE)
@@ -4946,6 +5060,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             save_state(state)
             # Реакция на медиа-сообщение: фоновая задача, не блокирует ответ
             if _media_pending_reaction:
+                import runtime_guard
                 runtime_guard.create_task(_try_send_reaction(event, msg_id, _media_pending_reaction), name=f"media_react_{msg_id}")
         except Exception as e:
             logger.error(f"Failed to send direct media assistant reply: {e}")
@@ -8709,7 +8824,7 @@ async def handle_private_message(bot_client, event):
                     )
                     return
 
-            all_protos = await database.get_clinical_protocols(limit=20)
+            all_protos = await database.get_clinical_protocols(limit=100)
             msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
             await bot_client.send_message(entity=chat_id, message=msg_text, buttons=btns, parse_mode='html')
             return
@@ -10339,7 +10454,7 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
                 ]
                 await bot_client.send_message(entity=sender_id, message=profile_card, buttons=profile_buttons, parse_mode='html')
             else:
-                all_protos = await database.get_clinical_protocols(limit=20)
+                all_protos = await database.get_clinical_protocols(limit=100)
                 msg_proto, proto_btns = protocol_extractor.format_protocol_catalog(all_protos)
                 await bot_client.send_message(entity=sender_id, message=msg_proto, buttons=proto_btns, parse_mode='html')
     except Exception as dm_err:
@@ -12022,7 +12137,7 @@ async def handle_quiz_callback(bot_client, event):
             
         elif nav_target in ("proto", "protocols"):
             import protocol_extractor
-            all_protos = await database.get_clinical_protocols(limit=20)
+            all_protos = await database.get_clinical_protocols(limit=100)
             msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
             await edit_callback_message(bot_client, event, msg_text,
                                        "edit_message:proto_list", buttons=btns,
@@ -13068,7 +13183,7 @@ async def handle_quiz_callback(bot_client, event):
 
     if data_str in ("proto:back", "proto:list"):
         import protocol_extractor
-        all_protos = await database.get_clinical_protocols(limit=20)
+        all_protos = await database.get_clinical_protocols(limit=100)
         msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
         await edit_callback_message(bot_client, event, msg_text,
                                    "edit_message:proto_list", buttons=btns,
@@ -13080,7 +13195,7 @@ async def handle_quiz_callback(bot_client, event):
         import protocol_extractor
         category = data_str[10:].strip()
         cat_filter = None if category == "all" else category
-        protos = await database.get_clinical_protocols(category=cat_filter, limit=20)
+        protos = await database.get_clinical_protocols(category=cat_filter, limit=100)
         msg_text, btns = protocol_extractor.format_protocol_catalog(protos, category_filter=cat_filter)
         await edit_callback_message(bot_client, event, msg_text,
                                    "edit_message:proto_cat", buttons=btns,
