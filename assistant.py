@@ -13999,10 +13999,22 @@ async def check_and_send_group_activity_pings(bot_client):
                     )
                     break
                 _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
-                failures = _info.get("ping_failures", 0) + 1
+                _err_str = str(send_err).lower()
+                # Постоянные ошибки: юзер никогда не открывал бота или заблокировал —
+                # сразу выставляем MAX_PING_FAILURES, чтобы исключить навсегда (1 попытка).
+                _permanent = any(x in _err_str for x in (
+                    "invalid peer", "peeridsinvalid", "user is blocked",
+                    "userblocked", "bots can't", "bots cannot",
+                    "an invalid peer was used",
+                ))
+                failures = MAX_PING_FAILURES if _permanent else _info.get("ping_failures", 0) + 1
+                commit_pm_ping(chat_id_str, ping_failures=failures)
                 logger.warning(
-                    f"Failed to send group activity ping to {chat_id} "
-                    f"(failure {failures}): {send_err}"
+                    "Failed to send group activity ping to %s "
+                    "(failure %d/%d%s): %s",
+                    chat_id, failures, MAX_PING_FAILURES,
+                    " — PERMANENT BLACKLIST" if _permanent else "",
+                    send_err,
                 )
                 continue
 
