@@ -625,7 +625,9 @@ def resolve_report_targets():
         # Битая цель уносила ВСЮ рассылку: в `.test` обработчике элемент-строка
         # падал на `target.get` с AttributeError. Пропускаем ровно её, остальные
         # чаты сводку получают.
-        if not isinstance(target, dict) or "chat_id" not in target:
+        if isinstance(target, int):
+            target = {"chat_id": target, "topic_id": None}
+        elif not isinstance(target, dict) or "chat_id" not in target:
             logger.error(
                 "REPORT_TARGETS[%d] пропущен (%r): нет chat_id — этот чат "
                 "сводок не получит",
@@ -716,7 +718,9 @@ async def scheduler_task(bot_client):
                     min_daily_msgs = getattr(config, "MIN_DAILY_SUMMARY_MESSAGES", 5)
                     allow_backfill = getattr(config, "ALLOW_DAILY_SUMMARY_BACKFILL", False)
                     messages = await asyncio.wait_for(
-                        database.get_messages_for_daily_summary(start_time, end_time, min_count=100),
+                        database.get_messages_for_daily_summary(
+                            start_time, end_time, min_count=100, allow_backfill=allow_backfill
+                        ),
                         timeout=30,
                     )
                     
@@ -1347,7 +1351,7 @@ async def stop_media_analysis_workers():
     _media_worker_tasks = []
 
 
-async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, bulk=False):
+async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, bulk=False, trigger_assistant=None):
     """
     Ставит медиа в очередь разбора. Возвращает True, если место нашлось.
 
@@ -1355,6 +1359,8 @@ async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, b
     очереди штатно и не должно писать строку ERROR на каждый снимок.
     Непоставленные никуда не пропадают: в базе у них пустое media_description,
     и их подбирает recover_pending_media_analysis при следующих запусках.
+    trigger_assistant=False — категорически запрещает вызывать ассистента в чат
+    (для фонового догона истории и восстановления базы).
     """
     # Вызываем безусловно, а не только при _media_queue is None.
     # start_media_analysis_workers() идемпотентна: она отбрасывает завершившиеся
@@ -1364,8 +1370,11 @@ async def enqueue_media_analysis(messages, msg_id, text, media_type_hint=None, b
     # анализа — до следующего перезапуска процесса.
     start_media_analysis_workers()
 
+    if trigger_assistant is None:
+        trigger_assistant = not bulk
+
     try:
-        _media_queue.put_nowait((messages, msg_id, text, media_type_hint))
+        _media_queue.put_nowait((messages, msg_id, text, media_type_hint, trigger_assistant))
         # Запоминаем ВСЕ сообщения пачки, а не только msg_id: у альбома в базе
         # своя строка на каждый снимок, и догон нашёл бы остальные по пустому
         # описанию. Отмечаем только после успешной постановки — непоставленные
@@ -1506,9 +1515,16 @@ async def media_recovery_task():
 
 async def media_analysis_worker(worker_id):
     while True:
-        messages, msg_id, text, media_type_hint = await _media_queue.get()
+        queue_item = await _media_queue.get()
+        if len(queue_item) >= 5:
+            messages, msg_id, text, media_type_hint, trigger_assistant = queue_item[:5]
+        else:
+            messages, msg_id, text, media_type_hint = queue_item
+            trigger_assistant = True
         try:
-            await process_media_message(messages, msg_id, text, media_type_hint=media_type_hint)
+            await process_media_message(
+                messages, msg_id, text, media_type_hint=media_type_hint, trigger_assistant=trigger_assistant
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2086,7 +2102,7 @@ async def _mark_media_processed(messages, msg_id, reason):
     return marked
 
 
-async def process_media_message(messages, msg_id, text, media_type_hint=None):
+async def process_media_message(messages, msg_id, text, media_type_hint=None, trigger_assistant=True):
     files_to_analyze = []
     # Чьи именно снимки дошли до Vision. Нужно потому, что описание одно на
     # вызов, а строк в базе столько же, сколько сообщений в альбоме.
@@ -2172,16 +2188,21 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                     except Exception as cdn_err:
                         logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
                 
-                # Запуск медиа-ассистента
-                async def run_media_assistant_safe():
-                    try:
-                        await assistant.check_and_trigger_assistant_media(
-                            bot_client, messages[0], msg_id, text, media_description,
-                            image_urls=getattr(media_description, "image_urls", None),
-                        )
-                    except Exception as e:
-                        logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
-                runtime_guard.create_task(run_media_assistant_safe(), name=f"media_{msg_id}")
+                # Запуск медиа-ассистента (только для свежих живых сообщений)
+                if trigger_assistant:
+                    async def run_media_assistant_safe():
+                        try:
+                            media_replied = await assistant.check_and_trigger_assistant_media(
+                                bot_client, messages[0], msg_id, text, media_description,
+                                image_urls=getattr(media_description, "image_urls", None),
+                            )
+                            if media_replied:
+                                lifeline_manager.cancel_question(msg_id, reason="media_assistant_replied")
+                        except Exception as e:
+                            logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
+                    runtime_guard.create_task(run_media_assistant_safe(), name=f"media_{msg_id}")
+                else:
+                    logger.info("Media analysis completed for msg_id=%s (trigger_assistant=False, background sync/recovery)", msg_id)
             else:
                 logger.info("media analysis returned empty description msg_id=%s, marking as processed", msg_id)
                 for message in messages:
@@ -2272,7 +2293,33 @@ async def forward_to_mirror(event_msg, target_chat_id):
         except Exception as exc:
             logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
 
+import question_lifeline
+
+async def _send_lifeline_to_chat(chat_id: int, reply_to_msg_id: int, text: str):
+    # PROD LOCKDOWN: Do not post to production chat unless explicitly enabled
+    is_prod = tg_safety.is_prod_chat(chat_id)
+    if is_prod and not getattr(config, "LIFELINE_PROD_ENABLED", False):
+        logger.info("🛡️ PROD LOCKDOWN: Lifeline в прод-чат %s заблокирован (LIFELINE_PROD_ENABLED=False)", chat_id)
+        return
+
+    try:
+        await bot_client.send_message(
+            entity=chat_id,
+            message=text,
+            reply_to=reply_to_msg_id,
+            parse_mode='html'
+        )
+    except Exception as exc:
+        logger.error("Failed to send lifeline response to chat %s: %s", chat_id, exc)
+
+lifeline_delay = getattr(config, "QUESTION_LIFELINE_DELAY_SECONDS", question_lifeline.DEFAULT_LIFELINE_DELAY_SECONDS)
+lifeline_manager = question_lifeline.QuestionLifelineManager(
+    delay_seconds=lifeline_delay,
+    send_message_callback=_send_lifeline_to_chat
+)
+
 @client.on(events.NewMessage(chats=WATCHED_CHATS))
+@bot_client.on(events.NewMessage(chats=WATCHED_CHATS))
 async def handle_new_message(event):
     """Обработчик новых сообщений в целевом чате."""
     try:
@@ -2696,12 +2743,24 @@ async def handle_new_message(event):
                     bot_client, event, msg_id, text, reply_to_msg_id,
                     sender_first_name=sender_first_name
                 )
-                if not replied:
+                if replied:
+                    lifeline_manager.cancel_question(msg_id, reason="assistant_replied")
+                    if reply_to_msg_id:
+                        lifeline_manager.cancel_question(reply_to_msg_id, reason="assistant_replied_to_parent")
+                else:
                     replied_mention = await assistant.check_bot_mention_trigger(
                         bot_client, event, msg_id, text, sender_first_name=sender_first_name
                     )
-                    if not replied_mention:
-                        await assistant.check_and_trigger_referee(bot_client, event, text)
+                    if replied_mention:
+                        lifeline_manager.cancel_question(msg_id, reason="assistant_mention_replied")
+                        if reply_to_msg_id:
+                            lifeline_manager.cancel_question(reply_to_msg_id, reason="assistant_mention_replied_to_parent")
+                    else:
+                        referee_replied = await assistant.check_and_trigger_referee(bot_client, event, text)
+                        if referee_replied:
+                            lifeline_manager.cancel_question(msg_id, reason="referee_replied")
+                            if reply_to_msg_id:
+                                lifeline_manager.cancel_question(reply_to_msg_id, reason="referee_replied_to_parent")
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
                 
@@ -2710,6 +2769,15 @@ async def handle_new_message(event):
         if is_any_bot:
             logger.info(f"Skipping assistant triggers for bot-authored msg_id={msg_id} in chat {event.chat_id}.")
         else:
+            # Оповещаем Lifeline менеджер о сообщении живого врача (отменяет зависший таймер, если ответил коллега)
+            lifeline_manager.on_human_message(
+                chat_id=event.chat_id,
+                sender_id=sender_id,
+                reply_to_msg_id=reply_to_msg_id,
+                text=text,
+                sender_name=sender_name
+            )
+
             runtime_guard.create_task(run_assistant_safe(), name=f"assistant_{msg_id}")
 
             # Фоновое автоматическое распознавание клинических протоколов врачей
@@ -2731,9 +2799,10 @@ async def handle_new_message(event):
 
             # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
             # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
-            is_direct_bot_call = (
-                "@" in text
-                or (assistant.BOT_USERNAME and assistant.BOT_USERNAME.lower() in text.lower())
+            bot_uname = (assistant.BOT_USERNAME or getattr(config, "STOMCHAT_BOT_USERNAME", "") or "docendobot").lower().lstrip("@")
+            is_direct_bot_call = bool(
+                (bot_uname and f"@{bot_uname}" in text.lower())
+                or (bot_uname and bot_uname in text.lower())
                 or "бот" in text.lower()
             )
             if event.chat_id == config.SOURCE_CHAT_ID and text and not is_direct_bot_call:
@@ -2741,6 +2810,20 @@ async def handle_new_message(event):
                     assistant.check_and_react_standalone(event, msg_id, text, sender_name or "Коллега"),
                     name=f"react_{msg_id}"
                 )
+
+            # Unanswered Question Lifeline (Протокол «Первый ответ») для неактивных чатов:
+            # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг
+            if text and not is_direct_bot_call:
+                if question_lifeline.is_clinical_question_candidate(text=text, has_media=has_media, sender_is_bot=is_any_bot):
+                    lifeline_manager.track_question(
+                        msg_id=msg_id,
+                        chat_id=event.chat_id,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=text,
+                        has_media=has_media,
+                        media_description=media_description
+                    )
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:

@@ -373,7 +373,7 @@ async def init_db():
     await purge_broken_media_remote_urls()
 
 
-async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
+async def get_messages_for_daily_summary(start_time, end_time, min_count=100, allow_backfill=False):
     def operation():
         with _connection() as db:
             period_messages = db.execute(
@@ -387,7 +387,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
             ).fetchall()
 
             total_msgs = list(period_messages)
-            if len(total_msgs) < min_count:
+            if allow_backfill and len(total_msgs) < min_count:
                 # Добор из прошлого — только то, что ещё НЕ уходило в сводку.
                 # Без этого условия в тихий день дайджест пересказывал
                 # сообществу вчерашний.

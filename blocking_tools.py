@@ -814,11 +814,22 @@ def _restore_foreign_summary_status(snapshot):
         return False
 
 
-# Только для фоновых генераций опросов (poll_content_gen, poll_clinical_review),
-# где задержки допустимы и нет живого врача, ждущего ответ в чате.
-# Интерактивные диалоговые задачи исключены: при исчерпании каскада бот не должен
-# устраивать retry storm на 30+60+90 секунд, сжигая ключи Groq.
+# Виды диалоговых и фоновых задач, для которых при отказе/кулдауне всех ключей
+# активируется прогрессивный бэкофф: паузы 30с, 60с, 90с (3 последовательных шанса).
 EXHAUSTION_RETRY_KINDS = frozenset({
+    "assistant",
+    "assistant_media",
+    "bot_mention_reply",
+    "group_ask",
+    "group_explainer",
+    "group_quiz_gen",
+    "group_referee",
+    "pm_chat",
+    "pm_ping",
+    "pm_web_lookup",
+    "dialogue_fallback",
+    "media_fallback",
+    "transcription_corrector",
     "poll_content_gen",
     "poll_clinical_review",
 })

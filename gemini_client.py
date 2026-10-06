@@ -1327,6 +1327,8 @@ def is_audio_silent_or_empty(file_path: str) -> bool:
             return False
 
         err_out = (proc.stderr or b"").decode("utf-8", errors="ignore")
+        if "misdetection possible!" in err_out:
+            return False
         if "does not contain any audio stream" in err_out or "Output file is empty" in err_out:
             return True
 

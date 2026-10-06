@@ -38,26 +38,41 @@ _STEP_MARKERS = {
 }
 
 
+# Маркеры вопросов/сомнений, исключающие кандидатность сообщения в протокол
+_QUESTION_INQUIRY_STARTERS = (
+    "подскажите", "кто подскажет", "как думаете", "что посоветуете",
+    "чем лучше", "кто как делает", "в чем причина", "что делать",
+    "кто сталкивался", "посоветуйте", "как правильно", "вопрос коллегам"
+)
+
+
 def is_protocol_candidate(text: str) -> bool:
     """
     Быстрый фильтр: определяет, содержит ли текст подробное описание клинического протокола.
-    Исключает тривиальные вопросы вида «какой протокол травления?».
+    Исключает клинические вопросы врачей, споры и короткие реплики.
     """
-    if not text or len(text.strip()) < 130:
+    if not text or len(text.strip()) < 180:
         return False
 
-    t_lower = text.lower()
+    t_lower = text.lower().strip()
 
-    # Не является кандидатом, если это чисто вопросительное предложение без пояснений
-    if t_lower.endswith("?") and len(text.splitlines()) <= 2 and "протокол" in t_lower and not any(c.isdigit() for c in t_lower):
+    # 1. Отсекаем вопросы (врач спрашивает совет, а не делится алгоритмом)
+    if any(t_lower.startswith(starter) or f"коллеги, {starter}" in t_lower[:70] for starter in _QUESTION_INQUIRY_STARTERS):
+        return False
+    if t_lower.endswith("?") and "?" not in t_lower[:-1] and len(t_lower.splitlines()) <= 3:
+        return False
+    # Если в тексте 2+ знака вопроса и нет нумерованных шагов — это опрос/вопрос, а не протокол
+    has_numbered_steps = bool(re.search(r'(?:^|\n|\s)(?:[1-9][\.\)]\s*|\bэтап\s*[1-9]|\bшаг\s*[1-9])', t_lower))
+    if t_lower.count("?") >= 2 and not has_numbered_steps:
         return False
 
+    # 2. Процедурные стоматологические термины
     has_proc_term = any(term in t_lower for term in _DENTAL_PROCEDURAL_TERMS)
     if not has_proc_term:
         return False
 
+    # 3. Маркеры алгоритма/шагов
     has_step_marker = any(marker in t_lower for marker in _STEP_MARKERS)
-    has_numbered_steps = bool(re.search(r'(?:^|\n|\s)(?:[1-9]\.|\bэтап\s*[1-9]|\bшаг\s*[1-9]|[1-9]\))', t_lower))
 
     return has_step_marker or has_numbered_steps
 
@@ -94,15 +109,20 @@ async def extract_protocol_from_text_async(
         return None
 
     prompt = f"""Ты — ведущий эксперт-методолог доказательной стоматологии (Evidence-Based Dentistry).
-Врач-стоматолог в профессиональном сообществе поделился клиническим протоколом/методикой.
-Твоя задача: структурировать этот клинический опыт в эталонный протокол.
+Врач-стоматолог в профессиональном сообществе поделился сообщением.
+Твоя задача: проверить, содержит ли сообщение РЕАЛЬНЫЙ пошаговый клинический протокол лечения, и если да — структурировать его.
 
 Исходный текст врача:
 <text>
 {text[:3500]}
 </text>
 
-КРИТИЧЕСКИЕ ТРЕБОВАНИЯ:
+КРИТИЧЕСКИЙ ФИЛЬТР:
+Если в тексте врач задает вопрос, просит совета («подскажите», «чем лучше»), сомневается, описывает неудачу без рецепта её решения, или текст не содержит реального пошагового клинического алгоритма — верни СТРОГО:
+{{"is_protocol": false, "reason": "текст является вопросом или обсуждением без пошагового алгоритма"}}
+Категорически запрещено выдумывать шаги, которых нет в тексте врача!
+
+ЕСЛИ текст действительно содержит реальный клинический протокол или пошаговую методику:
 1. Выдели точное клиническое название протокола (title), например: «Адгезивная фиксация керамических виниров E.max» или «Протокол распломбировки каналов, обтурированных резорцин-формалином».
 2. Определи категорию (category): строго одна из: "Ортопедия", "Терапия", "Эндодонтия", "Хирургия", "Пародонтология", "Гнатология", "Общая стоматология".
 3. Выдели четкие клинические показания (indication) и противопоказания/ограничения (contraindications).
@@ -111,6 +131,7 @@ async def extract_protocol_from_text_async(
 6. Выдели критические клинические нюансы и подводные камни (key_nuances) — на что обратить особое внимание, чтобы избежать осложнений.
 7. Верни результат СТРОГО в формате JSON:
 {{
+  "is_protocol": true,
   "title": "Название протокола",
   "category": "Ортопедия",
   "indication": "Показания к применению",
@@ -132,7 +153,11 @@ async def extract_protocol_from_text_async(
             return None
 
         parsed = _clean_json_str(response.text)
-        if not parsed or not parsed.get("title") or not parsed.get("steps"):
+        if not parsed or not parsed.get("is_protocol", True):
+            logger.info("Protocol extraction: candidate rejected by LLM (%s)", parsed.get("reason") if parsed else "no json")
+            return None
+
+        if not parsed.get("title") or not parsed.get("steps") or len(parsed.get("steps", [])) < 2:
             logger.debug(f"Protocol parsing returned incomplete JSON: {response.text[:100]}")
             return None
 
@@ -259,11 +284,11 @@ _DEFAULT_COMMUNITY_PROTOCOLS = [
 ]
 
 
-async def seed_default_protocols_async():
-    """Заполняет базу данных эталонными клиническими протоколами, если таблица пуста."""
+async def seed_default_protocols_async(force: bool = False):
+    """Заполняет базу данных эталонными клиническими протоколами, если таблица пуста (или force=True)."""
     try:
         existing = await database.get_clinical_protocols(limit=1)
-        if not existing:
+        if not existing or force:
             logger.info("Seeding default clinical protocols into database...")
             for proto in _DEFAULT_COMMUNITY_PROTOCOLS:
                 steps_json = json.dumps(proto["steps"], ensure_ascii=False)
