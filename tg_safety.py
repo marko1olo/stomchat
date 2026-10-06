@@ -58,6 +58,23 @@ import time
 
 _LOG = logging.getLogger(__name__)
 
+PROD_CHAT_IDS = {-1001617420995, -1001820467444}
+TEST_CHAT_IDS = {-1004363715130, -1002302318047, -1003735006121}
+
+def is_prod_chat(chat_id) -> bool:
+    """Определяет, является ли chat_id реальным продакшн-чатом."""
+    if not chat_id:
+        return False
+    try:
+        cid = int(chat_id)
+    except (ValueError, TypeError):
+        return False
+    if cid in TEST_CHAT_IDS:
+        return False
+    if cid in PROD_CHAT_IDS:
+        return True
+    return False
+
 # Бюджет по умолчанию согласован с summarizer.TELEGRAM_SEND_TIMEOUT_SECONDS = 90:
 # в проекте уже есть отработавший срок на отправку, второе число рядом разъедется.
 DEFAULT_TIMEOUT_SECONDS = 90.0

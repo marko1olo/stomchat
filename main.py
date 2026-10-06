@@ -1299,6 +1299,23 @@ async def patched_send_message(*args, **kwargs):
             chat_id = telethon_utils.get_peer_id(sent_msg.peer_id)
             if chat_id:
                 await database.save_bot_sent_message(sent_msg.id, chat_id)
+                try:
+                    reply_to_id = kwargs.get("reply_to")
+                    if reply_to_id is None and len(args) > 3:
+                        reply_to_id = args[3]
+                    bot_text = getattr(sent_msg, 'message', '') or (text if isinstance(text, str) else '')
+                    if bot_text:
+                        await database.save_message(
+                            msg_id=sent_msg.id,
+                            sender_id=getattr(config, "STOMCHAT_BOT_ID", FALLBACK_BOT_ID) or getattr(sent_msg, 'sender_id', None) or 7971556097,
+                            sender_name=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "StomChat",
+                            sender_username=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "docendobot",
+                            text=bot_text,
+                            date=getattr(sent_msg, 'date', None) or datetime.utcnow(),
+                            reply_to_msg_id=reply_to_id,
+                        )
+                except Exception as save_msg_err:
+                    logger.debug(f"Could not save outgoing bot message to messages table: {save_msg_err}")
         except Exception as e:
             logger.error(f"Error saving bot outgoing message ID: {e}")
     return sent_msg
@@ -1508,18 +1525,18 @@ async def media_analysis_worker(worker_id):
 def bot_mention_names():
     """
     Имена, по которым бота зовут в группе, — реальное и запасное.
-
-    Проверка вида f"@{assistant.BOT_ID}" была мёртвой: BOT_ID это числовой id,
-    и строка «@7971556097» в сообщениях не встречается никогда. Фактически
-    работал только зашитый литерал «@stomchat_bot», то есть при смене имени
-    бота обращения перестали бы распознаваться совершенно молча.
     """
     names = []
     resolved = getattr(assistant, "BOT_USERNAME", None)
     if resolved:
         names.append(resolved.lower())
-    if FALLBACK_BOT_USERNAME and FALLBACK_BOT_USERNAME not in names:
-        names.append(FALLBACK_BOT_USERNAME)
+    for env_key in ("STOMCHAT_BOT_USERNAME", "ENDOCHAT_BOT_USERNAME"):
+        val = (os.getenv(env_key) or "").lstrip("@").lower()
+        if val and val not in names:
+            names.append(val)
+    for fallback in ("docendobot", "stomchat_bot", "endochatbot"):
+        if fallback not in names:
+            names.append(fallback)
     return names
 
 
@@ -2752,6 +2769,7 @@ EDIT_RESAVE_RETRY_SECONDS = 2.0
 
 
 @client.on(events.MessageEdited(chats=SAVED_CHATS))
+@bot_client.on(events.MessageEdited(chats=SAVED_CHATS))
 async def handle_edited_message(event):
     """Догоняет правку сообщения: в базе должна лежать текущая редакция."""
     try:
@@ -2794,6 +2812,7 @@ async def handle_edited_message(event):
 
 
 @client.on(events.MessageDeleted(chats=SAVED_CHATS))
+@bot_client.on(events.MessageDeleted(chats=SAVED_CHATS))
 async def handle_deleted_messages(event):
     """Убирает удалённые сообщения из базы, чтобы бот перестал их цитировать."""
     try:
@@ -3033,8 +3052,34 @@ async def handle_poll_update(event):
         poll_id = getattr(event, "poll_id", None)
         if not poll_id:
             return
+
+        import poll_storage
+
+        # 1. Сохраняем агрегированные результаты голосования (в т.ч. для анонимных опросов)
+        if getattr(event, "results", None):
+            res = event.results
+            total_voters = getattr(res, "total_voters", 0) or 0
+            results_by_option = {}
+            if getattr(res, "results", None):
+                for ans_voter in res.results:
+                    try:
+                        opt_id = int(ans_voter.option.decode("utf-8"))
+                        results_by_option[opt_id] = ans_voter.voters
+                    except Exception:
+                        pass
+            if total_voters > 0 or results_by_option:
+                await poll_storage.update_poll_aggregate_results(
+                    poll_id=poll_id,
+                    total_voters=total_voters,
+                    results_by_option=results_by_option
+                )
+                logger.info(
+                    "📊 Обновлены результаты опроса #%s: всего %d, распределение: %s",
+                    poll_id, total_voters, results_by_option
+                )
+
+        # 2. Обрабатываем закрытие опроса
         if getattr(event.poll, "closed", False):
-            import poll_storage
             await poll_storage.close_poll(poll_id)
             logger.info("🔒 Опрос %s закрыт в Telegram", poll_id)
     except Exception as e:
