@@ -14000,6 +14000,11 @@ async def check_and_send_group_activity_pings(bot_client):
                     break
                 _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
                 _err_str = str(send_err).lower()
+                # Entity not found — юзер совсем не резолвится. Удаляем из пула.
+                if "could not find the input entity" in _err_str:
+                    logger.warning("Group ping: user %s entity not found. Removing from PM pings.", chat_id)
+                    drop_pm_ping(chat_id_str)
+                    continue
                 # Постоянные ошибки: юзер никогда не открывал бота или заблокировал —
                 # сразу выставляем MAX_PING_FAILURES, чтобы исключить навсегда (1 попытка).
                 _permanent = any(x in _err_str for x in (
