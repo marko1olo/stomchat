@@ -711,7 +711,7 @@ async def get_poll_summary_stats(poll_id: int, db_path: Optional[str] = None) ->
 
     # Fallback на анонимную агрегированную статистику Telegram
     if total_votes == 0 and poll_meta:
-        agg_total = poll_meta.get("total_voters") or 0
+        agg_total = int(poll_meta.get("total_voters") or 0)
         agg_results = poll_meta.get("results_json")
         if agg_total > 0 and agg_results:
             try:
