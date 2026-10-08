@@ -3719,8 +3719,36 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             if await resolve_bot_identity(bot_client):
                 logger.info(f"Dynamically resolved BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
 
+        # 0. Check Direct Bot Mention / Tag / Explicit Call (always bypasses passive cooldown)
+        bot_uname = (BOT_USERNAME or getattr(config, "STOMCHAT_BOT_USERNAME", "") or "stomchat_bot").lower().lstrip("@")
+        text_lower = (text or "").lower()
+        is_direct_mention = bool(
+            (bot_uname and f"@{bot_uname}" in text_lower)
+            or (bot_uname and bot_uname in text_lower)
+            or text_lower.startswith("бот,")
+            or text_lower.startswith("бот ")
+            or text_lower == "бот"
+        )
+        if is_direct_mention:
+            if is_negative_feedback(text):
+                logger.warning(f"Negative feedback detected in direct mention: '{text}'. Silencing bot.")
+                state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                save_state(state)
+                apology = "Понял, умолкаю. Если понадоблюсь — позовите."
+                await event.reply(apology)
+                REPLIED_MSG_IDS[msg_id] = True
+                return True
+
+            is_dialogue = True
+            triggered = True
+            trigger_reason = f"Direct mention/tag of bot by {sender_first_name or 'user'}"
+            chain, _, _ = await fetch_dynamic_chat_context(
+                msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
+            )
+            context_msgs = chain or [f"{sender_first_name or 'Коллега'}: {text}"]
+
         # 1. Check Dialogue Reaction or Thread Continuation with Bot
-        if reply_to_msg_id and BOT_ID:
+        if not triggered and reply_to_msg_id and BOT_ID:
             try:
                 # Проверяем прямого родителя через Telegram client, если доступен
                 direct_parent = None
@@ -3809,8 +3837,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
                     try:
                         msgs_since = await query_db_async(
-                            "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
-                            (ref_id,)
+                            "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < ?",
+                            (ref_id, msg_id or 90000000)
                         )
                         count_since = msgs_since[0][0] if msgs_since else 0
                     except Exception as db_err:
@@ -3824,44 +3852,59 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         )
                         return False
 
-                    # Расчет допустимого времени: для прямых ответов боту при спокойном чате (<= 10 сообщений)
-                    # даем до 4 часов (240 мин), при умеренной активности — до 3 часов (180 мин).
+                    # Расчет допустимого времени: для прямых ответов боту с явным вопросом
+                    # staleness вообще не применяется; без явного вопроса даем до суток (1440 мин).
+                    # Для чужих веток — 20 минут.
+                    is_explicit_question = bool(
+                        "?" in text
+                        or "？" in text
+                        or len(text.strip()) > 15
+                    )
                     if is_parent_bot:
-                        max_allowed_minutes = 240.0 if count_since <= 10 else 180.0
+                        if is_explicit_question:
+                            # Прямой реплай + вопрос — отвечаем всегда, staleness не применяется
+                            max_allowed_minutes = None
+                        else:
+                            max_allowed_minutes = 1440.0  # 24 часа
                     else:
                         max_allowed_minutes = 20.0
 
-                    # Проверка по времени исходного сообщения
-                    ref_dt = None
-                    if direct_parent and getattr(direct_parent, "date", None):
-                        try:
-                            ref_dt = direct_parent.date
-                            if hasattr(ref_dt, "astimezone"):
+                    # Проверка по времени исходного сообщения (только если лимит задан)
+                    if max_allowed_minutes is not None:
+                        ref_dt = None
+                        if direct_parent and getattr(direct_parent, "date", None):
+                            try:
+                                ref_dt = direct_parent.date
+                                if hasattr(ref_dt, "astimezone"):
+                                    ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                            except Exception:
+                                pass
+
+                        if not ref_dt:
+                            try:
+                                ref_date_row = await query_db_async(
+                                    "SELECT date FROM messages WHERE msg_id = ?",
+                                    (ref_id,)
+                                )
+                                if ref_date_row and ref_date_row[0][0]:
+                                    ref_dt = _parse_db_date(ref_date_row[0][0])
+                            except Exception as time_err:
+                                logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+
+                        if ref_dt:
+                            if hasattr(ref_dt, "tzinfo") and ref_dt.tzinfo is not None:
                                 ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
-                        except Exception:
-                            pass
-
-                    if not ref_dt:
-                        try:
-                            ref_date_row = await query_db_async(
-                                "SELECT date FROM messages WHERE msg_id = ?",
-                                (ref_id,)
-                            )
-                            if ref_date_row and ref_date_row[0][0]:
-                                ref_dt = _parse_db_date(ref_date_row[0][0])
-                        except Exception as time_err:
-                            logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
-
-                    if ref_dt:
-                        if hasattr(ref_dt, "tzinfo") and ref_dt.tzinfo is not None:
-                            ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
-                        elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
-                        if elapsed_min > max_allowed_minutes:
-                            logger.info(
-                                f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
-                                f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
-                            )
-                            return False
+                            elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
+                            if elapsed_min > max_allowed_minutes:
+                                logger.info(
+                                    f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
+                                    f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
+                                )
+                                return False
+                    else:
+                        logger.debug(
+                            f"Direct reply to bot msg {ref_id} with explicit question — no staleness limit applied."
+                        )
 
                     # Умный анализ продолжения диалога через триаж
                     recent_group_db = await database.get_last_n_messages(limit=5)
@@ -3938,8 +3981,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 try:
                     ref_id = last_case_bot_msg or 0
                     msgs_since = await query_db_async(
-                        "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
-                        (ref_id,)
+                        "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < ?",
+                        (ref_id, msg_id or 90000000)
                     )
                     count_since = msgs_since[0][0] if msgs_since else 0
                 except Exception:
@@ -8398,7 +8441,7 @@ async def handle_private_message(bot_client, event):
                 elif detected.name == INTENT_WEB_SEARCH:
                     text = f"/web {detected.query}".strip()
                 elif detected.name == INTENT_CALCULATOR:
-                    instant_calc = calculate_anesthesia_instant(text)
+                    instant_calc = calculate_anesthesia_instant(text) or calculate_endo_instant(text)
                     if instant_calc:
                         await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
                         return
@@ -8846,7 +8889,7 @@ async def handle_private_message(bot_client, event):
         if text.lower() == "/calc" or text.lower().startswith("/calc "):
             calc_arg = text[5:].strip() if text.lower().startswith("/calc ") else ""
             if calc_arg:
-                instant_calc = calculate_anesthesia_instant(calc_arg)
+                instant_calc = calculate_anesthesia_instant(calc_arg) or calculate_endo_instant(calc_arg)
                 if instant_calc:
                     await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
                     return
@@ -8875,6 +8918,10 @@ async def handle_private_message(bot_client, event):
                 "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
                 "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
                 "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "🔬 <b>Эндодонтические модули у кресла:</b>\n"
+                "• <b>NaOCl & EDTA:</b> объём (≥ 15-20 мл/канал), подогрев 45-50°C, экспозиция EDTA 60 сек, PUI.\n"
+                "• <b>Конусность (Taper):</b> расчёт диаметра D0–D16 и Danger Zone дентина.\n"
+                "• <b>Торк & Обороты:</b> настройки эндомотора для NiTi систем (ProTaper, WaveOne, Reciproc).\n\n"
                 "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
                 "При сопутствующей патологии, у детей, беременных и пожилых предел ниже. "
                 "Объём карпулы и концентрацию сверяйте с инструкцией к своему препарату — "
@@ -8883,7 +8930,9 @@ async def handle_private_message(bot_client, event):
             from telethon import Button
             buttons = [
                 [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("⬅️ В главное меню", data="nav:main")]
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("🧪 NaOCl & EDTA", data="calc:naocl")],
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("⬅️ В главное меню", data="nav:main")]
             ]
             await bot_client.send_message(entity=chat_id, message=calc_text, buttons=buttons, parse_mode='html')
             return
@@ -12749,7 +12798,7 @@ async def handle_quiz_callback(bot_client, event):
         
         if calc_sub in ("main", "menu"):
             calc_msg = (
-                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "🧮 <b>Справочник-калькулятор анестезии и эндодонтии</b>\n\n"
                 "Пришлите препарат, концентрацию и вес — например "
                 "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
                 "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
@@ -12765,12 +12814,17 @@ async def handle_quiz_callback(bot_client, event):
                 "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
                 "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
                 "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "🔬 <b>Эндодонтические модули у кресла:</b>\n"
+                "• <b>NaOCl & EDTA:</b> объём (≥ 15-20 мл/канал), подогрев 45-50°C, экспозиция EDTA 60 сек, PUI.\n"
+                "• <b>Конусность (Taper):</b> расчёт диаметра D0–D16 и Danger Zone дентина.\n"
+                "• <b>Торк & Обороты:</b> настройки эндомотора для NiTi систем (ProTaper, WaveOne, Reciproc).\n\n"
                 "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
                 "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
             )
             buttons = [
                 [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("🧪 NaOCl & EDTA", data="calc:naocl")],
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
             await edit_callback_message(bot_client, event, calc_msg,
@@ -12851,6 +12905,42 @@ async def handle_quiz_callback(bot_client, event):
             ]
             await edit_callback_message(bot_client, event, lido_text,
                                        "edit_message:calc_lidocaine", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "naocl":
+            naocl_text = calculate_endo_instant("naocl")
+            buttons = [
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, naocl_text,
+                                       "edit_message:calc_naocl", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "taper":
+            taper_text = calculate_endo_instant("taper")
+            buttons = [
+                [Button.inline("🧪 NaOCl & EDTA", data="calc:naocl"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, taper_text,
+                                       "edit_message:calc_taper", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "torque":
+            torque_text = calculate_endo_instant("torque")
+            buttons = [
+                [Button.inline("🧪 NaOCl & EDTA", data="calc:naocl"), Button.inline("📐 Конусность D0-D16", data="calc:taper")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, torque_text,
+                                       "edit_message:calc_torque", buttons=buttons,
                                        parse_mode='html')
             await event.answer()
             return

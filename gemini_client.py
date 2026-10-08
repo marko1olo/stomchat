@@ -999,8 +999,16 @@ def generate_text(prompt, status_context=None, timeout=None):
                 # долю: сумма таймаутов запросов не должна вылезать за timeout.
                 req_timeout = min(req_timeout, remaining)
 
+            call_timeout = req_timeout
+            if provider == "agentrouter":
+                rem = (deadline - time.monotonic()) if deadline else 35.0
+                call_timeout = max(call_timeout, min(30.0, max(7.0, rem)))
+            elif deadline is not None:
+                rem = deadline - time.monotonic()
+                call_timeout = min(call_timeout, rem)
+
             try:
-                client = client_maker(api_key)
+                client = get_provider_client(provider, api_key, timeout=call_timeout)
                 _write_generation_status(
                     status_context, stage=f"{provider}_request",
                     attempt=attempt + 1, max_attempts=max_attempts,

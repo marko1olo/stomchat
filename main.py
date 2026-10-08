@@ -3598,6 +3598,77 @@ async def health_watchdog_task():
             await client.disconnect()
             return
 
+async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
+    """При рестарте: ищем сообщения из БД за последние window_minutes минут
+    на которые бот не ответил — отвечаем через check_bot_mention_trigger.
+    Работает даже если @mention был удалён другим ботом, т.к. само сообщение в БД."""
+    try:
+        import runtime_guard as _rg
+        bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "stomchat_bot").lstrip("@").lower()
+        bot_id = getattr(assistant, "BOT_ID", None) or FALLBACK_BOT_ID
+        chat_id = config.SOURCE_CHAT_ID
+        cutoff_utc = (datetime.utcnow() - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Берём из БД сообщения за окно — не от бота
+        rows = await database.query_db_async(
+            """SELECT msg_id, sender_id, sender_name, text, has_media, media_description
+               FROM messages
+               WHERE date >= ? AND sender_id != ?
+               ORDER BY msg_id DESC LIMIT 60""",
+            (cutoff_utc, bot_id)
+        )
+        if not rows:
+            return
+
+        # id сообщений бота за то же окно
+        bot_rows = await database.query_db_async(
+            """SELECT reply_to_msg_id FROM messages
+               WHERE date >= ? AND sender_id = ? AND reply_to_msg_id IS NOT NULL""",
+            (cutoff_utc, bot_id)
+        )
+        bot_replied_to = {r[0] for r in bot_rows if r[0]}
+
+        # Ищем: @bot_username в тексте ИЛИ медиа с текстом-призывом оценить/помочь — без ответа бота
+        target = None
+        for row in rows:
+            msg_id, sender_id, sender_name, text, has_media, media_desc = row
+            if msg_id in bot_replied_to:
+                continue
+            text = text or ""
+            # прямое упоминание
+            is_mention = f"@{bot_username}" in text.lower()
+            # медиа с призывом (короткий текст + фото — просьба оценить)
+            is_media_ask = has_media and len(text.strip()) > 0 and len(text.strip()) < 80
+            if is_mention or is_media_ask:
+                target = (msg_id, sender_name, text, has_media, media_desc)
+                break  # самое свежее
+
+        if not target:
+            return
+
+        msg_id, sender_name, text, has_media, media_desc = target
+        logger.info("📬 Catchup: пропущенный msg_id=%s от %s, генерим ответ...", msg_id, sender_name)
+
+        # Получаем объект сообщения из Telegram для передачи в trigger
+        try:
+            tg_msg = await asyncio.wait_for(client.get_messages(chat_id, ids=msg_id), timeout=15)
+        except Exception:
+            tg_msg = None
+
+        if tg_msg:
+            try:
+                await asyncio.wait_for(
+                    assistant.check_bot_mention_trigger(bot_client, tg_msg, msg_id, text, sender_name),
+                    timeout=90
+                )
+            except Exception as ce:
+                logger.warning("Catchup reply failed for msg_id=%s: %s", msg_id, ce)
+        else:
+            logger.warning("Catchup: не удалось получить msg_id=%s из Telegram (возможно удалено)", msg_id)
+    except Exception as e:
+        logger.warning("_catchup_missed_mentions error: %s", e)
+
+
 # --- ОБНОВЛЕННЫЙ START_BOT ---
 async def start_bot():
     """Запуск бота и инициализация всех систем."""
@@ -3674,6 +3745,7 @@ async def start_bot():
     # СИНХРОНИЗАЦИЯ ПЕРЕД ЗАПУСКОМ СЛУШАТЕЛЯ
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()
+    await _catchup_missed_mentions(bot_client)
     
     # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")

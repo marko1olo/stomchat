@@ -121,6 +121,13 @@ MAX_MSGS = 0
 # REPORT_HOUR меньше 20 стык окон закрывает daily_window_start() через
 # last_sent_date, но ноль здесь — это выпуск в полночь, а не «выключено».
 REPORT_HOUR = 0
+DAILY_POLL_HOUR = 0
+DAILY_POLL_MINUTE = 0
+DAILY_POLL_CUTOFF_HOUR = 0
+DAILY_POLL_RESOLUTION_HOUR = 0
+DAILY_POLL_RESOLUTION_CUTOFF_HOUR = 0
+POLL_PROD_ENABLED = False
+MIN_DAILY_SUMMARY_MESSAGES = 5
 
 MAX_DIALOGUE_BOT_REPLIES = 6
 ENABLE_PM_PROACTIVE_PINGS = False

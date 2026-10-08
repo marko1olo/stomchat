@@ -280,6 +280,38 @@ _DEFAULT_COMMUNITY_PROTOCOLS = [
         "key_nuances": "Минимальная толщина циркониевой коронки на границе knife-edge должна составлять не менее 0.3–0.4 мм во избежание сколов края при жевательной нагрузке.",
         "author_doctor": "Пауло Кано / Доктора сообщества Docendo Discimus",
         "source_msg_id": 0
+    },
+    {
+        "title": "Закрытие перфораций дна и стенок корневого канала биокерамикой (MTA / Biodentine)",
+        "category": "Эндодонтия",
+        "indication": "Ятрогенные или резорбтивные перфорации дна пульповой камеры, фуркации, средней и апикальной трети корневого канала.",
+        "contraindications": "Застарелые перфорации с тотальной деструкцией костной ткани и выраженной подвижностью зуба III степени без возможности восстановления коронковой части.",
+        "steps": [
+            {"step": 1, "name": "Изоляция и визуализация под микроскопом", "description": "Абсолютная изоляция операционного поля коффердамом. Работа под операционным микроскопом с прямым освещением."},
+            {"step": 2, "name": "Гемостаз и дезинфекция зоны дефекта", "description": "Очистка краев перфорации ультразвуком с водяным охлаждением. Обильная ирригация 2-3% NaOCl без давления. Гемостаз стерильным физраствором или компрессией губчатым коллагеном (Колапол / Spongostan)."},
+            {"step": 3, "name": "Внесение и адаптация биокерамики", "description": "Замешивание МТА (ProRoot / MTA Angelus) или Biodentine до плотной консистенции. Доставка к дефекту пистолетом-аппликатором (MAP System / Dovgan). Конденсация микроблаггером Buchanan или бумажным пином с формированием герметичной пробки толщиной не менее 3–4 мм."},
+            {"step": 4, "name": "Контроль отверждения и закрытие", "description": "Влажный ватный шарик на 15 мин (для МТА) или ожидание первичного отверждения 12 мин (для Biodentine). Восстановление дна полости стеклоиономерным или адгезивным композитным билдапом."}
+        ],
+        "materials": "Операционный микроскоп, ProRoot MTA / Biodentine, микроаппликатор MAP System, микроплаггеры, коффердам, гемостатическая губка.",
+        "key_nuances": "Время — ключевой прогностический фактор: свежая перфорация, закрытая в тот же прием, имеет прогноз выживаемости >90%. Категорически избегать проталкивания излишков биокерамики в костную ткань фуркации.",
+        "author_doctor": "Mahmoud Torabinejad / Эксперты сообщества Docendo Discimus",
+        "source_msg_id": 0
+    },
+    {
+        "title": "Обход (байпас) и извлечение сломанных инструментов из корневого канала",
+        "category": "Эндодонтия",
+        "indication": "Наличие фрагмента эндодонтического файла в просвете канала при необходимости качественной хемомеханической обработки до физиологического апекса.",
+        "contraindications": "Расположение отломка за пределами апикального отверстия в периапикальных тканях с высоким риском проталкивания глубже, или истончение стенок корня с угрозой фатальной ленточной перфорации (strip perforation).",
+        "steps": [
+            {"step": 1, "name": "Оптический доступ и оценка локализации", "description": "Создание прямолинейного доступа к коронковой части отломка под операционным микроскопом (увеличение 16–25х)."},
+            {"step": 2, "name": "Формирование staging platform (ступеньки доступа)", "description": "Модифицированным ультразвуковым наконечником (ET25 / Start-X #3) на малой мощности аккуратно срезается дентин с внутренней кривизны до обнажения 1.5–2 мм коронковой части фрагмента."},
+            {"step": 3, "name": "Ультразвуковая активация и попытка извлечения", "description": "Работа сухим ультразвуковым кончиком на минимальной мощности против часовой стрелки между стенкой дентина и файлом до возникновения вибрации и вымывания отломка потоком ирриганта."},
+            {"step": 4, "name": "Тактика обхода (Bypass) при невозможности извлечения", "description": "Если инструмент заклинен прочно: предварительно изогнутыми ручными К-файлами #06, #08, #10 с обильным лубрикантом (ЭДТА) нащупывается путь вдоль отломка до рабочей длины (WL). Создание скользящей дорожки (glide path) и обработка канала машинным файлом малого диаметра (15.03/20.04), оставляя фрагмент интегрированным в обтурационную массу."}
+        ],
+        "materials": "Операционный микроскоп, ультразвуковые насадки ET25 / Start-X, ручные C+ и K-файлы #06-#10, ЭДТА гель/раствор, ирригационные иглы 30G.",
+        "key_nuances": "Приоритет безопасности корня: истончение дентина более чем на 30% снижает прочность корня вдвое. Если риск перфорации превышает пользу извлечения — байпас является золотым стандартом сохранения зуба.",
+        "author_doctor": "Yoshi Terauchi / Эксперты сообщества Docendo Discimus",
+        "source_msg_id": 0
     }
 ]
 
@@ -291,6 +323,9 @@ async def seed_default_protocols_async(force: bool = False):
         if not existing or force:
             logger.info("Seeding default clinical protocols into database...")
             for proto in _DEFAULT_COMMUNITY_PROTOCOLS:
+                existing_item = await database.search_clinical_protocols(proto["title"], limit=1)
+                if existing_item and any(e.get("title") == proto["title"] for e in existing_item):
+                    continue
                 steps_json = json.dumps(proto["steps"], ensure_ascii=False)
                 await database.save_clinical_protocol(
                     title=proto["title"],
@@ -303,7 +338,7 @@ async def seed_default_protocols_async(force: bool = False):
                     author_doctor=proto["author_doctor"],
                     source_msg_id=proto["source_msg_id"],
                 )
-            logger.info("Successfully seeded 5 core clinical protocols.")
+            logger.info("Successfully seeded default clinical protocols.")
     except Exception as e:
         logger.error(f"Failed to seed default protocols: {e}")
 
@@ -374,8 +409,12 @@ def format_protocol_view(proto: dict) -> Tuple[str, list]:
 
     text = "\n".join(out)
 
+    back_row = [Button.inline("⬅️ К списку протоколов", data="proto:list")]
+    if category in ("Эндодонтия", "Ортопедия", "Терапия", "Хирургия", "Гнатология"):
+        back_row.append(Button.inline(f"📂 В «{category}»", data=f"proto:cat:{category}"))
     buttons = [
-        [Button.inline("⬅️ К списку протоколов", data="proto:list"), Button.inline("🏠 Главное меню", data="nav:main")]
+        back_row,
+        [Button.inline("🏠 Главное меню", data="nav:main")]
     ]
     return text, buttons
 
@@ -390,26 +429,38 @@ def format_protocol_catalog(
     from telethon import Button
 
     header_title = f"категории «{category_filter}»" if category_filter else "Базы Знаний"
+    total_cnt = len(protocols)
     out = [
-        f"📚 <b>Клинические протоколы {header_title}:</b>",
+        f"📚 <b>Клинические протоколы {header_title}</b> (всего: {total_cnt}):",
         "Ниже представлены проверенные алгоритмы доказательной стоматологии (EBM), сформированные на основе клинических разборов сообщества.\n"
     ]
 
-    buttons = []
-    cat_buttons = [
-        Button.inline("🦷 Ортопедия", data="proto:cat:Ортопедия"),
-        Button.inline("🩸 Эндодонтия", data="proto:cat:Эндодонтия"),
-        Button.inline("🔪 Хирургия", data="proto:cat:Хирургия"),
+    buttons = [
+        [
+            Button.inline("🩸 Эндодонтия", data="proto:cat:Эндодонтия"),
+            Button.inline("🦷 Ортопедия", data="proto:cat:Ортопедия"),
+        ],
+        [
+            Button.inline("🩺 Терапия", data="proto:cat:Терапия"),
+            Button.inline("🔪 Хирургия", data="proto:cat:Хирургия"),
+        ],
+        [
+            Button.inline("📐 Гнатология", data="proto:cat:Гнатология"),
+        ]
     ]
-    buttons.append(cat_buttons)
+
+    max_display = 16
+    display_protos = protocols[:max_display]
 
     row = []
-    for idx, p in enumerate(protocols[:10], 1):
+    for idx, p in enumerate(display_protos, 1):
         p_id = p["id"]
         p_title = p["title"]
         p_cat = p.get("category", "")
-        out.append(f"<b>{idx}.</b> {p_title} <i>({p_cat})</i>")
-        btn = Button.inline(f"📖 #{idx} {p_title[:18]}...", data=f"proto:view:{p_id}")
+        author = p.get("author_doctor", "")
+        author_hint = f" • <i>{author.split('/')[0].strip()[:18]}</i>" if author else ""
+        out.append(f"<b>{idx}.</b> {p_title} <i>({p_cat})</i>{author_hint}")
+        btn = Button.inline(f"📖 #{idx} {p_title[:17]}...", data=f"proto:view:{p_id}")
         row.append(btn)
         if len(row) == 2:
             buttons.append(row)
@@ -417,6 +468,9 @@ def format_protocol_catalog(
 
     if row:
         buttons.append(row)
+
+    if total_cnt > max_display:
+        out.append(f"\n<i>Показано {max_display} из {total_cnt} протоколов. Выберите категорию выше для точной фильтрации.</i>")
 
     out.append("\n👇 <i>Нажмите на кнопку с протоколом для открытия полной пошаговой карты.</i>")
     buttons.append([Button.inline("🔄 Все протоколы", data="proto:list"), Button.inline("🏠 Меню", data="nav:main")])
