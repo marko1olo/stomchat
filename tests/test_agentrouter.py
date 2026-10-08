@@ -9,6 +9,8 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import config
 import runtime_guard
 
@@ -51,6 +53,10 @@ check("В daily сводке deepseek-v4-flash идет первым", cascade_s
 
 cascade_review = gc.cascade_for_context({"kind": "poll_clinical_review"})
 check("В poll_clinical_review deepseek-v4-flash идет первым", cascade_review[0] == ("deepseek-v4-flash", "agentrouter"))
+
+cascade_media = gc.cascade_for_context({"kind": "assistant_media", "has_media": True})
+check("При наличии медиа (assistant_media) Gemini идет первым", cascade_media[0][1] == "gemini")
+check("При наличии медиа deepseek в резерве каскада", ("deepseek-v4-flash", "agentrouter") in cascade_media and cascade_media[0] != ("deepseek-v4-flash", "agentrouter"))
 
 cascade_triage = gc.cascade_for_context({"kind": "llama_triage"})
 check("В triage deepseek-v4-flash присутствует как резерв", ("deepseek-v4-flash", "agentrouter") in cascade_triage)

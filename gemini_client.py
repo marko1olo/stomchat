@@ -773,6 +773,27 @@ def cascade_for_context(status_context=None):
         if has_agentrouter:
             base.append(("deepseek-v4-flash", "agentrouter"))
         return base
+    elif is_chatbot and bool(
+        kind in ("assistant_media", "assistant_media_pm")
+        or (status_context and (status_context.get("image_urls") or status_context.get("has_media")))
+    ):
+        # При наличии фото/рентгена мультимодальные модели (Gemini) ОБЯЗАНЫ идти первыми,
+        # чтобы анализировать пиксели напрямую, без «испорченного телефона» текстовых пересказов.
+        # DeepSeek (чисто текстовая модель) остаётся в конце только как аварийный резерв.
+        cascade = [
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+        ]
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+        ])
+        return cascade
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         cascade = []
         if has_agentrouter:
@@ -846,7 +867,13 @@ def generate_text(prompt, status_context=None, timeout=None):
     # разбор — у расчёта бюджета после сборки каскада.
     req_timeout = 35.0
 
+    # Авто-детект фокуса на изображении/рентгене по тексту промпта
+    if prompt and isinstance(status_context, dict) and not status_context.get("has_media"):
+        if any(k in prompt for k in ("(На фото", "прикреплено ФОТО", "на присланном снимке", "на рентгенограмме")):
+            status_context["has_media"] = True
+
     models_cascade = cascade_for_context(status_context)
+
 
 
     # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
