@@ -10,6 +10,7 @@ import hashlib
 import httpx
 from openai import AsyncOpenAI
 
+import clinical_cognitive_core
 import config
 import gemini_client
 from media_tools import prepare_image_for_analysis
@@ -392,6 +393,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"3) Дисциплинарная консистентность: не смешивай терапию, хирургию, ортопедию. "
                 f"4) Без фантомных величин: никаких вымышленных чисел (миллиметры, длина, дефект), если они не читаются на снимке. "
                 f"Для одиночного снимка: 3-6 емких профессиональных предложений (для альбома — зональный синтез). "
+                f"{clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE} "
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ без английских фраз, черновиков и тегов <think>."
             )
             
