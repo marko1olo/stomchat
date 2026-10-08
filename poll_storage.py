@@ -357,6 +357,11 @@ def _format_poll_dict(row: aiosqlite.Row) -> Dict[str, Any]:
             parsed_options = []
     d["options"] = parsed_options
     d["is_closed"] = bool(d.get("is_closed", 0))
+    raw_tv = d.get("total_voters")
+    try:
+        d["total_voters"] = int(raw_tv) if raw_tv is not None and str(raw_tv).strip().isdigit() else 0
+    except (ValueError, TypeError):
+        d["total_voters"] = 0
     return d
 
 
@@ -711,7 +716,11 @@ async def get_poll_summary_stats(poll_id: int, db_path: Optional[str] = None) ->
 
     # Fallback на анонимную агрегированную статистику Telegram
     if total_votes == 0 and poll_meta:
-        agg_total = int(poll_meta.get("total_voters") or 0)
+        raw_total = poll_meta.get("total_voters")
+        try:
+            agg_total = int(raw_total) if raw_total is not None and str(raw_total).strip().isdigit() else 0
+        except (ValueError, TypeError):
+            agg_total = 0
         agg_results = poll_meta.get("results_json")
         if agg_total > 0 and agg_results:
             try:

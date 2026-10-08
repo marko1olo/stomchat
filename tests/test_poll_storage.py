@@ -668,6 +668,71 @@ class TestPollStorage(unittest.IsolatedAsyncioTestCase):
         assert poll_up is not None
         self.assertEqual(poll_up["case_intro"], updated_intro)
 
+    async def test_anonymous_poll_aggregate_results(self) -> None:
+        """Проверка сохранения агрегированных результатов анонимного опроса и работы get_poll_summary_stats."""
+        poll_id = 998877
+        await poll_storage.save_poll(
+            poll_id=poll_id,
+            chat_id=-100555,
+            poll_type="quiz",
+            topic="endodontics",
+            question="Какой инструмент выбрать для первичного скаутинга?",
+            options=["C-Pilot #08", "ProTaper F1", "Gates Glidden"],
+            correct_option_id=0,
+            db_path=self.db_path,
+        )
+
+        # Имитируем приход UpdateMessagePoll с агрегированными данными (10 voters: 7 за опцию 0, 3 за опцию 1)
+        ok = await poll_storage.update_poll_aggregate_results(
+            poll_id=poll_id,
+            total_voters=10,
+            results_by_option={0: 7, 1: 3},
+            db_path=self.db_path,
+        )
+        self.assertTrue(ok)
+
+        # Проверяем, что get_poll_summary_stats подхватил данные из daily_polls
+        stats = await poll_storage.get_poll_summary_stats(poll_id, db_path=self.db_path)
+        self.assertEqual(stats["total_votes"], 10)
+        self.assertEqual(stats["correct_votes"], 7)
+        self.assertEqual(stats["incorrect_votes"], 3)
+        self.assertEqual(stats["accuracy_percent"], 70.0)
+        self.assertEqual(stats["votes_by_option"], {0: 7, 1: 3})
+
+    async def test_anonymous_poll_string_total_voters_regression(self) -> None:
+        """Регрессионный тест: total_voters хранится как строка из SQLite TEXT-колонки."""
+        poll_id = 998878
+        await poll_storage.save_poll(
+            poll_id=poll_id,
+            chat_id=-100555,
+            poll_type="regular",
+            topic="surgery",
+            question="Тактика при глубоком дефекте?",
+            options=["Удаление", "Резекция", "НТР"],
+            correct_option_id=None,
+            db_path=self.db_path,
+        )
+
+        # Насильно записываем строку в total_voters через raw SQL
+        async with poll_storage.get_db_connection(self.db_path) as db:
+            await db.execute(
+                "UPDATE daily_polls SET total_voters = ?, results_json = ? WHERE id = ?",
+                ("9", '{"0": 1, "1": 5, "2": 3}', poll_id)
+            )
+            await db.commit()
+
+        # Проверяем, что get_poll приводит total_voters к int
+        poll = await poll_storage.get_poll(poll_id, db_path=self.db_path)
+        self.assertIsNotNone(poll)
+        self.assertEqual(poll["total_voters"], 9)
+        self.assertIsInstance(poll["total_voters"], int)
+
+        # Проверяем, что get_poll_summary_stats не падает с TypeError '>' between str and int
+        stats = await poll_storage.get_poll_summary_stats(poll_id, db_path=self.db_path)
+        self.assertEqual(stats["total_votes"], 9)
+        self.assertEqual(stats["votes_by_option"], {0: 1, 1: 5, 2: 3})
+        self.assertEqual(stats["correct_votes"], 0)
+
 
 def run_tests() -> int:
     """Запуск набора тестов с человекочитаемым форматированием."""
