@@ -172,6 +172,79 @@ def _sanitize_telegraph_nodes(nodes):
     return sanitized
 
 
+def _convert_tables_to_telegraph(html_str: str) -> str:
+    """
+    Преобразует <table class="clinical-table">...</table> в безопасный и адаптивный
+    формат блоков <blockquote> для Telegraph API (который не поддерживает тег <table>).
+    Удаляет контейнерный тег <div class="table-container">.
+    """
+    if "<table" not in (html_str or "").lower():
+        return html_str
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_str, "html.parser")
+        for table in soup.find_all("table"):
+            headers = [th.get_text(strip=True) for th in table.find_all("th")]
+            rows = []
+            tbody = table.find("tbody")
+            tr_source = tbody.find_all("tr") if tbody else table.find_all("tr")
+            for tr in tr_source:
+                tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if tds:
+                    rows.append(tds)
+
+            parent = table.parent
+            classes = parent.get("class", []) if parent else []
+            if isinstance(classes, str):
+                classes = [classes]
+            target = parent if parent and parent.name == "div" and any("table" in c for c in classes) else table
+
+            if not headers and not rows:
+                target.decompose()
+                continue
+
+            num_cols = len(headers)
+            replacement_parts = []
+
+            # Двухколоночная таблица: объединяем в один элегантный блокquote
+            if num_cols == 2:
+                lines = []
+                for r in rows:
+                    if not r:
+                        continue
+                    k = r[0] if len(r) > 0 else ""
+                    v = r[1] if len(r) > 1 else ""
+                    k_clean = re.sub(r'</?[a-z0-9]+[^>]*>', '', k).strip()
+                    lines.append(f"• <b>{k_clean}:</b> {v}")
+                if lines:
+                    card_content = "<br>\n".join(lines)
+                    replacement_parts.append(f"<blockquote><p>{card_content}</p></blockquote>")
+            else:
+                # Многоколоночная сравнительная матрица: карточка для каждого свойства/параметра
+                for row in rows:
+                    if not row:
+                        continue
+                    first_col = row[0] if len(row) > 0 else ""
+                    first_col_clean = re.sub(r'</?[a-z0-9]+[^>]*>', '', first_col).strip()
+                    card_lines = [f"▫️ <b>{first_col_clean}</b>"]
+                    for col_idx in range(1, num_cols):
+                        col_val = row[col_idx] if col_idx < len(row) else "—"
+                        col_header = headers[col_idx] if col_idx < len(headers) else f"Колонка {col_idx+1}"
+                        card_lines.append(f"• <b>{col_header}:</b> {col_val}")
+
+                    card_content = "<br>\n".join(card_lines)
+                    replacement_parts.append(f"<blockquote><p>{card_content}</p></blockquote>")
+
+            replacement_soup = BeautifulSoup("\n".join(replacement_parts), "html.parser")
+            target.replace_with(replacement_soup)
+
+        return str(soup)
+    except Exception as exc:
+        logger.warning("Failed to convert tables to telegraph format: %s", exc)
+        return html_str
+
+
 def _create_telegraph_page_sync(title, html_content):
     import config
     import json
@@ -190,11 +263,13 @@ def _create_telegraph_page_sync(title, html_content):
     for p in paragraphs:
         p = p.strip()
         if p:
-            if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img")):
+            if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img", "<div", "<table", "<pre")):
                 formatted_body += p
             else:
                 formatted_body += f"<p>{p.replace('\n', '<br>')}</p>"
 
+    # Преобразуем HTML таблицы в адаптивные карточки blockquote для Telegraph
+    formatted_body = _convert_tables_to_telegraph(formatted_body)
     # Зачищаем любые битые ссылки на iili.io / freeimage перед конвертацией и отправкой
     formatted_body = _clean_telegraph_html(formatted_body)
 

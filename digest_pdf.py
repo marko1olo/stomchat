@@ -88,7 +88,7 @@ def _build_journal_html(
             continue
         # Срезаем повисшие знаки препинания в самом начале абзаца
         p = re.sub(r'^(<p[^>]*>)?\s*[.,;:!?—\-]\s*', r'\1', p)
-        if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img", "<div")):
+        if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img", "<div", "<table")):
             formatted_body.append(p)
         else:
             formatted_body.append(f"<p>{p.replace('\n', '<br>')}</p>")
@@ -517,6 +517,46 @@ def _build_journal_html(
 
         li {{
             margin-bottom: 4px;
+        }}
+
+        /* Клинические таблицы и сравнительные матрицы */
+        table.clinical-table, table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0 14px 0;
+            font-size: 8.5pt;
+            line-height: 1.4;
+            page-break-inside: avoid;
+            break-inside: avoid;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            clear: both;
+        }}
+
+        table.clinical-table thead tr, table thead tr {{
+            background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+            color: #ffffff;
+            text-align: left;
+            font-weight: 700;
+        }}
+
+        table.clinical-table th, table th {{
+            padding: 7px 10px;
+            border: 1px solid #cbd5e1;
+            font-size: 8.5pt;
+            letter-spacing: 0.02em;
+        }}
+
+        table.clinical-table td, table td {{
+            padding: 6px 10px;
+            border: 1px solid #e2e8f0;
+            vertical-align: top;
+            color: #1e293b;
+        }}
+
+        table.clinical-table tbody tr:nth-child(even), table tbody tr:nth-child(even) {{
+            background-color: #f8fafc;
         }}
 
         /* Двухколоночная галерея для парных клинических снимков */

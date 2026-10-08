@@ -11631,12 +11631,13 @@ async def handle_nba_callback(bot_client, event, data_str):
         await event.answer("📄 Формирую PDF-отчет...", alert=False)
         try:
             from digest_pdf import generate_digest_pdf
+            from html_safe import clean_markdown_to_html
             msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
             html_body = "<h2>Клиническая консультация StomChat</h2>\n"
             for m in msgs:
                 role_title = "Врач-стоматолог" if m.get("role") == "User" else "Консилиум StomChat"
-                clean_m = (m.get('text', '') or '').replace('\n', '<br>')
-                html_body += f"<p><b>{role_title}:</b><br>{clean_m}</p>\n<hr>\n"
+                clean_m = clean_markdown_to_html(m.get('text', '') or '')
+                html_body += f"<p><b>{role_title}:</b></p>\n{clean_m}\n<hr>\n"
             
             pdf_path = await generate_digest_pdf(
                 html_content=html_body,

@@ -211,11 +211,11 @@ def safe_truncate_html(html_str, max_len=9500):
     cut_pos = -1
 
     # 1. Граница абзаца / блока
-    for marker in ("\n\n", "</p>", "<p>", "</figure>", "<br><br>", "<br/>\n", "<br>"):
+    for marker in ("\n\n", "</p>", "<p>", "</figure>", "</div>", "</table>", "</blockquote>", "<br><br>", "<br/>\n", "<br>"):
         pos = truncated.rfind(marker)
         min_threshold = max(200, int(len(truncated) * 0.6))
         if pos >= min_threshold:
-            cut_pos = pos + (len(marker) if marker in ("</p>", "</figure>") else 0)
+            cut_pos = pos + (len(marker) if marker in ("</p>", "</figure>", "</div>", "</table>", "</blockquote>") else 0)
             break
 
     # 2. Граница строки (отдельный пункт списка, автор и т.д.)
@@ -336,18 +336,218 @@ def split_html_for_telegraph(html_str, max_len=11000):
     return split_html(html_str, limit=max_len)
 
 
+def parse_markdown_tables(text: str) -> str:
+    """
+    Находит все GFM Markdown таблицы в тексте и преобразует их в валидный HTML:
+    <div class="table-container"><table class="clinical-table">...</table></div>.
+    Поддерживает выравнивание (:---, :---:, ---:), стилизацию шапки и ячеек.
+    """
+    if not text or "|" not in text:
+        return text
+
+    lines = text.split("\n")
+    out_lines = []
+    i = 0
+    sep_pattern = re.compile(r"^[ \t]*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?[ \t]*$")
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if "|" in stripped and (i + 1 < len(lines)) and sep_pattern.match(lines[i + 1]):
+            raw_headers = [c.strip() for c in stripped.split("|")]
+            if stripped.startswith("|"):
+                raw_headers = raw_headers[1:]
+            if stripped.endswith("|") and len(raw_headers) > 0:
+                raw_headers = raw_headers[:-1]
+            headers = [h for h in raw_headers if h != ""]
+            if not headers:
+                out_lines.append(line)
+                i += 1
+                continue
+
+            # Определяем выравнивание колонок из строки разделителя
+            sep_line = lines[i + 1].strip()
+            raw_sep_cols = [c.strip() for c in sep_line.split("|")]
+            if sep_line.startswith("|"):
+                raw_sep_cols = raw_sep_cols[1:]
+            if sep_line.endswith("|") and len(raw_sep_cols) > 0:
+                raw_sep_cols = raw_sep_cols[:-1]
+            aligns = []
+            for sc in raw_sep_cols[:len(headers)]:
+                if sc.startswith(":") and sc.endswith(":"):
+                    aligns.append("center")
+                elif sc.endswith(":"):
+                    aligns.append("right")
+                else:
+                    aligns.append("left")
+            while len(aligns) < len(headers):
+                aligns.append("left")
+
+            i += 2  # Пропускаем header и separator
+            table_rows = []
+            while i < len(lines):
+                row_raw = lines[i].strip()
+                if not row_raw or "|" not in row_raw:
+                    break
+                raw_cols = [c.strip() for c in row_raw.split("|")]
+                if row_raw.startswith("|"):
+                    raw_cols = raw_cols[1:]
+                if row_raw.endswith("|") and len(raw_cols) > 0:
+                    raw_cols = raw_cols[:-1]
+                cols = [c.strip() for c in raw_cols]
+                while len(cols) < len(headers):
+                    cols.append("")
+                table_rows.append(cols[:len(headers)])
+                i += 1
+
+            th_cells = []
+            for h, al in zip(headers, aligns):
+                h_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', h)
+                al_style = f' style="text-align: {al};"' if al != "left" else ""
+                th_cells.append(f"<th{al_style}>{h_fmt}</th>")
+            th_html = "".join(th_cells)
+
+            tr_html = []
+            for r in table_rows:
+                tds = []
+                for col_idx, (c, al) in enumerate(zip(r, aligns)):
+                    c_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', c)
+                    if col_idx == 0 and not (c_fmt.startswith("<b>") and c_fmt.endswith("</b>")):
+                        c_fmt = f"<b>{c_fmt}</b>"
+                    al_style = f' style="text-align: {al};"' if al != "left" else ""
+                    tds.append(f"<td{al_style}>{c_fmt}</td>")
+                tr_html.append(f"<tr>{''.join(tds)}</tr>")
+            tbody_html = "".join(tr_html)
+
+            table_html = (
+                f'<div class="table-container">\n'
+                f'<table class="clinical-table">\n'
+                f'  <thead><tr>{th_html}</tr></thead>\n'
+                f'  <tbody>{tbody_html}</tbody>\n'
+                f'</table>\n'
+                f'</div>'
+            )
+            out_lines.append(table_html)
+            continue
+
+        out_lines.append(line)
+        i += 1
+
+    return "\n".join(out_lines)
+
+
+def convert_all_tables_in_html_to_telegraph(html_str: str) -> str:
+    """
+    Преобразует все HTML-таблицы (тег <table>) в Telegram / Telegraph-совместимый
+    структурированный формат на базе <blockquote> и списков параметров.
+    В Telegraph тег <table> запрещен официальным API (CONTENT_FORMAT_INVALID).
+    """
+    if not html_str or "<table" not in html_str.lower():
+        return html_str
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_str, 'html.parser')
+        tables = soup.find_all('table')
+        if not tables:
+            return html_str
+
+        for tbl in tables:
+            headers = []
+            thead = tbl.find('thead')
+            if thead:
+                for th in thead.find_all(['th', 'td']):
+                    headers.append(th.get_text(strip=True))
+            else:
+                first_tr = tbl.find('tr')
+                if first_tr:
+                    for cell in first_tr.find_all(['th', 'td']):
+                        headers.append(cell.get_text(strip=True))
+
+            rows = []
+            tbody = tbl.find('tbody')
+            tr_list = tbody.find_all('tr') if tbody else tbl.find_all('tr')
+            if not thead and tr_list:
+                tr_list = tr_list[1:]
+
+            for tr in tr_list:
+                row_cells = []
+                for td in tr.find_all(['td', 'th']):
+                    inner = ''.join(str(c) for c in td.contents).strip()
+                    row_cells.append(inner)
+                if any(row_cells):
+                    rows.append(row_cells)
+
+            if not headers and not rows:
+                continue
+
+            num_cols = len(headers)
+            output_parts = []
+
+            if num_cols <= 2:
+                output_parts.append("<blockquote>")
+                lines = []
+                for r in rows:
+                    k = r[0] if len(r) > 0 else ""
+                    v = r[1] if len(r) > 1 else ""
+                    k_clean = re.sub(r'</?[a-z0-9]+[^>]*>', '', k).strip()
+                    lines.append(f"• <b>{k_clean}:</b> {v}")
+                output_parts.append("<p>" + "<br>\n".join(lines) + "</p>")
+                output_parts.append("</blockquote>")
+            else:
+                for r in rows:
+                    if not r:
+                        continue
+                    param_name = r[0] if len(r) > 0 else ""
+                    param_clean = re.sub(r'</?[a-z0-9]+[^>]*>', '', param_name).strip()
+                    output_parts.append("<blockquote>")
+                    row_lines = [f"▫️ <b>{param_clean}</b>"]
+                    for col_idx in range(1, num_cols):
+                        col_name = headers[col_idx] if col_idx < len(headers) else f"Колонка {col_idx+1}"
+                        val = r[col_idx] if col_idx < len(r) else "—"
+                        row_lines.append(f"• <b>{col_name}:</b> {val}")
+                    output_parts.append("<p>" + "<br>\n".join(row_lines) + "</p>")
+                    output_parts.append("</blockquote>")
+
+            replacement_html = "\n".join(output_parts)
+            parent = tbl.parent
+            classes = parent.get('class', []) if parent else []
+            if isinstance(classes, str):
+                classes = [classes]
+            target = parent if parent and parent.name == 'div' and any('table' in c for c in classes) else tbl
+            frag = BeautifulSoup(replacement_html, 'html.parser')
+            target.replace_with(frag)
+
+        return str(soup)
+    except Exception as e:
+        logger.warning("Failed to convert tables for Telegraph: %s", e)
+        return html_str
+
+
 def clean_markdown_to_html(text):
     """Преобразует Markdown разметку в безопасный валидный HTML с семантической склейкой строк."""
     if not text:
         return ""
 
+    # 0. Извлекаем и парсим Markdown таблицы в атомарные токены
+    tables = {}
+    if "|" in text:
+        text_with_tables = parse_markdown_tables(text)
+        def _store_table(m):
+            t_id = len(tables)
+            t_tok = f"[CLINICAL_TABLE_{t_id}]"
+            tables[t_tok] = m.group(0)
+            return f"\n\n{t_tok}\n\n"
+        text = re.sub(r'(?:<div class="table-container">\s*)?<table[\s\S]*?</table>(?:\s*</div>)?', _store_table, text_with_tables, flags=re.IGNORECASE)
+
     # 1. Сначала превращаем Markdown-жирный в HTML-жирный
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
 
-    # 2. Обработка заголовков ###, списков и маркеров изображений
+    # 2. Обработка заголовков ###, списков и маркеров изображений / таблиц
     marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
     heading_re = re.compile(r'^[ \t]*#{1,6}\s+(.*)')
     image_re = re.compile(r'^[ \t]*\[IMG_\d+\][ \t]*$')
+    table_re = re.compile(r'^[ \t]*\[CLINICAL_TABLE_\d+\][ \t]*$')
 
     lines = []
     list_flags = []
@@ -356,7 +556,7 @@ def clean_markdown_to_html(text):
 
     for raw_line in text.split('\n'):
         line_clean = raw_line.strip()
-        is_img = bool(image_re.match(line_clean))
+        is_img = bool(image_re.match(line_clean)) or bool(table_re.match(line_clean))
 
         m_head = heading_re.match(raw_line)
         if m_head:
@@ -483,6 +683,11 @@ def clean_markdown_to_html(text):
     text = "\n".join(final_lines)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 5. Восстановление сохраненных таблиц
+    if tables:
+        for t_tok, t_html in tables.items():
+            text = text.replace(t_tok, t_html)
 
     return text.strip()
 
