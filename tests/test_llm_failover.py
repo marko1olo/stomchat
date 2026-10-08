@@ -37,6 +37,7 @@ GOOGLE_KEYS = [f"gk-{i:02d}-secretpart" for i in range(10)]
 GROQ_KEYS = [f"qk-{i:02d}-secretpart" for i in range(7)]
 config.GOOGLE_KEYS = GOOGLE_KEYS
 config.GROQ_KEYS = GROQ_KEYS
+config.AGENTROUTER_KEYS = []
 config.GEMINI_MODEL = "gemini-3.6-flash"
 config.GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -230,8 +231,9 @@ print("\n[13] Флаг «идёт работа» снимается за обы�
 import importlib.util as _ilu
 
 _status_dir = tempfile.mkdtemp(prefix="stomchat_status_")
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _spec = _ilu.spec_from_file_location(
-    "runtime_guard_for_status", os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_guard.py"))
+    "runtime_guard_for_status", os.path.join(_repo_root, "runtime_guard.py"))
 _rg = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_rg)
 _rg.SUMMARY_STATUS_PATH = os.path.join(_status_dir, "bot_summary_status.json")

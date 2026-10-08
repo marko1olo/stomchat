@@ -80,6 +80,7 @@ GOOGLE_KEYS = [f"gk-{i:02d}-secretpart" for i in range(10)]
 GROQ_KEYS = [f"qk-{i:02d}-secretpart" for i in range(7)]
 config.GOOGLE_KEYS = GOOGLE_KEYS
 config.GROQ_KEYS = GROQ_KEYS
+config.AGENTROUTER_KEYS = []
 config.GEMINI_MODEL = "gemini-3.6-flash"
 config.GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -232,7 +233,7 @@ check("забанены все — остаётся последняя, а не 
       active == [("gemini-3.5-flash", "gemini")], f"got {active}")
 
 check("адрес провайдера берётся из общей таблицы",
-      set(gc.PROVIDER_BASE_URLS) == {"gemini", "groq"}, f"got {gc.PROVIDER_BASE_URLS}")
+      set(gc.PROVIDER_BASE_URLS) == {"gemini", "groq", "agentrouter"}, f"got {gc.PROVIDER_BASE_URLS}")
 check("пул ключей провайдера виден через учёт",
       len(gc.provider_pool("groq")) == 7 and len(gc.provider_pool("gemini")) == 10,
       f"got {len(gc.provider_pool('groq'))}/{len(gc.provider_pool('gemini'))}")

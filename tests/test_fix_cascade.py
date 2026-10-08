@@ -36,7 +36,7 @@ import config  # noqa: E402
 import runtime_guard  # noqa: E402
 import gemini_client as gc  # noqa: E402
 
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 gc.BANNED_MODELS_FILE = os.path.join(_TMPDIR, "banned_models.json")
 gc.KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "key_cooldowns.json")
@@ -47,6 +47,7 @@ GOOGLE_KEYS = [f"gk-{i:02d}-secretpart" for i in range(10)]
 GROQ_KEYS = [f"qk-{i:02d}-secretpart" for i in range(7)]
 config.GOOGLE_KEYS = GOOGLE_KEYS
 config.GROQ_KEYS = GROQ_KEYS
+config.AGENTROUTER_KEYS = []
 config.GEMINI_MODEL = "gemini-3.6-flash"
 config.GROQ_MODEL = "llama-3.3-70b-versatile"
 

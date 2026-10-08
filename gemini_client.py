@@ -139,13 +139,16 @@ def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
         )
         time.sleep(min(15, remaining))
 
-def get_openai_client(api_key, base_url, timeout=30.0):
-    return OpenAI(
-        api_key=api_key if api_key else "dummy_key",
-        base_url=base_url,
-        timeout=timeout,
-        max_retries=0
-    )
+def get_openai_client(api_key, base_url, timeout=30.0, **kwargs):
+    client_kwargs = {
+        "api_key": api_key if api_key else "dummy_key",
+        "base_url": base_url,
+        "timeout": timeout,
+        "max_retries": 0,
+    }
+    if "default_headers" in kwargs and kwargs["default_headers"]:
+        client_kwargs["default_headers"] = kwargs["default_headers"]
+    return OpenAI(**client_kwargs)
 BANNED_MODELS_FILE = "banned_models.json"
 KEY_COOLDOWN_FILE = "key_cooldowns.json"
 KEY_COOLDOWN_SECONDS = 300
@@ -311,10 +314,15 @@ def _record_model_server_failure(model_name: str) -> int:
 PROVIDER_BASE_URLS = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "groq": "https://api.groq.com/openai/v1",
+    "agentrouter": getattr(config, "AGENTROUTER_BASE_URL", "https://agentrouter.org/v1"),
 }
 
 
-PROVIDER_KEY_ATTRS = {"gemini": "GOOGLE_KEYS", "groq": "GROQ_KEYS"}
+PROVIDER_KEY_ATTRS = {
+    "gemini": "GOOGLE_KEYS",
+    "groq": "GROQ_KEYS",
+    "agentrouter": "AGENTROUTER_KEYS",
+}
 
 
 def provider_pool(provider):
@@ -351,6 +359,14 @@ def get_provider_client(provider, api_key, timeout=30.0):
     base_url = PROVIDER_BASE_URLS.get(provider)
     if not base_url:
         raise ValueError(f"Неизвестный провайдер модели: {provider!r}")
+    if provider == "agentrouter":
+        try:
+            return get_openai_client(
+                api_key, base_url, timeout=timeout,
+                default_headers={"User-Agent": "opencode/1.18.25"}
+            )
+        except TypeError:
+            return get_openai_client(api_key, base_url, timeout=timeout)
     # Через глобальное имя намеренно: тесты подменяют get_openai_client целиком.
     return get_openai_client(api_key, base_url, timeout=timeout)
 
@@ -474,6 +490,23 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
     того, чтобы просто сменить ключ.
     """
     err_msg = str(error_text or "").lower()
+    # 402 Budget pool quota for a specific model (AgentRouter)
+    if "402" in err_msg or "budget pool" in err_msg:
+        if model_name:
+            ban_duration = 1800  # 30 mins
+            ban_model(model_name, ban_duration)
+            logger.warning(
+                f"{provider.capitalize()} model {model_name} budget pool exhausted (402). "
+                f"Banning model {model_name} for {ban_duration}s. Key remains active."
+            )
+        _record_failure("model_overloaded", error_text, api_key)
+        return "model_overloaded"
+
+    if "content-blocked" in err_msg:
+        logger.warning(f"{provider.capitalize()} content-blocked for {model_name}.")
+        _record_failure("content_blocked", error_text, api_key)
+        return "content_blocked"
+
     if _RATE_LIMIT_RE.search(err_msg):
         if provider == "gemini" and is_gcp_project_quota_error(err_msg):
             set_provider_pool_cooldown("gemini", seconds=GCP_PROJECT_COOLDOWN_SECONDS)
@@ -647,7 +680,7 @@ def _reset_failure():
 def _all_known_keys(extra_key=None):
     """Все настроенные ключи: их не должно быть ни в журнале, ни в файле статуса."""
     keys = []
-    for attr in ("GOOGLE_KEYS", "GROQ_KEYS", "OPENROUTER_KEYS"):
+    for attr in ("GOOGLE_KEYS", "GROQ_KEYS", "AGENTROUTER_KEYS", "OPENROUTER_KEYS"):
         value = getattr(config, attr, None)
         if isinstance(value, (list, tuple, set)):
             keys.extend(k for k in value if isinstance(k, str) and len(k) >= 8)
@@ -694,9 +727,10 @@ def cascade_for_context(status_context=None):
     is_chatbot = kind in CHAT_KINDS
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
+    has_agentrouter = bool(provider_pool("agentrouter"))
 
     if is_triage:
-        return [
+        base = [
             ("gemini-3.5-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
@@ -705,8 +739,20 @@ def cascade_for_context(status_context=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
         ]
+        if has_agentrouter:
+            base.append(("deepseek-v4-flash", "agentrouter"))
+        return base
     elif is_clinical_review:
-        # Независимый кросс-модельный рецензент: опрос от Gemini проверяет Qwen/Groq!
+        # Независимый кросс-модельный рецензент: опрос от Gemini проверяет DeepSeek / Qwen!
+        if has_agentrouter:
+            return [
+                ("deepseek-v4-flash", "agentrouter"),
+                ("qwen/qwen3.8-27b", "groq"),
+                ("openai/gpt-oss-120b", "groq"),
+                ("gemini-3.8-flash", "gemini"),
+                ("gemini-3.7-flash", "gemini"),
+                ("gemini-3.5-flash-lite", "gemini"),
+            ]
         return [
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
@@ -717,15 +763,21 @@ def cascade_for_context(status_context=None):
     elif is_poll_gen:
         # Только Gemini: Qwen выдаёт chinese thinking leaks в русском тексте.
         # Опрос не real-time — при вылете ключей ждём EXHAUSTION_RETRY_KINDS backoff.
-        return [
+        base = [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
         ]
+        if has_agentrouter:
+            base.append(("deepseek-v4-flash", "agentrouter"))
+        return base
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
-        return [
+        cascade = []
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
@@ -733,9 +785,13 @@ def cascade_for_context(status_context=None):
             ("qwen/qwen3.8-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
-        ]
+        ])
+        return cascade
     elif is_chatbot:
-        return [
+        cascade = []
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -743,10 +799,14 @@ def cascade_for_context(status_context=None):
             ("qwen/qwen3.8-27b", "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
-        ]
+        ])
+        return cascade
     else:
         # Complex tasks (Summaries, analytics, etc)
-        return [
+        cascade = []
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
             (config.GEMINI_MODEL, "gemini"), # gemini-3.8-flash
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -754,7 +814,8 @@ def cascade_for_context(status_context=None):
             ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
-        ]
+        ])
+        return cascade
 
 
 def generate_text(prompt, status_context=None, timeout=None):
@@ -842,7 +903,7 @@ def generate_text(prompt, status_context=None, timeout=None):
     out_of_budget = False
     requests_made = 0
     for model_index, (model_name, provider) in enumerate(active_cascade):
-        keys = list(config.GOOGLE_KEYS if provider == "gemini" else config.GROQ_KEYS)
+        keys = list(provider_pool(provider))
         # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
         # здесь были источником, с которого их скопировали остальные пути.
         client_maker = lambda k: get_provider_client(provider, k, timeout=req_timeout)
@@ -893,7 +954,7 @@ def generate_text(prompt, status_context=None, timeout=None):
             # него влез, а ноль запросов — это гарантированное молчание бота.
             if deadline is not None and requests_made:
                 remaining = deadline - time.monotonic()
-                min_needed = 7.0 if provider == "groq" else MIN_REQUEST_SECONDS
+                min_needed = 7.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
                 if remaining < min_needed:
                     # Запрос, который не успеет закончиться до убийства процесса,
                     # начинать нечего: его ответ никто не прочитает.
@@ -958,6 +1019,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                 if provider == "groq" and "max_tokens" in create_kwargs:
                     create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
 
+                # Для AgentRouter (DeepSeek / рассуждающие модели) не ограничиваем токенами:
+                # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ
+                if provider == "agentrouter":
+                    create_kwargs["max_tokens"] = max(4096, int(ctx_max_tokens or 4096))
+
                 # Нативный параметр размышлений для моделей:
                 # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort.
                 # Google OpenAI endpoint поддерживает только 'low', 'medium', 'high'.
@@ -977,6 +1043,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                 except (TypeError, Exception) as err:
                     err_str = str(err).lower()
                     retry_needed = False
+                    if "unexpected keyword" in err_str:
+                        for bad_kw in ("max_tokens", "reasoning_effort"):
+                            if bad_kw in create_kwargs and bad_kw in err_str:
+                                create_kwargs.pop(bad_kw, None)
+                                retry_needed = True
                     if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
                         create_kwargs.pop("reasoning_effort", None)
                         retry_needed = True
@@ -1076,7 +1147,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                         _sleep_with_status(rate_sleep, status_context, attempt + 1, max_attempts, key_id)
                     continue
 
-                if failure_reason in ("model_overloaded", "model_not_found"):
+                if failure_reason in ("model_overloaded", "model_not_found", "content_blocked"):
                     break
 
                 if failure_reason == "key_denied":
