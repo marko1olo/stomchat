@@ -65,6 +65,16 @@ async def _run_db(operation):
     return await loop.run_in_executor(_DB_EXECUTOR, operation)
 
 
+async def query_db_async(query_sql, params=()):
+    """Выполняет произвольный SQL-запрос асинхронно через рабочий пул БД."""
+    def operation():
+        with _connection() as db:
+            c = db.cursor()
+            c.execute(query_sql, params)
+            return c.fetchall()
+    return await _run_db(operation)
+
+
 def _bot_sent_messages_is_legacy(db):
     """
     True, если учёт исходящих ещё ключуется ОДНИМ msg_id.
