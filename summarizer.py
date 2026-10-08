@@ -240,38 +240,25 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
             if len(caption) > 140:
                 caption = caption[:137] + "..."
             fig_node = f'\n\n<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>\n\n'
-            # Заменяем плейсхолдер вместе с возможной пунктуацией встык
+            # Заменяем ровно одно вхождение (count=1), чтобы снимок не дублировался по всей статье
             pattern = re.compile(rf'[.,;:—\-]?\s*\[IMG_{m_id}\]\s*[.,;:—\-]?', re.IGNORECASE)
-            final_html = pattern.sub(fig_node, final_html)
+            final_html = pattern.sub(fig_node, final_html, count=1)
             placed_ids.add(m_id)
             llm_placed_count += 1
 
     fallback_count = 0
-    # Шаг 2: Детерминированный фоллбэк для клинических снимков, упущенных моделью
+    # Шаг 2: Детерминированный фоллбэк ТОЛЬКО для клинических снимков,
+    # чьи сообщения (MSG_{m_id}) явно упомянуты в тексте статьи.
+    # ЗАПРЕЩЕНО сваливать все оставшиеся картинки пачкой в первый попавшийся кейс.
     remaining_ids = [m_id for m_id in filtered_media_map if m_id not in placed_ids]
     if remaining_ids and (llm_placed_count < max_images):
-        case_headers = [
-            "КЛИНИЧЕСКИЕ КЕЙСЫ",
-            "КЛИНИЧЕСКАЯ ПАНОРАМА",
-            "ТЕМА ДНЯ",
-            "Клинические кейсы",
-            "Клиническая панорама"
-        ]
-        
         valid_fallback = []
         for m_id in remaining_ids:
             cap = media_captions.get(m_id, "")
             # Исключаем явные мемы / немедицинские заглушки
-            if "немедицинск" in cap.lower() or "мем" in cap.lower():
+            if "немедицинск" in cap.lower() or "мем" in cap.lower() or "скриншот переписки" in cap.lower():
                 continue
             valid_fallback.append(m_id)
-
-        target_header_pos = -1
-        for hdr in case_headers:
-            pos = final_html.find(hdr)
-            if pos != -1:
-                target_header_pos = pos
-                break
 
         slots_left = max_images - llm_placed_count
         for m_id in valid_fallback[:slots_left]:
@@ -287,19 +274,6 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
                 end_p = final_html.find("\n\n", pos)
                 if end_p != -1:
                     final_html = final_html[:end_p] + f"\n\n{fig_node}" + final_html[end_p:]
-                else:
-                    final_html += f"\n\n{fig_node}"
-                placed_ids.add(m_id)
-                fallback_count += 1
-            elif target_header_pos != -1:
-                end_header_p = final_html.find("\n\n", target_header_pos)
-                if end_header_p != -1:
-                    final_html = final_html[:end_header_p] + f"\n\n{fig_node}" + final_html[end_header_p:]
-                    # Продвигаем позицию за вставленный снимок и следующий абзац текста,
-                    # чтобы последующие снимки не склеивались встык
-                    next_scan_pos = end_header_p + len(fig_node) + 4
-                    next_p = final_html.find("\n\n", next_scan_pos)
-                    target_header_pos = (next_p + 2) if next_p != -1 else next_scan_pos
                 else:
                     final_html += f"\n\n{fig_node}"
                 placed_ids.add(m_id)
@@ -906,9 +880,10 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     author_counts = Counter()
 
     for msg in filtered_messages:
-        # Распаковка полей из БД (обратная совместимость с 8- и 9-элементными кортежами)
+        # Распаковка полей из БД (обратная совместимость с 8-, 9- и 10-элементными кортежами)
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]
         sender_id = msg[8] if len(msg) > 8 else None
+        m_short = msg[9] if len(msg) > 9 else None
 
         if sender_id is not None:
             try:
@@ -932,8 +907,11 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
         if m_url:
             media_map[m_id] = m_url
-            if m_desc:
-                media_captions[m_id] = m_desc
+            if m_short and str(m_short).strip():
+                media_captions[m_id] = str(m_short).strip()
+            elif m_desc:
+                from vision import extract_fallback_short_caption
+                media_captions[m_id] = extract_fallback_short_caption(m_desc, max_len=140)
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -1003,6 +981,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     3. Разрешено использовать маркеры списков (- или •) для перечисления пунктов.
     4. ВЫДЕЛЯЙ важные термины, бренды и выводы **жирным шрифтом**.
     5. Каждый новый раздел ОБЯЗАН начинаться с новой строки со знака ## и отделяться от текста ПУСТОЙ СТРОКОЙ (\n\n). Запрещено сливать заголовок раздела и текст в один абзац!
+    6. ВНИМАНИЕ ПО МАРКЕРАМ ФОТО: Если в тексте сообщений к данному кейсу прикреплено фото (в логе есть строка "(На фото в MSG_12345: ...)"), ОБЯЗАТЕЛЬНО поставь маркер [IMG_12345] (с реальным номером сообщения из лога!) сразу под заголовком кейса или после описания ситуации. ЗАПРЕЩЕНО писать [IMG_XXXXX] буквально — подставляй точный номер сообщения! Если к кейсу нет фото в логе — маркер [IMG_...] не ставь!
+    7. ЗАПРЕТ НА РИТОРИЧЕСКИЕ ВОПРОСЫ В КОНЦЕ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заканчивать статью или разделы шаблонными дежурными вопросами вроде "А как вы поступаете в подобных ситуациях?", "А какой силер выбираете вы?", "Коллеги, делитесь опытом!". Завершай конкретным клиническим резюме или выводом.
     === СТРУКТУРА СТАТЬИ (СТРОГО СОБЛЮДАТЬ ЗАГОЛОВКИ И ПЕРЕНОСЫ) ===
     ## 0. 📚 ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК: [Тема]
     (Краткий ввод в суть по самой сложной теме дня. Дай определение технологии, перечисли показания и противопоказания согласно мировым стандартам стоматологии. Это фундамент для дальнейшего разбора сообщений).
@@ -1014,7 +994,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     Каждый подробный клинический кейс начинай с подзаголовка:
     ### Кейс 1: [Имя врача / диагноз / суть случая]
     **▶️ СИТУАЦИЯ:** ...
-    [IMG_XXXXX]
+    [IMG_12345] (если есть фото к этому сообщению в логе, иначе пропусти)
     **ЧТО СДЕЛАЛИ:** ...
     **ЛОГИКА ЛЕЧЕНИЯ:** ...
     **ТЕХНИЧЕСКИЕ ДЕТАЛИ:** ...
@@ -1108,7 +1088,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         msg_to_send = ""
 
         if len(full_html) < TELEGRAPH_THRESHOLD:
-            msg_to_send = full_html
+            from html_safe import convert_all_tables_in_html_to_telegraph
+            msg_to_send = convert_all_tables_in_html_to_telegraph(full_html)
             direct_send_params = dict(send_params)
             direct_send_params['link_preview'] = False
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
@@ -1396,9 +1377,10 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     author_counts = Counter()
 
     for msg in filtered_messages:
-        # Распаковка полей из БД (обратная совместимость с 8- и 9-элементными кортежами)
+        # Распаковка полей из БД (обратная совместимость с 8-, 9- и 10-элементными кортежами)
         m_id, name, username, text, m_desc, date, reply_id, m_url = msg[:8]
         sender_id = msg[8] if len(msg) > 8 else None
+        m_short = msg[9] if len(msg) > 9 else None
 
         if sender_id is not None:
             try:
@@ -1425,8 +1407,11 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
 
         if m_url:
             media_map[m_id] = m_url
-            if m_desc:
-                media_captions[m_id] = m_desc
+            if m_short and str(m_short).strip():
+                media_captions[m_id] = str(m_short).strip()
+            elif m_desc:
+                from vision import extract_fallback_short_caption
+                media_captions[m_id] = extract_fallback_short_caption(m_desc, max_len=140)
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -1571,6 +1556,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     2. БЕЗ ВСТУПЛЕНИЯ И ЗАКЛЮЧЕНИЯ: Сразу начинай со структуры.
     3. Из HTML-тегов используй только <b> и <i>. Тег <br> ЗАПРЕЩЕН: переносы делай настоящими переводами строк, иначе весь текст склеится в одну строку.
     4. Целевой объём статьи: 11 000 – {WEEKLY_CHAR_BUDGET} символов. Распределяй объём гармонично по всем разделам, чтобы финальные рубрики (Доска почета, Юмор) оставались полными и завершенными.
+    5. ВНИМАНИЕ ПО МАРКЕРАМ ФОТО: Если в логе недели к сообщению прикреплено фото/видео (строка "[ВАЖНО: К этому сообщению прикреплено ФОТО/ВИДЕО: ...]"), поставь маркер [IMG_12345] (с реальным номером сообщения MSG_12345!) прямо в текст соответствующего кейса. Не ставь маркеры к кейсам без фото!
+    6. ЗАПРЕТ НА РИТОРИЧЕСКИЕ ВОПРОСЫ В КОНЦЕ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заканчивать статью или разделы шаблонными дежурными вопросами ("А как у вас?", "Делитесь опытом!"). Завершай конкретным клиническим выводом.
 {profiles_block}
     ЛОГ НЕДЕЛИ:
     {full_text}
