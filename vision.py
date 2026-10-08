@@ -509,9 +509,16 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()
             unbanned_pool = [entry for entry in models_pool if entry[0] not in banned_map]
-            active_pool = unbanned_pool if unbanned_pool else [models_pool[0]]
-            start_idx = 0 if not is_passive else random.randint(0, len(active_pool) - 1)
-            models_cascade = active_pool[start_idx:] + active_pool[:start_idx]
+            # Gemini-модели (3.5 и 3.1) всегда идут первыми — они нативно видят снимки и анатомию.
+            # Groq (Qwen) остаётся строго резервом на случай отказа или бана Google.
+            gemini_active = [m for m in active_pool if m[1] == "gemini"]
+            fallback_active = [m for m in active_pool if m[1] != "gemini"]
+            if is_passive and len(gemini_active) > 1:
+                s_idx = random.randint(0, len(gemini_active) - 1)
+                gemini_active = gemini_active[s_idx:] + gemini_active[:s_idx]
+            models_cascade = gemini_active + fallback_active
+            if not models_cascade:
+                models_cascade = active_pool
 
             timeout = httpx.Timeout(
                 GROQ_HTTP_TIMEOUT_SECONDS,

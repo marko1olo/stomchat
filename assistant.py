@@ -4680,24 +4680,38 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     except Exception:
         count_since = 0
 
+    has_explicit_question = bool(
+        text and (
+            "?" in text
+            or "？" in text
+            or any(q in text.lower() for q in ("как быть", "что делать", "подскажите", "как поступить", "посоветуйте", "заполнять", "пломбировать"))
+        )
+    )
+
     if is_passive:
-        # Для пассивных снимков: максимум 15 минут с момента отправки и не более 8 сообщений после него
-        if age_minutes > 15.0 or count_since > 8:
+        # Для пассивных снимков: если врач задал явный вопрос ("Как быть?", "?"),
+        # окно актуальности расширено до 60 минут при низкой активности (count_since <= 8).
+        # Для молчаливых снимков без вопроса: 20 минут и не более 5 сообщений.
+        max_passive_age = 60.0 if has_explicit_question else 20.0
+        max_passive_msgs = 8 if has_explicit_question else 5
+        if age_minutes > max_passive_age or count_since > max_passive_msgs:
             logger.info(
-                "Media Assistant: passive media msg_id=%s is stale (age=%.1fm > 15m, count=%s > 8). Skipping.",
-                msg_id, age_minutes, count_since,
+                "Media Assistant: passive media msg_id=%s is stale (age=%.1fm > %.1fm, count=%s > %s). Skipping.",
+                msg_id, age_minutes, max_passive_age, count_since, max_passive_msgs,
             )
             return False
 
+        passive_cooldown_min = 20 if has_explicit_question else 120
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
-        if datetime.now() - last_run < timedelta(minutes=120):
+        if datetime.now() - last_run < timedelta(minutes=passive_cooldown_min):
             elapsed_min = int((datetime.now() - last_run).total_seconds() / 60)
             logger.info(
-                "Media Assistant: passive media cooldown active (%s/120 min elapsed). Skipping unrequested media msg_id=%s.",
+                "Media Assistant: passive media cooldown active (%s/%s min elapsed). Skipping unrequested media msg_id=%s.",
                 elapsed_min,
+                passive_cooldown_min,
                 msg_id,
             )
-            return False  # Within 2-hour cooldown, skip!
+            return False  # Within cooldown, skip!
     else:
         # Для прямого обращения/упоминания: максимум 120 минут и не более 25 сообщений
         if age_minutes > 120.0 or count_since > 25:
@@ -4756,8 +4770,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if last_passive_media_str:
             try:
                 last_passive_media_dt = datetime.fromisoformat(last_passive_media_str)
-                if datetime.now() - last_passive_media_dt < timedelta(minutes=120):
-                    logger.info("Media Assistant: passive media cooldown active (120 min). Skipping unrequested media analysis.")
+                passive_cooldown_min = 20 if has_explicit_question else 120
+                if datetime.now() - last_passive_media_dt < timedelta(minutes=passive_cooldown_min):
+                    logger.info("Media Assistant: passive media cooldown active (%s min). Skipping unrequested media analysis.", passive_cooldown_min)
                     return
             except Exception:
                 pass

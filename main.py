@@ -1456,18 +1456,32 @@ async def recover_pending_media_analysis():
         if not (clinical_media_kind(message) or media_type_hint):
             logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
             continue
-        # bulk=True: для догона переполнение очереди ШТАТНО — строка остаётся в
-        # базе с пустым описанием, и её подберёт следующий запуск. Без флага
-        # каждое непоставленное писало logger.error на пути, где ничего не
-        # потеряно. И считаем поставленным только то, что действительно
-        # поставилось: queued += 1 стоял безусловно, поэтому сводная строка
-        # врала при полной очереди.
+        # Проверяем свежесть сообщения: если оно пришло недавно (до 45 мин назад),
+        # это живое клиническое обращение, отправленное прямо перед рестартом или во время него.
+        # Для него ОБЯЗАТЕЛЬНО должен сработать ассистент (trigger_assistant=True, bulk=False).
+        is_fresh = False
+        msg_dt = getattr(message, 'date', None)
+        if msg_dt:
+            try:
+                if hasattr(msg_dt, "astimezone"):
+                    m_utc = msg_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                elif hasattr(msg_dt, "tzinfo") and msg_dt.tzinfo is not None:
+                    m_utc = msg_dt.replace(tzinfo=None)
+                else:
+                    m_utc = msg_dt
+                age_m = (datetime.utcnow() - m_utc).total_seconds() / 60.0
+                if age_m <= 45.0:
+                    is_fresh = True
+            except Exception:
+                pass
+
         if await enqueue_media_analysis(
             [message],
             msg_id,
             id_to_text.get(msg_id) or message.message or "",
             media_type_hint=media_type_hint,
-            bulk=True,
+            bulk=not is_fresh,
+            trigger_assistant=is_fresh if is_fresh else None,
         ):
             queued += 1
 
