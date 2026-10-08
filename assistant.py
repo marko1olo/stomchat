@@ -4680,19 +4680,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     except Exception:
         count_since = 0
 
-    has_explicit_question = bool(
-        text and (
-            "?" in text
-            or "？" in text
-            or any(q in text.lower() for q in ("как быть", "что делать", "подскажите", "как поступить", "посоветуйте", "заполнять", "пломбировать"))
-        )
-    )
+    has_explicit_question = bool(text and ("?" in text or "？" in text))
 
     if is_passive:
-        # Для пассивных снимков: если врач задал явный вопрос ("Как быть?", "?"),
-        # окно актуальности расширено до 60 минут при низкой активности (count_since <= 8).
-        # Для молчаливых снимков без вопроса: 20 минут и не более 5 сообщений.
-        max_passive_age = 60.0 if has_explicit_question else 20.0
+        max_passive_age = 45.0 if has_explicit_question else 20.0
         max_passive_msgs = 8 if has_explicit_question else 5
         if age_minutes > max_passive_age or count_since > max_passive_msgs:
             logger.info(
@@ -4701,7 +4692,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             )
             return False
 
-        passive_cooldown_min = 20 if has_explicit_question else 120
+        passive_cooldown_min = 30 if has_explicit_question else 120
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
         if datetime.now() - last_run < timedelta(minutes=passive_cooldown_min):
             elapsed_min = int((datetime.now() - last_run).total_seconds() / 60)
@@ -4711,7 +4702,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 passive_cooldown_min,
                 msg_id,
             )
-            return False  # Within cooldown, skip!
+            return False
     else:
         # Для прямого обращения/упоминания: максимум 120 минут и не более 25 сообщений
         if age_minutes > 120.0 or count_since > 25:
@@ -4764,18 +4755,6 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     is_dental = False
     
     search_keywords = select_search_keywords(keywords)
-        
-    if is_passive:
-        last_passive_media_str = state.get("last_passive_media_run")
-        if last_passive_media_str:
-            try:
-                last_passive_media_dt = datetime.fromisoformat(last_passive_media_str)
-                passive_cooldown_min = 20 if has_explicit_question else 120
-                if datetime.now() - last_passive_media_dt < timedelta(minutes=passive_cooldown_min):
-                    logger.info("Media Assistant: passive media cooldown active (%s min). Skipping unrequested media analysis.", passive_cooldown_min)
-                    return
-            except Exception:
-                pass
 
     if has_dental_topic and not is_non_dental_img:
         # Dental Case: Always query RAG!
