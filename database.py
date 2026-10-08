@@ -53,19 +53,10 @@ def _connection():
 def _date_text(dt):
     """
     Приводит любой datetime к строке в UTC — именно UTC лежит в колонке `date`.
-
-    Сюда приходят значения двух видов, и раньше они трактовались одинаково:
-      * tz-aware UTC от Telethon (save_message) — записывались верно;
-      * НАИВНЫЕ локальные границы окон от планировщика (datetime.now()) —
-        сравнивались с UTC-строками как есть.
-    При смещении хоста UTC+4 запрошенное "вчера 20:00 — сейчас" фактически
-    начиналось с сегодняшних 00:00 локального времени, и вечерние часы —
-    самые активные в этом чате — не попадали ни в один дайджест: ни во
-    вчерашний, ни в сегодняшний. Терялись безвозвратно.
-
-    astimezone() наивное значение считает локальным, а tz-aware корректно
-    переводит, поэтому одна ветка покрывает оба случая.
+    Если уже передана строка, возвращает её как есть.
     """
+    if isinstance(dt, str):
+        return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -347,6 +338,16 @@ async def init_db():
                     logger.warning("database migration media_remote_url НЕ применена: "
                                    "%s: %s", type(exc).__name__, exc)
 
+            # Краткая подпись (1-2 фразы chairside) для figcaption в дайджестах и Telegraph.
+            # Длинное media_description остаётся для LLM-контекста; short_caption идёт в UI.
+            try:
+                db.execute("ALTER TABLE messages ADD COLUMN media_short_caption TEXT")
+                logger.info("database schema migrated: added media_short_caption")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    logger.warning("database migration media_short_caption НЕ применена: "
+                                   "%s: %s", type(exc).__name__, exc)
+
             # Таблица автоматически извлеченных и проверенных клинических протоколов сообщества
             db.execute(
                 """
@@ -378,7 +379,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100, al
         with _connection() as db:
             period_messages = db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 WHERE date >= ? AND date <= ?
                 ORDER BY date ASC
@@ -409,7 +410,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100, al
                 needed = min_count - len(total_msgs)
                 old_messages = db.execute(
                     """
-                    SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
+                    SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                     FROM messages
                     WHERE date < ? AND is_summarized = 0
                     ORDER BY date DESC, msg_id DESC
@@ -429,7 +430,7 @@ async def get_messages_for_range(start_dt, end_dt):
         with _connection() as db:
             return db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 WHERE date >= ? AND date <= ?
                 ORDER BY date ASC
@@ -452,7 +453,7 @@ async def get_messages_from(start_msg_id, limit=60):
         with _connection() as db:
             return db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 WHERE msg_id >= ?
                 ORDER BY msg_id ASC
@@ -486,7 +487,7 @@ async def get_last_n_messages(limit=300):
         with _connection() as db:
             rows = db.execute(
                 """
-                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id
+                SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 ORDER BY date DESC, msg_id DESC
                 LIMIT ?
@@ -731,13 +732,19 @@ async def delete_messages_by_ids(msg_ids, chat_id=None):
         return (0, 0)
 
 
-async def update_media_description(msg_id, description):
+async def update_media_description(msg_id, description, short_caption=None):
     def operation():
         with _connection() as db:
-            db.execute(
-                "UPDATE messages SET media_description = ? WHERE msg_id = ?",
-                (description, msg_id),
-            )
+            if short_caption is not None:
+                db.execute(
+                    "UPDATE messages SET media_description = ?, media_short_caption = ? WHERE msg_id = ?",
+                    (description, short_caption, msg_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE messages SET media_description = ? WHERE msg_id = ?",
+                    (description, msg_id),
+                )
 
     return await _run_db(operation)
 
@@ -891,6 +898,15 @@ async def get_media_description(msg_id):
             row = db.execute("SELECT media_description FROM messages WHERE msg_id = ?", (msg_id,)).fetchone()
             return row[0] if row else None
     return await _run_db(operation)
+
+
+async def get_media_short_caption(msg_id):
+    def operation():
+        with _connection() as db:
+            row = db.execute("SELECT media_short_caption FROM messages WHERE msg_id = ?", (msg_id,)).fetchone()
+            return row[0] if row else None
+    return await _run_db(operation)
+
 
 
 async def save_clinical_bookmark(saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date):

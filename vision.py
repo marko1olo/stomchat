@@ -169,14 +169,110 @@ class VisionDescription(str):
     """
     Строковое описание снимка с сохранением подготовленных image_urls (data:image/jpeg;base64,...).
     Полностью совместимо с обычным str для базы данных, логирования и строковых операций,
-    но позволяет вызывающему коду извлечь оригинальные изображения для мультимодального вызова Gemini.
+    но позволяет вызывающему коду извлечь оригинальные изображения для мультимодального вызова Gemini,
+    а также краткую chairside подпись к иллюстрации (short_caption).
     """
     image_urls: list[str]
+    short_caption: str | None
 
-    def __new__(cls, content, image_urls=None):
+    def __new__(cls, content, image_urls=None, short_caption=None):
         instance = super().__new__(cls, content)
         instance.image_urls = list(image_urls) if image_urls else []
+        instance.short_caption = short_caption
         return instance
+
+
+def extract_fallback_short_caption(text: str, max_len: int = 160) -> str:
+    """Извлекает лаконичную подпись chairside (1-2 предложения) из сплошного текста."""
+    if not text:
+        return ""
+    cleaned = re.sub(
+        r"^[\[\]#*\s\d.)-]*(?:ПОДРОБНОЕ\s+ОПИСАНИЕ|КРАТКАЯ\s+ПОДПИСЬ|ОПИСАНИЕ\s+СНИМКА|СНИМОК|НА\s+СНИМКЕ)[\[\]#*\s:\-]*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"^#+\s*", "", cleaned)
+    cleaned = re.sub(r"[\r\n]+", " ", cleaned).strip()
+
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    candidate = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if not candidate:
+            candidate = s
+        elif len(candidate) + len(s) + 1 <= max_len:
+            candidate = f"{candidate} {s}"
+        else:
+            break
+
+    if not candidate:
+        candidate = cleaned[:max_len]
+    if len(candidate) > max_len:
+        truncated = candidate[:max_len - 3]
+        last_space = truncated.rfind(" ")
+        if last_space > 40:
+            candidate = truncated[:last_space] + "..."
+        else:
+            candidate = truncated + "..."
+    return candidate.strip()
+
+
+def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
+    """
+    Разбирает ответ модели зрения на два компонента:
+    1. Подробное клиническое описание (для LLM контекста, логов и промпта)
+    2. Краткая chairside подпись (для figcaption в Telegraph и PDF)
+    """
+    if not raw_text:
+        return "", ""
+
+    text = raw_text.strip()
+
+    detailed_re = re.compile(
+        r"(?:^|\n)[\[\]#*\s\d.)-]*(?:ПОДРОБНОЕ\s+ОПИСАНИЕ|КЛИНИЧЕСКОЕ\s+ОПИСАНИЕ|ПОДРОБНЫЙ\s+РАЗБОР)[\[\]#*\s:\-]*",
+        re.IGNORECASE
+    )
+    short_re = re.compile(
+        r"(?:^|\n)[\[\]#*\s\d.)-]*(?:КРАТКАЯ\s+ПОДПИСЬ|ПОДПИСЬ\s+К\s+ИЛЛЮСТРАЦИИ|CHAIRSIDE\s+ПОДПИСЬ|КРАТКОЕ\s+ОПИСАНИЕ)[\[\]#*\s:\-]*",
+        re.IGNORECASE
+    )
+
+    d_match = detailed_re.search(text)
+    s_match = short_re.search(text)
+
+    if d_match and s_match:
+        if d_match.start() < s_match.start():
+            detailed_part = text[d_match.end():s_match.start()].strip()
+            short_part = text[s_match.end():].strip()
+        else:
+            short_part = text[s_match.end():d_match.start()].strip()
+            detailed_part = text[d_match.end():].strip()
+
+        short_part = re.sub(r"^[\"«']\s*|\s*[\"»']$", "", short_part).strip()
+        if len(short_part) > 180:
+            short_part = extract_fallback_short_caption(short_part, max_len=180)
+        if not short_part:
+            short_part = extract_fallback_short_caption(detailed_part, max_len=180)
+
+        return detailed_part, short_part
+
+    if d_match and not s_match:
+        detailed_part = text[d_match.end():].strip()
+        short_part = extract_fallback_short_caption(detailed_part, max_len=180)
+        return detailed_part, short_part
+
+    if s_match and not d_match:
+        short_part = text[s_match.end():].strip()
+        short_part = re.sub(r"^[\"«']\s*|\s*[\"»']$", "", short_part).strip()
+        return text, short_part
+
+    detailed = text
+    short = extract_fallback_short_caption(detailed)
+    return detailed, short
+
 
 
 _RECENT_IMAGE_URLS: dict[str, list[str]] = {}
@@ -352,12 +448,13 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 if cache_key in _VISION_CACHE:
                     cached_entry = _VISION_CACHE[cache_key]
                     cached_text = cached_entry.get("text") if isinstance(cached_entry, dict) else str(cached_entry)
+                    cached_short = cached_entry.get("short_caption") if isinstance(cached_entry, dict) else None
                     if cached_text:
                         logger.info("Vision cache hit for key=%s (%s images)", cache_key[:12], len(image_urls))
                         _RECENT_IMAGE_URLS[cached_text[:60]] = image_urls
                         if len(_RECENT_IMAGE_URLS) > 50:
                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
-                        return VisionDescription(cached_text, image_urls=image_urls)
+                        return VisionDescription(cached_text, image_urls=image_urls, short_caption=cached_short)
 
             context = f" Контекст от автора: '{caption}'." if caption else ""
             # Описание снимка уходит в отвечающий промпт и становится основанием
@@ -394,8 +491,14 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"4) Без фантомных величин: никаких вымышленных чисел (миллиметры, длина, дефект), если они не читаются на снимке. "
                 f"Для одиночного снимка: 3-6 емких профессиональных предложений (для альбома — зональный синтез). "
                 f"{clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE} "
+                f"ФОРМАТ ОТВЕТА — СТРОГО ДВЕ СЕКЦИИ:\n"
+                f"[ПОДРОБНОЕ ОПИСАНИЕ]\n"
+                f"<подробный клинический разбор снимка для LLM-контекста: 3-6 предложений>\n\n"
+                f"[КРАТКАЯ ПОДПИСЬ]\n"
+                f"<1-2 коротких chairside-фразы для подписи к фото в статье, макс 120 символов>\n\n"
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ без английских фраз, черновиков и тегов <think>."
             )
+
             
             # Load balancing pool (fallback: gemini-3.8-flash, gemini-3.7-flash): Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.8 27B
             models_pool = [
@@ -524,13 +627,20 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     if _is_mostly_cyrillic(russian_text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
-                                        _RECENT_IMAGE_URLS[russian_text[:60]] = image_urls
+                                        # Разбор двойного формата [ПОДРОБНОЕ ОПИСАНИЕ] / [КРАТКАЯ ПОДПИСЬ]
+                                        detailed_ctx, short_cap = parse_dual_vision_description(russian_text)
+                                        if not detailed_ctx:
+                                            detailed_ctx = russian_text
+                                        if not short_cap:
+                                            short_cap = extract_fallback_short_caption(detailed_ctx, max_len=160)
+                                        _RECENT_IMAGE_URLS[detailed_ctx[:60]] = image_urls
                                         if len(_RECENT_IMAGE_URLS) > 50:
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
                                         if not skip_cache and cache_key:
-                                            _VISION_CACHE[cache_key] = {"text": russian_text, "ts": time.time()}
+                                            _VISION_CACHE[cache_key] = {"text": detailed_ctx, "short_caption": short_cap, "ts": time.time()}
                                             _save_vision_cache(_VISION_CACHE)
-                                        return VisionDescription(russian_text, image_urls=image_urls)
+                                        return VisionDescription(detailed_ctx, image_urls=image_urls, short_caption=short_cap)
+
 
                                     if english_fallback is None:
                                         english_fallback = text

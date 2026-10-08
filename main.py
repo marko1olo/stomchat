@@ -1111,7 +1111,11 @@ async def scheduler_task(bot_client):
                                         seed_q = preset.get('discussion_seed_question')
                                         break
 
-                            vote_stats = await poll_storage.get_poll_summary_stats(poll_id)
+                            try:
+                                vote_stats = await poll_storage.get_poll_summary_stats(poll_id)
+                            except Exception as stats_err:
+                                logger.warning("Не удалось собрать статистику опроса #%s: %s", poll_id, stats_err)
+                                vote_stats = {}
                             res_text = poll_engine.generate_evening_poll_debrief(
                                 explanation_deep=deep_exp,
                                 discussion_seed_question=seed_q,
@@ -2154,6 +2158,12 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                 timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
             )
             if media_description:
+                # Извлекаем short_caption из VisionDescription, если он там есть
+                _vision_short_caption = getattr(media_description, "short_caption", None)
+                if not _vision_short_caption and media_description:
+                    # Фоллбэк: сгенерировать из detailed на месте
+                    import vision as _vision_mod
+                    _vision_short_caption = _vision_mod.extract_fallback_short_caption(str(media_description), max_len=160)
                 for message in messages:
                     # Описание относится ровно к тем файлам, которые попали в
                     # Vision. При частичном провале альбома (скачался один
@@ -2163,8 +2173,9 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                     row_description = (
                         media_description if message.id in analyzed_msg_ids else MEDIA_UNAVAILABLE_MARK
                     )
+                    row_short_caption = _vision_short_caption if message.id in analyzed_msg_ids else None
                     await asyncio.wait_for(
-                        database.update_media_description(message.id, row_description),
+                        database.update_media_description(message.id, row_description, short_caption=row_short_caption),
                         timeout=30,
                     )
                 if len(analyzed_msg_ids) < len(messages):
