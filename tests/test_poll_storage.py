@@ -17,7 +17,6 @@
 12. Получение активных опросов и закрытие опроса (close_poll).
 """
 
-import asyncio
 import os
 import sys
 import tempfile
@@ -31,7 +30,6 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import poll_storage

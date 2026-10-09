@@ -16,7 +16,6 @@ repo_dir = os.path.abspath(os.path.dirname(__file__))
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
 
-import vision
 from vision import VisionDescription
 import gemini_client
 import assistant
@@ -29,7 +28,7 @@ class TestVisionDescription(unittest.TestCase):
     def test_str_subclass_behavior(self):
         urls = ["data:image/jpeg;base64,abc12345"]
         desc = VisionDescription("На снимке 36 зуб", image_urls=urls)
-        
+
         self.assertIsInstance(desc, str)
         self.assertEqual(desc, "На снимке 36 зуб")
         self.assertEqual(desc.image_urls, urls)
@@ -61,12 +60,12 @@ class TestGeminiClientMultimodal(unittest.TestCase):
         }
 
         with patch.object(gemini_client, "get_provider_client", return_value=mock_client),              patch.object(gemini_client, "active_models", return_value=[("gemini-3.8-flash", "gemini")]),              patch.object(gemini_client, "available_keys", return_value=(["fake_key"], [], 0)):
-            
+
             resp = gemini_client.generate_text("Разбери снимок зуба 46", status_context=status_ctx, timeout=30)
-            
+
             self.assertIsNotNone(resp)
             self.assertIn("апикальный периодонтит", resp.text)
-            
+
             # Verify call args
             create_args = mock_client.chat.completions.create.call_args[1]
             messages = create_args["messages"]
@@ -94,11 +93,11 @@ class TestGeminiClientMultimodal(unittest.TestCase):
         }
 
         with patch.object(gemini_client, "get_provider_client", return_value=mock_client),              patch.object(gemini_client, "active_models", return_value=[("openai/gpt-oss-120b", "groq")]),              patch.object(gemini_client, "available_keys", return_value=(["fake_key"], [], 0)):
-            
+
             resp = gemini_client.generate_text("Разбери снимок зуба 46", status_context=status_ctx, timeout=30)
-            
+
             self.assertIsNotNone(resp)
-            
+
             # Verify call args: Groq text model must receive pure string prompt in content!
             create_args = mock_client.chat.completions.create.call_args[1]
             messages = create_args["messages"]
@@ -127,13 +126,13 @@ class TestGeminiClientMultimodal(unittest.TestCase):
         }
 
         with patch.object(gemini_client, "get_provider_client", return_value=mock_client),              patch.object(gemini_client, "active_models", return_value=[("gemini-3.8-flash", "gemini")]),              patch.object(gemini_client, "available_keys", return_value=(["fake_key"], [], 0)):
-            
+
             resp = gemini_client.generate_text("Разбери снимок", status_context=status_ctx, timeout=30)
-            
+
             self.assertIsNotNone(resp)
             self.assertEqual(resp.text, "Успешный ответ после text fallback")
             self.assertEqual(mock_client.chat.completions.create.call_count, 2)
-            
+
             # Second call should have text-only messages
             second_call_args = mock_client.chat.completions.create.call_args_list[1][1]
             self.assertEqual(second_call_args["messages"], [{"role": "user", "content": "Разбери снимок"}])
@@ -142,7 +141,7 @@ class TestGeminiClientMultimodal(unittest.TestCase):
 class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
     async def test_assistant_media_passes_image_urls(self):
         desc = VisionDescription("На снимке КЛКТ эндодонтический доступ", image_urls=["data:image/jpeg;base64,TEST1234"])
-        
+
         captured_ctx = []
         captured_prompt = []
 
@@ -172,7 +171,7 @@ class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
             self.assertIn("image_urls", captured_ctx[0])
             self.assertEqual(captured_ctx[0]["image_urls"], ["data:image/jpeg;base64,TEST1234"])
             self.assertEqual(captured_ctx[0]["kind"], "assistant_media")
-            
+
             # Check prompt contains multimodal notice
             self.assertEqual(len(captured_prompt), 1)
             self.assertIn("МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ", captured_prompt[0])

@@ -6,7 +6,6 @@ import os
 import shutil
 import tempfile
 import unittest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_intent_test_")
@@ -41,7 +40,7 @@ class TestUserIntentObject(unittest.TestCase):
         self.assertEqual(intent, INTENT_WEB_SEARCH)
         self.assertTrue(bool(intent))
         self.assertEqual(str(intent), INTENT_WEB_SEARCH)
-        
+
         name, query = intent
         self.assertEqual(name, INTENT_WEB_SEARCH)
         self.assertEqual(query, "биодентин")
@@ -68,35 +67,35 @@ class TestIntentClassifier(unittest.TestCase):
             ("какие свежие исследования по ирригации", INTENT_WEB_SEARCH, "ирригации"),
             ("поищи в интернете протокол фиксации", INTENT_WEB_SEARCH, "протокол фиксации"),
             ("найди протокол BOPT", INTENT_WEB_SEARCH, "bopt"),
-            
+
             # b) INTENT_CALCULATOR
             ("посчитай анестезию", INTENT_CALCULATOR, "посчитай анестезию"),
             ("сколько карпул артикаина на 70 кг", INTENT_CALCULATOR, "сколько карпул артикаина на 70 кг"),
             ("дозировка скандонеста ребенку", INTENT_CALCULATOR, "дозировка скандонеста ребенку"),
             ("рассчитай дозу", INTENT_CALCULATOR, "рассчитай дозу"),
-            
+
             # c) INTENT_QUIZ
             ("хочу квиз", INTENT_QUIZ, ""),
             ("давай викторину", INTENT_QUIZ, ""),
             ("проверь мои знания", INTENT_QUIZ, ""),
             ("дай вопрос", INTENT_QUIZ, ""),
-            
+
             # d) INTENT_CASE
             ("давай кейс", INTENT_CASE, ""),
             ("хочу клинический случай", INTENT_CASE, ""),
             ("сыграем в диагностику", INTENT_CASE, ""),
             ("запусти симулятор", INTENT_CASE, ""),
-            
+
             # e) INTENT_BOOKMARKS
             ("мои закладки", INTENT_BOOKMARKS, ""),
             ("что я сохранил", INTENT_BOOKMARKS, ""),
             ("покажи сохраненки", INTENT_BOOKMARKS, ""),
-            
+
             # f) INTENT_STYLE
             ("смени стиль", INTENT_STYLE, ""),
             ("настройки стиля", INTENT_STYLE, ""),
             ("хочу другой тон", INTENT_STYLE, ""),
-            
+
             # g) INTENT_MENU / INTENT_HELP -> показ главного меню
             ("меню", INTENT_MENU, ""),
             ("главное меню", INTENT_MENU, ""),

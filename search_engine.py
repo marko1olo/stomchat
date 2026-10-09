@@ -1,7 +1,7 @@
 import config
 import logging
 import asyncio
-from ddgs import DDGS 
+from ddgs import DDGS
 import re
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def perform_search(query: str, max_results: int = 2) -> str:
     """
     # Очистка запроса от мусора (вопросительные знаки, кавычки)
     clean_query = re.sub(r'[^\w\sа-яА-ЯёЁ]', ' ', query).strip()
-    
+
     try:
         # 1. TAVILY (Приоритет)
         if config.SEARCH_PROVIDER == "tavily" and tavily:
@@ -53,7 +53,7 @@ async def perform_search(query: str, max_results: int = 2) -> str:
             loop = asyncio.get_running_loop()
             # Запускаем в экзекьюторе, чтобы не блокировать бота
             results = await loop.run_in_executor(None, _run_ddg_sync, clean_query, max_results)
-            
+
             if not results:
                 # Вторая попытка: пробуем искать только первые 4 слова запроса (часто помогает)
                 short_query = " ".join(clean_query.split()[:4])
@@ -61,7 +61,7 @@ async def perform_search(query: str, max_results: int = 2) -> str:
                     results = await loop.run_in_executor(None, _run_ddg_sync, short_query, max_results)
 
             return "\n\n".join(results) if results else "Информации не найдено (поисковик не вернул данных)."
-                
+
     except Exception as e:
         logger.error(f"❌ Ошибка механизма поиска: {e}")
         return "Ошибка поиска."

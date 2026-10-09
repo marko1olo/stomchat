@@ -53,10 +53,10 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def main():
-    print(f"=== Запуск заливки истории в зеркало ===")
+    print("=== Запуск заливки истории в зеркало ===")
     print(f"Источник: {SOURCE_CHAT_ID}")
     print(f"Цель: {TARGET_CHAT_ID}")
-    print(f"Период: с 2026-09-01 (текущий месяц)")
+    print("Период: с 2026-09-01 (текущий месяц)")
 
     state = load_state()
     last_id = state.get("last_msg_id", 0)

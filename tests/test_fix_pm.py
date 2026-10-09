@@ -33,11 +33,9 @@
 """
 import io
 import os
-import re
 import shutil
 import sys
 import tempfile
-import time
 
 for _stream in (sys.stdout, sys.stderr):
     try:

@@ -9,7 +9,6 @@ digest_pdf.py — Генератор полиграфического PDF-вес
 - Изоляция ошибок: сбой рендера PDF не ломает публикацию в Telegraph.
 """
 
-import asyncio
 import base64
 import html
 import logging

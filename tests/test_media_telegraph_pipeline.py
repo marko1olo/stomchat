@@ -10,7 +10,6 @@ test_media_telegraph_pipeline.py — Тестирование пайплайна
 5. Наличие строгих инструкций [IMG_XXXXX] в системных промптах daily и weekly в summarizer.py.
 """
 
-import html
 import re
 import sys
 
@@ -73,7 +72,7 @@ def test_caption_truncation():
     media_captions = {202: long_desc}
 
     result = embed_media_into_summary_html(html_input, media_map, media_captions)
-    
+
     # figcaption должен быть обрезан до 140 символов (137 + '...')
     match = re.search(r'<figcaption>(.*?)</figcaption>', result)
     check("Figcaption найден", bool(match))

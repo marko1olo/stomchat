@@ -39,13 +39,13 @@ async def inspect():
         # Берем 10 случайных фактов, которые уже прошли реклассификацию
         cursor = await db.execute('SELECT id, content, category_code FROM distilled_facts WHERE is_reclassified = 1 ORDER BY RANDOM() LIMIT 25')
         rows = await cursor.fetchall()
-        
+
         print("\n🔎 ВЫБОРОЧНАЯ ПРОВЕРКА КЛАССИФИКАЦИИ:\n")
-        
+
         for f_id, content, cat_codes in rows:
             print(f"🆔 FACT ID: {f_id}")
             print(f"📝 ТЕКСТ: {content[:250]}...") # Показываем начало текста
-            
+
             print("🏷  КАТЕГОРИИ:")
             if cat_codes:
                 # Разбор списка через запятую — общий на весь проект: 99.1 % записей
@@ -58,7 +58,7 @@ async def inspect():
                     print(f"   • {c} -> {taxonomy.describe(c)}")
             else:
                 print("   ❌ Нет категорий!")
-            
+
             print("-" * 50)
 
 if __name__ == '__main__':

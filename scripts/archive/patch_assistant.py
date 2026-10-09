@@ -13,7 +13,6 @@ raise SystemExit(
     "vladeltsa repozitoriya, poetomu skript prosto obezvrezhen."
 )
 
-import re
 
 with open('assistant.py', 'r', encoding='utf-8') as f:
     code = f.read()

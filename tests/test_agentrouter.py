@@ -1,7 +1,6 @@
 import os
 import sys
 import tempfile
-import time
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -49,7 +48,8 @@ cascade_assistant = gc.cascade_for_context({"kind": "assistant", "thinking_level
 check("В assistant deepseek-v4-flash идет первым", cascade_assistant[0] == ("deepseek-v4-flash", "agentrouter"))
 
 cascade_summary = gc.cascade_for_context({"kind": "daily"})
-check("В daily сводке deepseek-v4-flash идет первым", cascade_summary[0] == ("deepseek-v4-flash", "agentrouter"))
+check("В daily сводке Gemini идет первым для длинного контекста", cascade_summary[0][1] == "gemini")
+check("В daily сводке deepseek-v4-flash присутствует как резерв", ("deepseek-v4-flash", "agentrouter") in cascade_summary)
 
 cascade_review = gc.cascade_for_context({"kind": "poll_clinical_review"})
 check("В poll_clinical_review deepseek-v4-flash идет первым", cascade_review[0] == ("deepseek-v4-flash", "agentrouter"))
@@ -102,9 +102,10 @@ check("Генерация завершилась успешно", res is not Non
 check("Запрос был отправлен к deepseek-v4-flash", len(CAPTURED_CALLS) > 0 and CAPTURED_CALLS[0].get("model") == "deepseek-v4-flash")
 check("max_tokens не ограничен малым лимитом (>= 4096)", CAPTURED_CALLS[0].get("max_tokens", 0) >= 4096)
 
-print(f"\n==============================================================")
-print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print(f"Провалено: {', '.join(FAIL)}")
-    sys.exit(1)
-sys.exit(0)
+if __name__ == "__main__":
+    print("\n==============================================================")
+    print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print(f"Провалено: {', '.join(FAIL)}")
+        sys.exit(1)
+    sys.exit(0)

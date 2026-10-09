@@ -473,7 +473,7 @@ async def generate_user_portrait(user_id):
         msgs = await database.get_user_recent_group_messages(user_id, limit=50)
         if not msgs or len(msgs) < 3:
             return "Недостаточно сообщений в общей группе для анализа клинического профиля."
-            
+
         context_str = "\n".join([f"- {m}" for m in msgs])
         prompt = f"""Ты — ИИ-аналитик профессионального сообщества врачей-стоматологов StomChat.
 Проанализируй список сообщений врача-стоматолога в общем чате и составь его краткий профессиональный портрет в 1-2 предложениях (не более 300 символов).
@@ -501,7 +501,7 @@ async def check_dialogue_continuation_triage(dialogue_chain, recent_chat=None):
     try:
         context_str = "\n".join(dialogue_chain)
         recent_chat_str = "\n".join(recent_chat) if recent_chat else "(нет недавних сообщений)"
-        
+
         triage_prompt = f"""Ты — клинический координатор профессионального врачебного сообщества "StomChat".
 В чате идет клинический диалог/консилиум с участием нашего ИИ-ассистента (Бота).
 Бот собирается ответить на реплику врача из цепочки диалога:
@@ -743,7 +743,7 @@ def detect_user_intent(text: str) -> UserIntent:
 
     # 1. INTENT_MENU / INTENT_HELP
     is_clinical_emergency_help = bool(
-        re.search(r'\b(первая|неотложная|скорая|доврачебная|оказание)\s+помощ', norm) or 
+        re.search(r'\b(первая|неотложная|скорая|доврачебная|оказание)\s+помощ', norm) or
         re.search(r'\bпомощь\s+(при|пациент|взросл|дет)', norm)
     )
 
@@ -915,7 +915,7 @@ async def classify_pm_intent_semantic_async(text: str) -> dict:
         resp, err = await generate_gemini_text_async(prompt, status_ctx, timeout=12)
         if err or not resp:
             return {"intent": "CLINICAL_CHAT", "confidence": 0.0, "error": err}
-        
+
         raw_text = resp.text.strip() if hasattr(resp, "text") else str(resp).strip()
         m = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if m:
@@ -1400,8 +1400,8 @@ async def init_assistant(bot_client):
         logger.error(f"Failed to initialize assistant or set commands: {e}")
 
 STOP_WORDS = {
-    "это", "как", "для", "или", "что", "этот", "себя", "себе", "меня", "тебя", 
-    "было", "быть", "если", "хочу", "только", "когда", "тоже", "есть", "было", 
+    "это", "как", "для", "или", "что", "этот", "себя", "себе", "меня", "тебя",
+    "было", "быть", "если", "хочу", "только", "когда", "тоже", "есть", "было",
     "будет", "просто", "здесь", "очень", "даже", "если", "тоже", "типа", "вообще",
     "надо", "можно", "хотя", "коллеги", "привет", "здравствуйте", "какой", "такой",
     "какие", "такие", "очень", "этого", "чтобы", "один", "одна", "одно", "будет",
@@ -1983,7 +1983,7 @@ def calculate_context_length_guidelines(history_msgs, is_clinical_case=False, qu
 
     if not history_msgs:
         return "Отвечай кратко, до 3-4 предложений."
-    
+
     words_counts = []
     for msg in history_msgs:
         text = ""
@@ -1993,16 +1993,16 @@ def calculate_context_length_guidelines(history_msgs, is_clinical_case=False, qu
             text = getattr(msg, "message", "") or ""
         elif isinstance(msg, str):
             text = msg
-            
+
         words = text.split()
         if words:
             words_counts.append(len(words))
-            
+
     if not words_counts:
         return "Отвечай кратко, до 3-4 предложений."
-        
+
     avg_words = sum(words_counts) / len(words_counts)
-    
+
     if avg_words < 12:
         return f"В чате общаются кратко (в среднем {int(avg_words)} слов). Ответь лаконично: 1-2 емких предложения (до 25-30 слов)."
     elif avg_words < 28:
@@ -2144,7 +2144,7 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
             if regexes[kw].search(entry):
                 score += weight
                 distinct += 1
-        
+
         # CRITICAL: Discard entries that matched in SQL but failed the regex boundary check!
         if score > 0:
             intersection_boost = (distinct - 1) * 10 if distinct > 1 else 0
@@ -2778,10 +2778,10 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     """
     if not text:
         return False
-        
+
     text_lower = text.lower()
     is_about_bot = False
-    
+
     # Check if reply to bot
     global BOT_ID
     if reply_to_msg_id and BOT_ID:
@@ -2797,7 +2797,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
                     is_about_bot = True
             except Exception:
                 pass
-            
+
     # Слово «бот» ищется как НАЧАЛО слова. Подстрокой оно живёт в «работа»,
     # «суббота», «заботиться», «обработать» — и вместе с детектором негатива
     # это глушило бота на четыре часа от обычного клинического поста. Замер по
@@ -2808,7 +2808,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     resolved_username = (BOT_USERNAME or "").lower()
     if resolved_username and f"@{resolved_username}" in text_lower:
         is_about_bot = True
-        
+
     if is_about_bot and is_negative_feedback(text):
         logger.warning(f"Global negative feedback detected: '{text}'. Silencing bot.")
         state = load_state()
@@ -2820,7 +2820,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
         except Exception as reply_err:
             logger.error(f"Failed to reply with apology: {reply_err}")
         return True
-        
+
     return False
 
 
@@ -2992,11 +2992,11 @@ async def check_llm_triage(context_msgs):
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
         response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
-        
+
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
             return False
-            
+
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
         # Robust JSON extraction: handles markdown fences (```json ... ```),
         # truncated responses, and unescaped quotes inside values — all of which
@@ -3016,11 +3016,11 @@ async def check_llm_triage(context_msgs):
         should_reply = data.get("should_reply", False)
         reason = data.get("reason", "No reason provided")
         confidence = float(data.get("confidence", 1.0))
-        
+
         if confidence < 0.85 and should_reply:
             logger.info(f"Llama triage confidence too low ({confidence}). Overriding should_reply to False.")
             should_reply = False
-        
+
         logger.info(f"Llama Triage decision: should_reply={should_reply} (confidence={confidence}). Reason: {reason}")
         return should_reply
     except Exception as e:
@@ -3430,7 +3430,6 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
     if _is_ped_context:
         for _pat, _warning in _PEDIATRIC_STOPWORDS:
             if re.search(_pat, lower):
-                from types import SimpleNamespace
                 _result_data = {
                     "is_pediatric": True,
                     "drug": "stopfactor",
@@ -3683,11 +3682,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         return True
 
     state = load_state()
-    
+
     # Check if the bot is temporarily silenced
     if is_silenced(state):
         return False
-    
+
     # Calculate context length guidelines
     try:
         recent_texts = []
@@ -3713,7 +3712,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     pending_thread_id = None  # помечается обработанным только после успешной отправки
     active_dialogue_keys = []
     try:
-    
+
         # Try dynamic BOT_ID resolution if it is missing
         if reply_to_msg_id and not BOT_ID:
             if await resolve_bot_identity(bot_client):
@@ -3817,7 +3816,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         return False
 
                     is_dialogue = True
-                
+
                     # Check for criticism / negative feedback from user
                     if is_negative_feedback(text):
                         logger.warning(f"Negative feedback detected in dialogue reply: '{text}'. Silencing bot.")
@@ -3921,7 +3920,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         logger.info(f"Dialogue triage rejected continuation for chain with {bot_msg_count} bot replies. Stopping.")
                         return False
                     logger.info(f"Triage approved dialogue continuation (bot_msg_count={bot_msg_count}).")
-                
+
                     triggered = True
                     trigger_reason = f"Dialogue continuation in thread with bot message {ref_id} (bot_msg_count={bot_msg_count})"
                     context_msgs = chain
@@ -3934,10 +3933,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             last_case_bot_msg = state.get("last_case_bot_msg_id")
             last_case_time = _parse_state_dt(state.get("last_case_time"))
             sender_id = getattr(event, "sender_id", None)
-        
+
             if (
-                last_case_author 
-                and sender_id == last_case_author 
+                last_case_author
+                and sender_id == last_case_author
                 and (datetime.now() - last_case_time) < timedelta(minutes=10)
             ):
                 # Проверяем критику / негативный фидбек от автора кейса
@@ -4001,7 +4000,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                             triggered = True
                             trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
                             context_msgs = recent_chain
-            
+
         # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
         # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
         # ронял весь обработчик сообщения.
@@ -4029,7 +4028,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # Count replies
                 reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
                 reply_count = reply_count_rows[0][0] if reply_count_rows else 0
-            
+
                 if reply_count >= 3 and reply_to_msg_id not in state.get("processed_threads", []):
                     # Заявка на слот незваного ответа. И гейт кулдауна (выше), и
                     # processed_threads (строкой выше) прочитаны из state, взятого
@@ -4075,10 +4074,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             _passive_ctx, _, _ = await fetch_dynamic_chat_context(
                 msg_id, None, base_limit=12, max_limit=40, max_gap_minutes=15, event=event
             )
-        
+
             if _passive_ctx:
                 last_text = text or ""  # текущее сообщение уже известно
-            
+
                 # Fast local check: if the message has no dental terms, drop it immediately in Python without LLM triage
                 has_dental = has_dental_term(last_text)
 
@@ -4089,7 +4088,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     not any(c.isalpha() for c in last_text) or
                     not has_dental
                 )
-            
+
                 passive_cooldown_active = (await passive_gate_block_reason_async(load_state())) is not None
 
                 if not is_obviously_junk and not passive_cooldown_active:
@@ -4193,15 +4192,15 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             if not keyword_source:
                 user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
                 keyword_source = " ".join(user_context_msgs) if user_context_msgs else ""
-                
-        keywords = extract_keywords(keyword_source)
-        
-        search_keywords = select_search_keywords(keywords)
-                    
 
-        
+        keywords = extract_keywords(keyword_source)
+
+        search_keywords = select_search_keywords(keywords)
+
+
+
         wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=keyword_source)
-        
+
         if not is_dialogue and not wiki_corpus and not archive_corpus:
             # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
             # Но если врача привлекло прямое упоминание бота (@bot) или прямой вопрос — отвечаем
@@ -4267,7 +4266,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
         if is_dialogue:
             ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а сухо и профессионально зафиксируй закрытие темы ('Принято.', 'На связи.'). Никакой дежурной слизи («Всегда пожалуйста», «Обращайтесь»). Отвечать IGNORE при прямом обращении запрещено."
-        
+
         # Защита от "шизофрении" (когда бот читает свой же ответ и соглашается с ним как с чужим)
         for i in range(len(context_msgs)):
             if "Бот Учимся Вместе 🤖:" in context_msgs[i] or "Учимся Вместе:" in context_msgs[i]:
@@ -4439,20 +4438,20 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 """
 
         logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
-        
+
         # CALL GEMINI
         status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-        
+
         if error:
             logger.error(f"Assistant Gemini generation error: {error}")
             return False
-            
+
         reply_text = getattr(response, "text", None)
         if not reply_text:
             logger.warning("Assistant Gemini returned empty text.")
             return False
-            
+
         reply_text = reply_text.strip()
         reply_text = clean_html_formatting(reply_text)
 
@@ -4478,7 +4477,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             if reply_clean == "IGNORE":
                 logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
                 return False
-        
+
         if pediatric_safety:
             # Post-generation pediatric override guard: if contraindicated or draft recommends more carpules than safe
             if pediatric_safety.contraindicated and re.search(r'\b[1-9]\d*\s+карпул', reply_text.lower()):
@@ -4623,11 +4622,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     if msg_id in REPLIED_MSG_IDS:
         return False
     state = load_state()
-    
+
     # Check if the bot is temporarily silenced
     if is_silenced(state, "media trigger check"):
         return False
-    
+
     # Calculate context length guidelines
     try:
         recent_texts = []
@@ -4645,7 +4644,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         logger.error(f"Error calculating length guideline for media: {calc_err}")
         length_guideline = "Отвечай кратко, до 3-4 предложений."
 
-    
+
     # Личность бота берётся из BOT_ID/BOT_USERNAME, а не из get_me() на каждый
     # снимок. Раньше здесь стояли два сетевых get_me() под пустым except: при
     # обрыве связи (51723 события по журналам) оба флага оставались False,
@@ -4762,9 +4761,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             self.client = getattr(msg, "client", None)
             self.chat_id = getattr(msg, "chat_id", None)
             self.sender_id = getattr(msg, "sender_id", None)
-            
+
     event = MediaEvent(message)
-    
+
     # 1. Parse keywords
     caption_text = text or ""
     # Если зрение прямо установило, что изображение не медицинское (скриншот соцсети, мем и т.д.),
@@ -4786,17 +4785,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     sanitized_media_desc = "" if is_non_dental_img else strip_vision_negations(media_description)
     full_context_str = caption_text + " " + sanitized_media_desc
     keywords = extract_keywords(full_context_str)
-    
+
     # Клиническая тема — по словам, а не подстрокой: «кт» сидит внутри «кто»,
     # «эффективно» и «комплекта», «бор» — внутри «выбора». См. has_dental_term.
     has_dental_topic = has_dental_term(full_context_str)
-    
+
     triggered = False
     trigger_reason = ""
     wiki_corpus = ""
     archive_corpus = ""
     is_dental = False
-    
+
     search_keywords = select_search_keywords(keywords)
 
     if has_dental_topic and not is_non_dental_img:
@@ -4811,10 +4810,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             triggered = True
             trigger_reason = "Non-dental direct reply/mention on media"
             is_dental = False
-            
+
     if not triggered:
         return
-        
+
     if is_passive:
         state["last_passive_media_run"] = datetime.now().isoformat()
         save_state(state)
@@ -4958,22 +4957,22 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 """
 
     logger.info(f"Triggered media assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
-    
+
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
     if image_urls and not has_text_desc:
         status_ctx["image_urls"] = image_urls
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-    
+
     if error:
         logger.error(f"Media Assistant Gemini generation error: {error}")
         return
-        
+
     reply_text = getattr(response, "text", None)
     if not reply_text:
         logger.warning("Media Assistant Gemini returned empty text.")
         return
-        
+
     reply_text = reply_text.strip()
     reply_text = clean_html_formatting(reply_text)
 
@@ -5009,7 +5008,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if reply_clean == "IGNORE":
             logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
             return
-    
+
     # POST-GENERATION QUALITY CHECK: validate draft before sending.
     # Проверяем и запрошенные разборы тоже: чтение снимка — самый
     # галлюциногенный выход бота, и раньше при прямом обращении оно уходило
@@ -7475,7 +7474,7 @@ def build_clinical_card_markup(section_type: str, card_key: str, crosslinks: lis
     Поддерживает динамическое переключение клинических вариантов прямо у кресла."""
     from telethon import Button
     buttons = []
-    
+
     # 1. ВЕРХНИЙ РЯД: Интерактивные вкладки вариантов (если есть)
     if variants and len(variants) > 1:
         v_row = []
@@ -7675,7 +7674,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             history_data = history_raw
     except Exception:
         history_data = []
-        
+
     # Пустой ход. Симулятор работает только с текстом, а маршрутизация в него
     # происходит до обработки медиа: присланный во время кейса снимок давал
     # user_text = "" и уходил экзаменатору как пустое действие врача — тот
@@ -7767,25 +7766,25 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 1. Дай развернутый экспертный фидбек.
 2. Разметка: только HTML. Без Markdown.
 """
-    
+
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-    
+
     if 'status_msg' in locals() and status_msg:
         try:
             await bot_client.delete_messages(chat_id, status_msg.id)
         except Exception:
             pass
-    
+
     if error or not response or not getattr(response, "text", None):
         await bot_client.send_message(entity=chat_id, message="❌ <i>Ошибка симулятора при генерации ответа. Пожалуйста, отправьте ваш ответ еще раз.</i>", parse_mode='html')
         return
-        
+
     reply_text = response.text.strip()
     reply_text = clean_html_formatting(reply_text)
     if not is_last_step:
         reply_text = ensure_case_options(reply_text)
-    
+
     from telethon import Button
     if is_last_step:
         # Clear state
@@ -7922,11 +7921,11 @@ def is_clinical_consultation_query(text: str, has_media: bool, has_dental_topic:
     """
     if has_media:
         return True
-        
+
     text_clean = (text or "").strip().lower()
     if not text_clean or len(text_clean) < 6:
         return False
-        
+
     small_talk_exact = {
         "привет", "здравствуй", "здравствуйте", "здорово", "хай", "hello", "hi",
         "как дела", "как ты", "как поживаешь", "что делаешь", "чем занят",
@@ -8055,10 +8054,10 @@ async def handle_private_message(bot_client, event):
     try:
         chat_id = event.chat_id
         text = (event.message.message or "").strip()
-        
+
         # Обновляем ID активного запроса для инвалидации устаревших фоновых задач дополнения
         _ACTIVE_PM_REQUESTS[chat_id] = time.time()
-        
+
         # Rate limit: PM requests allowed once per 5 seconds per user (allow commands through)
         is_command = text.lower().startswith("/")
         if not is_command:
@@ -8094,7 +8093,7 @@ async def handle_private_message(bot_client, event):
                     except Exception as notice_err:
                         logger.error(f"Failed to send PM rate notice: {notice_err}")
                 return
-        
+
         # Record user activity for DM proactive pings
         try:
             state = load_state()
@@ -8319,13 +8318,13 @@ async def handle_private_message(bot_client, event):
                         os.remove(temp_path)
                     except Exception:
                         pass
-            
+
             if transcribed_text:
                 text = transcribed_text
                 # Filter common Whisper silence hallucinations
                 silence_hallucinations = {
-                    "you", "thank you", "bye", "подпишитесь", 
-                    "продолжение следует", "редактор субтитров", "субтитры", 
+                    "you", "thank you", "bye", "подпишитесь",
+                    "продолжение следует", "редактор субтитров", "субтитры",
                     "youtube", "собачья чушь", "спасибо",
                     "дима торжок", "dimatorzhok", "dima torzhok",
                     "субтитры сделал", "синецкая", "перевод субтитров",
@@ -8359,7 +8358,7 @@ async def handle_private_message(bot_client, event):
 
         # 0.5. Interactive Simulator State Routing & Abort Check
         user_state = await database.get_user_interactive_state(chat_id)
-        
+
         # Check for case expiration (1 hour inactivity)
         if user_state and user_state.get("state_type") == "case":
             try:
@@ -8372,13 +8371,13 @@ async def handle_private_message(bot_client, event):
                         user_state = None
                         if inactivity_sec < 86400:
                             await bot_client.send_message(
-                                entity=chat_id, 
-                                message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>", 
+                                entity=chat_id,
+                                message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>",
                                 parse_mode='html'
                             )
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
-        
+
         # Natural Language Intent Routing (Zero-Slash Routing)
         doc = getattr(event.message, "document", None)
         image_document = media_tools.image_document(event.message)
@@ -8421,8 +8420,8 @@ async def handle_private_message(bot_client, event):
                     await database.clear_user_interactive_state(chat_id)
                     user_state = None
                     await bot_client.send_message(
-                        entity=chat_id, 
-                        message="⏹️ <i>Активный клинический симулятор прерван для перехода в другой раздел.</i>", 
+                        entity=chat_id,
+                        message="⏹️ <i>Активный клинический симулятор прерван для перехода в другой раздел.</i>",
                         parse_mode='html'
                     )
 
@@ -8549,7 +8548,7 @@ async def handle_private_message(bot_client, event):
                                 is_authorized = True
                 except Exception as auth_err:
                     logger.error(f"Error checking PM admin auth: {auth_err}")
-                
+
             if is_authorized:
                 parts = text.split()
                 count = 10
@@ -8577,13 +8576,13 @@ async def handle_private_message(bot_client, event):
                 if not last_msgs:
                     await bot_client.send_message(entity=chat_id, message="🤷‍♂️ <i>Не найдено отправленных сообщений бота для удаления.</i>", parse_mode='html')
                     return
-                
+
                 deleted_count = 0
                 from collections import defaultdict
                 by_chat = defaultdict(list)
                 for msg_id, c_id in last_msgs:
                     by_chat[c_id].append(msg_id)
-                    
+
                 for c_id, msg_ids in by_chat.items():
                     try:
                         del_outcome = await tg_safety.delete_messages(bot_client, c_id, msg_ids, logger=logger)
@@ -8595,10 +8594,10 @@ async def handle_private_message(bot_client, event):
                             logger.error(f"Failed to delete messages in chat {c_id}: {del_outcome.error}")
                     except Exception as del_err:
                         logger.error(f"Error deleting messages in chat {c_id}: {del_err}")
-                        
+
                 await bot_client.send_message(
-                    entity=chat_id, 
-                    message=f"🧹 <b>Успешно удалено последних сообщений бота: {deleted_count} шт.</b>", 
+                    entity=chat_id,
+                    message=f"🧹 <b>Успешно удалено последних сообщений бота: {deleted_count} шт.</b>",
                     parse_mode='html'
                 )
             else:
@@ -8734,24 +8733,24 @@ async def handle_private_message(bot_client, event):
                 parse_mode='html'
             )
             return
-            
+
         if text.lower() == "/style":
             profile = await database.get_user_profile(chat_id)
             current_style = profile.get("selected_style", "colleague_friendly")
-            
+
             style_names = {
                 "colleague_friendly": "Коллега-эксперт 🤝",
                 "clinical_dry": "Сухие факты 📝",
                 "humor_cynic": "Ироничный циник 💀"
             }
             curr_style_name = style_names.get(current_style, "Неизвестный")
-            
+
             style_welcome = (
                 "⚙️ <b>Настройка стиля общения</b>\n\n"
                 f"Текущий стиль общения: <b>{curr_style_name}</b>\n\n"
                 "Выберите стиль, в котором я буду отвечать вам в личных сообщениях:"
             )
-            
+
             from telethon import types
             style_buttons = [
                 [types.KeyboardButtonCallback(text="Коллега-эксперт 🤝 (по умолчанию)", data=b"style:colleague_friendly")],
@@ -8760,7 +8759,7 @@ async def handle_private_message(bot_client, event):
             ]
             await bot_client.send_message(entity=chat_id, message=style_welcome, buttons=style_buttons, parse_mode='html')
             return
-            
+
         if text.lower() == "/help":
             help_text = (
                 "💡 <b>Доступные команды в ЛС:</b>\n\n"
@@ -9039,7 +9038,7 @@ async def handle_private_message(bot_client, event):
                     page = int(arg)
                 else:
                     query_filter = arg
-            
+
             if query_filter:
                 rows = await database.get_clinical_bookmarks(chat_id, query=query_filter)
                 title = f"📌 <b>Результаты поиска в закладках по запросу «{query_filter}»:</b>\n\n"
@@ -9057,15 +9056,15 @@ async def handle_private_message(bot_client, event):
             per_page = 10
             total_items = len(rows)
             total_pages = (total_items + per_page - 1) // per_page
-            
+
             if not query_filter and page > total_pages:
                 await bot_client.send_message(entity=chat_id, message=f"⚠️ Страница {page} не существует. Всего страниц: {total_pages}.", parse_mode='html')
                 return
-                
+
             start_idx = (page - 1) * per_page
             end_idx = start_idx + per_page
             page_rows = rows[start_idx:end_idx]
-            
+
             text_out = title
             for i, row in enumerate(page_rows, start_idx + 1):
                 msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
@@ -9090,7 +9089,7 @@ async def handle_private_message(bot_client, event):
                     text_out += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
                 else:
                     text_out += "📖 <i>Статья энциклопедии</i>\n\n"
-                
+
             if query_filter:
                 # Для поиска счётчика не было вовсе: при 50 совпадениях врач
                 # видел первые 10 и считал, что это все его закладки по теме.
@@ -9101,7 +9100,7 @@ async def handle_private_message(bot_client, event):
                     text_out += f"<i>Найдено совпадений: {total_items}.</i>"
             elif total_pages > 1:
                 text_out += f"<i>Показано {len(page_rows)} из {total_items} закладок. Страница {page} из {total_pages}.\nИспользуйте <code>/bookmarks [номер_страницы]</code> для перехода.</i>"
-                
+
             await bot_client.send_message(entity=chat_id, message=text_out, parse_mode='html', link_preview=False)
             return
 
@@ -9569,7 +9568,7 @@ async def handle_private_message(bot_client, event):
                 return
 
             status_msg = await bot_client.send_message(entity=chat_id, message="🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>", parse_mode='html')
-            
+
             departments = [
                 "эндодонтия/кариесология (терапевтическая стоматология)",
                 "протезирование/виниры/коронки (ортопедическая стоматология)",
@@ -9578,7 +9577,7 @@ async def handle_private_message(bot_client, event):
                 "окклюзия/ВНЧС (гнатология)"
             ]
             selected_dept = random.choice(departments)
-            
+
             case_prompt = f"""
 Ты — опытный врач-стоматолог, модератор клинического консилиума. Придумай и опиши начало сложного клинического случая из области: {selected_dept}.
 Напиши:
@@ -9663,7 +9662,7 @@ async def handle_private_message(bot_client, event):
 
         for msg in history:
             context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
-            
+
         history_context_text = " ".join([msg['text'] for msg in history[-3:]]) if history else ""
 
         # Ключевые слова для поиска справки берём ТОЛЬКО из реплик врача.
@@ -9724,7 +9723,7 @@ async def handle_private_message(bot_client, event):
                 parse_mode='html'
             )
             return
-        
+
         if has_media:
             album_events = getattr(event, "_album_events", None) or [event]
             total_size = 0
@@ -9753,7 +9752,7 @@ async def handle_private_message(bot_client, event):
                     else "📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>"
                 )
                 status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
-                
+
                 for a_ev in album_events:
                     msg_obj = a_ev.message
                     temp_path = await asyncio.wait_for(
@@ -9776,7 +9775,7 @@ async def handle_private_message(bot_client, event):
                     # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
                     vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
                     media_description = await vision.describe_image(files_to_analyze, caption=vision_caption, is_passive=False)
-                    
+
                 # Удаляем статусное сообщение
                 if status_msg:
                     await bot_client.delete_messages(chat_id, status_msg.id)
@@ -9864,10 +9863,10 @@ async def handle_private_message(bot_client, event):
         user_profile = await database.get_user_profile(chat_id)
         selected_style = user_profile.get("selected_style", "colleague_friendly")
         style_prompt_text = STYLE_PROMPTS.get(selected_style, STYLE_PROMPTS["colleague_friendly"])
-        
+
         clinician_mem = await user_memory.get_clinician_memory(chat_id)
         portrait = user_memory.format_clinician_memory_prompt(chat_id, clinician_mem)
-        
+
         # Если портрета и клинической памяти еще нет, запускаем первичную генерацию в фоне
         has_existing_profile = bool(
             clinician_mem.get("clinical_summary")
@@ -9885,7 +9884,7 @@ async def handle_private_message(bot_client, event):
                     logger.info(f"Generated and saved initial portrait/memory for user {chat_id}: {p_text}")
                 except Exception as p_err:
                     logger.error(f"Error in bg portrait gen: {p_err}")
-            
+
             import runtime_guard
             runtime_guard.create_task(_bg_portrait(), name=f"portrait_gen_{chat_id}")
             portrait = "Клинический профиль доктора формируется."
@@ -9893,25 +9892,25 @@ async def handle_private_message(bot_client, event):
         # Получаем недавние сообщения пользователя из группы
         user_group_messages = await database.get_user_recent_group_messages(chat_id, limit=15)
         group_msgs_str = "\n".join([f"- {m}" for m in user_group_messages]) if user_group_messages else "(нет сообщений в группе)"
-            
+
         # 4. RAG-поиск по стоматологической базе знаний с учетом контекста переписки
         # Собираем текст текущего запроса и последних 3 сообщений ВРАЧА для детекции
         # клинической темы. search_context_text (без реплик бота) определён выше —
         # почему именно так, написано там же.
         full_context_str = (text or "") + " " + (media_description or "") + " " + search_context_text
         full_context_str_lower = full_context_str.lower()
-        
+
         # Клиническая тема — по словам, а не подстрокой (см. has_dental_term):
         # подстрочная проверка на 20 000 живых сообщений давала 1291 лишнее
         # срабатывание, из них 901 из-за «кт» внутри «кто» и «эффективно».
         has_dental_topic = has_dental_term(full_context_str)
-        
+
         # Запрос ссылок, архива, опыта коллег или поиска в чате
         has_search_or_link_intent = any(k in full_context_str_lower for k in ["ссылк", "чат", "где писали", "кто говорил", "поиск", "найти", "источник"])
-        
+
         # Извлекаем ключевые слова из всего контекста (текущий запрос + медиа + история), чтобы искать статьи
         keywords = extract_keywords(full_context_str)
-                    
+
         wiki_corpus, archive_corpus = "", ""
         if has_dental_topic or has_media or has_search_or_link_intent:
             # Ищем совпадения в стоматологической базе
@@ -10078,7 +10077,7 @@ async def handle_private_message(bot_client, event):
             f"Processing deep PM query from chat_id={chat_id}. "
             f"Has media={has_media}. Media analyzed={bool(media_description)}."
         )
-        
+
         # 6. Отправка статуса "печатает" и генерация с циклом рецензирования (до 2 ретраев)
         max_retries = 2
         reply_text = None
@@ -10098,7 +10097,7 @@ async def handle_private_message(bot_client, event):
                     if len(current_context_msgs) > 2:
                         current_context_msgs = current_context_msgs[-2:]
                     clean_history_str = chr(10).join(_fit_pm_history(current_context_msgs))
-                    
+
                     current_prompt = f"""{prompt}
 
 [КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ РЕЦЕНЗЕНТА К ПРЕДЫДУЩЕМУ ЧЕРНОВИКУ (ПОПЫТКА {attempt})]:
@@ -10113,7 +10112,7 @@ async def handle_private_message(bot_client, event):
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
-                
+
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
                     # Если генерация упала после всех ретраев каскада (включая бэкофф 30с, 60с, 90с)
@@ -10123,14 +10122,14 @@ async def handle_private_message(bot_client, event):
                         parse_mode='html'
                     )
                     return
-                    
+
                 candidate_text = getattr(response, "text", None)
                 if not candidate_text or not candidate_text.strip():
                     logger.warning("PM Gemini returned empty text on attempt %s.", attempt)
                     if attempt == max_retries:
                         return
                     continue
-                    
+
                 candidate_text = candidate_text.strip()
 
                 # Проверка качества ответа рецензентом
@@ -10235,7 +10234,7 @@ async def handle_private_message(bot_client, event):
                     ),
                     name=f"pm_supplement_{chat_id}_{int(req_id)}"
                 )  # [SYS-06 FIX] was bare asyncio.create_task -> GC could silently drop the task
-            
+
     except Exception as e:
         logger.exception(f"Unexpected error in handle_private_message: {e}")
 
@@ -10516,14 +10515,14 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
     """Сборка саммари обсуждения в группе по запросу."""
     chat_id = event.chat_id
     msg_id = event.message.id
-    
+
     cooldown = check_user_cooldown(chat_id, event.sender_id, "summary", seconds=30)
     if cooldown > 0:
         await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
         return
-        
+
     status_msg = await bot_client.send_message(entity=chat_id, message="📝 <i>Собираю и анализирую историю обсуждения... Подождите.</i>", reply_to=msg_id, parse_mode='html')
-    
+
     try:
         # Область сводки. Параметр reply_to_msg_id передавался вызывающей
         # стороной и НЕ ИСПОЛЬЗОВАЛСЯ: врач отвечал «/итог» на конкретный спор,
@@ -10556,13 +10555,13 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
                 parse_mode='html',
             )
             return
-            
+
         history_msgs = []
         for r in chat_rows:
             history_msgs.append(f"{r[1] or 'Врач'}: {r[3]}")
-            
+
         history_str = "\n".join(history_msgs)
-        
+
         prompt = f"""
 Ты — опытный клиницист и научный координатор стоматологического сообщества "StomChat".
 Проанализируй следующую дискуссию врачей-стоматологов и сделай краткую, профессиональную выжимку.
@@ -10583,7 +10582,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 """
         status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-        
+
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
                 bot_client, chat_id, status_msg.id,
@@ -10593,7 +10592,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
                 parse_mode='html',
             )
             return
-            
+
         summary_text = response.text.strip()
         summary_text = clean_html_formatting(summary_text)
 
@@ -10659,12 +10658,12 @@ async def handle_group_direct_ask(bot_client, event, question):
     """Ответ на прямой клинический вопрос пользователя в группе."""
     chat_id = event.chat_id
     msg_id = event.message.id
-    
+
     cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
     if cooldown > 0:
         await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
         return
-        
+
     # Получаем стиль отправителя для применения его предпочтений в группе
     user_profile = await database.get_user_profile(event.sender_id)
     selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
@@ -10673,7 +10672,7 @@ async def handle_group_direct_ask(bot_client, event, question):
     async with bot_client.action(chat_id, 'typing'):
         keywords = extract_keywords(question)
         wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords[:12])
-        
+
         prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
 Ответь кратко, экспертно и строго по существу.
@@ -10704,7 +10703,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 """
         status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
-        
+
         if error or not response or not getattr(response, "text", None):
             logger.warning("group direct ask generation failed chat=%s: %s", chat_id, error)
             await bot_client.send_message(
@@ -10715,7 +10714,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                 parse_mode='html',
             )
             return
-            
+
         reply_text = response.text.strip()
 
         # Публичный клинический ответ в общем чате: рецензента здесь не было.
@@ -10797,14 +10796,14 @@ async def handle_group_quiz(bot_client, event):
     """Генерация и отправка клинической викторины с инлайн-кнопками в группу."""
     chat_id = event.chat_id
     msg_id = event.message.id
-    
+
     cooldown = check_user_cooldown(chat_id, event.sender_id, "quiz", seconds=60)
     if cooldown > 0:
         await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией новой викторины.", reply_to=msg_id)
         return
-        
+
     status_msg = await bot_client.send_message(entity=chat_id, message="🎲 <i>Конструирую клиническую задачу... Подождите.</i>", reply_to=msg_id, parse_mode='html')
-    
+
     prompt = """
 ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. Все поля JSON — только на русском.
 Ты — опытный врач-стоматолог и клинический эксперт. Твоя задача — сгенерировать практическую клиническую задачу-викторину для группы врачей.
@@ -10823,7 +10822,7 @@ async def handle_group_quiz(bot_client, event):
         await bot_client.delete_messages(chat_id, status_msg.id)
     except Exception:
         pass
-    
+
     question = None
     options = None
     correct = None
@@ -10836,7 +10835,7 @@ async def handle_group_quiz(bot_client, event):
             end = raw_text.rfind("}")
             if start != -1 and end != -1:
                 raw_text = raw_text[start:end+1]
-                
+
             data = json.loads(raw_text)
             q_candidate = str(data.get("question", "")).strip()
             opts_candidate = [str(option).strip() for option in data.get("options", [])]
@@ -10878,9 +10877,9 @@ async def handle_group_quiz(bot_client, event):
         case_id=explanation,
         history=json.dumps(init_votes)
     )
-    
+
     from telethon import Button
-    
+
     buttons = [
         [
             Button.inline(f"A: {options[0][:30]}", data=f"qa:{correct}:0:{quiz_id}"),
@@ -10891,7 +10890,7 @@ async def handle_group_quiz(bot_client, event):
             Button.inline(f"D: {options[3][:30]}", data=f"qa:{correct}:3:{quiz_id}")
         ]
     ]
-    
+
     message_text = (
         "🎲 <b>КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА</b>\n\n"
         f"{question}\n\n"
@@ -11675,13 +11674,14 @@ async def handle_nba_callback(bot_client, event, data_str):
         try:
             from digest_pdf import generate_digest_pdf
             from html_safe import clean_markdown_to_html
+            from summarizer import get_russian_date
             msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
             html_body = "<h2>Клиническая консультация StomChat</h2>\n"
             for m in msgs:
                 role_title = "Врач-стоматолог" if m.get("role") == "User" else "Консилиум StomChat"
                 clean_m = clean_markdown_to_html(m.get('text', '') or '')
                 html_body += f"<p><b>{role_title}:</b></p>\n{clean_m}\n<hr>\n"
-            
+
             pdf_path = await generate_digest_pdf(
                 html_content=html_body,
                 title="Клинический протокол консультации",
@@ -11838,7 +11838,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     tag_parts = sub_tag.split(":")
     base_slug = tag_parts[0] if tag_parts else ""
     variant_slug = tag_parts[1] if len(tag_parts) > 1 else ""
-    
+
     # Извлекаем детальное клиническое описание темы или выбираем случайное
     if base_slug and base_slug in sec_map:
         chosen_topic_desc = sec_map[base_slug]
@@ -11988,7 +11988,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
         "vs": MATERIAL_BATTLE_CARDS,
     }
     cached_dict = cached_dict_map.get(section_type, CLINICAL_SOS_CARDS)
-    
+
     if not error and response and getattr(response, "text", None):
         res_text = clean_html_formatting(response.text.strip())
         final_text = f"✨ <b>Живой ИИ-разбор StomChat Superpowers</b>\n\n{res_text}"
@@ -12107,7 +12107,7 @@ async def handle_quiz_callback(bot_client, event):
     # 1. ОБЩИЙ НАВИГАЦИОННЫЙ ДИСПЕТЧЕР nav:* И menu:*
     if data_str.startswith("nav:") or data_str.startswith("menu:"):
         nav_target = data_str.split(":", 1)[1]
-        
+
         if nav_target in ("main", "home"):
             await edit_callback_message(
                 bot_client, event, MAIN_MENU_TEXT,
@@ -12116,7 +12116,7 @@ async def handle_quiz_callback(bot_client, event):
             )
             await event.answer()
             return
-            
+
         elif nav_target in ("wiki", "encyclopedia"):
             wiki_text = (
                 "📖 <b>Интерактивная Стоматологическая Энциклопедия</b>\n\n"
@@ -12134,7 +12134,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("web", "search_web"):
             web_info = (
                 "🌐 <b>Поиск в сети и PubMed</b>\n\n"
@@ -12152,7 +12152,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("calc", "anesthesia"):
             calc_msg = (
                 "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
@@ -12184,7 +12184,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("proto", "protocols"):
             import protocol_extractor
             all_protos = await database.get_clinical_protocols(limit=100)
@@ -12222,7 +12222,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target == "style":
             profile = await database.get_user_profile(event.sender_id)
             current_style = profile.get("selected_style", "colleague_friendly")
@@ -12248,7 +12248,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("bookmarks", "saved"):
             total_items = await database.count_clinical_bookmarks(event.sender_id)
             if not total_items:
@@ -12273,29 +12273,29 @@ async def handle_quiz_callback(bot_client, event):
             per_page = 5
             total_pages = max(1, (total_items + per_page - 1) // per_page)
             rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=0)
-            
+
             bm_text = f"⭐ <b>Ваши клинические закладки (Страница 1/{total_pages}):</b>\n\n"
             for idx, row in enumerate(rows, 1):
                 msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
                 snip = _bookmark_snippet(msg_text, limit=120)
                 bm_text += f"<b>{idx}.</b> {_bookmark_snippet(sender_name, limit=32)} ({date}):\n«{snip}»\n\n"
-                
+
             nav_row = []
             if total_pages > 1:
                 nav_row.append(Button.inline(f"1/{total_pages}", data="bm:page:1"))
                 nav_row.append(Button.inline("След ▶️", data="bm:page:2"))
-                
+
             buttons = []
             if nav_row:
                 buttons.append(nav_row)
             buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
-            
+
             await edit_callback_message(bot_client, event, bm_text,
                                        "edit_message:nav_bookmarks", buttons=buttons,
                                        parse_mode='html', link_preview=False)
             await event.answer()
             return
-            
+
         elif nav_target in ("quiz", "test"):
             quiz_prompt_info = (
                 "🎲 <b>Клинический квиз StomChat</b>\n\n"
@@ -12312,7 +12312,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("case", "sim"):
             case_prompt_info = (
                 "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
@@ -12333,7 +12333,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target in ("stats", "statistics"):
             counts, scanned = await get_topic_statistics()
             stats_text = render_topic_statistics(counts, scanned)
@@ -12349,7 +12349,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif nav_target == "help":
             help_text = (
                 "💡 <b>Памятка по возможностям StomChat:</b>\n\n"
@@ -12795,7 +12795,7 @@ async def handle_quiz_callback(bot_client, event):
     # 3. ДЕТАЛЬНЫЙ СПРАВОЧНИК-КАЛЬКУЛЯТОР calc:*
     if data_str.startswith("calc:"):
         calc_sub = data_str.split(":", 1)[1]
-        
+
         if calc_sub in ("main", "menu"):
             calc_msg = (
                 "🧮 <b>Справочник-калькулятор анестезии и эндодонтии</b>\n\n"
@@ -12832,7 +12832,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif calc_sub == "articaine":
             art_text = (
                 "🦷 <b>Артикаин 4% (с адреналином 1:100 000 / 1:200 000)</b>\n\n"
@@ -12858,7 +12858,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif calc_sub == "mepivacaine":
             mep_text = (
                 "💉 <b>Мепивакаин 3% (Scandonest, без вазоконстриктора)</b>\n\n"
@@ -12883,7 +12883,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif calc_sub == "lidocaine":
             lido_text = (
                 "🩸 <b>Лидокаин 2% (с адреналином 1:100 000 / 1:80 000)</b>\n\n"
@@ -12995,7 +12995,7 @@ async def handle_quiz_callback(bot_client, event):
     if data_str.startswith("quiz:"):
 
         quiz_sub = data_str.split(":", 1)[1]
-        
+
         if quiz_sub in ("menu", "main"):
             quiz_prompt_info = (
                 "🎲 <b>Клинический квиз StomChat</b>\n\n"
@@ -13011,7 +13011,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif quiz_sub in ("generate", "start", "next", "new"):
             fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
             question = fb["question"]
@@ -13058,7 +13058,7 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif quiz_sub.startswith("ans:"):
             parts = data_str.split(":")
             correct_idx = int(parts[2])
@@ -13068,7 +13068,7 @@ async def handle_quiz_callback(bot_client, event):
             state_row = await database.get_user_interactive_state(quiz_id)
             explanation = (state_row.get("case_id") if state_row else None) or "Клинический разбор."
             is_correct = (correct_idx == clicked_idx)
-            
+
             letters = ["A", "B", "C", "D"]
             your_letter = letters[clicked_idx] if 0 <= clicked_idx < 4 else str(clicked_idx)
             corr_letter = letters[correct_idx] if 0 <= correct_idx < 4 else str(correct_idx)
@@ -13092,7 +13092,7 @@ async def handle_quiz_callback(bot_client, event):
     # 5. КЛИНИЧЕСКИЙ СИМУЛЯТОР case:*
     if data_str.startswith("case:"):
         case_sub = data_str.split(":", 1)[1]
-        
+
         if case_sub in ("menu", "main"):
             case_prompt_info = (
                 "🎮 <b>Интерактивный симулятор клинического случая</b>\n\n"
@@ -13109,12 +13109,12 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             await event.answer()
             return
-            
+
         elif case_sub == "start":
             await edit_callback_message(bot_client, event,
                                        "🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>",
                                        "edit_message:case_loading", parse_mode='html')
-            
+
             departments = [
                 "эндодонтия/кариесология (терапевтическая стоматология)",
                 "протезирование/виниры/коронки (ортопедическая стоматология)",
@@ -13145,7 +13145,7 @@ async def handle_quiz_callback(bot_client, event):
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
             response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
-            
+
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
                     "🎮 <b>Клинический случай [Эндодонтия / Терапия]:</b>\n\n"
@@ -13173,7 +13173,7 @@ async def handle_quiz_callback(bot_client, event):
                 case_id="dynamic",
                 history=json.dumps(history_payload)
             )
-            
+
             buttons = [
                 [Button.inline("🔘 Вариант A", data="case:opt:A"), Button.inline("🔘 Вариант B", data="case:opt:B")],
                 [Button.inline("🔘 Вариант C", data="case:opt:C"), Button.inline("🔘 Вариант D", data="case:opt:D")],
@@ -13337,7 +13337,7 @@ async def handle_quiz_callback(bot_client, event):
             wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
         else:
             wiki_corpus = html_safe.safe_truncate_html(wiki_corpus, max_len=PROTOCOL_EXCERPT_MAX_CHARS)
-            
+
         proto_names = {
             "irrigation": "💧 Ирригация в эндодонтии",
             "bopt": "🦷 BOPT (Препарирование)",
@@ -13347,7 +13347,7 @@ async def handle_quiz_callback(bot_client, event):
         }
         title = proto_names.get(proto_id, "📚 Клинический протокол")
         response_text = f"<b>{title}:</b>\n\n{wiki_corpus}"
-        
+
         from telethon import Button
         back_btn = [
             [Button.inline("⬅️ Назад к списку", data="proto:back")],
@@ -13460,7 +13460,7 @@ async def handle_quiz_callback(bot_client, event):
 
         subtopic_names = WIKI_SUBTOPIC_NAMES
         subtopic_title = subtopic_names.get(subtopic_id, "📚 Статья")
-        
+
         if not total:
             response_text = f"📚 <b>{subtopic_title}:</b>\n\n<i>В данной категории пока нет статей в базе знаний.</i>"
             from telethon import Button
@@ -13480,20 +13480,20 @@ async def handle_quiz_callback(bot_client, event):
         # первую, без отдельной арифметики здесь.
         page_idx %= total
         fact_cleaned = clean_html_formatting(fact_content)
-        
+
         response_text = (
             f"📖 <b>{subtopic_title}</b>\n"
             f"<i>Статья {page_idx + 1} из {total}</i>\n\n"
             f"{fact_cleaned}"
         )
-        
+
         from telethon import Button
         nav_row = []
         if total > 1:
             nav_row.append(Button.inline("◀️ Пред", data=f"wiki_page:{subtopic_id}:{page_idx - 1}"))
             nav_row.append(Button.inline(f"{page_idx + 1}/{total}", data=f"wiki_page:{subtopic_id}:{page_idx}"))
             nav_row.append(Button.inline("След ▶️", data=f"wiki_page:{subtopic_id}:{page_idx + 1}"))
-            
+
         back_cat = subtopic_id.split("_")[0]
         buttons = []
         if nav_row:
@@ -13505,7 +13505,7 @@ async def handle_quiz_callback(bot_client, event):
         buttons.append([
             Button.inline("⬅️ Назад в меню", data="nav:main")
         ])
-        
+
         await edit_callback_message(bot_client, event, response_text,
                                    "edit_message:wiki_page", buttons=buttons,
                                    parse_mode='html', link_preview=False)
@@ -13517,7 +13517,7 @@ async def handle_quiz_callback(bot_client, event):
         parts = data_str.split(":")
         subtopic_id = parts[1]
         page_idx = int(parts[2])
-        
+
         # Тем же запросом, что и показ страницы. Раньше здесь грузился весь
         # раздел старой выборкой, и после перехода на пагинацию в SQL номер
         # страницы означал бы уже другую статью — в закладки сохранялось бы не
@@ -13528,11 +13528,11 @@ async def handle_quiz_callback(bot_client, event):
 
         if fact_content:
             fact_cleaned = clean_html_formatting(fact_content)
-            
+
             bookmark_text = f"📚 <b>{subtopic_title}</b>\n\n{fact_cleaned}"
-            
+
             fake_msg_id = -random.randint(100000000, 999999999)
-            
+
             await database.save_clinical_bookmark(
                 saved_by_user_id=event.sender_id,
                 msg_id=fake_msg_id,
@@ -13550,39 +13550,39 @@ async def handle_quiz_callback(bot_client, event):
 
     if not data_str.startswith("qa:"):
         return
-        
+
     parts = data_str.split(":")
     correct_idx = int(parts[1])
     clicked_idx = int(parts[2])
     quiz_id = int(parts[3])
     voter_id = str(event.sender_id)
-    
+
     state_row = await database.get_user_interactive_state(quiz_id)
     if not state_row:
         await event.answer("⚠️ Ошибка: Викторина не найдена.", alert=True)
         return
-        
+
     explanation = state_row.get("case_id") or "Правильный выбор!"
     history_str = state_row.get("history") or "{}"
-    
+
     try:
         history_data = json.loads(history_str)
         if not isinstance(history_data, dict) or "votes" not in history_data:
             history_data = {"votes": [0, 0, 0, 0], "voters": {}}
     except Exception:
         history_data = {"votes": [0, 0, 0, 0], "voters": {}}
-        
+
     votes = history_data["votes"]
     voters = history_data["voters"]
-    
+
     if voter_id in voters:
         await event.answer("⚠️ Вы уже проголосовали в этой викторине!", alert=True)
         return
-        
+
     # Record vote
     voters[voter_id] = clicked_idx
     votes[clicked_idx] += 1
-    
+
     # Update DB
     await database.set_user_interactive_state(
         user_id=quiz_id,
@@ -13591,14 +13591,14 @@ async def handle_quiz_callback(bot_client, event):
         case_id=explanation,
         history=json.dumps(history_data)
     )
-    
+
     is_correct = (correct_idx == clicked_idx)
     prefix = "✅ Верно! " if is_correct else "❌ Неверно! "
     alert_text = f"{prefix}\n\n{explanation}"
     if len(alert_text) > 200:
         alert_text = alert_text[:197] + "..."
     await event.answer(alert_text, alert=True)
-    
+
     # Update message text with stats
     try:
         original_msg = await event.get_message()
@@ -13606,7 +13606,7 @@ async def handle_quiz_callback(bot_client, event):
             lines = original_msg.message.split("\n")
             total_votes = sum(votes)
             pct = [int((v / total_votes) * 100) if total_votes > 0 else 0 for v in votes]
-            
+
             new_lines = []
             opt_regex = re.compile(r'^(?:<b>|\*\*)?([A-D])[:.](?:</b>|\*\*)?\s*(.*)', re.IGNORECASE)
             suffix_regex = re.compile(r'\s*\(\d+\s*гол\S*\s*\|\s*\d+%\)\s*$', re.IGNORECASE)
@@ -13629,12 +13629,12 @@ async def handle_quiz_callback(bot_client, event):
                     new_lines.append("🎲 <b>КЛИНИЧЕСКИЙ КЕЙС-ВИКТОРИНА</b>")
                 else:
                     new_lines.append(line)
-            
+
             while new_lines and not new_lines[-1].strip():
                 new_lines.pop()
-                
+
             new_lines.append(f"\n📊 <b>Всего проголосовало: {total_votes}</b>\n\n<i>Нажмите на кнопку с вашим вариантом ответа, чтобы проверить себя!</i>")
-            
+
             new_text = "\n".join(new_lines)
             quiz_buttons = getattr(original_msg, 'reply_markup', None)
             await edit_callback_message(
@@ -13702,11 +13702,11 @@ async def check_referee_triage(context_msgs):
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
         response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
-        
+
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
             return False
-            
+
         text = response.text.strip() if hasattr(response, "text") else str(response).strip()
         data = user_memory._extract_json_object(text)
         if data is None:
@@ -13715,7 +13715,7 @@ async def check_referee_triage(context_msgs):
         should_intervene = data.get("should_intervene", False)
         reason = data.get("reason", "No reason provided")
         confidence = data.get("confidence", 1.0)
-        
+
         logger.info(f"Llama Referee Triage decision: should_intervene={should_intervene} (confidence={confidence}). Reason: {reason}")
         return should_intervene
     except Exception as e:
@@ -13755,7 +13755,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     msg_id = getattr(getattr(event, "message", None), "id", None) or getattr(event, "id", None)
 
     text_lower = text.lower()
-    
+
     # 2. Исключаем обсуждение самого бота (чтобы не было автозацикливания при критике).
     #
     # Здесь стоял подстрочный поиск «бот», который живёт в «работа», «суббота»,
@@ -13794,7 +13794,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     escaped_phrases = [re.escape(ph) for ph in conflict_phrases]
     pattern = rf"(\b({'|'.join(escaped_kws)})(е|я|ом|а|ы|и|у|ой|ем|ах|ами|ями|ов|ев)?\b|{'|'.join(escaped_phrases)})"
     has_conflict_kw = bool(re.search(pattern, text_lower))
-    
+
     should_intervene = has_conflict_kw
     reply_to_msg_id = getattr(getattr(event, 'message', None), 'reply_to_msg_id', None)
     if reply_to_msg_id is None and getattr(event, 'message', None) and getattr(event.message, 'reply_to', None):
@@ -13844,7 +13844,7 @@ async def check_and_trigger_referee(bot_client, event, text):
     if not should_reply:
         logger.info("Llama referee triage decided NOT to intervene. Cancelling referee trigger.")
         return
-        
+
 
     logger.info(f"Clinical Referee triggered for msg_id={msg_id} (toxic={has_conflict_kw}). Generating EBM arbitration...")
     style = "ebm_reconciliation"
@@ -13874,10 +13874,10 @@ async def check_and_trigger_referee(bot_client, event, text):
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
-    
+
     if error or not response or not getattr(response, "text", None):
         return
-        
+
     reply_text = response.text.strip()
     reply_text = clean_html_formatting(reply_text)
     # Срезаем любые просочившиеся служебные штампы и заголовки арбитража/вердикта
@@ -13919,12 +13919,12 @@ async def handle_term_explainer(bot_client, event, term):
     """Быстрое объяснение стоматологического термина из базы знаний."""
     chat_id = event.chat_id
     msg_id = event.message.id
-    
+
     cooldown = check_user_cooldown(chat_id, event.sender_id, "what", seconds=30)
     if cooldown > 0:
         await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед повторным запросом термина.", reply_to=msg_id)
         return
-        
+
     # Термин уходит в промпт как есть, поэтому его длина ограничена: запрос на
     # четыре тысячи символов раздул бы промпт и вытеснил из него справку.
     term = (term or "").strip()[:TERM_EXPLAINER_MAX_CHARS]
@@ -13958,7 +13958,7 @@ async def handle_term_explainer(bot_client, event, term):
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
-    
+
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.
         logger.warning("term explainer generation failed chat=%s: %s", chat_id, error)
@@ -13970,10 +13970,10 @@ async def handle_term_explainer(bot_client, event, term):
             parse_mode='html',
         )
         return
-        
+
     reply_text = response.text.strip()
     reply_text = clean_html_formatting(reply_text)
-    
+
     try:
         await bot_client.send_message(
             entity=chat_id,
@@ -14174,11 +14174,11 @@ async def check_and_send_pm_pings(bot_client):
                         f"Generating proactive DM ping for chat_id={chat_id} "
                         f"(unanswered={unanswered_pings}, delay={delay_hours}h)..."
                     )
-                    
+
                     # Загружаем последние сообщения и профиль, чтобы сформировать контекстный живой пинг
                     history = await database.get_last_pm_messages(chat_id, limit=6)
                     context_str = "\n".join([f"{m['sender_name']}: {m['text']}" for m in history])
-                    
+
                     user_profile = await database.get_user_profile(chat_id)
                     portrait = user_profile.get("profile_portrait") or ""
                     portrait_hint = f"\nКлинический профиль врача: {portrait}\n" if portrait else ""
@@ -14198,7 +14198,7 @@ async def check_and_send_pm_pings(bot_client):
 """
                     status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
                     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
-                    
+
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
                         if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:

@@ -382,7 +382,7 @@ async def scenario_footer():
           f"got {len(S.clean_markdown_to_html(LONG_ARTICLE))}")
     check("преждевременной обрезки нет", "Отчет сокращен" not in html_sent)
     check("все 20 разделов сохранены", "РАЗДЕЛ 20" in html_sent)
-    check(f"счётчик сообщений на месте", f"Сообщений за неделю — {len(messages)}" in html_sent,
+    check("счётчик сообщений на месте", f"Сообщений за неделю — {len(messages)}" in html_sent,
           f"хвост: {html_sent[-120:]!r}")
     check("счётчик стоит в самом конце", html_sent.rstrip().endswith("</i>"),
           f"хвост: {html_sent[-60:]!r}")

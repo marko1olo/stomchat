@@ -91,9 +91,11 @@ def parse_keys(key_string):
 GROQ_VISION_MODEL = get_env("GROQ_VISION_MODEL", "")
 GOOGLE_KEYS = parse_keys(get_env("GOOGLE_API_KEYS"))
 GROQ_KEYS = parse_keys(get_env("GROQ_API_KEYS"))
+AGENTROUTER_KEYS = parse_keys(get_env("AGENTROUTER_API_KEYS"))
+AGENTROUTER_BASE_URL = get_env("AGENTROUTER_BASE_URL", "")
 
-if not GOOGLE_KEYS and not GROQ_KEYS:
-    print("ВНИМАНИЕ: Не найдены ключи для нейросетей (GOOGLE или GROQ). Саммери работать не будет.")
+if not GOOGLE_KEYS and not GROQ_KEYS and not AGENTROUTER_KEYS:
+    print("ВНИМАНИЕ: Не найдены ключи для нейросетей (GOOGLE, GROQ или AGENTROUTER). Саммери работать не будет.")
 # Токен Telegraph. Без него длинный дайджест не выносится на страницу и режется
 # жёстким пределом Telegram в 4096 символов.
 TELEGRAPH_TOKEN = get_env("TELEGRAPH_TOKEN")
@@ -102,6 +104,7 @@ TELEGRAPH_TOKEN = get_env("TELEGRAPH_TOKEN")
 # обслуживания, и зашитое имя тихо превращается в отказ генерации.
 GEMINI_MODEL = get_env("GEMINI_MODEL", "")
 GROQ_MODEL = get_env("GROQ_MODEL", "")
+AGENTROUTER_MODEL = get_env("AGENTROUTER_MODEL", "")
 # --- НАСТРОЙКИ ПОИСКА ---
 # Провайдер веб-поиска. Пусто — поиск по внешним источникам не работает, и на
 # вопрос врача уйдёт ответ без ссылок.
@@ -140,7 +143,6 @@ GROQ_WHISPER_MODEL = get_env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 WHISPER_PROMPT = get_env("WHISPER_PROMPT", "стоматология, зуб, препарирование, пульпит, кариес")
 ENABLE_AUDIO_VOLUMEDETECT = True
 
-from dental_vocab import DENTAL_KEYWORDS
 
 
 print("Конфигурация загружена.")

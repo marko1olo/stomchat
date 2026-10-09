@@ -7,14 +7,12 @@
 
 Запуск: python test_bot_modernization_4features.py
 """
-import asyncio
 import io
 import os
 import re
 import shutil
 import sys
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -26,8 +24,6 @@ _TMPDIR = tempfile.mkdtemp(prefix="stomchat_modernization_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "test.log")
 
 import assistant as A
-import vision as V
-import gemini_client as G
 
 PASS, FAIL = [], []
 

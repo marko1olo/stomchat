@@ -12,7 +12,6 @@
 5. Миграция колонок user_memories в database.py: логирование неожиданных ошибок вместо немого pass.
 """
 import asyncio
-import io
 import json
 import os
 import shutil
@@ -145,7 +144,7 @@ async def run_tests():
         reply_markup=dummy_markup
     )
     cb_quiz = FakeCallbackEvent(f"qa:0:0:{quiz_id}", sender_id=12345, original_msg=orig_msg)
-    
+
     bot_quiz = FakeWorkingBot()
     await assistant.handle_quiz_callback(bot_quiz, cb_quiz)
 

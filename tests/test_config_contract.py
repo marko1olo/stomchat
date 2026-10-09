@@ -35,7 +35,6 @@ config.py стоит в .gitignore и на боевую машину через 
 import ast
 import importlib.util
 import io
-import json
 import os
 import re
 import shutil
@@ -49,8 +48,9 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE = os.path.join(HERE, "config.example.py")
-LIVE = os.path.join(HERE, "config.py")
+ROOT = os.path.dirname(HERE) if os.path.basename(HERE) == "tests" else HERE
+TEMPLATE = os.path.join(ROOT, "config.example.py")
+LIVE = os.path.join(ROOT, "config.py")
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_cfgcontract_")
 os.environ.setdefault("STOMCHAT_LOG_PATH", os.path.join(_TMPDIR, "t.log"))
 
@@ -191,12 +191,12 @@ def classify_source(src, fname="<синтетика>"):
 
 def collect_contract():
     required, optional, dynamic = {}, {}, []
-    sources = sorted(f for f in os.listdir(HERE) if f.endswith(".py"))
+    sources = sorted(f for f in os.listdir(ROOT) if f.endswith(".py"))
     for fname in sources:
         if fname in ("config.py", "config.example.py"):
             continue
         try:
-            tree = parse_file(os.path.join(HERE, fname))
+            tree = parse_file(os.path.join(ROOT, fname))
         except SyntaxError:
             continue
         classify_tree(tree, fname, required, optional, dynamic)
@@ -305,6 +305,9 @@ ENV_STUB = {
     "DB_PATH": "ENVSTUB_DB_PATH",
     "GROQ_WHISPER_MODEL": "whisper-large-v3-turbo",
     "WHISPER_PROMPT": "ENVSTUB_WHISPER_PROMPT",
+    "AGENTROUTER_API_KEYS": "kD",
+    "AGENTROUTER_BASE_URL": "ENVSTUB_AGENTROUTER_BASE_URL",
+    "AGENTROUTER_MODEL": "ENVSTUB_AGENTROUTER_MODEL",
 }
 # Переменные, без которых шаблон обязан отказаться стартовать (required=True).
 MUST_HAVE_ENV = ("TG_BOT_TOKEN", "TG_API_ID", "TG_API_HASH")
@@ -590,8 +593,8 @@ check("в выводе названо последствие для рассыл
 
 _, out_no_keys, _ = exec_template(
     PROBE, {k: v for k, v in ENV_STUB.items()
-            if k not in ("GOOGLE_API_KEYS", "GROQ_API_KEYS")},
-    drop=("GOOGLE_API_KEYS", "GROQ_API_KEYS"))
+            if k not in ("GOOGLE_API_KEYS", "GROQ_API_KEYS", "AGENTROUTER_API_KEYS")},
+    drop=("GOOGLE_API_KEYS", "GROQ_API_KEYS", "AGENTROUTER_API_KEYS"))
 check("отсутствие ключей нейросетей объявлено вслух", "ВНИМАНИЕ" in out_no_keys,
       f"вывод: {out_no_keys!r} — иначе сводка молча не соберётся")
 

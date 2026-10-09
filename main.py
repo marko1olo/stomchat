@@ -723,7 +723,7 @@ async def scheduler_task(bot_client):
                         ),
                         timeout=30,
                     )
-                    
+
                     if len(messages) < min_daily_msgs:
                         logger.info(
                             "💤 Daily дайджест пропущен: низкая активность чата (%d сообщ. в окне при пороге %d). "
@@ -735,7 +735,7 @@ async def scheduler_task(bot_client):
                         _clear_summary_failure("daily", now)
                     else:
                         logger.info(f"🔥 Daily контент готов ({len(messages)} шт). Рассылка...")
-                        
+
                         # Кэш для текста (чтобы генерировать 1 раз на все чаты).
                         #
                         # Он обязан переживать круг цикла. Пока generated_cache
@@ -759,13 +759,13 @@ async def scheduler_task(bot_client):
                         for target in targets:
                             tgt_chat = target.get('chat_id')
                             tgt_topic = target.get('topic_id')
-                            
+
                             if not tgt_chat: continue
                             tgt_key = target_delivery_key(tgt_chat, tgt_topic)
                             if tgt_key in sent_targets:
                                 logger.info("Daily target already delivered; skip duplicate target=%s", tgt_key)
                                 continue
-                            
+
                             try:
                                 logger.info(f"📤 Отправка Daily в {tgt_chat} (Topic: {tgt_topic})...")
 
@@ -790,7 +790,7 @@ async def scheduler_task(bot_client):
                                     cached_message=generated_cache,
                                     delivery_hook=daily_delivery_hook,
                                 )
-                                
+
                                 # Если генерация прошла успешно, запоминаем текст для следующих кругов
                                 if result_text:
                                     if tgt_key not in sent_targets:
@@ -802,12 +802,12 @@ async def scheduler_task(bot_client):
 
                             except Exception:
                                 logger.exception(f"Daily send failed chat={tgt_chat}")
-                        
+
                         if target_keys and all(target_key in sent_targets for target_key in target_keys):
                             # Помечаем сообщения прочитанными 1 раз после всех рассылок
                             msg_ids = [m[0] for m in messages]
                             await asyncio.wait_for(database.mark_messages_as_summarized(msg_ids), timeout=30)
-                            
+
                             last_sent_date = now.date()
                             save_scheduler_state(last_sent_date, last_weekly_date)
                             _clear_summary_failure("daily", now)
@@ -843,7 +843,7 @@ async def scheduler_task(bot_client):
                         database.get_messages_for_range(start_weekly, end_weekly),
                         timeout=30,
                     )
-                    
+
                     if weekly_messages:
                         logger.info(f"💎 Weekly контент готов ({len(weekly_messages)} шт). Рассылка...")
                         weekly_sent_targets = load_sent_targets("weekly", now.date())
@@ -853,17 +853,17 @@ async def scheduler_task(bot_client):
                             for target in targets
                             if target.get('chat_id')
                         ]
-                         
+
                         for target in targets:
                             tgt_chat = target.get('chat_id')
                             tgt_topic = target.get('topic_id')
-                            
+
                             if not tgt_chat: continue
                             tgt_key = target_delivery_key(tgt_chat, tgt_topic)
                             if tgt_key in weekly_sent_targets:
                                 logger.info("Weekly target already delivered; skip duplicate target=%s", tgt_key)
                                 continue
-                             
+
                             try:
                                 logger.info(f"📤 Отправка Weekly в {tgt_chat} (Topic: {tgt_topic})...")
 
@@ -894,7 +894,7 @@ async def scheduler_task(bot_client):
                                         weekly_cache_text = result_text
                             except Exception:
                                 logger.exception(f"Weekly send failed chat={tgt_chat}")
-                         
+
                         if weekly_target_keys and all(target_key in weekly_sent_targets for target_key in weekly_target_keys):
                             last_weekly_date = now.date()
                             save_scheduler_state(last_sent_date, last_weekly_date)
@@ -2212,7 +2212,7 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                             logger.warning("media_cdn_failed msg_id=%s: upload returned None for %s", analyzed_id, fpath)
                     except Exception as cdn_err:
                         logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
-                
+
                 # Запуск медиа-ассистента (только для свежих живых сообщений)
                 if trigger_assistant:
                     async def run_media_assistant_safe():
@@ -2365,12 +2365,12 @@ async def handle_new_message(event):
             runtime_guard.create_task(forward_to_mirror(event.message, MIRROR_CHAT_ID), name=f"mirror_{event.message.id}")  # [SYS-06 FIX]
 
         sender_id = event.sender_id
-        
+
         # Флаг, является ли отправителем сам бот
         is_bot = False
         if sender_id == FALLBACK_BOT_ID or (assistant.BOT_ID and sender_id == assistant.BOT_ID):
             is_bot = True
-            
+
         sender = None
         try:
             sender = await asyncio.wait_for(
@@ -2534,7 +2534,7 @@ async def handle_new_message(event):
                         p_text = parent_msg.message or ""
                         p_has_media = parent_msg.photo is not None or parent_msg.video is not None
                         p_sender = await parent_msg.get_sender()
-                        
+
                         if p_sender is None:
                             p_sender_name = "Unknown"
                         elif hasattr(p_sender, 'first_name'):
@@ -2554,7 +2554,7 @@ async def handle_new_message(event):
                             media_description=db_desc or "",
                             date=parent_msg.date
                         )
-                        
+
                         confirm_text = "📌 <b>Клинический пост сохранен в ваши закладки!</b>\nВы можете просмотреть и найти его в ЛС бота по команде /bookmarks."
                         # Отправляем подтверждение лично доктору в ЛС, чтобы не спамить в общий чат на 800+ врачей
                         pm_delivered = False
@@ -2631,7 +2631,7 @@ async def handle_new_message(event):
             try:
                 cmd = text.strip()
                 cmd_lower = cmd.lower()
-                
+
                 # Перехват команд лички с перенаправлением в ЛС
                 if await assistant.handle_group_pm_redirect(bot_client, event, cmd):
                     return True
@@ -2646,7 +2646,7 @@ async def handle_new_message(event):
                             permissions = await event.client.get_permissions(event.chat_id, event.sender_id)
                             if permissions.is_admin:
                                 is_super_admin = True
-                                
+
                         if is_super_admin:
                             # Split deletion to avoid complete failure if bot cannot delete user's command message
                             try:
@@ -2657,7 +2657,7 @@ async def handle_new_message(event):
                                 await bot_client.delete_messages(event.chat_id, [msg_id])
                             except Exception as e2:
                                 logger.warning(f"Failed to delete command message {msg_id}: {e2}")
-                                
+
                             await database.remove_bot_sent_message(reply_to_msg_id)
                             return True
                     except Exception as delete_exc:
@@ -2678,7 +2678,7 @@ async def handle_new_message(event):
                 if cmd_lower.startswith(("/summary", "/итог", "/sum")):
                     await assistant.handle_group_summary(bot_client, event, reply_to_msg_id)
                     return True
-                
+
                 # 2. Прямой запрос к боту
                 mentioned, without_mention = strip_bot_mention(cmd)
                 if cmd_lower.startswith("/ask ") or mentioned:
@@ -2690,7 +2690,7 @@ async def handle_new_message(event):
                     if question:
                         await assistant.handle_group_direct_ask(bot_client, event, question)
                     return True
-                
+
                 # 3. Викторина/Опрос в группе — тоже только со слешем.
                 # Тот же класс: «Опрос» одним словом в архиве встречается как
                 # обычная реплика (msg 128077), а викторина — это платная
@@ -2722,7 +2722,7 @@ async def handle_new_message(event):
                     force_poll = "regular" if cmd_lower in ("/poll", "/опрос", "/батл") else "quiz"
                     await assistant.handle_native_group_poll(bot_client, event, force_type=force_poll)
                     return True
-                
+
                 # 4. Толковый словарь (объяснение терминов)
                 if cmd_lower.startswith(("/what ", "/что ")):
                     term = cmd[6:].strip() if cmd_lower.startswith("/what ") else cmd[5:].strip()
@@ -2788,7 +2788,7 @@ async def handle_new_message(event):
                                 lifeline_manager.cancel_question(reply_to_msg_id, reason="referee_replied_to_parent")
             except Exception as e:
                 logger.exception(f"Unexpected error in run_assistant_safe: {e}")
-                
+
         # Второй чат до блока SOURCE_CHAT_ID не доходит, поэтому страхуемся здесь:
         # без этой проверки бот отвечал на собственные дайджесты.
         if is_any_bot:
@@ -2854,10 +2854,10 @@ async def handle_new_message(event):
         if sender_username:
             log_msg += f" (@{sender_username})"
         if has_media:
-            log_msg += f" [МЕДИА]"
-        
+            log_msg += " [МЕДИА]"
+
         logger.info(log_msg)
-        
+
         if text:
             clean_text = text.replace('\n', ' ')[:70]
             logger.info("message_text_preview msg_id=%s text=%s", msg_id, clean_text)
@@ -3212,21 +3212,21 @@ async def get_chat_id(event):
         topic_id = event.reply_to.reply_to_top_id
     elif event.reply_to:
         topic_id = event.reply_to.reply_to_msg_id
-    
+
     # В Telethon для топиков часто используется просто reply_to_msg_id самого первого сообщения ветки
     # Если мы пишем просто в топик, то reply_to_msg_id сообщения, отправленного в топик, часто указывает на thread_id
-    
+
     text = f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>"
     if topic_id:
         text += f"\n📂 <b>Topic ID:</b> <code>{topic_id}</code>"
     else:
         text += "\n(Это не топик или я не смог определить ID ветки. Попробуй ответить на любое сообщение внутри топика командой .id)"
-        
+
     await event.edit(text, parse_mode='HTML')
 @client.on(events.NewMessage(pattern=r'\.test', outgoing=True))
 async def manual_test_handler(event):
     current_chat_id = event.chat_id
-    
+
     # Ищем, какой топик назначен для этого чата в REPORT_TARGETS.
     # Через resolve_report_targets, иначе элемент-не-словарь ронял обработчик
     # на AttributeError вместо ответа врачу.
@@ -3237,18 +3237,18 @@ async def manual_test_handler(event):
             break
 
     await event.edit(f"🧪 <b>Тест кэша (Topic: {target_topic})...</b>", parse_mode='HTML')
-    
+
     msgs = await database.get_last_n_messages(300)
-    
+
     # 1. Генерация (передаем найденный target_topic)
     start = datetime.now()
     msg1 = await summarizer.process_summary_batch(
-        msgs, bot_client, current_chat_id, 
+        msgs, bot_client, current_chat_id,
         topic_id=target_topic, # <-- Теперь передаем топик!
         msg_count=len(msgs)
     )
     t1 = (datetime.now() - start).total_seconds()
-    
+
     if not msg1: return
 
     # 2. Кэш
@@ -3263,25 +3263,25 @@ async def manual_test_handler(event):
 async def manual_weekly_test(event):
     """Ручной запуск Еженедельной Газеты (Тест)."""
     chat_id = event.chat_id
-    
+
     # Пытаемся определить топик, если это супергруппа
     topic_id = None
     if event.reply_to and event.reply_to.reply_to_top_id:
         topic_id = event.reply_to.reply_to_top_id
     elif event.reply_to:
         topic_id = event.reply_to.reply_to_msg_id
-    
+
     # 1. Визуальное уведомление
     await event.edit(f"🗞 <b>Готовлю тестовый WEEKLY за 7 дней...</b>\nTarget Chat: <code>{chat_id}</code>\nTopic ID: <code>{topic_id}</code>", parse_mode='HTML')
-    
+
     try:
         # 2. Берем диапазон (7 дней)
         end_time = datetime.now()
         start_time = end_time - timedelta(days=7)
-        
+
         # 3. Достаем сообщения
         messages = await database.get_messages_for_range(start_time, end_time)
-        
+
         if not messages:
             await event.edit("❌ Сообщений за неделю не найдено (или база пуста).")
             return
@@ -3290,7 +3290,7 @@ async def manual_weekly_test(event):
 
         # 4. Запускаем генерацию
         result = await summarizer.process_weekly_batch(messages, bot_client, chat_id, topic_id=topic_id)
-        
+
         if result:
             try:
                 await event.delete() # Удаляем служебное сообщение ".weekly"
@@ -3302,7 +3302,7 @@ async def manual_weekly_test(event):
                              type(exc).__name__, exc)
         else:
             await event.edit("❌ Ошибка генерации (вернулся None). Проверь логи.")
-            
+
     except Exception as e:
         logger.error(f"Manual Weekly Error: {e}")
         await event.edit(f"❌ Ошибка: {e}")
@@ -3315,10 +3315,10 @@ class TelethonEventAdapter:
     def __init__(self, message):
         self.message = message
         self.client = message.client
-        
+
     def __getattr__(self, name):
         return getattr(self.message, name)
-        
+
     async def get_sender(self):
         return await self.message.get_sender()
 
@@ -3332,7 +3332,7 @@ async def sync_history():
     logger.info(f"🔄 Проверка пропущенных сообщений с ID {last_id}...")
     count = 0
     last_synced_message = None
-    
+
     synced_albums = {}
     synced_singles = []
     # Голосовые окна собираем ОТДЕЛЬНО от медиа: clinical_media_kind для них
@@ -3382,7 +3382,7 @@ async def sync_history():
 
 
             reply_to_id = message.reply_to.reply_to_msg_id if message.reply_to else None
-            
+
             # То же единое правило, что и в живом обработчике: догон не должен
             # тащить в платный Vision превью ссылок, гифки, кружки и стикеры.
             # Отсев целиком внутри clinical_media_kind: она сама вызывает
@@ -3392,7 +3392,7 @@ async def sync_history():
             # применить», хотя он применён.
             media_type = clinical_media_kind(message)
             has_media = media_type is not None
-            
+
             synced_ok = await asyncio.wait_for(
                 database.save_message(
                     msg_id=message.id,
@@ -3433,7 +3433,7 @@ async def sync_history():
                 runtime_guard.write_heartbeat("sync_history")
         except Exception as e:
             logger.error(f"Ошибка синхронизации сообщения {message.id}: {e}")
-    
+
     # Медиа из догона ставим пачкой. Очередь вмещает MEDIA_QUEUE_MAX_SIZE, а за
     # месяц простоя набираются сотни снимков — влезет не всё, и это штатно:
     # непоставленные остаются в базе с пустым media_description и достаются
@@ -3603,7 +3603,6 @@ async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
     на которые бот не ответил — отвечаем через check_bot_mention_trigger.
     Работает даже если @mention был удалён другим ботом, т.к. само сообщение в БД."""
     try:
-        import runtime_guard as _rg
         bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "stomchat_bot").lstrip("@").lower()
         bot_id = getattr(assistant, "BOT_ID", None) or FALLBACK_BOT_ID
         chat_id = config.SOURCE_CHAT_ID
@@ -3694,7 +3693,7 @@ async def start_bot():
 
     logger.info("🚀 Инициализация базы данных...")
     await asyncio.wait_for(database.init_db(), timeout=30)
-    
+
     # Нарастающий бэкофф подключения к Telegram (10s -> 30s -> 60s -> 120s -> 300s).
     # Предотвращает бан по IP при падении серверов Telegram или сбоях сети.
     connect_wait = runtime_guard.get_startup_connect_wait()
@@ -3746,7 +3745,7 @@ async def start_bot():
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()
     await _catchup_missed_mentions(bot_client)
-    
+
     # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
     runtime_guard.create_task(pm_ping_scheduler_task(bot_client), "pm_ping_scheduler")

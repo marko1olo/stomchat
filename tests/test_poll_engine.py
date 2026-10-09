@@ -25,9 +25,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
-import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -35,24 +34,18 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-import poll_engine
 from poll_engine import (
     MAX_EXPLANATION_LEN,
     MAX_OPTION_LEN,
     MAX_OPTIONS_COUNT,
     MAX_QUESTION_LEN,
-    MIN_CLOSE_PERIOD,
-    MAX_CLOSE_PERIOD,
     MIN_OPTIONS_COUNT,
     POLL_FALLBACK_PRESETS,
-    WEEKLY_RUBRICATOR,
     PollEngine,
     PollPayload,
     PollType,
     TriageResult,
     build_poll_media,
-    detect_chat_discussion_heuristic,
-    extract_chat_text,
     generate_poll,
     generate_poll_content,
     get_fallback_preset,

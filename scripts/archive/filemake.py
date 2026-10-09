@@ -1,7 +1,6 @@
 import asyncio
 import aiosqlite
 import os
-import logging
 import sys
 
 # Потоки в utf-8: в print ниже есть эмодзи, а cp1251-консоль Windows роняет на
@@ -30,7 +29,7 @@ async def export_by_categories():
         # 1. Получаем все уникальные категории, которые уже есть в базе
         cursor = await db.execute('SELECT DISTINCT category_code FROM distilled_facts ORDER BY category_code')
         categories = await cursor.fetchall()
-        
+
         if not categories:
             print("⚠️ В базе пока нет извлеченных фактов.")
             return
@@ -39,9 +38,9 @@ async def export_by_categories():
             # Очищаем код категории для имени файла (убираем лишние точки в конце, если есть)
             safe_cat_code = str(cat_code).strip('.')
             if not safe_cat_code: safe_cat_code = "unclassified"
-            
+
             file_path = os.path.join(OUTPUT_DIR, f"{safe_cat_code}.txt")
-            
+
             # 2. Вытаскиваем все факты по этой категории
             cursor_facts = await db.execute('''
                 SELECT content, source_ids, is_case, confidence 

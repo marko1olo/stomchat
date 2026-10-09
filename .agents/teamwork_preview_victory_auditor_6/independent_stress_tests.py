@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import sys, os, time, math, unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock

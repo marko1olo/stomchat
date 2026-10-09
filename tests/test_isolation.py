@@ -55,7 +55,7 @@ def strip_comments(source):
     return "\n".join(l for l in source.split("\n") if not l.lstrip().startswith("#"))
 
 
-print(f"\n[1] Тесты, пишущие состояние, уводят STATE_PATH во временный каталог")
+print("\n[1] Тесты, пишущие состояние, уводят STATE_PATH во временный каталог")
 check("тесты вообще найдены", len(TESTS) >= 20, f"got {len(TESTS)}")
 
 offenders = []

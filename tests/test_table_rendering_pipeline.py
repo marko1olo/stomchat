@@ -9,7 +9,6 @@ test_table_rendering_pipeline.py — Тесты рендеринга Markdown т
 5. Корректность интеграции в журнальный шаблон PDF (CSS стили, отсутствие оборачивания в <p>).
 """
 import sys
-import re
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -20,8 +19,8 @@ for _stream in (sys.stdout, sys.stderr):
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from html_safe import clean_markdown_to_html, parse_markdown_tables, convert_all_tables_in_html_to_telegraph
-from blocking_tools import _convert_tables_to_telegraph, _sanitize_telegraph_nodes, _ALLOWED_TELEGRAPH_TAGS
+from html_safe import clean_markdown_to_html, convert_all_tables_in_html_to_telegraph
+from blocking_tools import _sanitize_telegraph_nodes, _ALLOWED_TELEGRAPH_TAGS
 from html_telegraph_poster.converter import convert_html_to_telegraph_format, OutputFormat
 from digest_pdf import _build_journal_html
 

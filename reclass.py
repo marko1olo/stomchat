@@ -12,7 +12,6 @@ from distiller import _iter_json_objects
 from datetime import datetime
 from google import genai
 from google.genai import types
-import time
 
 DB_PATH = "stomat_wiki.db"
 MODEL_ID = "models/gemma-3-27b-it"
@@ -370,9 +369,9 @@ async def main():
         cursor = await db.execute("SELECT id, content FROM distilled_facts WHERE is_reclassified = 0")
         facts = await cursor.fetchall()
         total_remaining = len(facts)
-        
+
         print(f"--- Processing {total_remaining} facts with Gemma 3 27B ---")
-        
+
         key_idx = 0
         idx = 0
         fails = 0

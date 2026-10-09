@@ -8,7 +8,7 @@ import shutil
 from PIL import Image
 from telethon import TelegramClient
 import config
-import vision 
+import vision
 from telethon.tl.types import MessageMediaWebPage
 import sys
 
@@ -26,7 +26,7 @@ for _stream in (sys.stdout, sys.stderr):
 ARCHIVE_DB_PATH = "stomat_archive.db"
 SESSION_NAME = "vision_session"
 TEMP_DIR = "temp_media"
-UPLOADED_DIR = "uploaded_media" 
+UPLOADED_DIR = "uploaded_media"
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -62,10 +62,10 @@ def resize_and_save_final(source_path, dest_dir, max_size=768):
         with Image.open(source_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-                
+
             if max(img.size) > max_size:
                 img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-            
+
             # Сохраняем с оптимизацией
             final_path = os.path.join(dest_dir, os.path.basename(source_path))
             img.save(final_path, 'JPEG', quality=85, optimize=True)
@@ -110,16 +110,16 @@ async def main():
             AND (vision_description IS NULL OR vision_description = '')
         ''')
         await db.commit()
-    
+
     client = TelegramClient(SESSION_NAME, config.API_ID, config.API_HASH)
     await client.start()
-    
+
     print("👀 Vision-Комбайн (ЛОКАЛЬНЫЙ РЕЖИМ) запущен. Начинаю обработку медиа...")
 
     while True:
         file_path = None
         final_img_path = None
-        
+
         async with aiosqlite.connect(ARCHIVE_DB_PATH) as db:
             # Берем строго те, что еще не обрабатывались (vision_processed = 0)
             cursor = await db.execute('''
@@ -128,11 +128,11 @@ async def main():
                 ORDER BY msg_id ASC LIMIT 1
             ''')
             row = await cursor.fetchone()
-            
+
             if not row:
                 print("✅ Все фото и видео из архива успешно обработаны!")
                 break
-            
+
             msg_id, text, m_type = row
             print(f"📸 Обработка MSG_{msg_id} ({m_type})...")
 
@@ -165,21 +165,21 @@ async def main():
                             asyncio.to_thread(extract_frame, file_path),
                             timeout=60,
                         )
-                        
+
                 elif m_type == 'photo':
                     file_path = await asyncio.wait_for(msg.download_media(file=os.path.join(TEMP_DIR, "")), timeout=60)
                     final_img_path = file_path
-                
+
                 # 3. Обрабатываем, если кадр получен
                 if final_img_path and os.path.exists(final_img_path):
-                    
+
                     # ИСПОЛЬЗУЕМ vision.describe_image (с ротацией ключей и кулдаунами)
                     description = await vision.describe_image(final_img_path, caption=text)
-                    
+
                     if description:
                         # Сохранение в постоянную папку
                         saved_path = resize_and_save_final(final_img_path, UPLOADED_DIR, max_size=768)
-                        
+
                         if saved_path:
                             # Запись в БД (описание и путь)
                             await db.execute('''
@@ -216,14 +216,14 @@ async def main():
                 # Гарантируем продвижение даже при фатальной ошибке кода
                 await db.execute('UPDATE archive_messages SET vision_processed = 1 WHERE msg_id = ?', (msg_id,))
                 await db.commit()
-            
+
             finally:
                 # Очистка временных файлов
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
                 if final_img_path and final_img_path != file_path and os.path.exists(final_img_path):
                     os.remove(final_img_path)
-        
+
         # Пауза
         await asyncio.sleep(random.uniform(12, 15))
 

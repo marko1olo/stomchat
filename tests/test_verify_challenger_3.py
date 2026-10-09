@@ -1,5 +1,4 @@
 import sys
-import os
 import ast
 import re
 from datetime import datetime, timedelta
@@ -43,20 +42,20 @@ expected_canonical = {
 for V in [5, 15, 30, 60, 120, 300]:
     v_eff = max(V, 5)
     f_vel_canon = (30.0 / v_eff) ** 0.40
-    
+
     day_raw = 60.0 * f_vel_canon * 0.85
     eve_raw = 60.0 * f_vel_canon * 1.00
     nit_raw = 60.0 * f_vel_canon * 1.60
-    
+
     day_rnd = round(max(45, min(day_raw, 180)))
     eve_rnd = round(max(45, min(eve_raw, 180)))
     nit_rnd = round(max(45, min(nit_raw, 180)))
 
     c_day_rnd, c_day_flt, c_eve_rnd, c_eve_flt, c_nit_rnd, c_nit_flt = expected_canonical[V]
-    
+
     if (day_rnd != c_day_rnd or eve_rnd != c_eve_rnd or nit_rnd != c_nit_rnd or
         round(day_raw, 1) != c_day_flt or round(eve_raw, 1) != c_eve_flt or round(nit_raw, 1) != c_nit_flt):
-        record_failure(f"Canonical Math at V={V}", 
+        record_failure(f"Canonical Math at V={V}",
                        f"Computed: Day={day_rnd} ({day_raw:.1f}), Eve={eve_rnd} ({eve_raw:.1f}), Nit={nit_rnd} ({nit_raw:.1f}) | Expected: {expected_canonical[V]}")
     else:
         record_pass(f"Canonical Math at V={V} ({day_rnd}m / {eve_rnd}m / {nit_rnd}m) matches Table 4.1.3")
@@ -69,7 +68,7 @@ for V, vals in expected_canonical.items():
         pattern_night_clamped = rf"\*\*{V}\*\*.*?\*\*(\d+)\s*min\*\*.*?\*\*(\d+)\s*min\*\*.*?\*\*(\d+)\s*min\*\*"
         m2 = re.search(pattern_night_clamped, report_text, re.DOTALL)
         if not m2:
-            record_failure(f"Table 4.1.3 Canonical Entry V={V}", f"Pattern not found in Table 4.1.3")
+            record_failure(f"Table 4.1.3 Canonical Entry V={V}", "Pattern not found in Table 4.1.3")
         else:
             record_pass(f"Table 4.1.3 Entry V={V} Present")
     else:

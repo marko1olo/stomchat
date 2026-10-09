@@ -2,7 +2,6 @@
 test_pm_bundle.py — Тестирование сборщика пакета сообщений ЛС (handle_private_message_bundle)
 и логики объединения медиа + текст + аудио.
 """
-import asyncio
 import os
 import sys
 import unittest
@@ -11,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 import assistant
-import media_tools
 
 
 class TestPMBundle(unittest.IsolatedAsyncioTestCase):
@@ -54,10 +52,10 @@ class TestPMBundle(unittest.IsolatedAsyncioTestCase):
 
         with patch("assistant.handle_private_message", new_callable=AsyncMock) as mock_handle:
             await assistant.handle_private_message_bundle(mock_client, [ev_photo, ev_text])
-            
+
             mock_handle.assert_awaited_once()
             called_client, target_event = mock_handle.call_args[0]
-            
+
             self.assertIs(called_client, mock_client)
             self.assertIs(target_event, ev_photo)
             self.assertIsNotNone(target_event.message.photo)
@@ -95,7 +93,7 @@ class TestPMBundle(unittest.IsolatedAsyncioTestCase):
              patch("blocking_tools.correct_dental_transcription_async", new_callable=AsyncMock) as mock_correct, \
              patch("os.path.exists", return_value=True), \
              patch("os.remove", return_value=None):
-            
+
             mock_gemini.return_value = ("подскажи как пройти медиальный канал", None)
             mock_correct.return_value = "подскажи как пройти мезиальный канал"
 

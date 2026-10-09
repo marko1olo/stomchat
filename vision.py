@@ -499,7 +499,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ без английских фраз, черновиков и тегов <think>."
             )
 
-            
+
             # Load balancing pool (fallback: gemini-3.8-flash, gemini-3.7-flash): Gemini 3.5 Flash Lite, Gemini 3.1 Flash Lite, Qwen 3.8 27B
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
@@ -549,7 +549,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                         keys = [k for k in raw_keys if k]
                     else:
                         keys = [k.strip() for k in str(raw_keys).split(",") if k.strip()]
-                        
+
                     if not keys:
                         continue
 
@@ -597,7 +597,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             max_images = 3 if provider == "groq" else min(len(image_urls), 6)
                             for iu in image_urls[:max_images]:
                                 content_arr.append({"type": "image_url", "image_url": {"url": iu}})
-                            
+
                             resp = await client.chat.completions.create(
                                 model=model_name,
                                 messages=[

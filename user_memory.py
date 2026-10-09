@@ -383,59 +383,6 @@ def format_clinician_memory_prompt(user_id: int, memory: Optional[dict] = None) 
 {content}"""
 
 
-def format_user_profile_card(memory: dict, display_name: str = "") -> str:
-    """
-    Форматирует красивую медицинскую карточку профиля врача для вывода по команде /profile в ЛС.
-    """
-    name = display_name or memory.get("first_name") or ""
-    username = memory.get("username")
-    user_label = f"<b>{html.escape(name)}</b>" if name else "<b>Коллега</b>"
-    if username:
-        user_label += f" (@{html.escape(username)})"
-
-    specialty = memory.get("specialty", "").strip() or "Стоматолог (уточняется в диалоге)"
-    summary = memory.get("clinical_summary", "").strip()
-    group_summary = memory.get("group_summary", "").strip()
-    pm_cnt = memory.get("pm_message_count", 0) or 0
-    grp_cnt = memory.get("group_message_count", 0) or 0
-    total_cnt = memory.get("message_count", 0) or (pm_cnt + grp_cnt)
-
-    facts_raw = memory.get("facts_json", "[]")
-    facts_list = []
-    try:
-        if facts_raw:
-            facts_list = json.loads(facts_raw)
-            if not isinstance(facts_list, list):
-                facts_list = []
-    except Exception:
-        facts_list = []
-
-    sections = [
-        f"🩺 <b>КЛИНИЧЕСКИЙ ПРОФИЛЬ ВРАЧА</b>\n{user_label}\n",
-        f"• <b>Специализация:</b> {html.escape(specialty)}",
-        f"• <b>Активность:</b> {total_cnt} сообщений (в группе: {grp_cnt}, в ЛС: {pm_cnt})",
-    ]
-
-    best_summary = summary or group_summary
-    if best_summary:
-        clean_summary = html.escape(best_summary[:1200].strip())
-        if len(best_summary) > 1200:
-            clean_summary += "..."
-        sections.append(f"\n📋 <b>Клиническое досье и арсенал:</b>\n<i>{clean_summary}</i>")
-
-    if facts_list:
-        rendered_facts = "\n".join([f"  • {html.escape(str(f))}" for f in facts_list[-6:]])
-        sections.append(f"\n💡 <b>Ключевые предпочтения в практике:</b>\n{rendered_facts}")
-
-    sections.append(
-        "\nℹ️ <i>Этот профиль автоматически собирается ИИ из ваших клинических разборов "
-        "и помогает ассистенту общаться с вами на равных без повторения базовых вопросов.</i>"
-    )
-
-    return "\n".join(sections)
-
-
-
 async def format_users_chunk_context(
     user_ids: List[int],
     max_chars: Optional[int] = 2000

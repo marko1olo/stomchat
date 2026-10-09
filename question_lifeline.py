@@ -17,9 +17,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -346,11 +345,11 @@ async def generate_lifeline_response(
     Строго без менторства, кафедральной воды и нудных лекций.
     """
     fallback_text = (
-        f"Коллега, вопрос очень практический.\n\n"
-        f"В подобных клинических ситуациях первичный ориентир — "
-        f"сохранение анатомии и работа под увеличением (микроскоп, предварительно "
-        f"изогнутые ручные файлы #08–#10, обильная ирригация NaOCl и ЭДТА без избыточного давления).\n\n"
-        f"💬 <i>Коллеги, кто недавно проходил подобный случай у себя — как вели?</i>"
+        "Коллега, вопрос очень практический.\n\n"
+        "В подобных клинических ситуациях первичный ориентир — "
+        "сохранение анатомии и работа под увеличением (микроскоп, предварительно "
+        "изогнутые ручные файлы #08–#10, обильная ирригация NaOCl и ЭДТА без избыточного давления).\n\n"
+        "💬 <i>Коллеги, кто недавно проходил подобный случай у себя — как вели?</i>"
     )
 
     if llm_caller is None:

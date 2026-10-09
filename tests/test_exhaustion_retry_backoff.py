@@ -2,7 +2,6 @@
 Тест прогрессивного бэкоффа (30с, 60с, 90с) при вылете всех ключей/моделей для ЛС и группы.
 """
 import asyncio
-import os
 import sys
 
 for stream in (sys.stdout, sys.stderr):

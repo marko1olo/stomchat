@@ -16,11 +16,10 @@ import sys
 import os
 import math
 import time
-import json
 import inspect
 from datetime import datetime, timedelta
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Ensure utf-8 encoding on Windows terminal streams
 for _stream in (sys.stdout, sys.stderr):

@@ -822,16 +822,52 @@ def cascade_for_context(status_context=None):
             ("openai/gpt-oss-120b", "groq"),
         ])
         return cascade
-    else:
-        # Complex tasks (Summaries, analytics, etc)
-        cascade = []
-        if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
-        cascade.extend([
-            (config.GEMINI_MODEL, "gemini"), # gemini-3.8-flash
+    elif kind in summary_kinds:
+        # Для ежедневных и еженедельных дайджестов с гигантским контекстом (50k–200k+ символов)
+        # и необходимостью масштабного лонгрида (8.5k–15k знаков) модели Gemini идут первыми:
+        # у них окно контекста 1M+ токенов и проверенное глубокое изложение.
+        # DeepSeek через AgentRouter выступает как надежный резерв при отказе Google.
+        primary_heavy = getattr(config, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash"
+        raw_models = [
+            (primary_heavy, "gemini"),
+            ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
+        ]
+        seen = set()
+        cascade = []
+        for m in raw_models:
+            if m not in seen:
+                seen.add(m)
+                cascade.append(m)
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+        ])
+        return cascade
+    else:
+        # Complex tasks (Analytics, etc)
+        primary_heavy = getattr(config, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash"
+        raw_models = [
+            (primary_heavy, "gemini"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+        ]
+        seen = set()
+        cascade = []
+        for m in raw_models:
+            if m not in seen:
+                seen.add(m)
+                cascade.append(m)
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.extend([
             ("gemini-3.1-flash-lite", "gemini"),
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
@@ -1002,7 +1038,10 @@ def generate_text(prompt, status_context=None, timeout=None):
             call_timeout = req_timeout
             if provider == "agentrouter":
                 rem = (deadline - time.monotonic()) if deadline else 35.0
-                call_timeout = max(call_timeout, min(30.0, max(7.0, rem)))
+                if kind in summary_kinds:
+                    call_timeout = max(call_timeout, min(180.0, max(30.0, rem)))
+                else:
+                    call_timeout = max(call_timeout, min(30.0, max(7.0, rem)))
             elif deadline is not None:
                 rem = deadline - time.monotonic()
                 call_timeout = min(call_timeout, rem)
@@ -1055,9 +1094,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                     create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
 
                 # Для AgentRouter (DeepSeek / рассуждающие модели) не ограничиваем токенами:
-                # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ
+                # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ.
+                # Для дайджестов выделяем расширенный лимит 16384 токенов.
                 if provider == "agentrouter":
-                    create_kwargs["max_tokens"] = max(4096, int(ctx_max_tokens or 4096))
+                    default_max = 16384 if kind in summary_kinds else 4096
+                    create_kwargs["max_tokens"] = max(default_max, int(ctx_max_tokens or default_max))
 
                 # Нативный параметр размышлений для моделей:
                 # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort.
@@ -1104,7 +1145,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                 if text_result:
                     # Удача тоже событие учёта, не только отказ: см. note_success.
                     note_success(provider, api_key, model_name=model_name)
-                    logger.info(f"{provider.capitalize()} success key={key_id} chars={len(text_result)}")
+                    logger.info(f"{provider.capitalize()} success key={key_id} model={model_name} chars={len(text_result)}")
                     _write_generation_status(
                         status_context, stage=f"{provider}_success",
                         attempt=attempt + 1, max_attempts=max_attempts,
@@ -1150,13 +1191,13 @@ def generate_text(prompt, status_context=None, timeout=None):
                     sleep_time = _retry_sleep_seconds(attempt)
                 else:
                     sleep_time = 5
-                    
+
                 _write_generation_status(
                     status_context, stage=f"{provider}_error",
                     attempt=attempt + 1, max_attempts=max_attempts,
                     key=key_id, error=str(exc)[:500]
                 )
-                
+
                 # Разбор отказа и запись в учёт — в note_key_failure, здесь только
                 # решение, куда идти дальше. Порядок проверок («ключ исчерпан»
                 # ПЕРВЫМ, бан модели вторым) оплачен дефектом и описан там же:
@@ -1711,11 +1752,11 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 # Ключ ответил — снимаем с него пометку и для текстового каскада.
                 note_success("groq", api_key)
                 logger.info(f"Transcription success chars={len(result_text)}")
-                
+
                 if actual_file_path != file_path and os.path.exists(actual_file_path):
                     try: os.remove(actual_file_path)
                     except Exception: pass
-                    
+
                 return result_text
         except Exception as e:
             logger.warning(f"Whisper transcription failed key={key_id}: {e}")
@@ -1731,11 +1772,11 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 left = (usable - (time.monotonic() - started)) if usable else 2.0
                 time.sleep(max(0.0, min(2.0, left)))
             continue
-            
+
     if actual_file_path != file_path and os.path.exists(actual_file_path):
         try: os.remove(actual_file_path)
         except Exception: pass
-        
+
     return None
 
 

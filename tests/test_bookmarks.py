@@ -13,7 +13,6 @@
 Запуск: python test_bookmarks.py
 """
 import asyncio
-import io
 import os
 import re
 import shutil

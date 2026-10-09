@@ -18,14 +18,11 @@
    - Наличие старших моделей в пуле
 """
 
-import asyncio
-import re
 import unittest
 from datetime import datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import assistant
-import vision
 
 
 class TestUniversalLengthGuidelines(unittest.TestCase):

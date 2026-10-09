@@ -7,7 +7,6 @@ raise SystemExit(
     "Te pravki uzhe v istorii git. Udalenie fayla - reshenie vladeltsa repozitoriya."
 )
 
-import re
 
 with open('assistant.py', 'r', encoding='utf-8') as f:
     code = f.read()

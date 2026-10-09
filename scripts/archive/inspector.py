@@ -1,7 +1,6 @@
 import config
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 import asyncio
-from datetime import datetime
 import sys
 
 # Потоки в utf-8: в print ниже есть эмодзи, а cp1251-консоль Windows роняет на
@@ -19,7 +18,7 @@ async def main():
     await client.start()
 
     print(f"🕵️‍♂️ Подключаюсь к чату {config.SOURCE_CHAT_ID} для анализа...")
-    
+
     total_msgs = 0
     photos = 0
     videos = 0
@@ -30,23 +29,23 @@ async def main():
     # Итерируемся по истории (быстро, только заголовки)
     async for msg in client.iter_messages(config.SOURCE_CHAT_ID):
         total_msgs += 1
-        
+
         if not last_date: last_date = msg.date # Самое свежее
         first_date = msg.date # Будет обновляться до самого старого
-        
+
         if msg.photo:
             photos += 1
         elif msg.video:
             videos += 1
         elif msg.text:
             texts += 1
-        
+
         # Визуализация прогресса каждые 1000 сообщений
         if total_msgs % 1000 == 0:
             print(f"   Просканировано: {total_msgs}...")
 
     print("\n" + "="*40)
-    print(f"📊 ИТОГИ АНАЛИЗА ЧАТА:")
+    print("📊 ИТОГИ АНАЛИЗА ЧАТА:")
     print(f"📅 Период: с {first_date.strftime('%d.%m.%Y')} по {last_date.strftime('%d.%m.%Y')}")
     print(f"📨 Всего сообщений: {total_msgs}")
     print(f"📝 Текстовых: {texts}")

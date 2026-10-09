@@ -88,12 +88,12 @@ async def main():
     # 4. Создаём недостающие топики
     print("\n=== 5. Создание разделов архива ===")
     mapping = {}
-    
+
     for t_spec in SOURCE_TOPICS:
         src_id = t_spec["src_id"]
         title = t_spec["title"]
         raw = t_spec["raw_title"].strip().lower()
-        
+
         target_id = None
         # Проверяем, есть ли уже такой топик
         for ex_title, ex_id in existing_topics.items():
@@ -101,7 +101,7 @@ async def main():
                 target_id = ex_id
                 print(f"Раздел '{title}' уже существует (ID {target_id}).")
                 break
-                
+
         if target_id is None:
             try:
                 res_create = await client(CreateForumTopicRequest(
@@ -117,11 +117,11 @@ async def main():
                         break
                     elif hasattr(update, 'id'):
                         target_id = update.id
-                
+
                 if target_id is None:
                     # fallback to id
                     target_id = getattr(res_create, 'id', None)
-                    
+
                 print(f"✅ Создан новый раздел: '{title}' -> ID {target_id}")
                 await asyncio.sleep(1.0)
             except Exception as e:

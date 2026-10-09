@@ -8,11 +8,10 @@ protocol_extractor.py — Автоматический экстрактор и �
 4. Интерактивную визуализацию и каталог для команды /protocols и RAG-поиска.
 """
 
-import asyncio
 import json
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import blocking_tools
 import database
@@ -358,7 +357,7 @@ def format_protocol_view(proto: dict) -> Tuple[str, list]:
     if isinstance(materials, (list, tuple)):
         materials = ", ".join(str(m) for m in materials)
     nuances = proto.get("key_nuances", "")
-    
+
     steps_raw = proto.get("steps") or proto.get("steps_json", "[]")
     steps = []
     if isinstance(steps_raw, (list, tuple)):

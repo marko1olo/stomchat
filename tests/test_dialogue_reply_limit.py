@@ -1,7 +1,6 @@
 import os
 import sys
 import tempfile
-import unittest
 
 for _stream in (sys.stdout, sys.stderr):
     try:

@@ -18,7 +18,6 @@ Adversarially challenges:
 import sys
 import os
 import time
-import math
 import asyncio
 import unittest
 import threading
@@ -30,7 +29,6 @@ _repo_dir = os.path.dirname(os.path.abspath(__file__))
 if _repo_dir not in sys.path:
     sys.path.insert(0, _repo_dir)
 
-import config
 import assistant
 import gemini_client
 

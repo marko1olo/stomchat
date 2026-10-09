@@ -1,7 +1,6 @@
 import asyncio
 import distiller
 import aiosqlite
-import json
 import sys
 
 # Потоки в utf-8: в print ниже есть эмодзи, а cp1251-консоль Windows роняет на
@@ -16,7 +15,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 async def test_run():
     print("🔬 ЗАПУСК ТЕСТОВОЙ ДИСТИЛЛЯЦИИ...")
-    
+
     # 1. Берем последние 50 сообщений из архива для теста
     # (Берем те, где есть текст и потенциально готов Vision)
     async with aiosqlite.connect("stomat_archive.db") as db:
@@ -36,7 +35,7 @@ async def test_run():
         return
 
     print(f"📥 Загружено {len(messages)} сообщений для анализа.")
-    
+
     # 2. Вызываем основной механизм Сита
     facts = await distiller.process_batch(messages)
 

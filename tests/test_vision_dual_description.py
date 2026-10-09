@@ -3,7 +3,6 @@ import os
 import unittest
 import asyncio
 import tempfile
-import sqlite3
 
 sys.path.insert(0, os.path.abspath("."))
 import vision
@@ -19,7 +18,7 @@ class TestVisionDualDescription(unittest.TestCase):
 
 [КРАТКАЯ ПОДПИСЬ]
 Рентгенограмма зуба 3.6: периапикальный очаг у дистального корня, недопломбировка канала."""
-        
+
         detailed, short = vision.parse_dual_vision_description(raw)
         self.assertIn("дистального корня", detailed)
         self.assertIn("PAI 3", detailed)
@@ -47,7 +46,7 @@ class TestVisionDualDescription(unittest.TestCase):
         async def _run():
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
                 db_path = tf.name
-            
+
             old_db = config.DB_PATH
             try:
                 config.DB_PATH = db_path

@@ -17,7 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 for _stream in (sys.stdout, sys.stderr):
     try:

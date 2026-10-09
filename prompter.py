@@ -22,7 +22,7 @@ def build_titan_prompts():
         return
 
     count = 0
-    
+
     # 2. Обработка файлов
     for filename in files:
         # Парсим имя файла: "2.2.1_Орто_Техника_BOPT.txt" -> Тема: Орто Техника BOPT
@@ -45,7 +45,7 @@ def build_titan_prompts():
         # 3. ФОРМИРОВАНИЕ УЛЬТИМАТИВНОГО ПРОМПТА (ВЕРСИЯ "TITAN-ULTIMATUM")
         titan_prompt = (
             f"--- УЛЬТИМАТИВНОЕ ЗАДАНИЕ ДЛЯ ВЕДУЩЕГО КЛИНИЦИСТА: БЕЗЛИМИТНЫЙ ОБЪЕМ ---\n\n"
-            
+
             f"РОЛЬ: Ты — ведущий клиницист и эксперт-практик. Ты пишешь практическое клиническое руководство для коллег. Твой стиль — суровая конкретика, доказательная медицина (EBM), цифры и биомеханика. \n"
             f"ЗАДАЧА: Написать ИСЧЕРПЫВАЮЩУЮ, ГИГАНТСКУЮ монографию по теме: '{cat_name}'.\n\n"
 
@@ -87,7 +87,7 @@ def build_titan_prompts():
         out_filename = f"PROMPT_{filename}"
         with open(os.path.join(OUTPUT_DIR, out_filename), "w", encoding="utf-8") as f_out:
             f_out.write(titan_prompt)
-        
+
         count += 1
         print(f"Промпт готов: {out_filename}")
 

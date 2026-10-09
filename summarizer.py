@@ -568,9 +568,9 @@ def get_russian_date(date_input):
         dt = datetime.strptime(date_input[:19], '%Y-%m-%d %H:%M:%S')
     else:
         dt = date_input
-    
+
     return f"{dt.day} {months[dt.month - 1]} {dt.year}"
-    
+
 
 
 clean_markdown_to_html = html_safe.clean_markdown_to_html
@@ -798,15 +798,15 @@ def filter_useful_messages(messages):
         m_desc = msg[4] if len(msg) > 4 else None
         m_url = msg[7] if len(msg) > 7 else None
         text = msg[3] if len(msg) > 3 else None
-        
+
         # Оставляем, если есть описание медиа (описание мема/снимка) или прямая ссылка
         if m_desc or m_url:
             useful.append(msg)
             continue
-            
+
         if not text:
             continue
-            
+
         text_strip = text.strip()
         text_lower = text_strip.lower()
 
@@ -856,7 +856,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         await _pin_message_safely(client, chat_id, sent_msg.id)
         runtime_guard.clear_summary_status("daily_cached_done")
         return cached_message
-    
+
     # --- 2. ОБЫЧНЫЙ ПУТЬ (ГЕНЕРАЦИЯ) ---
     filtered_messages = filter_useful_messages(messages)
     if not filtered_messages:
@@ -934,7 +934,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     profiles_block = f"\n{users_chunk_context}\n" if users_chunk_context else ""
 
     bonus_variants = BONUS_VARIANTS
-    
+
     # Блоки берём только те, для которых в логе дня есть материал.
     selected_bonuses = select_bonus_blocks(bonus_variants, full_text)
     bonus_instruction = "\n\n".join(selected_bonuses)
@@ -1052,29 +1052,29 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             len(messages),
             len(prompt),
         )
-        
-        if not response: 
+
+        if not response:
             runtime_guard.clear_summary_status("daily_gemini_no_response")
             return None
-        
+
         raw_summary = response.text
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
         cleaned_html = clean_markdown_to_html(raw_summary)
-        
+
         # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 4)
         full_html = embed_media_into_summary_html(cleaned_html, media_map, media_captions, max_images=4)
 
         cta_telegraph = build_clinical_assistant_cta("telegraph")
         count_footer = f"\n\n<i>Сообщений за период — {msg_count}</i>" if msg_count > 0 and "Сообщений за период" not in full_html else ""
         telegraph_footer = f"\n\n{cta_telegraph}{count_footer}"
-        
+
         # Благодаря прямому UTF-8 транспорту одна страница Telegraph безопасно вмещает до 25 000+ символов.
         # Не обрезаем статью преждевременно: _create_telegraph_page_resilient опубликует её целиком
         # либо автоматически разделит на связанные части (Часть 1, Часть 2) при превышении лимита.
         telegraph_html = full_html + telegraph_footer
-        
+
         date_str = get_russian_date(datetime.now())
-        TELEGRAPH_THRESHOLD = 1500 
+        TELEGRAPH_THRESHOLD = 1500
         sent_msg = None
 
         # --- НАСТРОЙКА ОТПРАВКИ В ТОПИК ---
@@ -1197,7 +1197,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                     for m in re.findall(pat, html_doc, re.IGNORECASE):
                         cl = re.sub(r'<[^>]+>', '', m).strip(' :–—-.•*#')
                         if any(st in cl.upper() for st in (
-                            "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ", 
+                            "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ",
                             "КЛИНИЧЕСКИЕ КЕЙСЫ", "ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК", "СООБЩЕНИЙ ЗА",
                             "ДАЙДЖЕСТ", "УЧИМСЯ ВМЕСТЕ", "МЕДИА-КОНТЕКСТ", "ИЛЛЮСТРАЦИЯ"
                         )):
@@ -1295,13 +1295,13 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         logger.info(f"✅ Саммари отправлено в {chat_id}")
         runtime_guard.clear_summary_status("daily_summary_done")
         return msg_to_send
-        
+
     except Exception:
         logger.exception("summary failed")
         runtime_guard.clear_summary_status("daily_summary_failed")
         return None
-        
-        
+
+
 
 async def process_weekly_batch(messages, client, chat_id, topic_id=None, delivery_hook=None, cached_message=None):
     """
@@ -1566,7 +1566,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
 
     try:
         logger.info("⏳ Генерируем МАСШТАБНЫЙ Weekly Digest (Longread)...")
-        
+
         # Используем executor для асинхронности, так как генерация длинная
         response = await _generate_text_singleflight(
             prompt,
@@ -1576,23 +1576,23 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             len(messages),
             len(prompt),
         )
-        
-        if not response: 
+
+        if not response:
             runtime_guard.clear_summary_status("weekly_gemini_no_response")
             return None
-        
+
         raw_text = response.text
         if not raw_text:
             logger.error("❌ Gemini вернул пустой текст для Weekly")
             runtime_guard.clear_summary_status("weekly_gemini_empty_text")
             return None
-            
+
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
         full_html = clean_markdown_to_html(raw_text)
-        
+
         # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 5)
         full_html = embed_media_into_summary_html(full_html, media_map, media_captions, max_images=5)
-        
+
         # Клинический CTA-подвал для Telegraph с описанием возможностей бота в ЛС
         cta_telegraph = build_clinical_assistant_cta("telegraph")
         count_footer = f"\n\n<i>Сообщений за неделю — {msg_count}</i>" if msg_count > 0 and "Сообщений за неделю" not in full_html else ""
@@ -1606,7 +1606,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         # Публикация в Telegraph с каскадным даунсайзингом
         date_str = get_russian_date(datetime.now())
         title = f"WEEKLY: Большая Стоматологическая Газета ({date_str})"
-        
+
         logger.info(f"📤 Отправка в Telegraph (Title: {title})...")
         _write_summary_stage(
             "telegraph_create",
@@ -1628,7 +1628,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         logger.info(f"summary weekly telegraph done chat={chat_id} ok={bool(page_url)}")
 
         logger.info(f"Готовим тизер для Weekly (Telegraph: {page_url or 'недоступен'})...")
-        
+
         weekly_teasers = [
             f"🗞 <b>ВЫШЕЛ НОВЫЙ НОМЕР WEEKLY ({date_str})</b>\n\n"
             f"Коллеги, это не просто саммари. Это летопись нашей недели.\n"
@@ -1645,7 +1645,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             f"⚔️ <b>Баттлы:</b> Аргументы сторон в вечных спорах.\n\n"
             f"Энциклопедия коллективного опыта готова."
         ]
-        
+
         sel_teaser = random.choice(weekly_teasers)
         if page_url:
             sel_cta = f"👉 <b><a href='{page_url}'>ЧИТАТЬ ПОЛНЫЙ ВЫПУСК</a></b>"
@@ -1658,7 +1658,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             f"{sel_cta}\n\n"
             f"{cta_telegram}"
         )
-        
+
         send_params = {
             'parse_mode': 'HTML',
             'link_preview': bool(page_url)
@@ -1667,7 +1667,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             send_params['buttons'] = [[Button.url("⚡ Читать в Telegram", page_url)]]
         if topic_id:
             send_params['reply_to'] = topic_id
-        
+
         _write_summary_stage(
             "telegram_send",
             kind="weekly",
@@ -1684,7 +1684,7 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             send_params,
             "weekly_teaser",
         )
-        
+
         # Закреп. Проверка на sent_msg тут была пропущена, хотя в дневной ветке
         # она есть: обращение к sent_msg.id у None бросало AttributeError уже
         # ПОСЛЕ доставки тизера, внешний except объявлял выпуск неудачей

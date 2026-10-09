@@ -7,7 +7,7 @@ and micron/millimeter catching in favor of real chairside clinical dilemmas.
 import inspect
 import unittest
 import poll_engine
-from poll_engine import WEEKLY_RUBRICATOR, PollPayload, PollType
+from poll_engine import WEEKLY_RUBRICATOR
 
 
 class TestPollPedantryGuardrail(unittest.TestCase):

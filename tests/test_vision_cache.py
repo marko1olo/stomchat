@@ -15,7 +15,6 @@ import asyncio
 import os
 import sys
 import tempfile
-import time
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -144,7 +143,7 @@ async def run_tests():
         gc.note_success("gemini", test_key, "gemini-3.5-flash-lite")
         check("note_success снял кулдаун", gc._key_fingerprint("gemini", test_key) not in gc.get_key_cooldowns())
 
-    print(f"\n==============================================================")
+    print("\n==============================================================")
     print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
     if FAIL:
         print("Провалено: " + ", ".join(FAIL))

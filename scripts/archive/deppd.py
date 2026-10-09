@@ -1,8 +1,6 @@
 import asyncio
 import aiosqlite
 import logging
-import os
-import re
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 import config
@@ -53,14 +51,14 @@ def is_garbage(message):
     """Проверяет, является ли сообщение мусором."""
     # 1. Если это сервисный системный месседж
     if not message.sender_id: return True
-    
+
     # 2. Если это стикер, гифка или кружок (видеосообщение)
     if message.sticker or message.gif or message.video_note: return True
-    
+
     # 3. Если текста нет и это не фото/видео/файл
     if not message.message and not message.photo and not message.video and not message.document:
         return True
-    
+
     # 4. Если текст слишком короткий (флуд типа 'ок', 'спс', '+')
     if message.message and len(message.message.strip()) < 4 and not message.photo:
         return True
@@ -106,7 +104,7 @@ async def main():
     await init_db()
     client = TelegramClient(DUMPER_SESSION, config.API_ID, config.API_HASH)
     await client.start()
-    
+
     # 1. СМОТРИМ, НА ЧЕМ ОСТАНОВИЛИСЬ В ПРОШЛЫЙ РАЗ
     last_id = 0
     async with aiosqlite.connect(ARCHIVE_DB_PATH) as db:
@@ -119,12 +117,12 @@ async def main():
     if last_id > 0:
         print(f"🔄 РЕЖИМ ДОКАЧКИ: Забираем только новые сообщения ( > {last_id})...")
     else:
-        print(f"🆕 ПОЛНАЯ ВЫГРУЗКА: База пуста, качаем всё с нуля...")
-    
+        print("🆕 ПОЛНАЯ ВЫГРУЗКА: База пуста, качаем всё с нуля...")
+
     count = 0
     ignored = 0
     batch = []
-    
+
     # 2. reverse=True + min_id позволяют идти ХРОНОЛОГИЧЕСКИ от старого к новому
     # Мы пропускаем всё, что уже есть (min_id=last_id)
     async for message in client.iter_messages(config.SOURCE_CHAT_ID, min_id=last_id, reverse=True):
@@ -134,7 +132,7 @@ async def main():
                 continue
 
             sender = await message.get_sender()
-            
+
             # Сбор данных об авторе (с поддержкой анонимных групп)
             if hasattr(sender, 'first_name'):
                 first_name = sender.first_name or ''
@@ -144,11 +142,11 @@ async def main():
                 sender_name = sender.title or "Администрация"
             else:
                 sender_name = "Админ"
-                
+
             sender_username = getattr(sender, 'username', None)
-            
+
             reply_to = message.reply_to.reply_to_msg_id if message.reply_to else None
-            
+
             # Определяем тип медиа. Разбор вынесен в media_kind, чтобы его можно
             # было проверить тестом: прежде три ветки стояли здесь, внутри цикла
             # по Telegram, и проверить их было нечем.
@@ -167,7 +165,7 @@ async def main():
             )
             batch.append(msg_data)
             count += 1
-            
+
             if len(batch) >= 500:
                 async with aiosqlite.connect(ARCHIVE_DB_PATH) as db:
                     await db.executemany('''

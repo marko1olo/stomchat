@@ -14,7 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
-from telethon import types, Button
+from telethon import types
 
 for _stream in (sys.stdout, sys.stderr):
     try:

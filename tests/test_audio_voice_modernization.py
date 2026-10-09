@@ -86,10 +86,10 @@ class TestAudioVoiceModernization(unittest.TestCase):
             # Generate 1 second of digital silence
             cmd = [binary, "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "1", tmp_wav]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            
+
             self.assertTrue(os.path.exists(tmp_wav))
             self.assertGreater(os.path.getsize(tmp_wav), 100)
-            
+
             is_silent = gemini_client.is_audio_silent_or_empty(tmp_wav)
             self.assertTrue(is_silent, "1s silent WAV should be detected as silence by volumedetect")
         finally:
@@ -119,7 +119,7 @@ class TestAudioVoiceModernization(unittest.TestCase):
                  patch("gemini_client.available_keys", return_value=(["fake_groq_key"], [], 0)):
                 res = gemini_client.transcribe_audio_bytes_or_file(tmp_path, timeout=30)
                 self.assertEqual(res, "Лечение пульпита зуба 1.6")
-                
+
                 # Check call kwargs
                 fake_client.audio.transcriptions.create.assert_called_once()
                 call_kwargs = fake_client.audio.transcriptions.create.call_args[1]
