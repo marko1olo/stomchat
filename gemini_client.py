@@ -748,7 +748,7 @@ def is_media_task(status_context=None, prompt=None) -> bool:
 def cascade_for_context(status_context=None, prompt=None):
     """
     Формирует каскад (model_name, provider) в зависимости от контекста задачи.
-    Для медиа/фото/рентгена: СТРОГО мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> 2.5 -> lite).
+    Для медиа/фото/рентгена: СТРОГО мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> lite).
     Никакого DeepSeek или Groq для задач со снимками!
     Для CHAT_KINDS: gemini-3.5-flash-lite в начале для быстрых ответов (при LOW/MEDIUM),
     но gemini-3.8-flash доступен для глубоких рассуждений (при HIGH).
@@ -765,7 +765,6 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash", "gemini"),
-            ("gemini-2.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
         ]
@@ -840,7 +839,6 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash", "gemini"),
-            ("gemini-2.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
         ]
@@ -1636,7 +1634,6 @@ async def transcribe_audio_gemini_multimodal(
     gemini_timeout = max(120.0, min(480.0, duration_secs * 0.6 + 80.0))
     models_to_try = [
         "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
         "gemini-3.8-flash",
         "gemini-3.5-flash",
     ]
@@ -1964,7 +1961,7 @@ async def generate_pm_supplement_async(user_question, initial_answer, timeout=14
 def generate_google_grounding(prompt_or_query, timeout=160.0):
     """
     Генерация клинического ответа с заземлением на живой веб-поиск через Google Search Grounding.
-    Модель: gemini-2.5-flash с tools=[google_search].
+    Модель: gemini-2.0-flash с tools=[google_search].
     Возвращает (result_dict, error_str).
     """
     keys = list(config.GOOGLE_KEYS)
@@ -1998,7 +1995,7 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
         "4. Пиши профессионально и строго по делу, как коллега коллеге, без пустых вводных слов и без рекламы."
     )
 
-    models_to_try = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+    models_to_try = ["gemini-2.0-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
     last_err = None
 
     for model_name in models_to_try:

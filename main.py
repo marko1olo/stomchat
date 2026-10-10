@@ -67,7 +67,7 @@ FALLBACK_BOT_ID = _env_int("STOMCHAT_BOT_ID", 7971556097)
 # соседняя проверка f"@{assistant.BOT_ID}" сравнивала текст с числовым id и
 # не срабатывала никогда.
 FALLBACK_BOT_USERNAME = os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot").lstrip("@").lower()
-MIRROR_CHAT_ID = _env_int("MIRROR_CHAT_ID", -1004326633527)
+MIRROR_CHAT_ID = _env_int("MIRROR_CHAT_ID", 0) or None
 
 HEALTH_CHECK_INTERVAL_SECONDS = 300
 HEALTH_FAILURE_LIMIT = 3
@@ -2287,8 +2287,12 @@ if not config.SOURCE_CHAT_ID:
 _mirror_album_lock = asyncio.Lock()
 _mirror_album_buffer = {}
 _mirror_album_tasks = {}
+_mirror_disabled = False
 
 async def _flush_mirror_album(grouped_id, target_chat_id):
+    global _mirror_disabled
+    if _mirror_disabled:
+        return
     await asyncio.sleep(1.5)
     async with _mirror_album_lock:
         msgs = _mirror_album_buffer.pop(grouped_id, [])
@@ -2298,10 +2302,17 @@ async def _flush_mirror_album(grouped_id, target_chat_id):
             await bot_client.forward_messages(target_chat_id, msgs)
             logger.info("Mirror forwarded album grouped_id=%s (%d msgs) to %s", grouped_id, len(msgs), target_chat_id)
         except Exception as exc:
-            logger.warning("Failed to forward mirror album %s: %s", grouped_id, exc)
+            err_msg = str(exc)
+            if "Could not find the input entity" in err_msg or "PeerChannel" in err_msg:
+                if not _mirror_disabled:
+                    _mirror_disabled = True
+                    logger.warning("Mirror chat %s inaccessible (%s). Disabling mirror forwarding.", target_chat_id, exc)
+            else:
+                logger.warning("Failed to forward mirror album %s: %s", grouped_id, exc)
 
 async def forward_to_mirror(event_msg, target_chat_id):
-    if not target_chat_id:
+    global _mirror_disabled
+    if not target_chat_id or _mirror_disabled:
         return
     grouped_id = getattr(event_msg, "grouped_id", None)
     if grouped_id:
@@ -2316,7 +2327,13 @@ async def forward_to_mirror(event_msg, target_chat_id):
             await bot_client.forward_messages(target_chat_id, event_msg)
             logger.info("Mirror forwarded msg_id=%s to %s", event_msg.id, target_chat_id)
         except Exception as exc:
-            logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
+            err_msg = str(exc)
+            if "Could not find the input entity" in err_msg or "PeerChannel" in err_msg:
+                if not _mirror_disabled:
+                    _mirror_disabled = True
+                    logger.warning("Mirror chat %s inaccessible (%s). Disabling mirror forwarding.", target_chat_id, exc)
+            else:
+                logger.warning("Failed to forward to mirror msg_id=%s: %s", event_msg.id, exc)
 
 import question_lifeline
 
@@ -2340,7 +2357,8 @@ async def _send_lifeline_to_chat(chat_id: int, reply_to_msg_id: int, text: str):
 lifeline_delay = getattr(config, "QUESTION_LIFELINE_DELAY_SECONDS", question_lifeline.DEFAULT_LIFELINE_DELAY_SECONDS)
 lifeline_manager = question_lifeline.QuestionLifelineManager(
     delay_seconds=lifeline_delay,
-    send_message_callback=_send_lifeline_to_chat
+    send_message_callback=_send_lifeline_to_chat,
+    typing_context_factory=lambda chat_id: assistant._safe_typing_action(bot_client, chat_id)
 )
 
 @client.on(events.NewMessage(chats=WATCHED_CHATS))

@@ -226,6 +226,24 @@ def get_ad_hint(reply_text: str = "") -> str:
     return random.choice(AD_HINTS)
 
 
+@contextlib.asynccontextmanager
+async def _safe_typing_action(client, chat_id):
+    """
+    Безопасный контекстный менеджер для отправки статуса 'typing' (печатает...).
+    Показывает врачам в Telegram, что бот готовит ответ. Если клиент недоступен
+    или Telegram возвращает ошибку — подавляет сбой, чтобы не срывать генерацию.
+    """
+    if not client or not chat_id:
+        yield
+        return
+    try:
+        async with client.action(chat_id, 'typing'):
+            yield
+    except Exception as exc:
+        logger.debug("Safe typing action suppressed for chat_id=%s: %s", chat_id, exc)
+        yield
+
+
 async def _try_send_reaction(event, msg_id: int, emoji: str, prefetched_msg=None) -> bool:
     """Ставит реакцию emoji на msg_id от имени юзербота (event.client).
 
@@ -4469,7 +4487,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             "thinking_level": "HIGH",
             "has_media": bool(thread_has_media),
         }
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+        async with _safe_typing_action(bot_client, event.chat_id):
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error:
             logger.error(f"Assistant Gemini generation error: {error}")
@@ -4544,22 +4563,25 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 )
                 dialogue_context_snippet = "\n".join(context_msgs[-3:]) if context_msgs else text
                 fallback_prompt = f"""Ты — опытный клинический эксперт-стоматолог в Telegram-чате.
-Врач задал клинический/технический вопрос в диалоге, но черновик ответа был отклонён рецензентом по причине: "{quality_reason}".
-Сформулируй предельно краткий (1-2 предложения), абсолютно безопасный, честный и доказательный ответ врачу.
+Врач написал реплику или вопрос в диалоге, но черновик ответа был отклонён рецензентом: "{quality_reason}".
+Сформулируй предельно краткий (1-2 предложения), емкий, профессиональный и честный ответ коллеге.
+
 ТРЕБОВАНИЯ:
-1. Запрещено выдумывать каталожные артикулы, конкретные номера позиций или сомнительные дозировки. Если вопрос касается точного артикула, размера запчасти или торка — прямо укажи, что точную спецификацию необходимо сверить по каталогу производителя/дилера системы.
-2. Сохраняй спокойный, уважительный тон опытного коллеги.
-3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
-4. Отвечай прямо по клинической сути, не упоминай валидаторы, ИИ, рецензентов или правила.
+1. Отвечай прямо по клинической или смысловой сути сообщения. Говори на равных, дружелюбно, профессионально и уважительно.
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые шаблонные дисклеймеры и бюрократические отписки: «сверяйте по инструкции производителя», «обратитесь к IFU», «проконсультируйтесь со специалистом», «следуйте рекомендациям протокола». Никакого канцелярита!
+3. Запрещено выдумывать каталожные артикулы, конкретные номера позиций или сомнительные дозировки. Если данных недостаточно — просто скажи это прямо своими словами.
+4. Сохраняй спокойный, уважительный тон опытного коллеги.
+5. Разметка: только HTML (<b>жирный</b>). Без Markdown. Никаких упоминаний валидаторов, правил, рецензентов или ИИ.
 
 Контекст диалога:
 {dialogue_context_snippet}
 
-Вопрос врача:
+Сообщение врача:
 {text}
 """
                 ctx = {"kind": "dialogue_fallback", "thinking_level": "MEDIUM"}
-                fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
+                async with _safe_typing_action(bot_client, event.chat_id):
+                    fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
                 fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
                 fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
                 if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
@@ -4567,10 +4589,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     quality_ok = True
                     logger.info("Dialogue safe fallback successfully generated.")
                 else:
-                    # Чтобы не бросать врача в тишине (Silent Dropout) и не вызывать каскадный срыв в referee:
                     reply_text = (
-                        "Сервис клинического анализа временно перегружен. "
-                        "Для точной информации сверьтесь с официальным клиническим протоколом или спецификацией производителя."
+                        "Клинический вопрос принят. Чтобы не давать непроверенных рекомендаций у кресла, "
+                        "ориентируемся на очный протокол и данные прицельной рентгенодиагностики."
                     )
                     quality_ok = True
                     logger.info("Dialogue safe deterministic fallback applied.")
@@ -5028,7 +5049,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH", "has_media": True}
     if image_urls:
         status_ctx["image_urls"] = image_urls
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+    async with _safe_typing_action(bot_client, event.chat_id):
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
     if error:
         logger.error(f"Media Assistant Gemini generation error: {error}")
@@ -5101,8 +5123,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 quality_reason
             )
             fallback_prompt = f"""Ты — клинический эксперт-стоматолог. Врач прислал фото/снимок с вопросом, но черновик разбора отклонён по причине: "{quality_reason}".
-Сформулируй краткий (1-2 предложения), предельно безопасный и взвешенный комментарий по снимку без домысливания деталей.
-Если по фото недостаточно чёткости или данных для однозначного вывода — прямо порекомендуй прицельный снимок или КЛКТ. Разметка: только HTML. Без Markdown.
+Сформулируй краткий (1-2 предложения), емкий и взвешенный комментарий по снимку без домысливания деталей.
+
+ТРЕБОВАНИЯ:
+1. Если по фото недостаточно чёткости или данных для однозначного вывода — прямо порекомендуй прицельный снимок или КЛКТ.
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые шаблонные дисклеймеры и канцелярские отписки («сверяйте по инструкции производителя», «обратитесь к IFU»). Говори на равных как опытный коллега.
+3. Разметка: только HTML (<b>жирный</b>). Без Markdown. Никаких упоминаний ИИ и проверок.
 
 Описание снимка:
 {media_description or "Снимок/фото"}
@@ -5111,7 +5137,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 {caption_text}
 """
             ctx = {"kind": "media_fallback", "thinking_level": "HIGH", "has_media": True}
-            fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
+            async with _safe_typing_action(bot_client, event.chat_id):
+                fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
             fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
             fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
             if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
@@ -7933,11 +7960,12 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
             logger.info(f"PM supplement discarded before generation: context changed for chat_id={chat_id}")
             return
 
-        supplement_text, error = await generate_pm_supplement_async(
-            user_question=user_question,
-            initial_answer=initial_answer,
-            timeout=140.0,
-        )
+        async with _safe_typing_action(bot_client, chat_id):
+            supplement_text, error = await generate_pm_supplement_async(
+                user_question=user_question,
+                initial_answer=initial_answer,
+                timeout=140.0,
+            )
 
         if error or not supplement_text:
             logger.info(f"PM supplement empty/error for chat_id={chat_id}: {error}")
@@ -7958,8 +7986,12 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
             logger.info(f"PM supplement aborted before send: context changed for chat_id={chat_id}")
             return
 
+        import html
+        supplement_text = html.unescape(supplement_text).strip()
+        supplement_text = re.sub(r'\n{3,}', '\n\n', supplement_text)
         formatted_message = f"🔍 <b>Дополнительные клинические нюансы:</b>\n\n{supplement_text}"
         formatted_message = clean_html_formatting(formatted_message)
+        formatted_message = re.sub(r'\n{3,}', '\n\n', formatted_message.strip())
 
         # Валидация качества фонового дополнения рецензентом
         supp_ok, supp_reason = await check_response_quality(
@@ -10669,7 +10701,8 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
         status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+        async with _safe_typing_action(bot_client, chat_id):
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
@@ -10905,7 +10938,8 @@ async def handle_group_quiz(bot_client, event):
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
     status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+    async with _safe_typing_action(bot_client, chat_id):
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
     try:
         await bot_client.delete_messages(chat_id, status_msg.id)
     except Exception:
@@ -12062,7 +12096,8 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     error = None
     if generate_gemini_text_async:
         try:
-            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+            async with _safe_typing_action(bot_client, chat_id):
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
         except Exception as e:
             error = str(e)
 
@@ -14045,7 +14080,8 @@ async def handle_term_explainer(bot_client, event, term):
 5. ЕСЛИ справка пуста и термин тебе незнаком — честно напиши: «Точных данных по этому термину нет в нашей базе. Уточни у коллег!» — и ничего не выдумывай.
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+    async with _safe_typing_action(bot_client, chat_id):
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
 
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.

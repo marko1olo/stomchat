@@ -113,13 +113,15 @@ class QuestionLifelineManager:
         max_per_day: int = DEFAULT_MAX_LIFELINES_PER_DAY,
         cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
         llm_caller: Optional[Callable] = None,
-        send_message_callback: Optional[Callable] = None
+        send_message_callback: Optional[Callable] = None,
+        typing_context_factory: Optional[Callable] = None
     ):
         self.delay_seconds = delay_seconds
         self.max_per_day = max_per_day
         self.cooldown_seconds = cooldown_seconds
         self.llm_caller = llm_caller
         self.send_message_callback = send_message_callback
+        self.typing_context_factory = typing_context_factory
 
         # msg_id -> PendingQuestion
         self.pending_questions: Dict[int, PendingQuestion] = {}
@@ -295,12 +297,30 @@ class QuestionLifelineManager:
             except ImportError:
                 caller = None
 
-        response_text = await generate_lifeline_response(
-            question_text=pq.text,
-            doctor_name=pq.sender_name,
-            media_desc=media_desc,
-            llm_caller=caller
-        )
+        if self.typing_context_factory:
+            try:
+                async with self.typing_context_factory(pq.chat_id):
+                    response_text = await generate_lifeline_response(
+                        question_text=pq.text,
+                        doctor_name=pq.sender_name,
+                        media_desc=media_desc,
+                        llm_caller=caller
+                    )
+            except Exception as typing_err:
+                logger.debug("Lifeline typing action error: %s", typing_err)
+                response_text = await generate_lifeline_response(
+                    question_text=pq.text,
+                    doctor_name=pq.sender_name,
+                    media_desc=media_desc,
+                    llm_caller=caller
+                )
+        else:
+            response_text = await generate_lifeline_response(
+                question_text=pq.text,
+                doctor_name=pq.sender_name,
+                media_desc=media_desc,
+                llm_caller=caller
+            )
 
         if not response_text:
             logger.warning("Lifeline generation returned empty text for msg_id=%s", pq.msg_id)
