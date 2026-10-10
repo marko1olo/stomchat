@@ -570,11 +570,11 @@ def prepare(question, raw_results, error=None):
 # попыток» стоит вызывающему не 90 с, а 110 с. Прежний вызывающий, посчитавший
 # 90, вылетел бы по своему таймауту на 20 с раньше, чем поиск успел бы честно
 # отказаться, — и врач не получил бы даже причины.
-SUBPROCESS_SLACK_SECONDS = 10.0
+SUBPROCESS_SLACK_SECONDS = 40.0
 
 # Бюджет РЕБЁНКА на одну попытку поиска. Число из search_engine_safe.perform_search:
 # второе число рядом разъедется, а поведение провайдера от места вызова не зависит.
-SEARCH_ATTEMPT_TIMEOUT_SECONDS = 45.0
+SEARCH_ATTEMPT_TIMEOUT_SECONDS = 180.0
 
 # Две попытки: полный запрос, затем укороченный. Так делает perform_search, и это
 # не украшение — общий поиск по длинной клинической фразе часто отдаёт пусто, а по
@@ -591,14 +591,13 @@ SEARCH_MAX_RESULTS = 8
 SEARCH_ATTEMPT_COST_SECONDS = SEARCH_ATTEMPT_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
 SEARCH_TOTAL_COST_SECONDS = SEARCH_ATTEMPT_COST_SECONDS * SEARCH_ATTEMPTS
 
-# Бюджет РЕБЁНКА на генерацию ответа. 90 с — то же, что на всех остальных путях
-# ассистента (generate_gemini_text_async(..., timeout=90)).
-ANSWER_TIMEOUT_SECONDS = 90.0
+# Бюджет РЕБЁНКА на генерацию ответа.
+ANSWER_TIMEOUT_SECONDS = 360.0
 ANSWER_COST_SECONDS = ANSWER_TIMEOUT_SECONDS + SUBPROCESS_SLACK_SECONDS
 
 # Меньше этого генерацию не начинаем. Запрос, которому не хватит времени даже
 # соединиться, только сожжёт остаток бюджета: лучше отдать врачу найденные ссылки.
-ANSWER_MIN_TIMEOUT_SECONDS = 20.0
+ANSWER_MIN_TIMEOUT_SECONDS = 80.0
 
 # Троттлинг LLM-шлюза разносит СТАРТЫ запросов на 3 с
 # (blocking_tools._GEMINI_MIN_INTERVAL_SECONDS). Ждать под этой блокировкой —

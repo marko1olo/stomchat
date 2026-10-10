@@ -641,10 +641,10 @@ check("подпись без источников не добавляет пус
 print("\n[12] Разметка ответа безопасна для Telegram")
 # Битый тег от модели отклоняет ВСЁ сообщение: врач не увидит ни ответа, ни ссылок.
 _dirty = assistant.clean_html_formatting(
-    "<b>Доза</b> <u>подчёркнутое</u> <script>alert(1)</script> 5 мг/кг [1]\n" + _footer
+    "<b>Доза</b> <font>подчёркнутое</font> <script>alert(1)</script> 5 мг/кг [1]\n" + _footer
 )
 check("неподдержанный тег экранирован, а не отдан Telegram",
-      "<u>" not in _dirty and "&lt;u&gt;" in _dirty)
+      "<font>" not in _dirty and "&lt;font&gt;" in _dirty)
 check("поддержанный тег сохранён", "<b>Доза</b>" in _dirty)
 check("ссылка после экранирования цела", PUBMED_URL in _dirty)
 check("угловых скобок без пары не осталось", _dirty.count("<") == _dirty.count(">"),
@@ -656,7 +656,7 @@ check("угловых скобок без пары не осталось", _dirt
 # незакрытый тег — и Telegram отклоняет сообщение целиком, врач не видит ни
 # ответа, ни ссылок, а в журнале это выглядит как «ответ доставлен».
 _MODEL_BROKEN_HTML = (
-    "<u>Доза</u> 5 мг/кг [1]. Незакрытый <b>тег и <script>alert(1)</script> "
+    "<font>Доза</font> 5 мг/кг [1]. Незакрытый <b>тег и <script>alert(1)</script> "
     "плюс 3 < 5 и амперсанд & сам по себе."
 )
 bot, _, _ = drive("/web биодентин доза", answer=_MODEL_BROKEN_HTML)
@@ -666,7 +666,7 @@ check("ответ модели дошёл до врача одним сообщ�
 if _delivered:
     _out = _delivered[0]
     check("доставка прогоняет ответ модели через очистку разметки",
-          "<u>" not in _out and "<script>" not in _out,
+          "<font>" not in _out and "<script>" not in _out,
           "неподдержанный тег уходит в Telegram, и он отклоняет ВСЁ сообщение")
     check("непарных угловых скобок в доставленном ответе нет",
           _out.count("<") == _out.count(">"),
@@ -709,7 +709,7 @@ check("перехватчик журнала подключён и что-то �
       "проверки на WARNING слепы, если перехватчик не подключён")
 check("подмена констант вернула настоящие числа",
       W.SEARCH_ATTEMPT_COST_SECONDS == W.SEARCH_ATTEMPT_TIMEOUT_SECONDS
-      + W.SUBPROCESS_SLACK_SECONDS and W.ANSWER_MIN_TIMEOUT_SECONDS == 20.0,
+      + W.SUBPROCESS_SLACK_SECONDS and W.ANSWER_MIN_TIMEOUT_SECONDS == 80.0,
       f"COST={W.SEARCH_ATTEMPT_COST_SECONDS} MIN={W.ANSWER_MIN_TIMEOUT_SECONDS}")
 
 print("\n[14] Попутный фикс: отказ разбора файла не висит вечно")
@@ -934,12 +934,12 @@ async def _instant_two(query, timeout):
 
 
 _tight = run(W.run_lookup("биодентин перфорация", _instant_two, _record_gen,
-                          budget=100.0, log=W.logger))
+                          budget=350.0, log=W.logger))
 check("генерация запущена на тесном бюджете", len(_budget_gen) == 1,
       f"вызовов {len(_budget_gen)}")
-check("генерации выдан ОСТАТОК, а не полные 90 с",
+check("генерации выдан ОСТАТОК, а не полные 360 с",
       _budget_gen[0] < W.ANSWER_TIMEOUT_SECONDS,
-      f"выдано {_budget_gen[0]} при бюджете прохода 100 — вместе с запасом это "
+      f"выдано {_budget_gen[0]} при бюджете прохода 350 — вместе с запасом это "
       f"выход за срок команды")
 check("остатка всё же хватило на генерацию",
       _budget_gen[0] >= W.ANSWER_MIN_TIMEOUT_SECONDS and _tight["outcome"] == W.OUTCOME_OK,

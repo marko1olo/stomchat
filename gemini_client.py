@@ -139,7 +139,7 @@ def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
         )
         time.sleep(min(15, remaining))
 
-def get_openai_client(api_key, base_url, timeout=30.0, **kwargs):
+def get_openai_client(api_key, base_url, timeout=120.0, **kwargs):
     client_kwargs = {
         "api_key": api_key if api_key else "dummy_key",
         "base_url": base_url,
@@ -354,7 +354,7 @@ def set_provider_pool_cooldown(provider: str, seconds: int = GCP_PROJECT_COOLDOW
         set_key_cooldown(provider, k, seconds=seconds)
 
 
-def get_provider_client(provider, api_key, timeout=30.0):
+def get_provider_client(provider, api_key, timeout=120.0):
     """Клиент к провайдеру по его имени. Единственная точка создания клиента."""
     base_url = PROVIDER_BASE_URLS.get(provider)
     if not base_url:
@@ -645,12 +645,12 @@ POLL_GEN_KINDS = frozenset({
 
 
 # Ниже этого одна попытка бессмысленна: запрос рвётся на генерации. Значение
-# унаследовано от прежнего max(7.0, ...) — нижнюю границу автор уже выбрал.
-MIN_REQUEST_SECONDS = 8.0
+# увеличено 4x для предотвращения обрыва тяжелых рассуждающих моделей Gemini.
+MIN_REQUEST_SECONDS = 32.0
 # Дробить долю модели на несколько попыток по разным ключам стоит только если
 # каждой достанется хотя бы столько: иначе ротация ключей превращается в серию
 # запросов, убитых по таймауту на середине ответа.
-COMFORT_REQUEST_SECONDS = 23.0
+COMFORT_REQUEST_SECONDS = 92.0
 # 15% бюджета не раздаём запросам: это сны между попытками (2-12 с,
 # _retry_sleep_seconds), старт подпроцесса с импортом openai (~1-2 с) и запас,
 # чтобы успеть записать причину провала ДО того, как родитель убьёт процесс.
@@ -891,10 +891,8 @@ def generate_text(prompt, status_context=None, timeout=None):
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
 
     # Таймаут одного запроса считается ниже, когда известен каскад: он зависит от
-    # числа попыток, а число попыток — от числа моделей и живых ключей. Здесь
-    # стояло req_timeout = timeout/3, и это была ошибка арифметики, а не оценки;
-    # разбор — у расчёта бюджета после сборки каскада.
-    req_timeout = 35.0
+    # числа попыток, а число попыток — от числа моделей и живых ключей.
+    req_timeout = 140.0
 
     # Авто-детект фокуса на изображении/рентгене по тексту промпта
     if prompt and isinstance(status_context, dict) and not status_context.get("has_media"):
@@ -1008,7 +1006,7 @@ def generate_text(prompt, status_context=None, timeout=None):
             # него влез, а ноль запросов — это гарантированное молчание бота.
             if deadline is not None and requests_made:
                 remaining = deadline - time.monotonic()
-                min_needed = 7.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
+                min_needed = 28.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
                 if remaining < min_needed:
                     # Запрос, который не успеет закончиться до убийства процесса,
                     # начинать нечего: его ответ никто не прочитает.
@@ -1028,11 +1026,11 @@ def generate_text(prompt, status_context=None, timeout=None):
 
             call_timeout = req_timeout
             if provider == "agentrouter":
-                rem = (deadline - time.monotonic()) if deadline else 35.0
+                rem = (deadline - time.monotonic()) if deadline else 140.0
                 if kind in summary_kinds:
-                    call_timeout = max(call_timeout, min(180.0, max(30.0, rem)))
+                    call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
                 else:
-                    call_timeout = max(call_timeout, min(30.0, max(7.0, rem)))
+                    call_timeout = max(call_timeout, min(120.0, max(28.0, rem)))
             elif deadline is not None:
                 rem = deadline - time.monotonic()
                 call_timeout = min(call_timeout, rem)
@@ -1552,7 +1550,7 @@ async def transcribe_audio_gemini_multimodal(
         "ВЫВЕДИ ТОЛЬКО расшифровку, без комментариев, пояснений и предисловий."
     )
 
-    gemini_timeout = max(30.0, min(120.0, duration_secs * 0.6 + 20.0))
+    gemini_timeout = max(120.0, min(480.0, duration_secs * 0.6 + 80.0))
     models_to_try = [
         "gemini-3.1-flash-lite",
         "gemini-2.5-flash",
@@ -1791,7 +1789,7 @@ def sanitize_supplement_output(text):
     return text
 
 
-def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
+def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     """
     Генерирует лаконичное клиническое дополнение (дельту) к первичному ответу через Groq (openai/gpt-oss-120b)
     с автоматическим фоллбеком на Gemini (gemini-3.5-flash).
@@ -1838,7 +1836,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
         for api_key in candidates[:2]:
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
             try:
-                client = get_provider_client(provider, api_key, timeout=min(25.0, timeout or 25.0))
+                client = get_provider_client(provider, api_key, timeout=min(100.0, timeout or 100.0))
                 supp_kwargs = {
                     "model": model_name,
                     "messages": [
@@ -1874,13 +1872,13 @@ def generate_pm_supplement(user_question, initial_answer, timeout=35.0):
     return None
 
 
-async def generate_pm_supplement_async(user_question, initial_answer, timeout=35.0):
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=140.0):
     """Асинхронная обертка для вызова генерации дополнения через изолированный подпроцесс."""
     import blocking_tools
     return await blocking_tools.generate_pm_supplement_async(user_question, initial_answer, timeout=timeout)
 
 
-def generate_google_grounding(prompt_or_query, timeout=40.0):
+def generate_google_grounding(prompt_or_query, timeout=160.0):
     """
     Генерация клинического ответа с заземлением на живой веб-поиск через Google Search Grounding.
     Модель: gemini-2.5-flash с tools=[google_search].

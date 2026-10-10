@@ -438,7 +438,7 @@ async def check_and_react_standalone(event, msg_id: int, text: str, sender_name:
 Ответ:"""
 
         ctx = {"kind": "react_standalone_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, ctx, timeout=15)
+        response, error = await generate_gemini_text_async(triage_prompt, ctx, timeout=60)
         if error or not response:
             _rollback_reservation()
             return False
@@ -489,7 +489,7 @@ async def generate_user_portrait(user_id):
 Вывод (строго 1-2 предложения):
 """
         status_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=20)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=80)
         if error or not response or not getattr(response, "text", None):
             return "Недостаточно сообщений в общей группе для анализа клинического профиля."
         return response.text.strip()
@@ -529,7 +529,7 @@ YES — если вопрос содержит клинический интер
 NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), нецензурная брань/троллинг или оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=240)
         if error or not response or not getattr(response, "text", None):
             last_msg = dialogue_chain[-1] if dialogue_chain else ""
             last_text = last_msg.split(": ", 1)[-1].strip().lower() if ": " in last_msg else last_msg.lower()
@@ -912,7 +912,7 @@ async def classify_pm_intent_semantic_async(text: str) -> dict:
 
     status_ctx = {"kind": "pm_chat", "thinking_level": "LOW"}
     try:
-        resp, err = await generate_gemini_text_async(prompt, status_ctx, timeout=12)
+        resp, err = await generate_gemini_text_async(prompt, status_ctx, timeout=48)
         if err or not resp:
             return {"intent": "CLINICAL_CHAT", "confidence": 0.0, "error": err}
 
@@ -2947,7 +2947,7 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 {{"ok": true/false, "reason": "одна фраза на русском"}}
 """
         ctx = {"kind": "response_validator", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(prompt, ctx, timeout=30)
+        response, error = await generate_gemini_text_async(prompt, ctx, timeout=120)
         if error or not response:
             return _unavailable(error or "empty response")
 
@@ -3006,7 +3006,7 @@ async def check_llm_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=240)
 
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
@@ -4462,7 +4462,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         # CALL GEMINI
         status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error:
             logger.error(f"Assistant Gemini generation error: {error}")
@@ -4552,7 +4552,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 {text}
 """
                 ctx = {"kind": "dialogue_fallback", "thinking_level": "MEDIUM"}
-                fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
+                fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
                 fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
                 fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
                 if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
@@ -5019,9 +5019,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    if image_urls and not has_text_desc:
+    if image_urls:
         status_ctx["image_urls"] = image_urls
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
     if error:
         logger.error(f"Media Assistant Gemini generation error: {error}")
@@ -5104,7 +5104,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 {caption_text}
 """
             ctx = {"kind": "media_fallback", "thinking_level": "MEDIUM"}
-            fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
+            fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
             fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
             fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
             if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
@@ -7838,7 +7838,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 """
 
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
     if 'status_msg' in locals() and status_msg:
         try:
@@ -7929,7 +7929,7 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         supplement_text, error = await generate_pm_supplement_async(
             user_question=user_question,
             initial_answer=initial_answer,
-            timeout=35.0,
+            timeout=140.0,
         )
 
         if error or not supplement_text:
@@ -9032,7 +9032,7 @@ async def handle_private_message(bot_client, event):
 """
             async with bot_client.action(chat_id, 'typing'):
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
                 except Exception:
@@ -9661,7 +9661,7 @@ async def handle_private_message(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
@@ -10181,7 +10181,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=480)
 
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -10397,7 +10397,7 @@ YES — если человек обращается к боту, задаёт �
 NO — если это случайное упоминание, обсуждение другого бота, ругательство, или контекст никак не требует реакции бота.
 """
         triage_ctx = {"kind": "bot_mention_triage", "chat_id": chat_id, "thinking_level": "LOW"}
-        triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
+        triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=180)
 
         if triage_err or not triage_resp:
             logger.warning(f"Bot mention triage failed: {triage_err}")
@@ -10458,7 +10458,7 @@ NO — если это случайное упоминание, обсужден
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
         async with bot_client.action(chat_id, 'typing'):
-            reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=90)
+            reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=360)
 
         if reply_err or not reply_resp:
             logger.warning(f"Bot mention reply generation failed: {reply_err}")
@@ -10657,7 +10657,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
         status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
@@ -10778,7 +10778,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 {style_instruction}
 """
         status_ctx = {"kind": "group_ask", "chat_id": chat_id, "thinking_level": "HIGH"}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error or not response or not getattr(response, "text", None):
             logger.warning("group direct ask generation failed chat=%s: %s", chat_id, error)
@@ -10893,7 +10893,7 @@ async def handle_group_quiz(bot_client, event):
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
     status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
     try:
         await bot_client.delete_messages(chat_id, status_msg.id)
     except Exception:
@@ -12050,7 +12050,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     error = None
     if generate_gemini_text_async:
         try:
-            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
         except Exception as e:
             error = str(e)
 
@@ -13220,7 +13220,7 @@ async def handle_quiz_callback(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
+            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
 
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
@@ -13738,7 +13738,7 @@ async def analyze_dispute_need(context_msgs):
 Правило: выведи строго одно слово 'YES' (если спор/конфликт есть) или 'NO' (если это обычное мирное обсуждение, шутка или обмен опытом без спора). Никаких других слов или комментариев не пиши.
 """
     status_ctx = {"kind": "referee_analyser", "thinking_level": "LOW"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=45)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=180)
     if response and getattr(response, "text", None):
         res = response.text.strip().upper()
         if res.startswith("YES"):
@@ -13777,7 +13777,7 @@ async def check_referee_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=180)
 
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
@@ -13949,7 +13949,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 """
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
 
     if error or not response or not getattr(response, "text", None):
         return
@@ -14033,7 +14033,7 @@ async def handle_term_explainer(bot_client, event, term):
 5. ЕСЛИ справка пуста и термин тебе незнаком — честно напиши: «Точных данных по этому термину нет в нашей базе. Уточни у коллег!» — и ничего не выдумывай.
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
 
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.
@@ -14273,7 +14273,7 @@ async def check_and_send_pm_pings(bot_client):
 5. Разметка: только HTML (<b>жирный</b>, <i>курсив</i>).
 """
                     status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
-                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
 
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
@@ -14383,7 +14383,7 @@ async def check_and_send_group_activity_pings(bot_client):
             "верни JSON строго в формате: {\"is_hot\": true, \"topic\": \"коротко тема обсуждения\", \"teaser\": \"интригующая краткая фраза для коллег\"}.\n"
             "Если обсуждения нет, обычный бытовой флуд или мало активности — верни: {\"is_hot\": false}."
         )
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=240)
         if error or not response or not getattr(response, "text", None):
             logger.warning("Group ping: LLM error, skipping cycle. error=%s", error)
             return

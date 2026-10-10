@@ -409,7 +409,7 @@ def _web_search_sync(query, max_results):
 # который выдан ребёнку в payload["timeout"], и начало бюджета съедал запуск:
 # ребёнок не доживал до последней модели каскада, вызывающий получал "timeout"
 # вместо ответа, а вся уже проделанная работа выбрасывалась.
-_SUBPROCESS_STARTUP_SLACK_SECONDS = 10.0
+_SUBPROCESS_STARTUP_SLACK_SECONDS = 40.0
 
 # Уровень строки журнала ребёнка, чтобы grep ERROR по bot.log продолжал находить
 # его отказы: без разбора всё легло бы в родительский INFO.
@@ -733,7 +733,7 @@ _GEMINI_MIN_INTERVAL_SECONDS = 3.0
 # Страховка от вечного ожидания: без неё timeout=None превращался в
 # asyncio.wait_for(..., None), а дочерний процесс может спать до 60 с между
 # ретраями на каждой из 4 моделей каскада.
-_GEMINI_DEFAULT_TIMEOUT_SECONDS = 120.0
+_GEMINI_DEFAULT_TIMEOUT_SECONDS = 480.0
 
 _LAST_GEMINI_CALL_START = 0.0
 # Блокировка удерживается только на время расчёта паузы и самого сна, а не на
@@ -1054,9 +1054,9 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             )
 
 
-async def generate_pm_supplement_async(user_question, initial_answer, timeout=35.0):
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=140.0):
     """Асинхронный вызов генерации дополнения через изолированный подпроцесс gemini_client."""
-    effective_timeout = float(timeout) if timeout else 35.0
+    effective_timeout = float(timeout) if timeout else 140.0
     payload, error = await _run_json_tool(
         "pm-supplement",
         {"user_question": user_question, "initial_answer": initial_answer, "timeout": effective_timeout},
@@ -1135,7 +1135,7 @@ async def web_search_async(query, max_results, timeout):
     return [entry for entry in entries if entry["text"] or entry["url"]], None
 
 
-async def google_grounding_async(query, timeout=45.0):
+async def google_grounding_async(query, timeout=180.0):
     """
     Выполняет Google Search Grounding через изолированный подпроцесс.
     Возвращает (result_dict, error).
@@ -1232,7 +1232,7 @@ async def transcribe_audio_async(file_path, timeout):
     return payload.get("text"), None
 
 
-async def correct_dental_transcription_async(raw_text, timeout=20):
+async def correct_dental_transcription_async(raw_text, timeout=80):
     if not raw_text or len(raw_text) < 4:
         return raw_text
 
@@ -1352,7 +1352,7 @@ def _main():
         if action == "google-grounding":
             import gemini_client
             query = payload.get("query") or ""
-            timeout = payload.get("timeout") or 40.0
+            timeout = payload.get("timeout") or 160.0
             res, err = gemini_client.generate_google_grounding(query, timeout=timeout)
             if res:
                 _json_exit({"ok": True, "result": res})
