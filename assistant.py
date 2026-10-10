@@ -2261,11 +2261,10 @@ _clip_at_sentence = html_safe.clip_at_sentence_text
 # дают 24 500 — вдвое больше всей справки, ради которой выстроены ранжирование
 # (_rank_corpus_entries) и бюджет (_fit_corpus_budget).
 # 12000 = ровно столько же, сколько отдано одному корпусу справки.
-_PM_HISTORY_MAX_CHARS = 12000
+_PM_HISTORY_MAX_CHARS = 25000
 # Одна реплика не должна съесть бюджет целиком: без этого единственный
 # развёрнутый ответ бота на 4000 символов забирает две трети блока истории.
-# 2500 — как у записи справки (_CORPUS_ENTRY_MAX_CHARS).
-_PM_HISTORY_ENTRY_MAX_CHARS = 2500
+_PM_HISTORY_ENTRY_MAX_CHARS = 4000
 
 
 def _fit_pm_history(lines):
@@ -3094,9 +3093,32 @@ async def check_llm_triage(context_msgs):
 # ---------------------------------------------------------------------------
 # Dynamic chat context builder
 # ---------------------------------------------------------------------------
-_DCTX_DIALOG_MAX_CHARS = 25_000
-_DCTX_RECENT_FULL_LEN  = 1_000   # последние 4 реплики — полный текст
-_DCTX_DEEP_TRUNC_LEN   = 600     # глубокие реплики
+_DCTX_DIALOG_MAX_CHARS = 50_000
+_DCTX_RECENT_FULL_LEN  = 2_500   # последние 4 реплики — расширенный текст
+_DCTX_DEEP_TRUNC_LEN   = 1_500   # глубокие реплики
+
+
+def _format_relative_time(dt_val: datetime, now_dt: datetime = None) -> str:
+    """Формирует относительную временную метку (только что, 2 мин назад, 3 ч назад, вчера)."""
+    if not dt_val or dt_val.year <= 2000:
+        return ""
+    if now_dt is None:
+        now_dt = datetime.utcnow()
+    diff_sec = (now_dt - dt_val).total_seconds()
+    if diff_sec < 0:
+        diff_sec = 0
+    if diff_sec < 45:
+        return "только что"
+    diff_min = int(diff_sec // 60)
+    if diff_min < 60:
+        return f"{diff_min} мин назад"
+    diff_hours = int(diff_sec // 3600)
+    if diff_hours < 24:
+        return f"{diff_hours} ч назад"
+    diff_days = int(diff_sec // 86400)
+    if diff_days == 1:
+        return "вчера"
+    return f"{diff_days} дн назад"
 
 
 def _parse_db_date(val):
@@ -3288,15 +3310,18 @@ async def fetch_dynamic_chat_context(
     result = []
     total_chars = 0
     N = len(rows)
+    now_dt = datetime.utcnow()
     for idx, r in enumerate(rows):
-        r_msg_id, r_reply_to, r_sender_id, r_sender_name, r_text, _, r_media_desc = r
+        r_msg_id, r_reply_to, r_sender_id, r_sender_name, r_text, r_date, r_media_desc = r
         trunc_limit = _DCTX_RECENT_FULL_LEN if idx >= N - 4 else _DCTX_DEEP_TRUNC_LEN
         raw_text = r_text or ""
         msg_text = sanitize_user_input_xml(raw_text[:trunc_limit]) + ("... [обрезано]" if len(raw_text) > trunc_limit else "")
         is_prev_bot = (r_sender_id == BOT_ID) or (r_msg_id in bot_msg_ids)
         sender_label = "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]" if is_prev_bot else sanitize_user_input_xml(r_sender_name or "Участник")
         rep_str = f" (в ответ на #{r_reply_to})" if r_reply_to else ""
-        line = f"[Сообщение #{r_msg_id}{rep_str}] {sender_label}: {msg_text}"
+        time_str = _format_relative_time(_parse_db_date(r_date), now_dt)
+        time_prefix = f"{time_str} | " if time_str else ""
+        line = f"[{time_prefix}Сообщение #{r_msg_id}{rep_str}] {sender_label}: {msg_text}"
         if r_media_desc:
             desc_val = str(r_media_desc).strip()
             if desc_val and desc_val not in ("-", "MEDIA_UNAVAILABLE", "None", "[медиа — ошибка анализа]", "[медиа недоступно]") and not desc_val.startswith("MEDIA_UNAVAILABLE"):
@@ -3855,12 +3880,22 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     resolved_thread_id = ref_id
                     sender_id = getattr(event, "sender_id", None)
 
-                    # Fast-fail entrance in-flight check:
-                    if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
+                    # In-flight lock: если ветка или отправитель сейчас заняты генерацией ответа,
+                    # не выбрасываем входящее сообщение, а ждём завершения текущей генерации (до 25 сек).
+                    lock_thread_key = (event.chat_id, resolved_thread_id)
+                    lock_sender_key = (event.chat_id, sender_id) if sender_id else None
+                    if lock_thread_key in _ACTIVE_DIALOGUE_THREADS or (lock_sender_key and lock_sender_key in _ACTIVE_DIALOGUE_THREADS):
                         logger.info(
-                            f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+                            f"In-flight dialogue active for thread {resolved_thread_id} / sender {sender_id}. "
+                            f"Waiting for in-flight completion for msg_id={msg_id}..."
                         )
-                        return False
+                        for _ in range(50):  # до 25 секунд с шагом 0.5с
+                            await asyncio.sleep(0.5)
+                            if lock_thread_key not in _ACTIVE_DIALOGUE_THREADS and (not lock_sender_key or lock_sender_key not in _ACTIVE_DIALOGUE_THREADS):
+                                break
+                        else:
+                            logger.warning(f"In-flight dialogue lock wait timeout for thread {resolved_thread_id}, msg_id={msg_id}. Skipping.")
+                            return False
 
                     # [TOCTOU FIX] Lock immediately before slow DB queries & async triage!
                     active_dialogue_keys.append((event.chat_id, resolved_thread_id))
@@ -4018,12 +4053,22 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # instead of falling back to raw msg_id.
                 resolved_thread_id = last_case_bot_msg or msg_id
 
-                # Fast-fail entrance in-flight check:
-                if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
+                # In-flight lock: если ветка или отправитель сейчас заняты генерацией ответа,
+                # не выбрасываем входящее сообщение, а ждём завершения текущей генерации (до 25 сек).
+                lock_thread_key = (event.chat_id, resolved_thread_id)
+                lock_sender_key = (event.chat_id, sender_id) if sender_id else None
+                if lock_thread_key in _ACTIVE_DIALOGUE_THREADS or (lock_sender_key and lock_sender_key in _ACTIVE_DIALOGUE_THREADS):
                     logger.info(
-                        f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+                        f"In-flight dialogue active for thread {resolved_thread_id} / sender {sender_id}. "
+                        f"Waiting for in-flight completion for msg_id={msg_id}..."
                     )
-                    return False
+                    for _ in range(50):  # до 25 секунд с шагом 0.5с
+                        await asyncio.sleep(0.5)
+                        if lock_thread_key not in _ACTIVE_DIALOGUE_THREADS and (not lock_sender_key or lock_sender_key not in _ACTIVE_DIALOGUE_THREADS):
+                            break
+                    else:
+                        logger.warning(f"In-flight dialogue lock wait timeout for thread {resolved_thread_id}, msg_id={msg_id}. Skipping.")
+                        return False
 
                 # [TOCTOU FIX] Lock immediately before slow DB queries & async triage!
                 active_dialogue_keys.append((event.chat_id, resolved_thread_id))
@@ -8493,7 +8538,15 @@ async def handle_private_message(bot_client, event):
                 await bot_client.send_message(entity=chat_id, message=fail_reply, parse_mode='html')
                 return
 
-        if text and not text.startswith("/"):
+        doc = getattr(event.message, "document", None)
+        image_document = media_tools.image_document(event.message)
+        has_media_intent = (
+            getattr(event.message, "photo", None) is not None
+            or getattr(event.message, "video", None) is not None
+            or image_document is not None
+        )
+
+        if text and not text.startswith("/") and not has_media_intent:
             await database.save_pm_message(chat_id, "User", text)
 
         # 0.5. Interactive Simulator State Routing & Abort Check
@@ -8519,14 +8572,6 @@ async def handle_private_message(bot_client, event):
                 logger.error(f"Error checking case expiration: {exp_err}")
 
         # Natural Language Intent Routing (Zero-Slash Routing)
-        doc = getattr(event.message, "document", None)
-        image_document = media_tools.image_document(event.message)
-        has_media_intent = (
-            getattr(event.message, "photo", None) is not None
-            or getattr(event.message, "video", None) is not None
-            or image_document is not None
-        )
-
         if text and not text.startswith("/") and not has_media_intent:
             detected = detect_user_intent(text)
 
@@ -9972,6 +10017,22 @@ async def handle_private_message(bot_client, event):
                     )
                 return
 
+        # Persist media clinical case into PM history for subsequent turns
+        if has_media:
+            if media_description:
+                pm_user_entry = f"[Прикреплён клинический снимок: {media_description}]"
+                if text:
+                    pm_user_entry += f"\nВопрос врача: {text}"
+                try:
+                    await database.save_pm_message(chat_id, "User", pm_user_entry)
+                except Exception as pm_save_err:
+                    logger.error(f"Failed to persist PM media user message: {pm_save_err}")
+            elif text and not text.startswith("/"):
+                try:
+                    await database.save_pm_message(chat_id, "User", text)
+                except Exception as pm_save_err:
+                    logger.error(f"Failed to persist PM fallback user message: {pm_save_err}")
+
         # Проверка намерения записи на консультацию / связи с куратором (Адиля / администрация)
         text_lower = (text or "").lower()
         booking_keywords = (
@@ -10063,6 +10124,10 @@ async def handle_private_message(bot_client, event):
 
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
+            length_guideline = (
+                "Разбор клинического снимка. Дай структурированный, исчерпывающий EBM-разбор по существу "
+                "(до 1500–2500 символов, четкие пункты протокола: рентген-статус, дифдиагноз, пошаговая тактика без воды)."
+            )
             pm_multimodal_notice = ""
             pm_image_urls = getattr(media_description, "image_urls", None)
             if pm_image_urls:
@@ -10131,6 +10196,15 @@ async def handle_private_message(bot_client, event):
             # Определяем тип запроса: это клинический вопрос или свободная тема
             has_clinical_topic = has_dental_topic or bool(wiki_corpus)
             if has_clinical_topic:
+                query_words = len((text or "").split())
+                if query_words > 6 or any(kw in (text or "").lower() for kw in ("протокол", "тактик", "лечен", "дифдиагноз", "как лечить", "дозировк", "алгоритм", "осложнен", "почему", "разбор")):
+                    length_guideline = (
+                        "Клинический разбор. Дай доказательный, структурированный EBM-ответ по существу "
+                        "(до 1200–2000 символов, пошаговый протокол, дозировки и риски без лишней воды)."
+                    )
+                else:
+                    length_guideline = "Ответь емко и профессионально по существу клинического вопроса (2-4 четких предложения)."
+
                 system_role = f"""Ты — опытный врач-стоматолог, модератор клинического консилиума сообщества "StomChat". Общаешься с дипломированным врачом-стоматологом в личных сообщениях.
 {style_prompt_text}
 
@@ -10151,6 +10225,12 @@ async def handle_private_message(bot_client, event):
 6. СМАЙЛИКИ: Никаких смайликов и эмодзи.
 7. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата."""
             else:
+                try:
+                    recent_pm_texts = [m["text"] for m in history[-6:] if m.get("text")]
+                    length_guideline = calculate_context_length_guidelines(recent_pm_texts)
+                except Exception:
+                    length_guideline = "Отвечай емко, кратко и дружелюбно, до 2-4 предложений."
+
                 system_role = f"""Ты — врач-стоматолог из чата "StomChat", ведёшь диалог с коллегой в личных сообщениях.
 {style_prompt_text}
 
@@ -10823,13 +10903,40 @@ async def handle_group_direct_ask(bot_client, event, question):
     style_instruction = style_instruction_block(selected_style)
 
     async with _safe_typing_action(bot_client, chat_id):
-        keywords = extract_keywords(question)
+        # Если команда задана как ответ на пост со снимком или вопрос коллеги —
+        # подтягиваем цепочку контекста: родительское сообщение + 2-3 предшествующих.
+        reply_context_block = ""
+        reply_chain_lines = []
+        reply_to_msg_id = getattr(getattr(event.message, 'reply_to', None), 'reply_to_msg_id', None)
+        if reply_to_msg_id:
+            chain_rows = await query_db_async(
+                "SELECT msg_id, sender_name, text, date, media_description FROM messages "
+                "WHERE msg_id <= ? ORDER BY msg_id DESC LIMIT 4",
+                (reply_to_msg_id,)
+            )
+            if chain_rows:
+                now_dt = datetime.utcnow()
+                for c_row in reversed(chain_rows):
+                    c_id, c_name, c_text, c_date, c_media = c_row
+                    c_time = _format_relative_time(_parse_db_date(c_date), now_dt)
+                    c_prefix = f"{c_time} | " if c_time else ""
+                    c_line = f"[{c_prefix}#{c_id}] {sanitize_user_input_xml(c_name or 'Участник')}: {sanitize_user_input_xml(c_text or '')}"
+                    if c_media and str(c_media).strip() not in ("-", "None", "MEDIA_UNAVAILABLE", "[медиа — ошибка анализа]"):
+                        c_line += f"\n  [Клинический снимок/рентген к #{c_id}]: {sanitize_user_input_xml(str(c_media)[:600])}"
+                    reply_chain_lines.append(c_line)
+                reply_context_block = (
+                    f"\nПредыстория кейса и сообщений, на которые ссылается врач (в ответ на #{reply_to_msg_id}):\n"
+                    + "\n".join(reply_chain_lines)
+                    + "\n"
+                )
+
+        keywords = extract_keywords(question + (" " + " ".join(reply_chain_lines) if reply_chain_lines else ""))
         wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords[:12])
 
         prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
 Ответь кратко, экспертно и строго по существу.
-
+{reply_context_block}
 Вопрос коллеги:
 {sanitize_user_input_xml(question)}
 
@@ -10870,12 +10977,10 @@ async def handle_group_direct_ask(bot_client, event, question):
 
         reply_text = response.text.strip()
 
-        # Публичный клинический ответ в общем чате: рецензента здесь не было.
-        # invited=True — вопрос задан боту прямо.
-        # Своего контекста у этой функции нет: рецензенту отдаём сам вопрос
-        # врача — по нему и проверяется, относится ли ответ к делу.
+        # Публичный клинический ответ в общем чате: валидация с учетом цепочки контекста
+        context_for_validator = reply_chain_lines + [f"Врач: {question}"] if (reply_chain_lines or question) else []
         ask_ok, ask_reason = await check_response_quality(
-            [f"Врач: {question}"] if question else [], reply_text,
+            context_for_validator, reply_text,
             invited=True, reference=wiki_corpus
         )
         if not ask_ok:
@@ -10883,7 +10988,7 @@ async def handle_group_direct_ask(bot_client, event, question):
             await bot_client.send_message(
                 entity=chat_id,
                 message=(
-                    "👨‍⚕️ <i>Коллега, для доказательного разбора недостаточно исходных данных. "
+                    "👨‍⚕️ <i>Для доказательного разбора недостаточно исходных данных. "
                     "Уточните клинические детали или прикрепите снимок — тогда разберём подробно.</i>"
                 ),
                 reply_to=msg_id,

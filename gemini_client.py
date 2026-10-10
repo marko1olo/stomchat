@@ -732,6 +732,11 @@ def is_media_task(status_context=None, prompt=None) -> bool:
     так и текст промпта на ключевые клинические маркеры визуального осмотра.
     """
     if isinstance(status_context, dict):
+        # Triage, классификаторы и валидаторы ответов (response_validator) — это ВСЕГДА
+        # чисто текстовые задачи. Они никогда не должны попадать в тяжёлый медиа-каскад,
+        # даже если в тексте проверяемого черновика или контексте цитируется снимок.
+        if status_context.get("kind") in TRIAGE_KINDS:
+            return False
         if status_context.get("has_media"):
             return True
         if status_context.get("image_urls"):
@@ -739,6 +744,8 @@ def is_media_task(status_context=None, prompt=None) -> bool:
         if status_context.get("kind") in ("assistant_media", "assistant_media_pm", "media_fallback"):
             return True
     if prompt and isinstance(prompt, str):
+        if status_context and status_context.get("kind") in TRIAGE_KINDS:
+            return False
         for pat in MEDIA_PROMPT_PATTERNS:
             if pat.search(prompt):
                 return True
@@ -1001,6 +1008,13 @@ def generate_text(prompt, status_context=None, timeout=None):
         model_share = usable / share_divisor
         max_attempts = max(1, min(max_attempts, int(model_share // COMFORT_REQUEST_SECONDS)))
         req_timeout = model_share / max_attempts
+        # Интерактивные потолки таймаута на один HTTP-запрос к провайдеру:
+        # Для triage/валидатора: максимум 15с (ответ классификатора нужен за секунды).
+        # Для живого чата: максимум 30с (если модель Google висит, не ждём 80с, а сразу ротируем каскад).
+        if is_triage:
+            req_timeout = max(5.0, min(req_timeout, 15.0))
+        elif is_chatbot:
+            req_timeout = max(8.0, min(req_timeout, 30.0))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
         deadline = time.monotonic() + usable
