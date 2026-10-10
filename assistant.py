@@ -232,16 +232,38 @@ async def _safe_typing_action(client, chat_id):
     Безопасный контекстный менеджер для отправки статуса 'typing' (печатает...).
     Показывает врачам в Telegram, что бот готовит ответ. Если клиент недоступен
     или Telegram возвращает ошибку — подавляет сбой, чтобы не срывать генерацию.
+    Корректно пробрасывает исключения вызывающего кода без генераторных сбоев.
     """
     if not client or not chat_id:
         yield
         return
+
+    action_cm = None
     try:
-        async with client.action(chat_id, 'typing'):
-            yield
-    except Exception as exc:
-        logger.debug("Safe typing action suppressed for chat_id=%s: %s", chat_id, exc)
+        action_cm = client.action(chat_id, 'typing')
+    except Exception as init_err:
+        logger.debug("Failed to init typing action for chat_id=%s: %s", chat_id, init_err)
         yield
+        return
+
+    entered = False
+    try:
+        await action_cm.__aenter__()
+        entered = True
+    except Exception as enter_err:
+        logger.debug("Failed to start typing action for chat_id=%s: %s", chat_id, enter_err)
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        if entered:
+            try:
+                await action_cm.__aexit__(None, None, None)
+            except Exception as exit_err:
+                logger.debug("Failed to stop typing action for chat_id=%s: %s", chat_id, exit_err)
+
 
 
 async def _try_send_reaction(event, msg_id: int, emoji: str, prefetched_msg=None) -> bool:
@@ -2671,6 +2693,14 @@ def clean_vertex_redirect_urls(text: str) -> str:
 def clean_html_formatting(text):
     if not text:
         return ""
+    # Unescape HTML entities (resolving double-escaped &amp;gt; down to raw character)
+    for _ in range(3):
+        if "&" not in text:
+            break
+        prev = text
+        text = html.unescape(text)
+        if text == prev:
+            break
     text = clean_vertex_redirect_urls(text)
     # Strip database codes/fact indexes (e.g. [2.1.1], [1.3])
     text = re.sub(r'\s*\[\d+(?:\.\d+)+\]', '', text)
@@ -7872,7 +7902,8 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 """
 
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+    async with _safe_typing_action(bot_client, chat_id):
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
     if 'status_msg' in locals() and status_msg:
         try:
@@ -9069,7 +9100,7 @@ async def handle_private_message(bot_client, event):
 Не пиши правильный ответ сразу в сообщении викторины!
 Будь лаконичен, профессионален.
 """
-            async with bot_client.action(chat_id, 'typing'):
+            async with _safe_typing_action(bot_client, chat_id):
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
                 try:
@@ -9605,7 +9636,7 @@ async def handle_private_message(bot_client, event):
                 return (getattr(web_response, "text", None) or "").strip(), web_error
 
             async def _web_grounding_call(query, timeout):
-                """Google Search Grounding: gemini-2.5-flash с Google Search tool."""
+                """Google Search Grounding: gemini-2.0-flash с Google Search tool."""
                 if os.environ.get("STOMCHAT_LOG_PATH") and "websearch" in os.environ.get("STOMCHAT_LOG_PATH", ""):
                     return None, "test_mock_fallback"
                 return await blocking_tools.google_grounding_async(query, timeout=timeout)
@@ -9616,11 +9647,12 @@ async def handle_private_message(bot_client, event):
             if "grounding_call" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                 lookup_kwargs["grounding_call"] = _web_grounding_call
 
-            lookup = await web_lookup.run_lookup(
-                query_param, _web_search_call, _web_answer_call,
-                budget=WEB_LOOKUP_BUDGET_SECONDS, log=logger,
-                **lookup_kwargs
-            )
+            async with _safe_typing_action(bot_client, chat_id):
+                lookup = await web_lookup.run_lookup(
+                    query_param, _web_search_call, _web_answer_call,
+                    budget=WEB_LOOKUP_BUDGET_SECONDS, log=logger,
+                    **lookup_kwargs
+                )
 
             # Статус убираем ДО ответа и под сроком: без границы уборка сама может
             # подвиснуть и удержать замок на пользователе после того, как ответ уже
@@ -9700,7 +9732,8 @@ async def handle_private_message(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
+            async with _safe_typing_action(bot_client, chat_id):
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
@@ -10194,7 +10227,7 @@ async def handle_private_message(bot_client, event):
         current_context_msgs = list(context_msgs)
         last_pm_reason = ""
 
-        async with bot_client.action(chat_id, 'typing'):
+        async with _safe_typing_action(bot_client, chat_id):
             for attempt in range(max_retries + 1):
                 if attempt > 0:
                     logger.info(
@@ -10501,7 +10534,7 @@ NO — если это случайное упоминание, обсужден
 Твой ответ — это естественная реакция именно на сообщение #{msg_id}!
 """
         reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
-        async with bot_client.action(chat_id, 'typing'):
+        async with _safe_typing_action(bot_client, chat_id):
             reply_resp, reply_err = await generate_gemini_text_async(reply_prompt, reply_ctx, timeout=360)
 
         if reply_err or not reply_resp:
@@ -10790,7 +10823,7 @@ async def handle_group_direct_ask(bot_client, event, question):
     selected_style = user_profile.get("selected_style", DEFAULT_STYLE)
     style_instruction = style_instruction_block(selected_style)
 
-    async with bot_client.action(chat_id, 'typing'):
+    async with _safe_typing_action(bot_client, chat_id):
         keywords = extract_keywords(question)
         wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords[:12])
 
@@ -13267,7 +13300,8 @@ async def handle_quiz_callback(bot_client, event):
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
-            response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
+            async with _safe_typing_action(bot_client, event.sender_id):
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
 
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
@@ -13996,7 +14030,8 @@ async def check_and_trigger_referee(bot_client, event, text):
 """
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+    async with _safe_typing_action(bot_client, chat_id):
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
 
     if error or not response or not getattr(response, "text", None):
         return
