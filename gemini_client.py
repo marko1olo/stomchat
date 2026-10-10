@@ -777,23 +777,16 @@ def cascade_for_context(status_context=None):
         kind in ("assistant_media", "assistant_media_pm")
         or (status_context and (status_context.get("image_urls") or status_context.get("has_media")))
     ):
-        # При наличии фото/рентгена мультимодальные модели (Gemini) ОБЯЗАНЫ идти первыми,
-        # чтобы анализировать пиксели напрямую, без «испорченного телефона» текстовых пересказов.
-        # DeepSeek (чисто текстовая модель) остаётся в конце только как аварийный резерв.
-        cascade = [
+        # При наличии фото/рентгена — СТРОГО мультимодальные модели (Gemini)!
+        # Категорический запрет чисто текстовых моделей (DeepSeek, Groq):
+        # они не видят пикселей, работают как «испорченный телефон» и галлюцинируют
+        # выдуманные зубы, культевые вкладки и развилки.
+        return [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
         ]
-        if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
-        cascade.extend([
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
-        ])
-        return cascade
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         cascade = []
         if has_agentrouter:
@@ -912,9 +905,10 @@ def generate_text(prompt, status_context=None, timeout=None):
 
 
 
-    # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
-    # копией цикла: вторая копия проверки бана уже начинала расходиться с первой.
     active_cascade = active_models(models_cascade)
+    # Гарантия 100%: если есть медиа/изображения, исключаем любые не-мультимодальные модели
+    if status_context and (status_context.get("image_urls") or status_context.get("has_media")):
+        active_cascade = [(m, p) for m, p in active_cascade if p == "gemini" or "vision" in m.lower()]
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
 
     # АРИФМЕТИКА БЮДЖЕТА: попытки x таймаут попытки обязаны влезать в timeout.

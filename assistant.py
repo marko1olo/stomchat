@@ -4223,15 +4223,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     unique_senders.add(cm.split(": ", 1)[0].strip())
 
             if len(unique_senders) > 2:
-                # Несколько людей → 50% "Коллеги," / 50% без обращения
-                address_prefix = "Коллеги, " if random.random() < 0.5 else ""
+                # Несколько людей → без обращения (категорически без "Коллеги,")
+                address_prefix = ""
             elif sender_first_name:
-                # Один автор → 33% имя / 33% "Коллега," / 33% без обращения
+                # Один автор → 50% имя / 50% без обращения (категорически без "Коллега,")
                 roll = random.random()
-                if roll < 0.33:
+                if roll < 0.5:
                     address_prefix = f"{sender_first_name}, "
-                elif roll < 0.66:
-                    address_prefix = "Коллега, "
                 else:
                     address_prefix = ""
             else:
@@ -4306,8 +4304,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - На конкретный точечный вопрос по протоколу/материалу — лаконично (2–4 предложения строго по делу).
    - Развернутый структурированный ответ давай ТОЛЬКО если прямо описывается сложный клинический случай или коллега просит полный протокол/дифдиагноз.
    - Ориентир: {length_guideline}
-3. Никаких приветствий, «Уважаемые коллеги», вводных фраз и пожеланий в конце. Сразу по делу.
-4. Тон: живой, практический chairside-стиль опытного врача-практика у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори с коллегой на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
+3. СТРОЖАЙШИЙ ЗАПРЕТ ОБРАЩЕНИЯ «КОЛЛЕГА» И «КОЛЛЕГИ»: Категорически запрещено использовать слова «коллега», «коллеги», «уважаемые коллеги» в качестве обращения, приветствия или вводного слова! Не называй участников коллегами. Никаких приветствий, вводных фраз и пожеланий в конце. Сразу по делу.
+4. Тон: живой, практический chairside-стиль опытного врача-практика у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
 6. КУЛЬТУРА КЛИНИЧЕСКОГО МЫШЛЕНИЯ И EBM (FIRST PRINCIPLES НА ПАЛЬЦАХ):
@@ -4396,8 +4394,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - На конкретный точечный вопрос по протоколу/материалу — лаконично (2–4 предложения строго по делу).
    - Развернутый структурированный ответ давай ТОЛЬКО если прямо описывается сложный клинический случай или коллега просит полный протокол/дифдиагноз.
    - Ориентир: {length_guideline}
-3. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
-4. Тон: живой, практический chairside-стиль опытного врача-практика у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори с коллегой на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
+3. СТРОЖАЙШИЙ ЗАПРЕТ ОБРАЩЕНИЯ «КОЛЛЕГА» И «КОЛЛЕГИ»: Категорически запрещено использовать слова «коллега», «коллеги», «уважаемые коллеги» в качестве обращения, приветствия или вводного слова! Не называй участников коллегами. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
+4. Тон: живой, practical chairside-стиль опытного врача-практика у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
 
 7. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
@@ -4469,7 +4467,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         # Фиксы: re.I (lowercase), (?:^|\n) (без \n в начале), rstrip('\ufe0f')
         # потому что LLM пишет ❤️ (U+2764 + U+FE0F), Telegram хранит ❤ (без FE0F).
         _pending_reaction: str | None = None
-        _react_match = re.search(r'(?:^|\n)\s*REACTION:\s*([^\n]+)', reply_text, re.IGNORECASE)
+        _react_match = re.search(r'(?:[\s\n]|^)REACTION:\s*([^\s\n]+)', reply_text, re.IGNORECASE)
         if _react_match:
             _react_emoji = _react_match.group(1).strip().strip('"\'`').rstrip('\ufe0f')
             reply_text = reply_text[:_react_match.start()].rstrip()
@@ -4478,6 +4476,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 logger.info("reaction extracted from LLM: %r for msg_id=%s", _pending_reaction, msg_id)
             else:
                 logger.debug("reaction %r rejected (not in ALLOWED_REACTIONS)", _react_emoji)
+        # Окончательная очистка: гарантируем, что никакой остаточный тег REACTION не попадёт в чат
+        reply_text = re.sub(r'(?i)\s*REACTION:\s*\S+', '', reply_text).rstrip()
 
 
         if not is_dialogue:
@@ -4547,7 +4547,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 else:
                     # Чтобы не бросать врача в тишине (Silent Dropout) и не вызывать каскадный срыв в referee:
                     reply_text = (
-                        "<b>Коллега</b>, сервис клинического анализа временно перегружен. "
+                        "Сервис клинического анализа временно перегружен. "
                         "Для точной информации сверьтесь с официальным клиническим протоколом или спецификацией производителя."
                     )
                     quality_ok = True
@@ -4556,6 +4556,15 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 logger.warning(f"Response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
                 return False
         logger.info(f"Response quality validator approved draft: {quality_reason}")
+
+        # Санитизация обращений: строгое удаление любых остаточных "Коллега," / "Коллеги,"
+        reply_text = re.sub(
+            r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*|здравствуйте,?\s*коллег[аи],?\s*|добрый\s+(?:день|вечер),?\s*коллег[аи],?\s*)',
+            '',
+            reply_text
+        ).strip()
+        if reply_text and reply_text[0].islower():
+            reply_text = reply_text[0].upper() + reply_text[1:]
 
         # SENDING
         if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
@@ -4999,7 +5008,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # Парсинг опциональной реакции из media-ответа (те же правила что в text-пути)
     _media_pending_reaction: str | None = None
-    _media_react_match = re.search(r'(?:^|\n)\s*REACTION:\s*([^\n]+)', reply_text, re.IGNORECASE)
+    _media_react_match = re.search(r'(?:[\s\n]|^)REACTION:\s*([^\s\n]+)', reply_text, re.IGNORECASE)
     if _media_react_match:
         _media_react_emoji = _media_react_match.group(1).strip().strip('"\'`').rstrip('\ufe0f')
         reply_text = reply_text[:_media_react_match.start()].rstrip()
@@ -5008,6 +5017,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             logger.info("media reaction extracted from LLM: %r for msg_id=%s", _media_pending_reaction, msg_id)
         else:
             logger.debug("media reaction %r rejected (not in ALLOWED_REACTIONS)", _media_react_emoji)
+    # Окончательная очистка: гарантируем, что никакой остаточный тег REACTION не попадёт в чат
+    reply_text = re.sub(r'(?i)\s*REACTION:\s*\S+', '', reply_text).rstrip()
 
     # Check IGNORE filter only for dental checks (non-dental balancer is already validated)
 
@@ -5058,9 +5069,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 quality_ok = True
                 logger.info("Media dialogue safe fallback successfully generated.")
             else:
-                # Врач обратился напрямую или тегнул бота — не бросаем тишиной
                 reply_text = (
-                    "<b>Коллега</b>, для однозначной клинической оценки данного снимка требуется более высокое разрешение или данные КЛКТ. "
+                    "Для однозначной клинической оценки данного снимка требуется более высокое разрешение или данные КЛКТ. "
                     "Рекомендуется ориентироваться на очный осмотр и прицельную рентгенодиагностику."
                 )
                 quality_ok = True
@@ -5069,6 +5079,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             logger.warning(f"Media response quality validator REJECTED draft: {quality_reason}. Suppressing reply.")
             return
     logger.info(f"Media response quality validator approved draft: {quality_reason}")
+
+    # Санитизация обращений: строгое удаление любых остаточных "Коллега," / "Коллеги,"
+    reply_text = re.sub(
+        r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*|здравствуйте,?\s*коллег[аи],?\s*|добрый\s+(?:день|вечер),?\s*коллег[аи],?\s*)',
+        '',
+        reply_text
+    ).strip()
+    if reply_text and reply_text[0].islower():
+        reply_text = reply_text[0].upper() + reply_text[1:]
 
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
