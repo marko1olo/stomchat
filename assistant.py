@@ -2688,16 +2688,31 @@ def clean_html_formatting(text):
     text = re.sub(r'</?(?:ul|ol)[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<li[^>]*>', '\n• ', text, flags=re.IGNORECASE)
     text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
-    # Temporarily hide valid HTML tags we want to support
-    text = text.replace("<b>", "__B_OPEN__").replace("</b>", "__B_CLOSE__")
-    text = text.replace("<i>", "__I_OPEN__").replace("</i>", "__I_CLOSE__")
-    text = text.replace("<code>", "__C_OPEN__").replace("</code>", "__C_CLOSE__")
+    # Temporarily hide valid HTML tags we want to support in Telegram
+    valid_simple_tags = ["b", "i", "u", "s", "code", "pre", "blockquote", "tg-spoiler"]
+    for t in valid_simple_tags:
+        text = re.sub(rf'<{t}\b[^>]*>', f'__{t.upper()}_OPEN__', text, flags=re.IGNORECASE)
+        text = re.sub(rf'</{t}\s*>', f'__{t.upper()}_CLOSE__', text, flags=re.IGNORECASE)
+
+    # Preserve link tags <a href="...">
+    link_map = {}
+    def _save_link(m):
+        key = f"__LINK_{len(link_map)}__"
+        link_map[key] = m.group(0)
+        return key
+    text = re.sub(r'<a\s+href="[^"]+">', _save_link, text, flags=re.IGNORECASE)
+    text = re.sub(r'</a\s*>', '__A_CLOSE__', text, flags=re.IGNORECASE)
+
     # Escape raw HTML syntax characters to prevent Telegram parse errors
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     # Restore valid tags
-    text = text.replace("__B_OPEN__", "<b>").replace("__B_CLOSE__", "</b>")
-    text = text.replace("__I_OPEN__", "<i>").replace("__I_CLOSE__", "</i>")
-    text = text.replace("__C_OPEN__", "<code>").replace("__C_CLOSE__", "</code>")
+    for t in valid_simple_tags:
+        text = text.replace(f'__{t.upper()}_OPEN__', f'<{t}>')
+        text = text.replace(f'__{t.upper()}_CLOSE__', f'</{t}>')
+    for k, v in link_map.items():
+        text = text.replace(k, v)
+    text = text.replace('__A_CLOSE__', '</a>')
 
     # Балансировка тегов: Telegram отклоняет сообщение целиком при любом незакрытом теге
     balanced, unclosed = html_safe.balance_html(text)
@@ -4730,13 +4745,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             age_minutes = (datetime.utcnow() - msg_dt_utc).total_seconds() / 60.0
         except Exception:
             age_minutes = 0.0
-    else:
+    if not isinstance(age_minutes, (int, float)):
         age_minutes = 0.0
 
     try:
         cnt_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE msg_id > ?", (msg_id,))
         count_since = cnt_rows[0][0] if cnt_rows else 0
     except Exception:
+        count_since = 0
+    if not isinstance(count_since, (int, float)):
         count_since = 0
 
     has_explicit_question = bool(text and ("?" in text or "？" in text))
@@ -4852,6 +4869,31 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         msg_id, reply_to_msg_id, base_limit=12, max_limit=35, max_gap_minutes=15, event=event
     )
     context_str = "\n".join(context_msgs) if context_msgs else "Нет предыдущего контекста."
+
+    # Проверяем, не написал ли автор снимка уточняющие реплики/вопросы, пока снимок обрабатывался
+    sender_id = getattr(message, 'sender_id', None)
+    if sender_id and msg_id:
+        try:
+            followup_rows = await query_db_async(
+                "SELECT msg_id, text, date FROM messages "
+                "WHERE sender_id = ? AND msg_id > ? "
+                "ORDER BY msg_id ASC LIMIT 4",
+                (sender_id, msg_id)
+            )
+            if followup_rows:
+                msg_dt = getattr(message, 'date', None)
+                valid_followups = []
+                for r in followup_rows:
+                    r_text = (r[1] or "").strip()
+                    r_date = _parse_db_date(r[2]) if len(r) > 2 and r[2] else None
+                    if r_text and (msg_dt is None or r_date is None or abs((r_date - msg_dt).total_seconds()) <= 300):
+                        valid_followups.append(r_text)
+                if valid_followups:
+                    extra_followup = "\n".join(valid_followups)
+                    caption_text = f"{caption_text}\n[Последующие сообщения автора кейса]: {extra_followup}" if caption_text else extra_followup
+                    logger.info("Media Assistant attached %d follow-up messages from sender %s to caption", len(valid_followups), sender_id)
+        except Exception as fe:
+            logger.debug("Error checking media sender follow-up messages: %s", fe)
 
     is_dialogue = is_direct_reply or is_mentioned
     ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
@@ -5002,7 +5044,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         ).strip()
         reply_text = re.sub(r'(?i)\b(?:модел[ьи]\s+зрени\w*|нейросет\w*|искусственн\w+\s+интеллект\w*)\b', '', reply_text)
         reply_text = re.sub(r'^[,\s—–-]+', '', reply_text)
-        reply_text = re.sub(r'\s{2,}', ' ', reply_text).strip()
+        reply_text = re.sub(r'[^\S\r\n]{2,}', ' ', reply_text)
+        reply_text = re.sub(r'\n{3,}', '\n\n', reply_text).strip()
         if reply_text and reply_text[0].islower():
             reply_text = reply_text[0].upper() + reply_text[1:]
 

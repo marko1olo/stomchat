@@ -906,9 +906,6 @@ def generate_text(prompt, status_context=None, timeout=None):
 
 
     active_cascade = active_models(models_cascade)
-    # Гарантия 100%: если есть медиа/изображения, исключаем любые не-мультимодальные модели
-    if status_context and (status_context.get("image_urls") or status_context.get("has_media")):
-        active_cascade = [(m, p) for m, p in active_cascade if p == "gemini" or "vision" in m.lower()]
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
 
     # АРИФМЕТИКА БЮДЖЕТА: попытки x таймаут попытки обязаны влезать в timeout.
@@ -1061,7 +1058,14 @@ def generate_text(prompt, status_context=None, timeout=None):
                         user_content.append({"type": "image_url", "image_url": {"url": iu}})
                     messages_payload = [{"role": "user", "content": user_content}]
                 else:
-                    messages_payload = [{"role": "user", "content": prompt}]
+                    clean_prompt = prompt
+                    if "[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ:" in clean_prompt:
+                        clean_prompt = re.sub(
+                            r'\[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ:[^\]]*\]',
+                            '[КЛИНИЧЕСКИЙ КОНТЕКСТ: Анализируй вопрос врача по описанию и симптомам. Не придумывай, что ты лично смотришь снимок.]',
+                            clean_prompt
+                        )
+                    messages_payload = [{"role": "user", "content": clean_prompt}]
 
                 # Using OpenAI SDK for BOTH Groq and Gemini now
                 ctx_temp = status_context.get("temperature") if isinstance(status_context, dict) else None
