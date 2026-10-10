@@ -1748,6 +1748,11 @@ async def calculate_dynamic_passive_cooldown(state: dict) -> tuple[int, str]:
     elif v_num <= 15:
         f_vel = 0.55
         min_mins = getattr(config, "PASSIVE_COOLDOWN_MODERATE_MINUTES", 35)
+    elif v_num > 25:
+        # Для бурных активных дискуссий (>25 сообщ./час)
+        v_eff = max(v_num, 5)
+        f_vel = (30.0 / v_eff) ** 0.40
+        min_mins = getattr(config, "PASSIVE_COOLDOWN_ACTIVE_MINUTES", 20)
     else:
         v_eff = max(v_num, 5)
         f_vel = (30.0 / v_eff) ** 0.40
@@ -1790,6 +1795,12 @@ async def passive_gate_block_reason_async(state: dict) -> str | None:
     if v_num <= 5:
         floor_minutes = getattr(config, "PASSIVE_COOLDOWN_QUIET_FLOOR_MINUTES", 15)
         volume_gate_threshold = getattr(config, "PASSIVE_VOLUME_GATE_QUIET_MSGS", 4)
+    elif v_num > 25:
+        # В активном чате (>25 сообщ./час) дискуссия движется стремительно:
+        # снижаем жесткий пол до 20 минут, давая Volume Gate право открывать ответ
+        # при прохождении >=20 новых клинических сообщений.
+        floor_minutes = getattr(config, "PASSIVE_COOLDOWN_ACTIVE_FLOOR_MINUTES", 20)
+        volume_gate_threshold = getattr(config, "PASSIVE_VOLUME_GATE_MSGS", 20)
     else:
         floor_minutes = getattr(config, "PASSIVE_COOLDOWN_MIN_MINUTES", 45)
         volume_gate_threshold = getattr(config, "PASSIVE_VOLUME_GATE_MSGS", 20)

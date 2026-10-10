@@ -1010,11 +1010,12 @@ def generate_text(prompt, status_context=None, timeout=None):
         req_timeout = model_share / max_attempts
         # Интерактивные потолки таймаута на один HTTP-запрос к провайдеру:
         # Для triage/валидатора: максимум 15с (ответ классификатора нужен за секунды).
-        # Для живого чата: максимум 30с (если модель Google висит, не ждём 80с, а сразу ротируем каскад).
+        # Для живого чата: максимум 60с (даем reasoning-моделям Gemini/DeepSeek время
+        # на генерацию подробных клинических ответов без ложных срывов по ReadTimeout).
         if is_triage:
             req_timeout = max(5.0, min(req_timeout, 15.0))
         elif is_chatbot:
-            req_timeout = max(8.0, min(req_timeout, 30.0))
+            req_timeout = max(10.0, min(req_timeout, 60.0))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
         deadline = time.monotonic() + usable
