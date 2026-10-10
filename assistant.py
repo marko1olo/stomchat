@@ -3725,6 +3725,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     context_msgs = []
     is_dialogue = False
     pending_thread_id = None  # помечается обработанным только после успешной отправки
+    thread_has_media = False
     active_dialogue_keys = []
     try:
 
@@ -4040,6 +4041,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             # Check if parent has media
             parent_rows = await query_db_async("SELECT has_media, text FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
             if parent_rows and bool(parent_rows[0][0]):
+                thread_has_media = True
                 # Count replies
                 reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
                 reply_count = reply_count_rows[0][0] if reply_count_rows else 0
@@ -4461,7 +4463,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         logger.info(f"Triggered assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
 
         # CALL GEMINI
-        status_ctx = {"kind": "assistant", "chat_id": event.chat_id, "thinking_level": "HIGH"}
+        status_ctx = {
+            "kind": "assistant",
+            "chat_id": event.chat_id,
+            "thinking_level": "HIGH",
+            "has_media": bool(thread_has_media),
+        }
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
 
         if error:
@@ -5018,7 +5025,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     logger.info(f"Triggered media assistant! Reason: {trigger_reason}. Keywords: {search_keywords}")
 
     # CALL GEMINI
-    status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
+    status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH", "has_media": True}
     if image_urls:
         status_ctx["image_urls"] = image_urls
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
@@ -5103,7 +5110,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Подпись или вопрос врача:
 {caption_text}
 """
-            ctx = {"kind": "media_fallback", "thinking_level": "MEDIUM"}
+            ctx = {"kind": "media_fallback", "thinking_level": "HIGH", "has_media": True}
             fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=80)
             fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
             fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
@@ -10177,7 +10184,12 @@ async def handle_private_message(bot_client, event):
 {clean_history_str}
 """
 
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                status_ctx = {
+                    "kind": "pm_chat",
+                    "chat_id": chat_id,
+                    "thinking_level": "HIGH" if (has_media or bool(media_description)) else "MEDIUM",
+                    "has_media": bool(has_media or media_description),
+                }
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls

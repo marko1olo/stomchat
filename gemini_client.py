@@ -709,13 +709,67 @@ def _record_failure(reason, detail="", api_key=None):
     LAST_FAILURE = {"reason": reason, "detail": text, "ts": time.time()}
 
 
-def cascade_for_context(status_context=None):
+MEDIA_PROMPT_PATTERNS = [
+    re.compile(r"\[МУЛЬТИМОДАЛЬНО[ЕЙ]\s+ЗРЕНИ[ЕЯ]", re.IGNORECASE),
+    re.compile(r"\[МУЛЬТИМОДАЛЬНЫЙ\s+АНАЛИЗ", re.IGNORECASE),
+    re.compile(r"описание\s+изображения\s*\(", re.IGNORECASE),
+    re.compile(r"распознано\s+моделью\s+зрения", re.IGNORECASE),
+    re.compile(r"модел(?:ь|ью|и)\s+зрения", re.IGNORECASE),
+    re.compile(r"(?:\(|^|\s)(?:на\s+(?:фото|снимке|рентгенограмме)|прикреплен[оаы]?\s+(?:фото|снимок|изображение|серия))", re.IGNORECASE),
+    re.compile(r"(?:на|по)\s+присланн(?:ом|ому)\s+(?:снимке|фото|изображени[ию])", re.IGNORECASE),
+    re.compile(r"присланн(?:ое|ый)\s+(?:изображение|снимок|фото)", re.IGNORECASE),
+    re.compile(r"анатомический\s+и\s+рентгенологический\s+статус", re.IGNORECASE),
+    re.compile(r"детали\s+(?:каждого\s+)?снимка", re.IGNORECASE),
+    re.compile(r"компьютерное\s+зрение\s*\(\s*vision\s*\)", re.IGNORECASE),
+    re.compile(r"комментарий\s+по\s+снимку", re.IGNORECASE),
+]
+
+
+def is_media_task(status_context=None, prompt=None) -> bool:
+    """
+    Определяет, относится ли задача к анализу фото/рентгена/медиа.
+    Проверяет как контекст вызова (has_media, image_urls, kind),
+    так и текст промпта на ключевые клинические маркеры визуального осмотра.
+    """
+    if isinstance(status_context, dict):
+        if status_context.get("has_media"):
+            return True
+        if status_context.get("image_urls"):
+            return True
+        if status_context.get("kind") in ("assistant_media", "assistant_media_pm", "media_fallback"):
+            return True
+    if prompt and isinstance(prompt, str):
+        for pat in MEDIA_PROMPT_PATTERNS:
+            if pat.search(prompt):
+                return True
+    return False
+
+
+def cascade_for_context(status_context=None, prompt=None):
     """
     Формирует каскад (model_name, provider) в зависимости от контекста задачи.
+    Для медиа/фото/рентгена: СТРОГО мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> 2.5 -> lite).
+    Никакого DeepSeek или Groq для задач со снимками!
     Для CHAT_KINDS: gemini-3.5-flash-lite в начале для быстрых ответов (при LOW/MEDIUM),
     но gemini-3.8-flash доступен для глубоких рассуждений (при HIGH).
     Для daemon_memory и простых задач с LOW не проваливается во флагманский gemini-3.8-flash.
     """
+    if is_media_task(status_context, prompt):
+        # При наличии фото/рентгена — СТРОГО мультимодальные модели Gemini!
+        # Категорический запрет чисто текстовых моделей (DeepSeek, Groq):
+        # они не видят пикселей, работают как «испорченный телефон» и галлюцинируют
+        # выдуманные зубы, культевые вкладки и развилки.
+        # Приоритет умных reasoning-моделей (3.8, 3.7, 3.6), затем стабильный резерв.
+        return [
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-2.5-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+        ]
+
     kind = status_context.get("kind") if status_context else None
     is_triage = kind in TRIAGE_KINDS
     summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
@@ -785,7 +839,10 @@ def cascade_for_context(status_context=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-2.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
         ]
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         cascade = []
@@ -894,16 +951,19 @@ def generate_text(prompt, status_context=None, timeout=None):
     # числа попыток, а число попыток — от числа моделей и живых ключей.
     req_timeout = 140.0
 
-    # Авто-детект фокуса на изображении/рентгене по тексту промпта
-    if prompt and isinstance(status_context, dict) and not status_context.get("has_media"):
-        if any(k in prompt for k in ("(На фото", "прикреплено ФОТО", "на присланном снимке", "на рентгенограмме")):
-            status_context["has_media"] = True
+    # Авто-детект фокуса на изображении/рентгене по контексту и промпту
+    is_media = is_media_task(status_context, prompt)
+    if is_media and isinstance(status_context, dict) and not status_context.get("has_media"):
+        status_context["has_media"] = True
 
-    models_cascade = cascade_for_context(status_context)
-
-
-
+    models_cascade = cascade_for_context(status_context, prompt=prompt)
     active_cascade = active_models(models_cascade)
+    if is_media:
+        # Для медиа-задач категорически исключаем любые сторонние модели (DeepSeek, Groq)
+        gemini_only = [(m, p) for m, p in active_cascade if p == "gemini"]
+        if gemini_only:
+            active_cascade = gemini_only
+
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
 
     # АРИФМЕТИКА БЮДЖЕТА: попытки x таймаут попытки обязаны влезать в timeout.
@@ -939,7 +999,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                 "Budget %.0fs nominally fits %s of %s cascade models; tail preserved for fast fallbacks.",
                 budget, models_fit, len(active_cascade)
             )
-        share_divisor = min(models_fit, len(active_cascade))
+        share_divisor = max(1, min(models_fit, len(active_cascade)))
         model_share = usable / share_divisor
         max_attempts = max(1, min(max_attempts, int(model_share // COMFORT_REQUEST_SECONDS)))
         req_timeout = model_share / max_attempts
@@ -954,299 +1014,322 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     out_of_budget = False
     requests_made = 0
-    for model_index, (model_name, provider) in enumerate(active_cascade):
-        keys = list(provider_pool(provider))
-        # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
-        # здесь были источником, с которого их скопировали остальные пути.
-        client_maker = lambda k: get_provider_client(provider, k, timeout=req_timeout)
+    max_media_rounds = 8 if is_media else 1
+    media_round = 0
 
-        if not keys:
-            logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
-            _record_failure("no_keys_configured", f"{provider}: ключи не настроены")
-            continue
+    while media_round < max_media_rounds and not out_of_budget:
+        min_cooldown_seen = float('inf')
+        for model_index, (model_name, provider) in enumerate(active_cascade):
+            if is_media and provider != "gemini" and any(p == "gemini" for _, p in active_cascade):
+                continue
+            keys = list(provider_pool(provider))
+            # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
+            # здесь были источником, с которого их скопировали остальные пути.
+            client_maker = lambda k: get_provider_client(provider, k, timeout=req_timeout)
 
-        random.shuffle(keys)
-
-        # Ключи на кулдауне отсеиваются ДО цикла попыток.
-        #
-        # Раньше проверка стояла внутри цикла и делала `continue`: «холодный»
-        # ключ съедал попытку целиком, не отправив запроса. Настроено 10 ключей
-        # Google и 7 Groq при бюджете max_attempts=3 — трёх подряд попавшихся
-        # остывающих ключей хватало, чтобы модель была пропущена при семи
-        # полностью здоровых. Когда так же осыпался весь каскад, бот писал
-        # «All AI attempts exhausted» и молча не отвечал врачу, имея на руках
-        # больше десятка рабочих ключей.
-        # Отбор — через общий учёт (available_keys), а не своей копией фильтра.
-        available, _cooling, cooldown_wait = available_keys(provider, keys)
-        if not available:
-            logger.info(
-                "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
-                provider, cooldown_wait, model_name
-            )
-            _record_failure(
-                "all_keys_on_cooldown",
-                f"{provider}: все {len(keys)} ключей остывают, ближайший через "
-                f"{cooldown_wait}с"
-            )
-            continue
-        if len(available) < len(keys):
-            logger.info(
-                "%s: %s of %s keys available, rest on cooldown.",
-                provider, len(available), len(keys)
-            )
-
-        # Бюджет попыток — это число РЕАЛЬНЫХ запросов, каждый на своём ключе.
-        attempts_planned = min(max_attempts, len(available))
-        is_last_model = model_index == len(active_cascade) - 1
-        for attempt in range(attempts_planned):
-            api_key = available[attempt]
-            key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
-
-            # Первый запрос делаем всегда: бюджет уже нарезан так, чтобы он в
-            # него влез, а ноль запросов — это гарантированное молчание бота.
-            if deadline is not None and requests_made:
-                remaining = deadline - time.monotonic()
-                min_needed = 28.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
-                if remaining < min_needed:
-                    # Запрос, который не успеет закончиться до убийства процесса,
-                    # начинать нечего: его ответ никто не прочитает.
-                    logger.warning(
-                        "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
-                        max(0.0, remaining), min_needed, model_name
-                    )
-                    _record_failure(
-                        "budget_exhausted",
-                        f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
-                    )
-                    out_of_budget = True
-                    break
-                # Последнему запросу отдаём ровно остаток бюджета, а не полную
-                # долю: сумма таймаутов запросов не должна вылезать за timeout.
-                req_timeout = min(req_timeout, remaining)
-
-            call_timeout = req_timeout
-            if provider == "agentrouter":
-                rem = (deadline - time.monotonic()) if deadline else 140.0
-                if kind in summary_kinds:
-                    call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
-                else:
-                    call_timeout = max(call_timeout, min(120.0, max(28.0, rem)))
-            elif deadline is not None:
-                rem = deadline - time.monotonic()
-                call_timeout = min(call_timeout, rem)
-
-            try:
-                client = get_provider_client(provider, api_key, timeout=call_timeout)
-                _write_generation_status(
-                    status_context, stage=f"{provider}_request",
-                    attempt=attempt + 1, max_attempts=max_attempts,
-                    key=key_id, model=model_name
-                )
-                logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
-
-                requests_made += 1
-                # Поддержка мультимодальности: если переданы image_urls, прикрепляем их для Gemini
-                image_urls = status_context.get("image_urls") if isinstance(status_context, dict) else None
-                can_vision = (provider == "gemini") or ("vision" in model_name.lower())
-
-                if can_vision and image_urls:
-                    user_content = [{"type": "text", "text": prompt}]
-                    max_imgs = 6 if provider == "gemini" else 3
-                    for iu in image_urls[:max_imgs]:
-                        user_content.append({"type": "image_url", "image_url": {"url": iu}})
-                    messages_payload = [{"role": "user", "content": user_content}]
-                else:
-                    clean_prompt = prompt
-                    if "[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ:" in clean_prompt:
-                        clean_prompt = re.sub(
-                            r'\[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ:[^\]]*\]',
-                            '[КЛИНИЧЕСКИЙ КОНТЕКСТ: Анализируй вопрос врача по описанию и симптомам. Не придумывай, что ты лично смотришь снимок.]',
-                            clean_prompt
-                        )
-                    messages_payload = [{"role": "user", "content": clean_prompt}]
-
-                # Using OpenAI SDK for BOTH Groq and Gemini now
-                ctx_temp = status_context.get("temperature") if isinstance(status_context, dict) else None
-                if ctx_temp is not None:
-                    eff_temp = float(ctx_temp)
-                elif is_triage or is_clinical_review:
-                    eff_temp = 0.2
-                else:
-                    eff_temp = 0.95
-
-                create_kwargs = {
-                    "model": model_name,
-                    "messages": messages_payload,
-                    "temperature": eff_temp,
-                }
-                ctx_max_tokens = status_context.get("max_tokens") if isinstance(status_context, dict) else None
-                if ctx_max_tokens:
-                    create_kwargs["max_tokens"] = int(ctx_max_tokens)
-                elif kind == "daemon_memory":
-                    create_kwargs["max_tokens"] = 2048
-
-                # Лимит OTPM для Groq (особенно бесплатные квоты Qwen): потолок 1000 токенов/мин
-                if provider == "groq" and "max_tokens" in create_kwargs:
-                    create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
-
-                # Для AgentRouter (DeepSeek / рассуждающие модели) не ограничиваем токенами:
-                # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ.
-                # Для дайджестов выделяем расширенный лимит 16384 токенов.
-                if provider == "agentrouter":
-                    default_max = 16384 if kind in summary_kinds else 4096
-                    create_kwargs["max_tokens"] = max(default_max, int(ctx_max_tokens or default_max))
-
-                # Нативный параметр размышлений для моделей:
-                # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort.
-                # Google OpenAI endpoint поддерживает только 'low', 'medium', 'high'.
-                # Значение 'none' вызывает 400 INVALID_ARGUMENT, поэтому для none/triage опускаем параметр.
-                if provider == "gemini":
-                    if is_triage or thinking_level in ("NONE", "none"):
-                        pass
-                    elif thinking_level == "LOW":
-                        create_kwargs["reasoning_effort"] = "low"
-                    elif thinking_level == "HIGH":
-                        create_kwargs["reasoning_effort"] = "high"
-                    else:  # MEDIUM
-                        create_kwargs["reasoning_effort"] = "medium"
-
-                try:
-                    response = client.chat.completions.create(**create_kwargs)
-                except (TypeError, Exception) as err:
-                    err_str = str(err).lower()
-                    retry_needed = False
-                    if "unexpected keyword" in err_str:
-                        for bad_kw in ("max_tokens", "reasoning_effort"):
-                            if bad_kw in create_kwargs and bad_kw in err_str:
-                                create_kwargs.pop(bad_kw, None)
-                                retry_needed = True
-                    if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
-                        create_kwargs.pop("reasoning_effort", None)
-                        retry_needed = True
-                    if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
-                        logger.warning("Model %s rejected multimodal payload; retrying with text only", model_name)
-                        create_kwargs["messages"] = [{"role": "user", "content": prompt}]
-                        retry_needed = True
-                    if retry_needed:
-                        response = client.chat.completions.create(**create_kwargs)
-                    else:
-                        raise
-                text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
-
-                # Срезаем размышления ДО проверки на непустоту: раньше проверка
-                # стояла до срезки, и ответ из одних размышлений уходил наружу
-                # пустым, но с признаком успеха — каскад обрывался.
-                text_result = strip_reasoning(text_result)
-
-                if text_result:
-                    # Удача тоже событие учёта, не только отказ: см. note_success.
-                    note_success(provider, api_key, model_name=model_name)
-                    logger.info(f"{provider.capitalize()} success key={key_id} model={model_name} chars={len(text_result)}")
-                    _write_generation_status(
-                        status_context, stage=f"{provider}_success",
-                        attempt=attempt + 1, max_attempts=max_attempts,
-                        key=key_id, result_chars=len(text_result)
-                    )
-                    _release_generation_status(status_context)
-                    _reset_failure()
-                    return DummyResponse(text_result)
-
-                logger.warning(f"{provider.capitalize()} returned empty response attempt={attempt + 1}/{max_attempts} key={key_id}")
-                _write_generation_status(
-                    status_context, stage=f"{provider}_empty_response",
-                    attempt=attempt + 1, max_attempts=max_attempts, key=key_id
-                )
-                _record_failure("empty_response", f"{model_name}: модель вернула пустой текст")
-
-            except Exception as exc:
-                err_msg = str(exc).lower()
-                logger.warning(f"{provider.capitalize()} failed attempt={attempt + 1}/{max_attempts} key={key_id}: {exc}")
-
-                is_status_400 = (
-                    getattr(exc, "status_code", None) == 400
-                    or "400" in err_msg
-                    or "bad request" in err_msg
-                )
-                is_fatal_400 = is_status_400 and (
-                    "invalid_argument" in err_msg
-                    or "context_length_exceeded" in err_msg
-                    or "token count exceeds" in err_msg
-                    or "maximum context length" in err_msg
-                    or "context_window_exceeded" in err_msg
-                )
-                if is_fatal_400:
-                    logger.warning(
-                        f"{provider.capitalize()} fatal deterministic 400 Bad Request ({err_msg[:120]}). "
-                        "Aborting cascade immediately with fatal_invalid_request."
-                    )
-                    _record_failure("fatal_invalid_request", str(exc), api_key)
-                    out_of_budget = True
-                    break
-
-                if _is_retryable_gemini_error(err_msg):
-                    sleep_time = _retry_sleep_seconds(attempt)
-                else:
-                    sleep_time = 5
-
-                _write_generation_status(
-                    status_context, stage=f"{provider}_error",
-                    attempt=attempt + 1, max_attempts=max_attempts,
-                    key=key_id, error=str(exc)[:500]
-                )
-
-                # Разбор отказа и запись в учёт — в note_key_failure, здесь только
-                # решение, куда идти дальше. Порядок проверок («ключ исчерпан»
-                # ПЕРВЫМ, бан модели вторым) оплачен дефектом и описан там же:
-                # держать его в одном месте — весь смысл выноса, потому что
-                # копия в vision этот порядок уже воспроизводит вручную.
-                failure_reason = note_key_failure(
-                    provider, api_key, str(exc), model_name=model_name
-                )
-                if failure_reason == "key_rate_limited":
-                    if provider == "gemini" and is_gcp_project_quota_error(err_msg):
-                        logger.warning(
-                            "GCP project quota exhausted: skipping remaining Gemini keys, moving to fallback provider."
-                        )
-                        break
-                    # Ликвидация 429 stampede: обязательная пауза не менее 2.5-3.0 сек перед переходом к следующему ключу
-                    rate_sleep = 2.5
-                    if deadline is not None:
-                        rate_sleep = min(rate_sleep, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
-                    if rate_sleep > 0:
-                        logger.info(
-                            f"{provider.capitalize()} key rate limited (429); pausing {rate_sleep:.1f}s before trying next key."
-                        )
-                        _sleep_with_status(rate_sleep, status_context, attempt + 1, max_attempts, key_id)
-                    continue
-
-                if failure_reason in ("model_overloaded", "model_not_found", "content_blocked"):
-                    break
-
-                if failure_reason == "key_denied":
-                    logger.info(f"{provider.capitalize()} key denied (403), switching key without sleeping.")
-                    continue
-
-                # Сон нужен только тому, кто ещё будет повторять. На последней
-                # попытке последней модели дальше стоит return None — 8-10 с сна
-                # перед ним врач ждал впустую. Остаток бюджета тоже режем: спать
-                # дольше, чем осталось на сам запрос, бессмысленно.
-                if is_last_model and attempt + 1 >= attempts_planned:
-                    logger.info(
-                        f"{provider.capitalize()} last chance in cascade failed; "
-                        f"skipping the {sleep_time:.1f}s backoff before giving up."
-                    )
-                    continue
-                if deadline is not None:
-                    sleep_time = min(
-                        sleep_time,
-                        max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS)
-                    )
-                if sleep_time > 0:
-                    logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
-                    _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
+            if not keys:
+                logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
+                _record_failure("no_keys_configured", f"{provider}: ключи не настроены")
                 continue
 
+            random.shuffle(keys)
+
+            # Ключи на кулдауне отсеиваются ДО цикла попыток.
+            #
+            # Раньше проверка стояла внутри цикла и делала `continue`: «холодный»
+            # ключ съедал попытку целиком, не отправив запроса. Настроено 10 ключей
+            # Google и 7 Groq при бюджете max_attempts=3 — трёх подряд попавшихся
+            # остывающих ключей хватало, чтобы модель была пропущена при семи
+            # полностью здоровых. Когда так же осыпался весь каскад, бот писал
+            # «All AI attempts exhausted» и молча не отвечал врачу, имея на руках
+            # больше десятка рабочих ключей.
+            # Отбор — через общий учёт (available_keys), а не своей копией фильтра.
+            available, _cooling, cooldown_wait = available_keys(provider, keys)
+            if not available:
+                logger.info(
+                    "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
+                    provider, cooldown_wait, model_name
+                )
+                _record_failure(
+                    "all_keys_on_cooldown",
+                    f"{provider}: все {len(keys)} ключей остывают, ближайший через "
+                    f"{cooldown_wait}с"
+                )
+                continue
+            if len(available) < len(keys):
+                logger.info(
+                    "%s: %s of %s keys available, rest on cooldown.",
+                    provider, len(available), len(keys)
+                )
+
+            # Бюджет попыток — это число РЕАЛЬНЫХ запросов, каждый на своём ключе.
+            attempts_planned = min(max_attempts, len(available))
+            is_last_model = (model_index == len(active_cascade) - 1) and (media_round + 1 >= max_media_rounds)
+            for attempt in range(attempts_planned):
+                api_key = available[attempt]
+                key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
+
+                # Первый запрос делаем всегда: бюджет уже нарезан так, чтобы он в
+                # него влез, а ноль запросов — это гарантированное молчание бота.
+                if deadline is not None and requests_made:
+                    remaining = deadline - time.monotonic()
+                    min_needed = 28.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
+                    if remaining < min_needed:
+                        # Запрос, который не успеет закончиться до убийства процесса,
+                        # начинать нечего: его ответ никто не прочитает.
+                        logger.warning(
+                            "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
+                            max(0.0, remaining), min_needed, model_name
+                        )
+                        _record_failure(
+                            "budget_exhausted",
+                            f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
+                        )
+                        out_of_budget = True
+                        break
+                    # Последнему запросу отдаём ровно остаток бюджета, а не полную
+                    # долю: сумма таймаутов запросов не должна вылезать за timeout.
+                    req_timeout = min(req_timeout, remaining)
+
+                call_timeout = req_timeout
+                if provider == "agentrouter":
+                    rem = (deadline - time.monotonic()) if deadline else 140.0
+                    if kind in summary_kinds:
+                        call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
+                    else:
+                        call_timeout = max(call_timeout, min(120.0, max(28.0, rem)))
+                elif deadline is not None:
+                    rem = deadline - time.monotonic()
+                    call_timeout = min(call_timeout, rem)
+
+                try:
+                    client = get_provider_client(provider, api_key, timeout=call_timeout)
+                    _write_generation_status(
+                        status_context, stage=f"{provider}_request",
+                        attempt=attempt + 1, max_attempts=max_attempts,
+                        key=key_id, model=model_name
+                    )
+                    logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
+
+                    requests_made += 1
+                    # Поддержка мультимодальности: если переданы image_urls, прикрепляем их для Gemini
+                    image_urls = status_context.get("image_urls") if isinstance(status_context, dict) else None
+                    can_vision = (provider == "gemini") or ("vision" in model_name.lower())
+
+                    if can_vision and image_urls:
+                        user_content = [{"type": "text", "text": prompt}]
+                        max_imgs = 6 if provider == "gemini" else 3
+                        for iu in image_urls[:max_imgs]:
+                            user_content.append({"type": "image_url", "image_url": {"url": iu}})
+                        messages_payload = [{"role": "user", "content": user_content}]
+                    else:
+                        messages_payload = [{"role": "user", "content": prompt}]
+
+                    # Using OpenAI SDK for BOTH Groq and Gemini now
+                    ctx_temp = status_context.get("temperature") if isinstance(status_context, dict) else None
+                    if ctx_temp is not None:
+                        eff_temp = float(ctx_temp)
+                    elif is_triage or is_clinical_review:
+                        eff_temp = 0.2
+                    else:
+                        eff_temp = 0.95
+
+                    create_kwargs = {
+                        "model": model_name,
+                        "messages": messages_payload,
+                        "temperature": eff_temp,
+                    }
+                    ctx_max_tokens = status_context.get("max_tokens") if isinstance(status_context, dict) else None
+                    if ctx_max_tokens:
+                        create_kwargs["max_tokens"] = int(ctx_max_tokens)
+                    elif kind == "daemon_memory":
+                        create_kwargs["max_tokens"] = 2048
+
+                    # Лимит OTPM для Groq (особенно бесплатные квоты Qwen): потолок 1000 токенов/мин
+                    if provider == "groq" and "max_tokens" in create_kwargs:
+                        create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
+
+                    # Для AgentRouter (DeepSeek / рассуждающие модели) не ограничиваем токенами:
+                    # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ.
+                    # Для дайджестов выделяем расширенный лимит 16384 токенов.
+                    if provider == "agentrouter":
+                        default_max = 16384 if kind in summary_kinds else 4096
+                        create_kwargs["max_tokens"] = max(default_max, int(ctx_max_tokens or default_max))
+
+                    # Нативный параметр размышлений для моделей:
+                    # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort.
+                    # Google OpenAI endpoint поддерживает только 'low', 'medium', 'high'.
+                    # Значение 'none' вызывает 400 INVALID_ARGUMENT, поэтому для none/triage опускаем параметр.
+                    if provider == "gemini":
+                        if is_triage or thinking_level in ("NONE", "none"):
+                            pass
+                        elif thinking_level == "LOW":
+                            create_kwargs["reasoning_effort"] = "low"
+                        elif thinking_level == "HIGH":
+                            create_kwargs["reasoning_effort"] = "high"
+                        else:  # MEDIUM
+                            create_kwargs["reasoning_effort"] = "medium"
+
+                    try:
+                        response = client.chat.completions.create(**create_kwargs)
+                    except (TypeError, Exception) as err:
+                        err_str = str(err).lower()
+                        retry_needed = False
+                        if "unexpected keyword" in err_str:
+                            for bad_kw in ("max_tokens", "reasoning_effort"):
+                                if bad_kw in create_kwargs and bad_kw in err_str:
+                                    create_kwargs.pop(bad_kw, None)
+                                    retry_needed = True
+                        if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
+                            create_kwargs.pop("reasoning_effort", None)
+                            retry_needed = True
+                        if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
+                            logger.warning("Model %s rejected multimodal payload; retrying with text only", model_name)
+                            create_kwargs["messages"] = [{"role": "user", "content": prompt}]
+                            retry_needed = True
+                        if retry_needed:
+                            response = client.chat.completions.create(**create_kwargs)
+                        else:
+                            raise
+                    text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
+
+                    # Срезаем размышления ДО проверки на непустоту: раньше проверка
+                    # стояла до срезки, и ответ из одних размышлений уходил наружу
+                    # пустым, но с признаком успеха — каскад обрывался.
+                    text_result = strip_reasoning(text_result)
+
+                    if text_result:
+                        # Удача тоже событие учёта, не только отказ: см. note_success.
+                        note_success(provider, api_key, model_name=model_name)
+                        logger.info(f"{provider.capitalize()} success key={key_id} model={model_name} chars={len(text_result)}")
+                        _write_generation_status(
+                            status_context, stage=f"{provider}_success",
+                            attempt=attempt + 1, max_attempts=max_attempts,
+                            key=key_id, result_chars=len(text_result)
+                        )
+                        _release_generation_status(status_context)
+                        _reset_failure()
+                        return DummyResponse(text_result)
+
+                    logger.warning(f"{provider.capitalize()} returned empty response attempt={attempt + 1}/{max_attempts} key={key_id}")
+                    _write_generation_status(
+                        status_context, stage=f"{provider}_empty_response",
+                        attempt=attempt + 1, max_attempts=max_attempts, key=key_id
+                    )
+                    _record_failure("empty_response", f"{model_name}: модель вернула пустой текст")
+
+                except Exception as exc:
+                    err_msg = str(exc).lower()
+                    logger.warning(f"{provider.capitalize()} failed attempt={attempt + 1}/{max_attempts} key={key_id}: {exc}")
+
+                    is_status_400 = (
+                        getattr(exc, "status_code", None) == 400
+                        or "400" in err_msg
+                        or "bad request" in err_msg
+                    )
+                    is_fatal_400 = is_status_400 and (
+                        "invalid_argument" in err_msg
+                        or "context_length_exceeded" in err_msg
+                        or "token count exceeds" in err_msg
+                        or "maximum context length" in err_msg
+                        or "context_window_exceeded" in err_msg
+                    )
+                    if is_fatal_400:
+                        logger.warning(
+                            f"{provider.capitalize()} fatal deterministic 400 Bad Request ({err_msg[:120]}). "
+                            "Aborting cascade immediately with fatal_invalid_request."
+                        )
+                        _record_failure("fatal_invalid_request", str(exc), api_key)
+                        out_of_budget = True
+                        break
+
+                    if _is_retryable_gemini_error(err_msg):
+                        sleep_time = _retry_sleep_seconds(attempt)
+                    else:
+                        sleep_time = 5
+
+                    _write_generation_status(
+                        status_context, stage=f"{provider}_error",
+                        attempt=attempt + 1, max_attempts=max_attempts,
+                        key=key_id, error=str(exc)[:500]
+                    )
+
+                    # Разбор отказа и запись в учёт — в note_key_failure, здесь только
+                    # решение, куда идти дальше. Порядок проверок («ключ исчерпан»
+                    # ПЕРВЫМ, бан модели вторым) оплачен дефектом и описан там же:
+                    # держать его в одном месте — весь смысл выноса, потому что
+                    # копия в vision этот порядок уже воспроизводит вручную.
+                    failure_reason = note_key_failure(
+                        provider, api_key, str(exc), model_name=model_name
+                    )
+                    if failure_reason == "key_rate_limited":
+                        if provider == "gemini" and is_gcp_project_quota_error(err_msg):
+                            logger.warning(
+                                "GCP project quota exhausted: skipping remaining Gemini keys, moving to fallback provider."
+                            )
+                            break
+                        # Ликвидация 429 stampede: обязательная пауза не менее 2.5-3.0 сек перед переходом к следующему ключу
+                        rate_sleep = 2.5
+                        if deadline is not None:
+                            rate_sleep = min(rate_sleep, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                        if rate_sleep > 0:
+                            logger.info(
+                                f"{provider.capitalize()} key rate limited (429); pausing {rate_sleep:.1f}s before trying next key."
+                            )
+                            _sleep_with_status(rate_sleep, status_context, attempt + 1, max_attempts, key_id)
+                        continue
+
+                    if failure_reason in ("model_overloaded", "model_not_found", "content_blocked"):
+                        break
+
+                    if failure_reason == "key_denied":
+                        logger.info(f"{provider.capitalize()} key denied (403), switching key without sleeping.")
+                        continue
+
+                    # Сон нужен только тому, кто ещё будет повторять. На последней
+                    # попытке последней модели дальше стоит return None — 8-10 с сна
+                    # перед ним врач ждал впустую. Остаток бюджета тоже режем: спать
+                    # дольше, чем осталось на сам запрос, бессмысленно.
+                    if is_last_model and attempt + 1 >= attempts_planned:
+                        logger.info(
+                            f"{provider.capitalize()} last chance in cascade failed; "
+                            f"skipping the {sleep_time:.1f}s backoff before giving up."
+                        )
+                        continue
+                    if deadline is not None:
+                        sleep_time = min(
+                            sleep_time,
+                            max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS)
+                        )
+                    if sleep_time > 0:
+                        logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
+                        _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
+                    continue
+
         if out_of_budget:
+            break
+
+        if is_media and (media_round + 1 < max_media_rounds):
+            remaining = (deadline - time.monotonic()) if deadline else 120.0
+            if remaining >= (MIN_REQUEST_SECONDS + 2.0):
+                wait_s = min(8.0, max(2.5, min_cooldown_seen if min_cooldown_seen < float('inf') else 3.0))
+                if deadline is not None:
+                    wait_s = min(wait_s, max(1.0, remaining - MIN_REQUEST_SECONDS))
+                logger.info(
+                    'Media task: Gemini models unready in round %s/%s; '
+                    'pausing %.1fs before next round (remaining budget %.1fs)...',
+                    media_round + 1, max_media_rounds, wait_s, remaining
+                )
+                _sleep_with_status(wait_s, status_context, media_round + 1, max_media_rounds, 'gemini_backoff')
+                media_round += 1
+                continue
+            else:
+                logger.warning(
+                    'Media task: insufficient budget left (%.1fs < %.1fs) for another round; stopping.',
+                    remaining, MIN_REQUEST_SECONDS + 2.0
+                )
+                break
+        else:
             break
 
     # Причина провала уходит и в журнал, и в файл статуса. Раньше здесь была

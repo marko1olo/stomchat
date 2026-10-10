@@ -56,7 +56,12 @@ check("В poll_clinical_review deepseek-v4-flash идет первым", cascade
 
 cascade_media = gc.cascade_for_context({"kind": "assistant_media", "has_media": True})
 check("При наличии медиа (assistant_media) Gemini идет первым", cascade_media[0][1] == "gemini")
-check("При наличии медиа deepseek в резерве каскада", ("deepseek-v4-flash", "agentrouter") in cascade_media and cascade_media[0] != ("deepseek-v4-flash", "agentrouter"))
+check("При наличии медиа deepseek КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН", ("deepseek-v4-flash", "agentrouter") not in cascade_media)
+check("При наличии медиа все модели в каскаде исключительно Gemini", all(p == "gemini" for _, p in cascade_media))
+
+cascade_prompt_media = gc.cascade_for_context({"kind": "pm_chat"}, prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: фото зуба 4.6]")
+check("Авто-детект медиа по тексту промпта блокирует deepseek", ("deepseek-v4-flash", "agentrouter") not in cascade_prompt_media)
+check("Авто-детект медиа возвращает только Gemini", all(p == "gemini" for _, p in cascade_prompt_media))
 
 cascade_triage = gc.cascade_for_context({"kind": "llama_triage"})
 check("В triage deepseek-v4-flash присутствует как резерв", ("deepseek-v4-flash", "agentrouter") in cascade_triage)
