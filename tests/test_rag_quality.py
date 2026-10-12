@@ -344,6 +344,34 @@ async def run():
           all(not assistant.has_dental_term(q) for q in false_positive_phrases),
           f"false pos: {[q for q in false_positive_phrases if assistant.has_dental_term(q)]}")
 
+    print("\n[13] Red-Team Phase 3: морфология прилагательных, гейт узких EBM-протоколов и фильтр вопросов")
+    adj_kws = assistant.select_search_keywords(
+        assistant.extract_keywords("глубокого поддесневого кариеса и мандибулярная анестезия при остром пульпите")
+    )
+    check("стемминг прилагательных: поддесневого -> поддеснев, мандибулярная -> мандибулярн",
+          "поддеснев" in adj_kws and "мандибулярн" in adj_kws and "кариес" in adj_kws and "пульпит" in adj_kws,
+          f"got {adj_kws}")
+
+    proto_candidates = [
+        "[ПРОТОКОЛ EBM: Протокол лазерного демонтажа керамических реставраций (Er:YAG) (Ортопедия)] Показания: Атравматичное снятие коронок из дисиликата лития (E.max) и циркония. Материалы: Er:YAG лазер, плавиковая кислота, силан.",
+        "[ПРОТОКОЛ EBM: Адгезивная фиксация керамики E.max (дисиликат лития) (Ортопедия)] Показания: Непрямые реставрации из дисиликата лития E.max. Материалы: Плавиковая кислота 5%, силан, адгезив.",
+        "[2.2.1 msg#12345] Травление керамики E.max проводится 5% плавиковой кислотой в течение 20 секунд с последующим нанесением силана.",
+    ]
+    ranked_emax = assistant._rank_corpus_entries(proto_candidates, ["травлен", "керамик", "емакс", "силан"])
+    check("узкий EBM-протокол лазерного демонтажа отсечён при запросе про травление и фиксацию E.max",
+          all("лазерного демонтажа" not in r for r in ranked_emax) and any("Адгезивная фиксация керамики E.max" in r for r in ranked_emax),
+          f"got {ranked_emax}")
+
+    noise_samples = [
+        "Коллеги, подскажите, пожалуйста, чем лучше закрыть перфорацию в области фуркации?",
+        "Стоит ли перелечивать этот канал или сразу на удаление? Заранее благодарю!",
+        "Как бы вы поступили в такой ситуации? Опыт 1 год 🙏🏻",
+        "Анонс курса по эндодонтии! Регистрация по ссылке в профиле.",
+    ]
+    check("_ARCHIVE_QUESTION_NOISE_RE отсекает посты-просьбы о помощи и анонсы курсов",
+          all(bool(assistant._ARCHIVE_QUESTION_NOISE_RE.search(s)) for s in noise_samples),
+          f"missed: {[s for s in noise_samples if not assistant._ARCHIVE_QUESTION_NOISE_RE.search(s)]}")
+
 
 asyncio.run(run())
 
