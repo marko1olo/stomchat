@@ -79,6 +79,10 @@ snapshots/
 *.bak_*
 scratch/
 scratch_*.py
+_archive/sessions/
+_archive/logs/
+_archive/media/
+_archive/legacy_dbs/
 
 
 # Одноразовые скрипты замеров и проб. Их вывод живёт в отчётах _fix_*.md и

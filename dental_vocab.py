@@ -28,6 +28,9 @@ except Exception:  # noqa: BLE001 — причина не важна, важно
     config = None
 
 DENTAL_KEYWORDS = {
+    # Red-Team: Expanded materials, abbreviations, and cross-lingual clinical terms
+    "emax", "cadcam", "ptfe", "naocl", "chx", "vertiprep", "cbct", "xpendo", "cshape", "pui",
+    "бопт", "bopt", "емакс", "кэдкам", "вертипреп", "эдта", "мта", "гипохлорит", "хлоргексидин", "тефлон", "клкт",
     "зуб", "канал", "уступ", "бор", "файл", "цемент", "коронка", "коронок", "имплант",
     "активация", "винил", "преп", "эндо", "гнатол", "окклюз", "сустав", "внчс",
     "сплинт", "капп", "слеп", "оттис", "трансфер", "абатм", "циркон", "пмма", "pmma",
@@ -125,6 +128,56 @@ NON_CLINICAL_PREFIXES = frozenset({
 })
 
 
+# Red-Team Dental Synonyms & Compound Normalization
+COMPOUND_NORM = [
+    (re.compile(r'\be[\.-]max\b', re.IGNORECASE), 'emax'),
+    (re.compile(r'\bcad[/-]cam\b', re.IGNORECASE), 'cadcam'),
+    (re.compile(r'\bair[\s-]flow\b', re.IGNORECASE), 'airflow'),
+    (re.compile(r'\bbio[\s-]oss\b', re.IGNORECASE), 'biooss'),
+    (re.compile(r'\bxp[\s-]endo\b', re.IGNORECASE), 'xpendo'),
+    (re.compile(r'\bc[\s-]shape\b', re.IGNORECASE), 'cshape'),
+    (re.compile(r'\bptfe[\s-]лент[а-я]*\b', re.IGNORECASE), 'ptfe'),
+]
+
+def normalize_dental_compounds(text: str) -> str:
+    """Нормализует составные стоматологические термины (e.max -> emax, cad/cam -> cadcam)."""
+    if not text:
+        return ""
+    t = text
+    for pattern, repl in COMPOUND_NORM:
+        t = pattern.sub(repl, t)
+    return t
+
+DENTAL_SYNONYMS: dict[str, list[str]] = {
+    "бопт": ["bopt", "бопт"],
+    "bopt": ["bopt", "бопт"],
+    "емакс": ["emax", "e.max", "e-max", "емакс"],
+    "emax": ["emax", "e.max", "e-max", "емакс"],
+    "e.max": ["emax", "e.max", "e-max", "емакс"],
+    "cadcam": ["cadcam", "cad/cam", "кэдкам"],
+    "cad/cam": ["cadcam", "cad/cam", "кэдкам"],
+    "кэдкам": ["cadcam", "cad/cam", "кэдкам"],
+    "вертипреп": ["vertiprep", "вертипреп"],
+    "vertiprep": ["vertiprep", "вертипреп"],
+    "эдта": ["edta", "эдта"],
+    "edta": ["edta", "эдта"],
+    "мта": ["mta", "мта"],
+    "mta": ["mta", "мта"],
+    "гипохлорит": ["naocl", "гипохлорит"],
+    "naocl": ["naocl", "гипохлорит"],
+    "хлоргексидин": ["chx", "хлоргексидин"],
+    "chx": ["chx", "хлоргексидин"],
+    "тефлон": ["ptfe", "тефлон"],
+    "ptfe": ["ptfe", "тефлон"],
+    "клкт": ["cbct", "клкт"],
+    "cbct": ["cbct", "клкт"],
+    "коффердам": ["раббердам", "коффердам"],
+    "раббердам": ["коффердам", "раббердам"],
+    "xpendo": ["xp-endo", "xpendo"],
+    "xp-endo": ["xpendo", "xp-endo"],
+}
+
+
 def is_non_clinical_word(word):
     """
     Слово выглядит клиническим по корню, но им не является. См. NON_CLINICAL_PREFIXES.
@@ -181,6 +234,8 @@ def is_dental_keyword(word):
     # «скандал» — через «скан». Замер: 28 реплик архива из 107 316.
     if is_non_clinical_word(w):
         return False
+    if w in DENTAL_SYNONYMS:
+        return True
     for term in DENTAL_KEYWORDS:
         if len(term) <= 2:
             # Двухбуквенные термины — это аббревиатуры ("кт"), склонений у них

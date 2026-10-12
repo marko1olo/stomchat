@@ -25,6 +25,8 @@ from dental_vocab import (
     SHORT_DENTAL_TERMS,
     has_dental_term,
     is_dental_keyword,
+    normalize_dental_compounds,
+    DENTAL_SYNONYMS,
 )
 import html_safe
 import media_tools
@@ -2093,7 +2095,8 @@ def extract_keywords(text):
     if not text:
         return []
 
-    cleaned = re.sub(r"[^\w\s-]", " ", text.lower())
+    norm_text = normalize_dental_compounds(text)
+    cleaned = re.sub(r"[^\w\s-]", " ", norm_text.lower())
     words = cleaned.split()
     keywords = []
     for w in words:
@@ -2183,30 +2186,41 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
     Сортирует найденные фрагменты по числу РАЗНЫХ ключевых слов запроса,
     стоматологические веса выше. Фрагменты, содержащие несколько ключевых
     слов одновременно (пересечение терминов), получают максимальный приоритет.
-
-    Без ранжирования в промпт уходило то, что первым нашлось по первому же
-    ключевому слову: на вопрос про боль после лечения канала в справку
-    попадали факты про снятие оттисков (совпало "канал" внутри "канальцами"),
-    про BOPT и про CAD/CAM. То есть модели скармливали ровно ту приманку для
-    клинической отсебятины, которую следующие строки промпта запрещают.
+    Red-Team: кросс-языковые синонимы, инквизиционный отсев шума и Authority Boost для EBM.
     """
     if not entries or not keywords:
         return []
 
+    has_dental_kws = any(is_dental_keyword(kw) for kw in keywords)
+
+    kw_patterns = {}
+    for kw in keywords:
+        forms = DENTAL_SYNONYMS.get(kw.lower(), [kw])
+        kw_patterns[kw] = [re.compile(rf'\b{re.escape(f)}', re.IGNORECASE) for f in forms]
+
     weights = {kw: (2 if is_dental_keyword(kw) else 1) for kw in keywords}
-    regexes = {kw: re.compile(rf'\b{re.escape(kw)}', re.IGNORECASE) for kw in weights}
 
     scored = []
     for idx, entry in enumerate(entries):
         score = 0
         distinct = 0
+        matched_dental = False
         for kw, weight in weights.items():
-            if regexes[kw].search(entry):
+            if any(rgx.search(entry) for rgx in kw_patterns[kw]):
                 score += weight
                 distinct += 1
+                if is_dental_keyword(kw):
+                    matched_dental = True
 
-        # CRITICAL: Discard entries that matched in SQL but failed the regex boundary check!
+        # INQUISITION FILTER:
+        # Если в вопросе были клинические термины, отсекаем кандидатов, совпавших
+        # ТОЛЬКО по неклиническим общим словам (вроде "протокол" или "делать")
+        if has_dental_kws and not matched_dental and distinct < 2:
+            continue
+
         if score > 0:
+            if entry.startswith("[ПРОТОКОЛ EBM:") or "[ПРОТОКОЛ EBM:" in entry:
+                score += 20  # Золотой стандарт EBM получает наивысший приоритет
             intersection_boost = (distinct - 1) * 10 if distinct > 1 else 0
             total_score = score + intersection_boost
             scored.append((total_score, distinct, -idx, entry))
@@ -2216,10 +2230,8 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
 
     scored.sort(reverse=True)
 
-    # Предпочитаем фрагменты, зацепившие минимум два разных ключа, но никогда
-    # не отдаём пустую справку: при пустом корпусе вызывающий вообще молчит.
-    strong = [s for s in scored if s[1] >= 2]
-    chosen = strong if len(strong) >= 3 else scored
+    strong = [s for s in scored if s[1] >= 2 or s[0] >= 15]
+    chosen = strong if len(strong) >= 2 else scored
     return _fit_corpus_budget((s[3] for s in chosen[:output_limit]), max_chars=max_chars)
 
 
@@ -2365,10 +2377,12 @@ def like_any_case(column, keyword):
     втрое за каждый запрос смысла нет.
     """
     forms = []
-    for form in (keyword.lower(), keyword.upper(), keyword.capitalize()):
-        pattern = f"%{form}%"
-        if pattern not in forms:
-            forms.append(pattern)
+    synonyms = DENTAL_SYNONYMS.get(keyword.lower(), [keyword])
+    for syn in synonyms:
+        for form in (syn.lower(), syn.upper(), syn.capitalize()):
+            pattern = f"%{form}%"
+            if pattern not in forms:
+                forms.append(pattern)
     clause = " OR ".join(f"{column} LIKE ?" for _ in forms)
     return f"({clause})", tuple(forms)
 
@@ -2410,9 +2424,27 @@ def _is_bot_sender(sender_name, sender_username=None):
     return False
 
 
-async def search_knowledge_corpus(keywords, query_text=""):
+async def search_knowledge_corpus(keywords, query_text="", context_type="default"):
     if not keywords:
         return "", ""
+
+    # Red-Team Context Profiles
+    if context_type == "pm":
+        ctx_max_chars = 4000
+        ctx_output_limit = 4
+        skip_archive = False
+    elif context_type == "vision":
+        ctx_max_chars = 3500
+        ctx_output_limit = 3
+        skip_archive = True  # На снимках чатовая болтовня запрещена: только EBM и анатомия
+    elif context_type == "passive":
+        ctx_max_chars = 3000
+        ctx_output_limit = 3
+        skip_archive = False
+    else:
+        ctx_max_chars = _CORPUS_MAX_CHARS
+        ctx_output_limit = _CORPUS_OUTPUT_LIMIT
+        skip_archive = False
 
     def sync_search():
         try:
@@ -2637,16 +2669,20 @@ async def search_knowledge_corpus(keywords, query_text=""):
         return "", ""
 
 
-async def _safe_search_knowledge_corpus(keywords, query_text=""):
+async def _safe_search_knowledge_corpus(keywords, query_text="", context_type="default"):
     """
-    Вызывает search_knowledge_corpus с query_text, если целевая функция принимает этот аргумент,
-    либо с одним аргументом keywords (для полной обратной совместимости с тестами и одноаргументными моками).
+    Вызывает search_knowledge_corpus с query_text и context_type для профилирования бюджетов RAG.
     """
     fn = search_knowledge_corpus
     try:
         sig = inspect.signature(fn)
-        if "query_text" in sig.parameters or len(sig.parameters) >= 2 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            return await fn(keywords, query_text=query_text)
+        kwargs = {}
+        if "query_text" in sig.parameters:
+            kwargs["query_text"] = query_text
+        if "context_type" in sig.parameters:
+            kwargs["context_type"] = context_type
+        if kwargs or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return await fn(keywords, **kwargs)
     except Exception:
         pass
     return await fn(keywords)
@@ -4424,7 +4460,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 
 
-        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=keyword_source)
+        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=keyword_source, context_type="passive" if is_passive else "default")
 
         if not is_dialogue and not wiki_corpus and not archive_corpus:
             # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
@@ -5055,7 +5091,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         triggered = True
         trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic})"
         is_dental = True
-        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=caption_text or text)
+        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=caption_text or text, context_type="vision")
     else:
         # Non-dental Meme/Screenshot/Coffee: Trigger chitchat only if NOT passive (direct reply/mention)
         if not is_passive:
@@ -10232,7 +10268,7 @@ async def handle_private_message(bot_client, event):
         if has_dental_topic or has_media or has_search_or_link_intent:
             # Ищем совпадения в стоматологической базе
             search_keywords = select_search_keywords(keywords)
-            wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=full_context_str)
+            wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=full_context_str, context_type="pm")
 
         raw_chat_id = str(getattr(config, "SOURCE_CHAT_ID", "") or "")
         clean_chat_id = raw_chat_id[4:] if raw_chat_id.startswith("-100") else raw_chat_id.lstrip("-")
