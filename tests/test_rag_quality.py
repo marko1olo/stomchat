@@ -249,6 +249,35 @@ async def run():
           assistant._CORPUS_ENTRY_MAX_CHARS < assistant._CORPUS_MAX_CHARS,
           f"{assistant._CORPUS_ENTRY_MAX_CHARS} против {assistant._CORPUS_MAX_CHARS}")
 
+    print("\n[10] Red-Team: профили контекста и инквизиционный фильтр")
+    # 1. Vision profile: strict archive isolation & 3500 limit
+    v_wiki, v_arch = await assistant.search_knowledge_corpus(["гипохлорит", "канал"], context_type="vision")
+    check("vision: архив чата строго исключен", v_arch == "")
+    check("vision: вики укладывается в бюджет 3500", len(v_wiki) <= 3500)
+
+    # 2. PM profile: 4000 limit
+    pm_wiki, pm_arch = await assistant.search_knowledge_corpus(["бопт", "уступ"], context_type="pm")
+    check("pm: вики укладывается в бюджет 4000", len(pm_wiki) <= 4000)
+    check("pm: архив укладывается в бюджет 4000", len(pm_arch) <= 4000)
+
+    # 3. Wiki-only profile
+    wo_wiki, wo_arch = await assistant.search_knowledge_corpus(["емакс"], context_type="wiki_only")
+    check("wiki_only: архив не запрашивается", wo_arch == "")
+
+    # 4. Group reply profile: 2500 limit
+    gr_wiki, gr_arch = await assistant.search_knowledge_corpus(["цирконий"], context_type="group_reply")
+    check("group_reply: вики <= 2500", len(gr_wiki) <= 2500)
+    check("group_reply: архив <= 2500", len(gr_arch) <= 2500)
+
+    # 5. Inquisition filter: candidate with ONLY non-dental words rejected when query has dental words
+    raw_entries = [
+        "Врач: Мы вчера делали этот протокол и обсуждали время работы.",
+        "Врач: Протокол препарирования под оксид циркония с уступом 0.5 мм.",
+    ]
+    ranked = assistant._rank_corpus_entries(raw_entries, ["циркон", "уступ", "протокол", "делать"])
+    check("инквизиция: мусорная запись без клинических терминов отсечена",
+          len(ranked) == 1 and "циркония" in ranked[0], f"got {ranked}")
+
 
 asyncio.run(run())
 

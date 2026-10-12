@@ -2213,9 +2213,10 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
                     matched_dental = True
 
         # INQUISITION FILTER:
-        # Если в вопросе были клинические термины, отсекаем кандидатов, совпавших
+        # Если в запросе были клинические термины, кандидат ОБЯЗАН содержать хотя бы один
+        # клинический термин из запроса (или его синоним). Отсекаем кандидатов, совпавших
         # ТОЛЬКО по неклиническим общим словам (вроде "протокол" или "делать")
-        if has_dental_kws and not matched_dental and distinct < 2:
+        if has_dental_kws and not matched_dental:
             continue
 
         if score > 0:
@@ -2427,6 +2428,9 @@ def _is_bot_sender(sender_name, sender_username=None):
 async def search_knowledge_corpus(keywords, query_text="", context_type="default"):
     if not keywords:
         return "", ""
+    keywords = select_search_keywords(keywords)
+    if not keywords:
+        return "", ""
 
     # Red-Team Context Profiles
     if context_type == "pm":
@@ -2440,6 +2444,14 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
     elif context_type == "passive":
         ctx_max_chars = 3000
         ctx_output_limit = 3
+        skip_archive = False
+    elif context_type in ("wiki_only", "term", "referee"):
+        ctx_max_chars = 1500 if context_type == "term" else (2500 if context_type == "referee" else 4000)
+        ctx_output_limit = 2 if context_type == "term" else (3 if context_type == "referee" else 4)
+        skip_archive = True
+    elif context_type == "group_reply":
+        ctx_max_chars = 2500
+        ctx_output_limit = 2
         skip_archive = False
     else:
         ctx_max_chars = _CORPUS_MAX_CHARS
@@ -2539,9 +2551,8 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching stomat_wiki.db: {e}")
 
-            # 2. Search active bot DB (stomat_bot.db: 41k+ live messages from 2026)
-            bot_db_path = getattr(config, "DB_PATH", "stomat_bot.db") or "stomat_bot.db"
-            if os.path.exists(bot_db_path):
+            # 2. Search active bot DB (stomat_bot.db: live messages) - bypassed if skip_archive
+            if not skip_archive and bot_db_path and os.path.exists(bot_db_path):
                 try:
                     with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -2583,8 +2594,8 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching {bot_db_path}: {e}")
 
-            # 3. Search archive messages (stomat_archive.db: pre-2026 archive)
-            if len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
+            # 3. Search archive messages (stomat_archive.db: pre-2026 archive) - bypassed if skip_archive
+            if not skip_archive and len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
                 try:
                     with contextlib.closing(sqlite3.connect("file:stomat_archive.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -2632,7 +2643,12 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
             q_len = len(query_text.strip()) if query_text else 0
             is_compact = (0 < q_len < 30 and kw_count <= 1)
 
-            if is_compact:
+            if context_type != "default":
+                wiki_limit = ctx_max_chars
+                wiki_rows = ctx_output_limit
+                archive_limit = 0 if skip_archive else ctx_max_chars
+                archive_rows = 0 if skip_archive else ctx_output_limit
+            elif is_compact:
                 if all_wiki_facts and archive_msgs:
                     wiki_limit = 1500
                     archive_limit = 1500
@@ -2655,7 +2671,7 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 archive_rows = _CORPUS_OUTPUT_LIMIT
 
             wiki_corpus = "\n".join(_rank_corpus_entries(all_wiki_facts, keywords, max_chars=wiki_limit, output_limit=wiki_rows)) if all_wiki_facts else ""
-            archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords, max_chars=archive_limit, output_limit=archive_rows)) if archive_msgs else ""
+            archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords, max_chars=archive_limit, output_limit=archive_rows)) if (archive_msgs and not skip_archive) else ""
             return wiki_corpus, archive_corpus
         except Exception as e:
             logger.error(f"Error in sync_search: {e}")
@@ -8039,7 +8055,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
     # RAG-поддержка для экзаменатора (подтягиваем клинические факты для корректной оценки действий)
     keywords = extract_keywords(user_text + " " + history_str)
-    wiki_corpus, _ = await search_knowledge_corpus(select_search_keywords(keywords))
+    wiki_corpus, _ = await search_knowledge_corpus(keywords, context_type="wiki_only")
 
     # Статус отправляем ТОЛЬКО после поиска по базе. Раньше он уходил первым,
     # а его удаление стояло за LLM-вызовом и не было защищено: любое исключение
@@ -10726,7 +10742,7 @@ NO — если это случайное упоминание, обсужден
 
         # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
         mention_keywords = extract_keywords(text or "")
-        mention_wiki, mention_archive = await search_knowledge_corpus(mention_keywords[:12]) if mention_keywords else ("", "")
+        mention_wiki, _ = await search_knowledge_corpus(mention_keywords, context_type="wiki_only") if mention_keywords else ("", "")
 
         # ЭТАП 2: Сгенерировать живой ответ
         reply_prompt = f"""Ты — клинический консультант и эксперт сообщества "StomChat". 
@@ -11082,7 +11098,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                 )
 
         keywords = extract_keywords(question + (" " + " ".join(reply_chain_lines) if reply_chain_lines else ""))
-        wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords[:12])
+        wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords, query_text=question, context_type="group_reply")
 
         prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
@@ -13743,7 +13759,7 @@ async def handle_quiz_callback(bot_client, event):
             "vertical": ["вертикальн", "уступ", "преп", "коронка"],
         }
         kws = keywords_map.get(proto_id, ["дентин"])
-        wiki_corpus, _ = await search_knowledge_corpus(kws)
+        wiki_corpus, _ = await search_knowledge_corpus(kws, context_type="wiki_only")
         wiki_corpus = clean_html_formatting(wiki_corpus)
         if not wiki_corpus:
             wiki_corpus = "<i>Данные протокола временно отсутствуют в базе знаний.</i>"
@@ -14264,7 +14280,7 @@ async def check_and_trigger_referee(bot_client, event, text):
 
     # Поиск по базе RAG для содержательного EBM-арбитража
     keywords = extract_keywords(text + " " + " ".join(chain_msgs))
-    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
+    wiki_corpus, _ = await search_knowledge_corpus(keywords, query_text=chain_str, context_type="referee")
 
     prompt = f"""
 Ты — опытный врач-стоматолог, коллега у кресла в профессиональном сообществе "StomChat". Говоришь на равных, емко и строго по делу, как врач врачу.
@@ -14351,7 +14367,7 @@ async def handle_term_explainer(bot_client, event, term):
         return
 
     keywords = extract_keywords(term)
-    wiki_corpus, _ = await search_knowledge_corpus(keywords[:12])
+    wiki_corpus, _ = await search_knowledge_corpus(keywords, query_text=term, context_type="term")
 
     prompt = f"""
 Ты — толковый словарь стоматологического сообщества "StomChat".
