@@ -86,11 +86,21 @@ CRON_JOB="0 * * * * cd $INSTALL_DIR && ./venv/bin/python3 scripts/snapshot_backu
 (crontab -u "$BOT_USER" -l 2>/dev/null | grep -v "snapshot_backup.py" || true; echo "$CRON_JOB") | crontab -u "$BOT_USER" -
 
 echo "=========================================================="
-echo " [7/7] Настройка файрвола (UFW) - только SSH"
+echo " [7/7] Настройка файрвола (UFW)"
 echo "=========================================================="
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow ssh
+
+# Preserve VPN ports if WireGuard / AmneziaWG are installed
+if command -v wg &>/dev/null || [ -f /etc/wireguard/wg0.conf ]; then
+    echo "Обнаружен WireGuard: разрешаю UDP 443..."
+    ufw allow 443/udp comment 'WireGuard' || true
+fi
+if command -v awg &>/dev/null || [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
+    echo "Обнаружен AmneziaWG: разрешаю UDP 4433..."
+    ufw allow 4433/udp comment 'AmneziaWG' || true
+fi
 ufw --force enable
 
 echo "=========================================================="
