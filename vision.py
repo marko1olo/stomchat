@@ -57,7 +57,7 @@ VISION_MIN_CALL_INTERVAL_SECONDS = 3.0
 # Сколько моделей в пуле каскада зрения. Держим рядом с константами, потому что
 # от этого числа зависит внешний потолок разбора снимка в main.py, а сам пул
 # объявлен внутри describe_image.
-VISION_MODEL_POOL_SIZE = 4
+VISION_MODEL_POOL_SIZE = 3
 
 # Сколько ключей пробовать на ОДНУ модель. Отказ конкретного ключа почти всегда
 # означает квоту или 429, и от этого спасает следующая модель, а не двадцатый
@@ -500,10 +500,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             )
 
 
-            # Load balancing pool (fallback: gemini-3.8-flash, gemini-3.7-flash): Gemini 3.5 Flash Lite, Gemini 3.8 Flash, Gemini 3.1 Flash Lite, Groq fallback
+            # Load balancing pool (fallback: gemini-3.8-flash, gemini-3.7-flash): высококвотные Flash-Lite для фонового разбора и Qwen (Groq) fallback.
+            # Не сжигает дефицитные квоты умных 3.8/3.7 на рутинные фоновые снимки.
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
-                ("gemini-3.8-flash", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
                 ("qwen/qwen3.8-27b", "groq"),
             ]
@@ -648,6 +648,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         if not skip_cache and cache_key:
                                             _VISION_CACHE[cache_key] = {"text": detailed_ctx, "short_caption": short_cap, "ts": time.time()}
                                             _save_vision_cache(_VISION_CACHE)
+                                        gemini_client.note_success(provider, api_key, model_name=model_name)
                                         return VisionDescription(detailed_ctx, image_urls=image_urls, short_caption=short_cap)
 
 
@@ -685,7 +686,10 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             # то есть обычная ошибка запроса выбрасывала модель
                             # из каскада как перегруженную.
                             if gemini_client._SERVER_ERROR_RE.search(err_str) or any(s in err_str for s in ("unavailable", "503", "504", "overload")):
-                                ban_duration = getattr(gemini_client, "MODEL_BAN_SECONDS", 1200)
+                                if hasattr(gemini_client, "_record_model_server_failure"):
+                                    ban_duration = gemini_client._record_model_server_failure(model_name)
+                                else:
+                                    ban_duration = getattr(gemini_client, "MODEL_BAN_SECONDS", 1200)
                                 gemini_client.ban_model(model_name, ban_duration)
                                 logger.warning(
                                     f"Vision {provider} server overloaded ({err_str}). "

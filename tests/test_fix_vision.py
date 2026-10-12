@@ -228,7 +228,7 @@ async def run():
     params = inspect.signature(vision.describe_image).parameters
     check("describe_image принимает is_passive", "is_passive" in params)
     for name in ("main.py", "assistant.py"):
-        source = io.open(os.path.join(_HERE, name), encoding="utf-8").read()
+        source = io.open(os.path.join(os.path.dirname(_HERE), name), encoding="utf-8").read()
         calls = [chunk for chunk in source.split("describe_image(")[1:]
                  if "is_passive" in chunk.split(")", 1)[0]]
         check(f"{name} передаёт is_passive именованным аргументом", bool(calls),

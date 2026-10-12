@@ -1013,7 +1013,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         # Для живого чата: максимум 60с (даем reasoning-моделям Gemini/DeepSeek время
         # на генерацию подробных клинических ответов без ложных срывов по ReadTimeout).
         if is_triage:
-            req_timeout = max(5.0, min(req_timeout, 15.0))
+            req_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, 15.0))
         elif is_chatbot:
             req_timeout = max(10.0, min(req_timeout, 60.0))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
@@ -1086,12 +1086,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                 # него влез, а ноль запросов — это гарантированное молчание бота.
                 if deadline is not None and requests_made:
                     remaining = deadline - time.monotonic()
-                    if provider == "groq":
-                        min_needed = 3.0
-                    elif provider == "agentrouter":
+                    if provider == "agentrouter":
                         min_needed = 8.0
                     else:
-                        min_needed = 6.0
+                        min_needed = MIN_REQUEST_SECONDS
                     if remaining < min_needed:
                         # Запрос, который не успеет закончиться до убийства процесса,
                         # начинать нечего: его ответ никто не прочитает.
@@ -1110,7 +1108,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                     req_timeout = min(req_timeout, remaining)
 
                 call_timeout = req_timeout
-                if provider == "agentrouter":
+                if is_chatbot:
+                    if provider in ("gemini", "agentrouter"):
+                        rem = (deadline - time.monotonic()) if deadline else 60.0
+                        call_timeout = max(call_timeout, min(60.0, max(15.0, rem)))
+                elif provider == "agentrouter":
                     rem = (deadline - time.monotonic()) if deadline else 140.0
                     if kind in summary_kinds:
                         call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
