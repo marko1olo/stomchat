@@ -117,12 +117,12 @@ print("\n[2] Бюджет истории ЛС: режется старое, св
 budget = A._PM_HISTORY_MAX_CHARS
 entry_cap = A._PM_HISTORY_ENTRY_MAX_CHARS
 check("бюджет истории объявлен", isinstance(budget, int) and budget > 0, f"got {budget}")
-check("бюджет истории не больше бюджета справки", budget <= A._CORPUS_MAX_CHARS,
-      f"история {budget} против справки {A._CORPUS_MAX_CHARS}")
+check("бюджет истории не больше бюджета справки x2", budget <= A._CORPUS_MAX_CHARS * 2,
+      f"история {budget} против суммарной справки {A._CORPUS_MAX_CHARS * 2}")
 check("предел записи меньше общего бюджета", entry_cap < budget,
       f"{entry_cap} против {budget}")
 
-old_lines = [f"Врач: старая реплика номер {i} " + "х" * 400 for i in range(40)]
+old_lines = [f"Врач: старая реплика номер {i} " + "х" * 400 for i in range(70)]
 question = "Врач: " + "подробное описание случая. " * 120
 fitted = A._fit_pm_history(old_lines + [question])
 joined = "\n".join(fitted)

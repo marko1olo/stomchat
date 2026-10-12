@@ -1086,7 +1086,12 @@ def generate_text(prompt, status_context=None, timeout=None):
                 # него влез, а ноль запросов — это гарантированное молчание бота.
                 if deadline is not None and requests_made:
                     remaining = deadline - time.monotonic()
-                    min_needed = 28.0 if provider in ("groq", "agentrouter") else MIN_REQUEST_SECONDS
+                    if provider == "groq":
+                        min_needed = 3.0
+                    elif provider == "agentrouter":
+                        min_needed = 8.0
+                    else:
+                        min_needed = 6.0
                     if remaining < min_needed:
                         # Запрос, который не успеет закончиться до убийства процесса,
                         # начинать нечего: его ответ никто не прочитает.
@@ -1110,9 +1115,9 @@ def generate_text(prompt, status_context=None, timeout=None):
                     if kind in summary_kinds:
                         call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
                     else:
-                        call_timeout = max(call_timeout, min(120.0, max(28.0, rem)))
-                elif deadline is not None:
-                    rem = deadline - time.monotonic()
+                        call_timeout = max(call_timeout, min(120.0, max(15.0, rem)))
+                if deadline is not None:
+                    rem = max(1.0, deadline - time.monotonic())
                     call_timeout = min(call_timeout, rem)
 
                 try:
@@ -1205,6 +1210,16 @@ def generate_text(prompt, status_context=None, timeout=None):
                         else:
                             raise
                     text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
+                    if not text_result and response.choices and len(response.choices) > 0:
+                        choice = response.choices[0]
+                        msg = choice.message
+                        reasoning = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
+                        finish_reason = getattr(choice, "finish_reason", "")
+                        if reasoning and finish_reason == "length":
+                            logger.warning(
+                                "%s model %s exhausted token limit on reasoning before generating content (finish_reason=length)",
+                                provider, model_name
+                            )
 
                     # Срезаем размышления ДО проверки на непустоту: раньше проверка
                     # стояла до срезки, и ответ из одних размышлений уходил наружу
