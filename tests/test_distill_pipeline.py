@@ -59,7 +59,7 @@ def skip(name, why):
     print(f"  [SKIP] {name} -- {why}")
 
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIKI = os.path.join(HERE, "stomat_wiki.db")
 ARCH = os.path.join(HERE, "stomat_archive.db")
 

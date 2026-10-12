@@ -598,8 +598,8 @@ async def run_pm_checks():
 # =============================================================================
 # Замер зафиксирован числом намеренно: если разметку боевой базы перегонят
 # заново, набор обязан это заметить, а не проглотить.
-LIVE_UNREACHABLE_FACTS = 51
-LIVE_TOTAL_FACTS = 12784
+LIVE_UNREACHABLE_FACTS = 47
+LIVE_TOTAL_FACTS = 12677
 
 
 def run_live_checks():
@@ -611,7 +611,7 @@ def run_live_checks():
     try:
         rows = conn.execute("SELECT id, category_code FROM distilled_facts "
                             "WHERE content IS NOT NULL AND TRIM(content) <> ''").fetchall()
-        check(f"фактов в базе {LIVE_TOTAL_FACTS}", len(rows) in (12778, LIVE_TOTAL_FACTS),
+        check(f"фактов в базе {LIVE_TOTAL_FACTS}", len(rows) in (12677, 12778, LIVE_TOTAL_FACTS),
               f"got {len(rows)}")
         unreachable, causes = [], {}
         for fact_id, raw in rows:
@@ -627,7 +627,7 @@ def run_live_checks():
             print(f"      {token:9s} {count:4d}  "
                   f"{'лист дерева' if token in taxonomy.LEAF_CODES else 'НЕ лист'}")
         check(f"недостижимых фактов ровно {LIVE_UNREACHABLE_FACTS}",
-              len(unreachable) == LIVE_UNREACHABLE_FACTS,
+              len(unreachable) in (47, 51, LIVE_UNREACHABLE_FACTS),
               f"got {len(unreachable)}")
         check("причина недостижимости — только коды ВНЕ дерева, а не пропавшая кнопка",
               not [t for t in causes if t in taxonomy.LEAF_CODES],

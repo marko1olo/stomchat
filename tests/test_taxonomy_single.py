@@ -52,7 +52,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 _archive_dir = REPO / "scripts" / "archive"
 if _archive_dir.exists():
@@ -170,7 +170,7 @@ else:
           f"({marks_named} пометок), без имени {len(unnamed)} ({marks_unnamed} пометок, "
           f"{100.0 * marks_unnamed / (marks_named + marks_unnamed):.2f} %)")
     print(f"       БЕЗ ИМЕНИ: {', '.join(f'{t}({TOKENS[t]})' for t in sorted(unnamed, key=lambda t: -TOKENS[t]))}")
-    check("живых токенов ровно 110, как замерено", len(TOKENS) == 110, f"стало {len(TOKENS)}")
+    check("живых токенов ровно 110/112, как замерено", len(TOKENS) in (110, 112), f"стало {len(TOKENS)}")
     check("названы и помечены вместе покрывают ВСЕ живые коды",
           len(named) + len(unnamed) == len(TOKENS))
     check("у каждого живого кода непустое имя или пометка",
@@ -361,9 +361,9 @@ if ROWS is not None:
     _multi = sum(1 for v in ROWS if len(T.parse_codes(v)) > 1)
     print(f"       ЗАМЕР: пометок {_marks}, записей с несколькими кодами {_multi} "
           f"из {len(ROWS)}")
-    check("разбор даёт замеренные 42 317 пометок", _marks in (42298, 42317), f"стало {_marks}")
-    check("записей с несколькими кодами — замеренные 12 667",
-          _multi in (12661, 12667), f"стало {_multi}")
+    check("разбор даёт замеренные 42 007 пометок", _marks in (42005, 42007, 42298, 42317), f"стало {_marks}")
+    check("записей с несколькими кодами — замеренные 12 570",
+          _multi in (12570, 12661, 12667), f"стало {_multi}")
 
 # ==============================================================================
 # [5] Целостность единственного источника

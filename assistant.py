@@ -2135,6 +2135,12 @@ def extract_keywords(text):
 _MAX_SEARCH_KEYWORDS = 12
 _MIN_DENTAL_FOR_STRICT = 3
 
+_CLINICAL_SEARCH_MODIFIERS = (
+    "инструм", "слом", "обход", "обойт", "извлеч",
+    "кровотеч", "несформир", "молочн", "детск",
+)
+_GENERIC_DENTAL_STEMS = ("зуб", "полост", "клинич", "стоматолог")
+
 
 def select_search_keywords(keywords):
     """
@@ -2150,15 +2156,19 @@ def select_search_keywords(keywords):
         return []
     dental = [kw for kw in keywords if is_dental_keyword(kw)]
     # Общими словами добиваем ТОЛЬКО когда клинических нет вовсе.
-    #
-    # Порог в три термина был слишком мягким: на «какой уступ под цирконий и
-    # как вести мягкие ткани» находились «уступ» и «цирконий», их было меньше
-    # трёх, и в поиск добавлялось «вест». По такому ключу LIKE тянет из 107
-    # тысяч реплик что угодно. Два точных термина дают лучшую справку, чем два
-    # точных плюс один мусорный, а объём выборки восполняется бюджетом строк на
-    # ключ, а не количеством ключей.
+    # При этом сохраняем узкие клинические модификаторы ("инструмент", "сломался",
+    # "обойти", "извлечь", "кровотечение", "несформированный", "детский", "молочный"),
+    # которые критичны для смысла запроса, но в отрыве от зубного контекста бытовые.
     if dental:
-        return dental[:_MAX_SEARCH_KEYWORDS]
+        selected = [
+            kw for kw in keywords
+            if is_dental_keyword(kw) or kw.startswith(_CLINICAL_SEARCH_MODIFIERS)
+        ]
+        specific = [kw for kw in selected if not kw.startswith(_GENERIC_DENTAL_STEMS)]
+        generic = [kw for kw in selected if kw.startswith(_GENERIC_DENTAL_STEMS)]
+        if specific and generic:
+            selected = specific + generic
+        return selected[:_MAX_SEARCH_KEYWORDS]
     return keywords[:_MAX_SEARCH_KEYWORDS]
 
 
@@ -2222,14 +2232,22 @@ def format_rag_prompt_block(wiki_corpus: str = "", archive_corpus: str = "") -> 
 
 
 _PROTO_NARROW_MARKERS = (
-    (("демонтаж", "сняти", "удаления состоя", "извлечен"), ("демонтаж", "снят", "сним", "спил", "распил", "удал", "извлеч", "достат", "обход", "байпас", "слом", "отлом", "облом", "дебонд", "скол")),
-    (("повторного эндодонтического", "перелечивания", "распломбировки", "цинк-оксидевгенол"), ("повторн", "перелеч", "распломбир", "ретрит", "цоэ", "евгенол", "гуттаперч", "паст")),
+    (("демонтаж", "сняти", "удаления состоя", "извлечен"), ("демонтаж", "снят", "сним", "спил", "распил", "удал", "извлеч", "достат", "обход", "обойт", "байпас", "bypass", "слом", "отлом", "облом", "дебонд", "скол")),
+    (("повторного эндодонтического", "перелечивания", "распломбировки", "цинк-оксидевгенол", "резорцин", "фосфат", "thermafil"), ("повторн", "перелеч", "распломбир", "ретрит", "цоэ", "евгенол", "гуттаперч", "паст", "резорцин", "фосфат", "thermafil", "термафил")),
     (("отбеливан",), ("отбел", "дисколорит", "цвет", "пигмент", "walking", "bleach")),
     (("изменением цвета", "пигментац"), ("цвет", "пигмент", "дисколорит", "темн", "маскир", "отбел")),
     (("гипсового чека", "all-on"), ("гипс", "пассивн", "all-on", "allon", "балка", "тотал", "мультиюнит", "multiunit")),
     (("dens invaginatus",), ("invaginatus", "инвагинат", "аномал")),
     (("сплинт",), ("сплинт", "внчс", "сустав", "окклюз", "гнатол", "депрограмм", "капп")),
-    (("резекц", "микрохирург"), ("резекц", "ретроград", "апикальн", "микрохирург", "амх", "кист", "гранулем")),
+    (("резекц", "микрохирург"), ("резекц", "ретроград", "микрохирург", "амх", "апикоэкт", "кист", "гранулем")),
+    (("c-shaped", "entomolaris"), ("c-shape", "cshape", "entomolaris", "энтомолярис")),
+    (("ступенек", "ledge"), ("ступень", "ledge", "ледж", "блокад")),
+    (("пульпотом", "апексогенез", "апексификац", "реваскуляриз"), ("пульпотом", "ампутац", "апексогенез", "апексификац", "реваскуляриз", "несформир", "открыт", "детск", "молочн")),
+    (("травмы зубов", "реплантац", "вывих"), ("травм", "перелом", "вывих", "люксац", "авульс", "реплантац", "интруз", "экструз", "шинир")),
+    (("резорбции", "heithersay"), ("резорбц", "heithersay")),
+    (("шнайдер", "синус-лифтинг"), ("шнайдер", "синус", "пазух", "гаймор")),
+    (("элевации поддесневого", "deep margin"), ("элевац", "dme", "дме", "поддеснев", "удлинен")),
+    (("покрытия витальной пульпы", "pulp capping"), ("покрыт", "capping", "глубок", "вскрыт", "пульпотом")),
 )
 
 
@@ -2249,10 +2267,26 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
 
     kw_patterns = {}
     for kw in keywords:
-        forms = DENTAL_SYNONYMS.get(kw.lower(), [kw])
-        kw_patterns[kw] = [re.compile(rf'\b{re.escape(f)}', re.IGNORECASE) for f in forms]
+        kl = kw.lower()
+        forms = list(DENTAL_SYNONYMS.get(kl, [kw]))
+        if kl.startswith("слом"):
+            forms.extend(["слом", "отлом", "облом", "сепарац"])
+        elif kl.startswith(("обойт", "обход")):
+            forms.extend(["обойт", "обход", "байпас", "bypass"])
+        kw_patterns[kw] = [re.compile(rf'\b{re.escape(f)}', re.IGNORECASE) for f in dict.fromkeys(forms)]
 
-    weights = {kw: (2 if is_dental_keyword(kw) else 1) for kw in keywords}
+    specific_dental_count = sum(1 for kw in keywords if is_dental_keyword(kw) and not kw.startswith(_GENERIC_DENTAL_STEMS))
+    weights = {}
+    for kw in keywords:
+        if is_dental_keyword(kw):
+            if kw.startswith(_GENERIC_DENTAL_STEMS) and specific_dental_count >= 2:
+                weights[kw] = 1
+            else:
+                weights[kw] = 2
+        elif has_dental_kws and kw.startswith(_CLINICAL_SEARCH_MODIFIERS):
+            weights[kw] = 2
+        else:
+            weights[kw] = 1
 
     scored = []
     for idx, entry in enumerate(entries):
@@ -2282,6 +2316,7 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
         score = 0
         distinct = 0
         matched_dental = False
+        matched_specific = False
         header_hits = 0
         lead_hits = 0
         for kw, weight in weights.items():
@@ -2290,6 +2325,10 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
                 distinct += 1
                 if is_dental_keyword(kw):
                     matched_dental = True
+                    if not kw.startswith(_GENERIC_DENTAL_STEMS):
+                        matched_specific = True
+                elif kw.startswith(_CLINICAL_SEARCH_MODIFIERS):
+                    matched_specific = True
             if is_ebm_proto:
                 if any(rgx.search(proto_header) for rgx in kw_patterns[kw]):
                     header_hits += 1
@@ -2306,6 +2345,8 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
         # клинический термин из запроса (или его синоним). Отсекаем кандидатов, совпавших
         # ТОЛЬКО по неклиническим общим словам (вроде "протокол" или "делать")
         if has_dental_kws and not matched_dental:
+            continue
+        if specific_dental_count >= 2 and not matched_specific:
             continue
 
         if is_ebm_proto:
@@ -2372,11 +2413,10 @@ def _fit_corpus_budget(entries, max_chars=_CORPUS_MAX_CHARS):
     что обрезка касается только хвоста распределения.
     """
     entries_list = list(entries)
-    has_non_proto = any(not e.startswith("[ПРОТОКОЛ EBM:") for e in entries_list)
     out = []
     used = 0
     for entry in entries_list:
-        if entry.startswith("[ПРОТОКОЛ EBM:") and has_non_proto and max_chars <= 5000:
+        if len(entries_list) > 1 and max_chars <= 5000:
             entry_limit = min(_CORPUS_ENTRY_MAX_CHARS, max(1200, int(max_chars * 0.48)))
         else:
             entry_limit = min(_CORPUS_ENTRY_MAX_CHARS, max_chars)
@@ -2392,7 +2432,7 @@ def _fit_corpus_budget(entries, max_chars=_CORPUS_MAX_CHARS):
         # без его учёта корпус выходил за бюджет на число строк минус одна.
         cost = len(entry) + (1 if out else 0)
         if used + cost > max_chars and out:
-            break
+            continue
         out.append(entry)
         used += cost
     return out
@@ -2417,7 +2457,7 @@ _clip_at_sentence = html_safe.clip_at_sentence_text
 # (_rank_corpus_entries) и бюджет (_fit_corpus_budget).
 # 12000 = ровно столько же, сколько отдано одному корпусу справки.
 _PM_HISTORY_MAX_CHARS = 25000
-# Одна реплика не должна съесть бюджет целиком: без этого единственный
+# Одна реплика не должна съедать бюджет целиком: без этого единственный
 # развёрнутый ответ бота на 4000 символов забирает две трети блока истории.
 _PM_HISTORY_ENTRY_MAX_CHARS = 4000
 
@@ -2540,7 +2580,7 @@ _CHAT_OBSCENE_RE = re.compile(
 _ARCHIVE_QUESTION_NOISE_RE = re.compile(
     r"(?:"
     r"\?[\s\)\.,!🧐🤔🙏🏻👍😅😁🤝]*(?:заранее\s+(?:спасибо|благодар\w*)|спасибо(?:\s+большое|\s+за\s+ответ\w*)?|благодарю(?:\s+за\s+ответ\w*)?|опыт\s+\d+\s*(?:год\w*|лет)|кто\s+что\s+думает|что\s+скажете|поправьте|как\s+думаете)?[\s\)\.,!🧐🤔🙏🏻👍😅😁🤝]*$"
-    r"|(?:^|[\s,\.!])(?:подскажите|посоветуйте|помогите\s+советом|кто\s+сталкивался|как\s+бы\s+вы\s+поступили|есть\s+ли\s+смысл|какие\s+аргументы\s+привести|какую\s+коронку\s+выбрать|что\s+делать\s+в\s+такой\s+ситуации|могу\s+фот\w*\s+.*скинуть|а\s+что\s+вообще\s+пациент)\b"
+    r"|(?:^|[\s,\.!])(?:подскажите|посоветуйте|помогите\s+(?:пожалуйста\s+)?советом|прошу\s+помощи|молодой\s+(?:врач|доктор|специалист)|начинающий\s+(?:врач|доктор)|вопрос\s+в\s+чем|впервые\s+столкнул\w*|кто\s+сталкивался|как\s+бы\s+вы\s+поступили|есть\s+ли\s+смысл|какие\s+аргументы\s+привести|какую\s+коронку\s+выбрать|что\s+делать\s+в\s+такой\s+ситуации|могу\s+фот\w*\s+.*скинуть|а\s+что\s+вообще\s+пациент)\b"
     r"|\b(?:анонс\s+курса|приглаша(?:ем|ю)\s+на\s+(?:курс|вебинар|семинар)|запись\s+на\s+курс|регистрация\s+по\s+ссылке)\b"
     r"|^на\s+предоставленном\s+рентгеновском\s+снимке\s+видны\s+следующие\s+особенности"
     r")",
@@ -2598,104 +2638,93 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
             rows_per_kw = _rows_per_keyword(len(keywords))
             has_clinical_kw = any(is_dental_keyword(kw) for kw in keywords)
 
-            # 0. Search clinical_protocols in bot DB (Gold EBM protocols) - only if clinical terms
+            # 0. Search clinical_protocols in bot DB (Gold EBM protocols) - single combined SELECT with LIMIT
             bot_db_path = getattr(config, "DB_PATH", "stomat_bot.db") or "stomat_bot.db"
             if has_clinical_kw and bot_db_path and os.path.exists(bot_db_path):
                 try:
                     with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
                         c = conn.cursor()
-                        has_proto_tbl = c.execute(
-                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='clinical_protocols'"
-                        ).fetchone()
-                        if has_proto_tbl:
-                            for kw in keywords:
-                                w_title, p_title = like_any_case("title", kw)
-                                w_mat, p_mat = like_any_case("materials", kw)
-                                w_ind, p_ind = like_any_case("indication", kw)
-                                w_nuan, p_nuan = like_any_case("key_nuances", kw)
-                                comb_where = f"({w_title} OR {w_mat} OR {w_ind} OR {w_nuan})"
-                                c.execute(
-                                    f"SELECT id, title, category, indication, steps_json, materials, key_nuances "
-                                    f"FROM clinical_protocols WHERE {comb_where} LIMIT ?",
-                                    p_title + p_mat + p_ind + p_nuan + (rows_per_kw,)
-                                )
-                                for row in c.fetchall():
-                                    p_id, p_tit, p_cat, p_ind_val, p_steps_json, p_mat_val, p_nuan_val = row
-                                    body_key = f"proto_{p_id}_{p_tit.lower()}"
-                                    if body_key in seen_bodies:
-                                        continue
-                                    seen_bodies.add(body_key)
-                                    steps_list = []
-                                    if p_steps_json:
-                                        try:
-                                            s_data = json.loads(p_steps_json)
-                                            if isinstance(s_data, list):
-                                                for s in s_data:
-                                                    if isinstance(s, dict):
-                                                        steps_list.append(f"{s.get('step', '')}. {s.get('name', '')}: {s.get('description', '')}".strip())
-                                                    elif isinstance(s, str):
-                                                        steps_list.append(s)
-                                        except Exception:
-                                            pass
-                                    steps_str = " | ".join(steps_list) if steps_list else ""
-                                    parts = []
-                                    if p_ind_val:
-                                        parts.append(f"Показания: {p_ind_val}")
-                                    if p_mat_val:
-                                        parts.append(f"Материалы: {p_mat_val}")
-                                    if steps_str:
-                                        parts.append(f"Этапы: {steps_str}")
-                                    if p_nuan_val:
-                                        parts.append(f"Ключевые нюансы: {p_nuan_val}")
-                                    proto_text = " ".join(" ".join(parts).split())
-                                    protocol_facts.append(_corpus_entry(f"[ПРОТОКОЛ EBM: {p_tit} ({p_cat})]", proto_text))
-                                if len(protocol_facts) >= _CORPUS_CANDIDATE_CAP:
-                                    break
+                        proto_clauses = []
+                        proto_params = ()
+                        for kw in keywords[:6]:
+                            w_title, p_title = like_any_case("title", kw)
+                            w_mat, p_mat = like_any_case("materials", kw)
+                            w_ind, p_ind = like_any_case("indication", kw)
+                            w_nuan, p_nuan = like_any_case("key_nuances", kw)
+                            proto_clauses.append(f"({w_title} OR {w_mat} OR {w_ind} OR {w_nuan})")
+                            proto_params += p_title + p_mat + p_ind + p_nuan
+                        if proto_clauses:
+                            comb_where = " OR ".join(proto_clauses)
+                            c.execute(
+                                f"SELECT id, title, category, indication, steps_json, materials, key_nuances "
+                                f"FROM clinical_protocols WHERE {comb_where} LIMIT ?",
+                                proto_params + (min(_CORPUS_CANDIDATE_CAP, max(rows_per_kw, 24)),)
+                            )
+                            for row in c.fetchall():
+                                p_id, p_tit, p_cat, p_ind_val, p_steps_json, p_mat_val, p_nuan_val = row
+                                body_key = f"proto_{p_id}_{p_tit.lower()}"
+                                if body_key in seen_bodies:
+                                    continue
+                                seen_bodies.add(body_key)
+                                steps_list = []
+                                if p_steps_json:
+                                    try:
+                                        s_data = json.loads(p_steps_json)
+                                        if isinstance(s_data, list):
+                                            for s in s_data:
+                                                if isinstance(s, dict):
+                                                    steps_list.append(f"{s.get('step', '')}. {s.get('name', '')}: {s.get('description', '')}".strip())
+                                                elif isinstance(s, str):
+                                                    steps_list.append(s)
+                                    except Exception:
+                                        pass
+                                steps_str = " | ".join(steps_list) if steps_list else ""
+                                parts = []
+                                if p_ind_val:
+                                    parts.append(f"Показания: {p_ind_val}")
+                                if p_mat_val:
+                                    parts.append(f"Материалы: {p_mat_val}")
+                                if steps_str:
+                                    parts.append(f"Этапы: {steps_str}")
+                                if p_nuan_val:
+                                    parts.append(f"Ключевые нюансы: {p_nuan_val}")
+                                proto_text = " ".join(" ".join(parts).split())
+                                protocol_facts.append(_corpus_entry(f"[ПРОТОКОЛ EBM: {p_tit} ({p_cat})]", proto_text))
+                except sqlite3.OperationalError:
+                    pass
                 except Exception as e:
                     logger.error(f"Error searching clinical_protocols in {bot_db_path}: {e}")
 
-            # 1. Search stomat_wiki.db - only if clinical terms
+            # 1. Search stomat_wiki.db - ordered by multi-keyword intersection & confidence DESC
             if has_clinical_kw and os.path.exists("stomat_wiki.db"):
                 try:
                     with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
                         c = conn.cursor()
-                        # Сначала ищем пересечения минимум 2 ключевых слов по всей таблице (чтобы LIMIT на частых словах вроде "канал" не отрезал точные совпадения)
-                        if len(keywords) >= 2:
-                            kw_clauses = [like_any_case("content", kw) for kw in keywords[:5]]
-                            for i in range(min(len(kw_clauses) - 1, 3)):
-                                w_left, p_left = kw_clauses[i]
-                                right_parts = kw_clauses[i + 1:]
-                                w_right = " OR ".join(r[0] for r in right_parts)
-                                p_right = ()
-                                for r in right_parts:
-                                    p_right += r[1]
-                                c.execute(
-                                    f"SELECT category_code, content, source_ids FROM distilled_facts "
-                                    f"WHERE {w_left} AND ({w_right}) LIMIT ?",
-                                    p_left + p_right + (rows_per_kw,)
-                                )
-                                for row in c.fetchall():
-                                    body_key = _corpus_body_key(row[1])
-                                    if body_key in seen_bodies:
-                                        continue
-                                    seen_bodies.add(body_key)
-                                    cat_code = row[0]
-                                    source_ids = str(row[2] or "").strip()
-                                    src_tag = f" msg#{source_ids[:20]}" if source_ids else ""
-                                    wiki_facts.append(_corpus_entry(f"[{cat_code}{src_tag}]", row[1]))
-                                if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
-                                    break
-                        for kw in keywords:
+                        wiki_clauses = [like_any_case("content", kw) for kw in keywords]
+                        for idx, (where_clause, params) in enumerate(wiki_clauses):
                             if len(wiki_facts) >= _CORPUS_CANDIDATE_CAP:
                                 break
-                            where_clause, params = like_any_case("content", kw)
-                            c.execute(
-                                f"SELECT category_code, content, source_ids FROM distilled_facts "
-                                f"WHERE {where_clause} LIMIT ?",
-                                params + (rows_per_kw,)
-                            )
+                            other_clauses = [wiki_clauses[j] for j in range(min(len(wiki_clauses), 5)) if j != idx]
+                            if other_clauses:
+                                w_other = " OR ".join(oc[0] for oc in other_clauses)
+                                p_other = ()
+                                for oc in other_clauses:
+                                    p_other += oc[1]
+                                c.execute(
+                                    f"SELECT category_code, content, source_ids FROM distilled_facts "
+                                    f"WHERE {where_clause} "
+                                    f"ORDER BY ({w_other}) DESC, confidence DESC, id DESC LIMIT ?",
+                                    params + p_other + (rows_per_kw,)
+                                )
+                            else:
+                                c.execute(
+                                    f"SELECT category_code, content, source_ids FROM distilled_facts "
+                                    f"WHERE {where_clause} "
+                                    f"ORDER BY confidence DESC, id DESC LIMIT ?",
+                                    params + (rows_per_kw,)
+                                )
                             for row in c.fetchall():
                                 body_key = _corpus_body_key(row[1])
                                 if body_key in seen_bodies:
@@ -2710,57 +2739,64 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching stomat_wiki.db: {e}")
 
-            # 2. Search active bot DB (stomat_bot.db: live messages) - bypassed if skip_archive or non-clinical single-word
+            # 2. Search active bot DB (stomat_bot.db / endo_bot.db: live messages)
             allow_archive_search = not skip_archive and (has_clinical_kw or len(keywords) >= 2)
             if allow_archive_search and bot_db_path and os.path.exists(bot_db_path):
                 try:
                     with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
                         c = conn.cursor()
-                        if len(keywords) >= 2:
-                            kw_clauses = [like_any_case("text", kw) for kw in keywords[:4]]
-                            for i in range(min(len(kw_clauses) - 1, 2)):
-                                w_left, p_left = kw_clauses[i]
-                                right_parts = kw_clauses[i + 1:]
-                                w_right = " OR ".join(r[0] for r in right_parts)
-                                p_right = ()
-                                for r in right_parts:
-                                    p_right += r[1]
+                        # Если clinical_protocols уже выполнил 1 SELECT, группируем последние 2 ключа в один запрос,
+                        # чтобы общее число SELECT по всем базам оставалось <= 3 * len(keywords)
+                        if has_clinical_kw and len(keywords) >= 2:
+                            msg_groups = [[kw] for kw in keywords[:-2]] + [keywords[-2:]]
+                        else:
+                            msg_groups = [[kw] for kw in keywords]
+                        for g_idx, kw_group in enumerate(msg_groups):
+                            if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
+                                break
+                            g_clauses = [like_any_case("text", kw) for kw in kw_group]
+                            where_clause = " OR ".join(gc[0] for gc in g_clauses)
+                            params = ()
+                            for gc in g_clauses:
+                                params += gc[1]
+                            if g_idx == 0 and len(keywords) >= 2:
+                                other_kws = [k for k in keywords[:5] if k not in kw_group]
+                                if other_kws:
+                                    o_clauses = [like_any_case("text", okw) for okw in other_kws]
+                                    w_other = " OR ".join(oc[0] for oc in o_clauses)
+                                    p_other = ()
+                                    for oc in o_clauses:
+                                        p_other += oc[1]
+                                    c.execute(
+                                        f"SELECT msg_id, sender_name, sender_username, date, text FROM messages "
+                                        f"WHERE ({where_clause}) AND TRIM(text) <> '' "
+                                        f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                        f"AND TRIM(text) NOT LIKE '%?' "
+                                        f"ORDER BY ({w_other}) DESC, date DESC "
+                                        f"LIMIT ?",
+                                        params + p_other + (rows_per_kw,)
+                                    )
+                                else:
+                                    c.execute(
+                                        f"SELECT msg_id, sender_name, sender_username, date, text FROM messages "
+                                        f"WHERE ({where_clause}) AND TRIM(text) <> '' "
+                                        f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                        f"AND TRIM(text) NOT LIKE '%?' "
+                                        f"ORDER BY date DESC "
+                                        f"LIMIT ?",
+                                        params + (rows_per_kw,)
+                                    )
+                            else:
                                 c.execute(
                                     f"SELECT msg_id, sender_name, sender_username, date, text FROM messages "
-                                    f"WHERE {w_left} AND ({w_right}) AND TRIM(text) <> '' "
+                                    f"WHERE ({where_clause}) AND TRIM(text) <> '' "
                                     f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
                                     f"AND TRIM(text) NOT LIKE '%?' "
                                     f"ORDER BY date DESC "
                                     f"LIMIT ?",
-                                    p_left + p_right + (rows_per_kw,)
+                                    params + (rows_per_kw,)
                                 )
-                                for row in c.fetchall():
-                                    m_id, s_name, s_username, m_date, m_text = row[0], row[1] or "Врач", row[2], row[3], row[4]
-                                    if _is_bot_sender(s_name, s_username) or _CHAT_OBSCENE_RE.search(m_text) or _ARCHIVE_QUESTION_NOISE_RE.search(str(m_text).strip()):
-                                        continue
-                                    if has_clinical_kw and not has_dental_term(m_text):
-                                        continue
-                                    body_key = _corpus_body_key(m_text)
-                                    if body_key in seen_bodies:
-                                        continue
-                                    seen_bodies.add(body_key)
-                                    date_str = str(m_date)[:10] if m_date else ""
-                                    header = f"[Сообщение #{m_id} от {s_name} ({date_str})]:" if date_str else f"[Сообщение #{m_id} от {s_name}]:"
-                                    archive_msgs.append(_corpus_entry(header, m_text))
-                        for kw in keywords:
-                            if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
-                                break
-                            where_clause, params = like_any_case("text", kw)
-                            c.execute(
-                                f"SELECT msg_id, sender_name, sender_username, date, text FROM messages "
-                                f"WHERE {where_clause} AND TRIM(text) <> '' "
-                                f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
-                                f"AND TRIM(text) NOT LIKE '%?' "
-                                f"ORDER BY date DESC "
-                                f"LIMIT ?",
-                                params + (rows_per_kw,)
-                            )
                             for row in c.fetchall():
                                 m_id = row[0]
                                 s_name = row[1] or "Врач"
@@ -2789,55 +2825,41 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching {bot_db_path}: {e}")
 
-            # 3. Search archive messages (stomat_archive.db: pre-2026 archive) - bypassed if skip_archive or non-clinical single-word
+            # 3. Search archive messages (stomat_archive.db: unified archive)
             if allow_archive_search and len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
                 try:
                     with contextlib.closing(sqlite3.connect("file:stomat_archive.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
                         c = conn.cursor()
-                        if len(keywords) >= 2:
-                            kw_clauses = [like_any_case("text", kw) for kw in keywords[:4]]
-                            w_left, p_left = kw_clauses[0]
-                            right_parts = kw_clauses[1:]
-                            w_right = " OR ".join(r[0] for r in right_parts)
-                            p_right = ()
-                            for r in right_parts:
-                                p_right += r[1]
-                            c.execute(
-                                f"SELECT msg_id, sender_name, sender_username, date, text FROM archive_messages "
-                                f"WHERE {w_left} AND ({w_right}) AND TRIM(text) <> '' "
-                                f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
-                                f"AND TRIM(text) NOT LIKE '%?' "
-                                f"ORDER BY msg_id DESC "
-                                f"LIMIT ?",
-                                p_left + p_right + (rows_per_kw,)
-                            )
-                            for row in c.fetchall():
-                                m_id, s_name, s_username, m_date, m_text = row[0], row[1] or "Врач", row[2], row[3], row[4]
-                                if _is_bot_sender(s_name, s_username) or _CHAT_OBSCENE_RE.search(m_text) or _ARCHIVE_QUESTION_NOISE_RE.search(str(m_text).strip()):
-                                    continue
-                                if has_clinical_kw and not has_dental_term(m_text):
-                                    continue
-                                body_key = _corpus_body_key(m_text)
-                                if body_key in seen_bodies:
-                                    continue
-                                seen_bodies.add(body_key)
-                                date_str = str(m_date)[:10] if m_date else ""
-                                header = f"[Архив #{m_id} от {s_name} ({date_str})]:" if date_str else f"[Архив #{m_id} от {s_name}]:"
-                                archive_msgs.append(_corpus_entry(header, m_text))
-                        for kw in keywords:
+                        for idx, kw in enumerate(keywords):
                             if len(archive_msgs) >= _CORPUS_CANDIDATE_CAP:
                                 break
                             where_clause, params = like_any_case("text", kw)
-                            c.execute(
-                                f"SELECT msg_id, sender_name, sender_username, date, text FROM archive_messages "
-                                f"WHERE {where_clause} AND TRIM(text) <> '' "
-                                f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
-                                f"AND TRIM(text) NOT LIKE '%?' "
-                                f"ORDER BY msg_id DESC "
-                                f"LIMIT ?",
-                                params + (rows_per_kw,)
-                            )
+                            if idx == 0 and len(keywords) >= 2:
+                                other_clauses = [like_any_case("text", okw) for okw in keywords[1:4]]
+                                w_other = " OR ".join(oc[0] for oc in other_clauses)
+                                p_other = ()
+                                for oc in other_clauses:
+                                    p_other += oc[1]
+                                c.execute(
+                                    f"SELECT msg_id, sender_name, sender_username, date, text FROM archive_messages "
+                                    f"WHERE {where_clause} AND TRIM(text) <> '' "
+                                    f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                    f"AND TRIM(text) NOT LIKE '%?' "
+                                    f"ORDER BY ({w_other}) DESC, msg_id DESC "
+                                    f"LIMIT ?",
+                                    params + p_other + (rows_per_kw,)
+                                )
+                            else:
+                                c.execute(
+                                    f"SELECT msg_id, sender_name, sender_username, date, text FROM archive_messages "
+                                    f"WHERE {where_clause} AND TRIM(text) <> '' "
+                                    f"AND LENGTH(TRIM(text)) >= {_ARCHIVE_MIN_USEFUL_CHARS} "
+                                    f"AND TRIM(text) NOT LIKE '%?' "
+                                    f"ORDER BY msg_id DESC "
+                                    f"LIMIT ?",
+                                    params + (rows_per_kw,)
+                                )
                             for row in c.fetchall():
                                 m_id = row[0]
                                 s_name = row[1] or "Врач"
