@@ -387,7 +387,11 @@ def _web_search_sync(query, max_results):
             from ddgs import DDGS
 
             with DDGS() as ddgs:
-                for item in ddgs.text(query, region="ru-ru", max_results=max_results, backend="api"):
+                try:
+                    ddgs_gen = ddgs.text(query, region="ru-ru", max_results=max_results)
+                except (TypeError, KeyError):
+                    ddgs_gen = ddgs.text(query, region="ru-ru", max_results=max_results, backend="auto")
+                for item in ddgs_gen:
                     body = item.get("body") if item else None
                     href = item.get("href") if item else None
                     if body and href:

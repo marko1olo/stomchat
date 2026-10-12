@@ -557,7 +557,7 @@ async def update_clinician_memory_async(
 """
 
         status_ctx = {"kind": "daemon_memory", "thinking_level": "MEDIUM", "max_tokens": 2048}
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
         if error or not response or not getattr(response, "text", None):
             logger.debug(f"PM memory AI rewriting returned error or empty for {user_id}")
@@ -706,7 +706,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 """
 
             status_ctx = {"kind": "daemon_memory", "thinking_level": "MEDIUM", "max_tokens": 2048}
-            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
             if error or not response or not getattr(response, "text", None):
                 continue

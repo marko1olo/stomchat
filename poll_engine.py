@@ -1291,7 +1291,7 @@ discussion_seed_question:
 async def review_poll_quality(
     payload: PollPayload,
     llm_caller: Callable,
-    timeout: float = 25.0
+    timeout: float = 85.0
 ) -> Tuple[bool, List[str]]:
     """
     Шаг 3.5 пайплайна — клинический контроль качества (11 критериев).

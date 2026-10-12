@@ -2572,9 +2572,13 @@ async def fetch_dynamic_web_snippets_async(query_text: str, timeout: float = 4.0
         return ""
     try:
         clean_q = re.sub(r"@[A-Za-z0-9_]+", "", query_text)
+        # Очистка Telegram-метаданных сообщений: [2 ч назад | Сообщение #183869] Имя:
+        clean_q = re.sub(r"\[[^\]]+\]\s*[^:\n]+:\s*", " ", clean_q)
         clean_q = re.sub(r"(?i)^(?:привет|здравствуйте|добрый день|подскажите(?: пожалуйста)?|коллеги)[,\s!]*", "", clean_q).strip()
         if len(clean_q) < 5:
             clean_q = query_text.strip()
+            clean_q = re.sub(r"\[[^\]]+\]\s*[^:\n]+:\s*", " ", clean_q)
+        clean_q = re.sub(r"\s+", " ", clean_q)
         clean_q = clean_q[:120].strip()
 
         results, err = await blocking_tools.web_search_async(clean_q, max_results=3, timeout=timeout)

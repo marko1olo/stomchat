@@ -2010,7 +2010,10 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
         "4. Пиши профессионально и строго по делу, как коллега коллеге, без пустых вводных слов и без рекламы."
     )
 
-    models_to_try = ["gemini-2.0-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+    cfg_model = getattr(config, "GEMINI_MODEL", "gemini-3.8-flash")
+    raw_models = [m for m in [cfg_model, "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"] if m]
+    seen_models = set()
+    models_to_try = [m for m in raw_models if not (m in seen_models or seen_models.add(m))]
     last_err = None
 
     for model_name in models_to_try:
