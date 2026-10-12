@@ -163,6 +163,8 @@ STANDALONE = {
     "apply_content_hash_migration": "разовая миграция таблицы distilled_facts на UNIQUE(content_hash)",
     "dump_recent_bot_disasters": "диагностический дампер последних аварийных сообщений бота",
     "fix_corrupted_source_ids": "разовая вычистка MSG_ префиксов из source_ids в stomat_wiki.db",
+    "checker": "проверка полноты покрытия реплик архива фактами stomat_wiki.db, запуск руками",
+    "videosi": "классификатор и импортёр клинических видеоразборов в stomat_wiki.db, запуск руками",
 }
 
 

@@ -64,9 +64,12 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(ROOT, "scripts")
+ARCHIVE_DIR = os.path.join(SCRIPTS_DIR, "archive")
+for _p in (ROOT, SCRIPTS_DIR, ARCHIVE_DIR):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import videosi as V  # noqa: E402
 
@@ -257,7 +260,7 @@ print("=" * 78)
 
 # ---------------------------------------------------------------- [1]
 print("\n[1] Второй вход закрыт: import_videos.py не запустить и не импортировать")
-RETIRED = os.path.join(ROOT, "import_videos.py")
+RETIRED = os.path.join(ARCHIVE_DIR, "import_videos.py") if os.path.exists(os.path.join(ARCHIVE_DIR, "import_videos.py")) else os.path.join(ROOT, "import_videos.py")
 if not os.path.exists(RETIRED):
     check("import_videos.py удалён — второго входа нет", True)
 else:
@@ -305,7 +308,7 @@ else:
 print("\n[2] Нет входного файла или базы -> ГРОМКИЙ отказ, а не молчаливый ноль")
 tmp = tempfile.mkdtemp(prefix="stomchat_videos_loud_")
 try:
-    script = os.path.join(ROOT, "videosi.py")
+    script = os.path.join(SCRIPTS_DIR, "videosi.py") if os.path.exists(os.path.join(SCRIPTS_DIR, "videosi.py")) else os.path.join(ROOT, "videosi.py")
     code, out = run_script(script, tmp)
     check("НЕТ videos.txt -> процесс заканчивается НЕ нулём (для cron это отказ)",
           code != 0, f"returncode {code} — обёртка считает это успехом")

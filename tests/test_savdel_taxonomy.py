@@ -45,7 +45,8 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-_archive_dir = Path(__file__).resolve().parent / "scripts" / "archive"
+REPO = Path(__file__).resolve().parent.parent
+_archive_dir = REPO / "scripts" / "archive"
 if _archive_dir.exists():
     sys.path.insert(0, str(_archive_dir))
 
@@ -63,7 +64,6 @@ def check(name, cond, detail=""):
         print(f"[FAIL] {name}" + (f" — {detail}" if detail else ""))
 
 
-REPO = Path(__file__).resolve().parent
 LIVE_WIKI = REPO / "stomat_wiki.db"
 LIVE_ARCHIVE = REPO / "stomat_archive.db"
 

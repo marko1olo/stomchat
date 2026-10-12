@@ -83,6 +83,11 @@ _archive/sessions/
 _archive/logs/
 _archive/media/
 _archive/legacy_dbs/
+_archive/wiki_dumps/
+_archive/reports/
+_archive/id.py
+.agents/
+_agent_docs/
 
 
 # Одноразовые скрипты замеров и проб. Их вывод живёт в отчётах _fix_*.md и

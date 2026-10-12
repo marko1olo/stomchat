@@ -460,7 +460,7 @@ print("=" * 70)
 # докстринга ЭТОГО файла, объявив собственную документацию неполной пометкой.
 # Проверяется на этом же файле: в нём десятки строк, похожих на пометку, и все
 # они лежат в строковых литералах.
-_self = "test_debt_registry.py"
+_self = "tests/test_debt_registry.py" if os.path.exists("tests/test_debt_registry.py") else "test_debt_registry.py"
 _sf, _sb, _sok = scan_file(_self)
 _raw = io.open(_self, encoding="utf-8-sig").read()
 _textual_full, _textual_broken = parse_marks(_raw, _self)

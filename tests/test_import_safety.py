@@ -54,7 +54,14 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-SOURCES = sorted(f for f in os.listdir(".") if f.endswith(".py"))
+_SEARCH_DIRS = (".", "scripts", os.path.join("scripts", "archive"), "tests")
+_SOURCE_PATHS = {}
+for _d in _SEARCH_DIRS:
+    if os.path.isdir(_d):
+        for _f in sorted(os.listdir(_d)):
+            if _f.endswith(".py") and _f not in _SOURCE_PATHS:
+                _SOURCE_PATHS[_f] = _f if _d == "." else os.path.join(_d, _f)
+SOURCES = sorted(_SOURCE_PATHS)
 
 
 UNPARSED, _TREES = {}, {}
@@ -71,8 +78,9 @@ def parse(path):
     каждый файл разбирается по многу раз (замыкание, [1], [3], [5]).
     """
     if path not in _TREES:
+        real_path = _SOURCE_PATHS.get(path, path)
         try:
-            _TREES[path] = ast.parse(io.open(path, encoding="utf-8-sig").read())
+            _TREES[path] = ast.parse(io.open(real_path, encoding="utf-8-sig").read())
         except (SyntaxError, ValueError, OSError, UnicodeDecodeError) as exc:
             UNPARSED[path] = f"{type(exc).__name__}: {exc}"
             _TREES[path] = ast.parse("")  # пустой модуль: проверки ниже не упадут на нём
@@ -553,7 +561,8 @@ DANGEROUS = {
     "delist.py": "запрос в API Google",
 }
 for path, why in DANGEROUS.items():
-    if not os.path.exists(path):
+    real_path = _SOURCE_PATHS.get(path, path)
+    if not os.path.exists(real_path):
         check(f"{path} удалён — проверка неприменима", True)
         continue
     check(f"{path} отказывается работать при импорте ({why})", guards_import(parse(path)),
