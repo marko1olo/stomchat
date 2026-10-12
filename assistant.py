@@ -2181,17 +2181,53 @@ _CORPUS_MAX_CHARS = 13500
 _CORPUS_ENTRY_MAX_CHARS = 2500
 
 
+_TOXIC_PRACTICE_RE = re.compile(
+    r'\b(?:мышьяк(?:овист\w*|ом|а|у|е)?|депулпин|форедент|резорцин[- ]?формалин\w*)\b',
+    re.IGNORECASE
+)
+
+_CONVERSATIONAL_INTENT_RE = re.compile(
+    r'^\s*(?:спасибо|благодарю|понял[а]?|ясно|ок(?:ей)?|хорошо|отлично|договорились|привет(?:ствую)?|здравствуй(?:те)?|добр(?:ый\s+(?:день|вечер|утро)|ое\s+утро)|хай|салют|пока|до\s+свидания|спокойной\s+ночи|мерси|благодарствую)(?:[\s,!.?-]+(?:спасибо|благодарю|понял[а]?|ясно|ок(?:ей)?|хорошо|отлично|договорились|привет|пока|доктор|коллега|друг|большое|огромное|всё|все|принял[а]?))*[\s,!.?-]*$',
+    re.IGNORECASE
+)
+
+
+def format_rag_prompt_block(wiki_corpus: str = "", archive_corpus: str = "") -> str:
+    """
+    Форматирует RAG-справку для системного промпта.
+    Если справка пуста, возвращает пустую строку, не засоряя контекст модели
+    ложными заголовками и инструкциями по фильтрации несуществующей базы.
+    """
+    sections = []
+    if wiki_corpus and wiki_corpus.strip():
+        sections.append(
+            "Справка из Базы Знаний (stomat_wiki):\n"
+            f"{wiki_corpus.strip()}\n"
+            "[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]"
+        )
+    if archive_corpus and archive_corpus.strip():
+        sections.append(
+            "Похожие обсуждения из Архива чата:\n"
+            f"{archive_corpus.strip()}\n"
+            "[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные утверждения. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии!]"
+        )
+    if not sections:
+        return ""
+    return "\n\n" + "\n\n".join(sections) + "\n"
+
+
 def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_limit=_CORPUS_OUTPUT_LIMIT):
     """
     Сортирует найденные фрагменты по числу РАЗНЫХ ключевых слов запроса,
     стоматологические веса выше. Фрагменты, содержащие несколько ключевых
     слов одновременно (пересечение терминов), получают максимальный приоритет.
-    Red-Team: кросс-языковые синонимы, инквизиционный отсев шума и Authority Boost для EBM.
+    Red-Team: кросс-языковые синонимы, инквизиционный отсев шума, отсев токсичных практик и EBM Boost.
     """
     if not entries or not keywords:
         return []
 
     has_dental_kws = any(is_dental_keyword(kw) for kw in keywords)
+    has_toxic_intent = any(re.search(r'\b(?:резорцин|мышьяк|депулпин|форедент)\b', kw, re.IGNORECASE) for kw in keywords)
 
     kw_patterns = {}
     for kw in keywords:
@@ -2202,6 +2238,12 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
 
     scored = []
     for idx, entry in enumerate(entries):
+        # TOXIC PRACTICE GATE:
+        # Если врач сам не спрашивал про резорцин/мышьяк (например, вопрос о перелечивании/распломбировке),
+        # категорически отсекаем старые токсичные рецепты из архива чата
+        if not has_toxic_intent and _TOXIC_PRACTICE_RE.search(entry):
+            continue
+
         score = 0
         distinct = 0
         matched_dental = False
@@ -2211,6 +2253,11 @@ def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_
                 distinct += 1
                 if is_dental_keyword(kw):
                     matched_dental = True
+
+        # MINIMUM SCORE THRESHOLD:
+        # Исключаем кандидатов с весом < 2 (одиночные неклинические совпадения)
+        if score < 2:
+            continue
 
         # INQUISITION FILTER:
         # Если в запросе были клинические термины, кандидат ОБЯЗАН содержать хотя бы один
@@ -2467,9 +2514,9 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
             rows_per_kw = _rows_per_keyword(len(keywords))
             has_clinical_kw = any(is_dental_keyword(kw) for kw in keywords)
 
-            # 0. Search clinical_protocols in bot DB (Gold EBM protocols)
+            # 0. Search clinical_protocols in bot DB (Gold EBM protocols) - only if clinical terms
             bot_db_path = getattr(config, "DB_PATH", "stomat_bot.db") or "stomat_bot.db"
-            if os.path.exists(bot_db_path):
+            if has_clinical_kw and bot_db_path and os.path.exists(bot_db_path):
                 try:
                     with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -2524,8 +2571,8 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching clinical_protocols in {bot_db_path}: {e}")
 
-            # 1. Search stomat_wiki.db
-            if os.path.exists("stomat_wiki.db"):
+            # 1. Search stomat_wiki.db - only if clinical terms
+            if has_clinical_kw and os.path.exists("stomat_wiki.db"):
                 try:
                     with contextlib.closing(sqlite3.connect("file:stomat_wiki.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -2551,8 +2598,9 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching stomat_wiki.db: {e}")
 
-            # 2. Search active bot DB (stomat_bot.db: live messages) - bypassed if skip_archive
-            if not skip_archive and bot_db_path and os.path.exists(bot_db_path):
+            # 2. Search active bot DB (stomat_bot.db: live messages) - bypassed if skip_archive or non-clinical single-word
+            allow_archive_search = not skip_archive and (has_clinical_kw or len(keywords) >= 2)
+            if allow_archive_search and bot_db_path and os.path.exists(bot_db_path):
                 try:
                     with contextlib.closing(sqlite3.connect(f"file:{bot_db_path}?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -2594,8 +2642,8 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                 except Exception as e:
                     logger.error(f"Error searching {bot_db_path}: {e}")
 
-            # 3. Search archive messages (stomat_archive.db: pre-2026 archive) - bypassed if skip_archive
-            if not skip_archive and len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
+            # 3. Search archive messages (stomat_archive.db: pre-2026 archive) - bypassed if skip_archive or non-clinical single-word
+            if allow_archive_search and len(archive_msgs) < _CORPUS_CANDIDATE_CAP and os.path.exists("stomat_archive.db"):
                 try:
                     with contextlib.closing(sqlite3.connect("file:stomat_archive.db?mode=ro", uri=True, timeout=30)) as conn:
                         conn.execute("PRAGMA busy_timeout = 30000")
@@ -4458,25 +4506,38 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         pediatric_gt = f"\n{pediatric_safety.ground_truth_block}\n" if pediatric_safety else ""
 
         # EXTRACT KEYWORDS & SEARCH DB
-        # Для обычных триггеров извлекаем ключевые слова ТОЛЬКО из текста текущего вопроса, чтобы избежать каши в RAG
-        if is_dialogue:
-            user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
-            if not user_context_msgs:
-                user_context_msgs = context_msgs
-            keyword_source = " ".join(user_context_msgs)
+        # Исключаем собственные ответы бота из источника ключевых слов (защита от самозагрязнения RAG)
+        _bot_markers = (
+            "Бот Учимся Вместе", "Учимся Вместе:",
+            "Бот StomChat", "StomChat:",
+            "Бот EndoChat", "EndoChat:",
+            "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]",
+        )
+        user_context_msgs = [m for m in context_msgs if not any(bm in m for bm in _bot_markers)]
+        is_conversational_msg = bool(_CONVERSATIONAL_INTENT_RE.match((text or "").strip()))
+
+        if is_conversational_msg:
+            keyword_source = ""
+            keywords = []
+            search_keywords = []
+            wiki_corpus, archive_corpus = "", ""
         else:
-            keyword_source = text if text else ""
-            if not keyword_source:
-                user_context_msgs = [m for m in context_msgs if "Бот Учимся Вместе" not in m and "Учимся Вместе:" not in m]
-                keyword_source = " ".join(user_context_msgs) if user_context_msgs else ""
+            if is_dialogue:
+                if text and has_dental_term(text):
+                    keyword_source = text
+                else:
+                    recent_user_ctx = user_context_msgs[-3:] if user_context_msgs else context_msgs[-2:]
+                    keyword_source = " ".join(recent_user_ctx + ([text] if text else []))
+            else:
+                keyword_source = text if text else (" ".join(user_context_msgs[-3:]) if user_context_msgs else "")
 
-        keywords = extract_keywords(keyword_source)
-
-        search_keywords = select_search_keywords(keywords)
-
-
-
-        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=keyword_source, context_type="passive" if is_passive else "default")
+            keywords = extract_keywords(keyword_source)
+            search_keywords = select_search_keywords(keywords)
+            wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(
+                search_keywords,
+                query_text=keyword_source,
+                context_type="passive" if is_passive else "default",
+            )
 
         if not is_dialogue and not wiki_corpus and not archive_corpus:
             # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
@@ -4530,12 +4591,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         # Динамический веб-поиск для технических/клинических вопросов
         web_corpus = ""
-        try:
-            web_corpus = await fetch_dynamic_web_snippets_async(keyword_source, timeout=4.0)
-            if web_corpus:
-                logger.info("Dynamic web grounding retrieved factual context for query.")
-        except Exception as web_err:
-            logger.debug(f"Failed dynamic web snippets fetch: {web_err}")
+        if not is_conversational_msg and keyword_source:
+            try:
+                web_corpus = await fetch_dynamic_web_snippets_async(keyword_source, timeout=4.0)
+                if web_corpus:
+                    logger.info("Dynamic web grounding retrieved factual context for query.")
+            except Exception as web_err:
+                logger.debug(f"Failed dynamic web snippets fetch: {web_err}")
 
         # BUILD PROMPT
         ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
@@ -4544,8 +4606,19 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         # Защита от "шизофрении" (когда бот читает свой же ответ и соглашается с ним как с чужим)
         for i in range(len(context_msgs)):
-            if any(k in context_msgs[i] for k in ("Бот Учимся Вместе 🤖:", "Учимся Вместе:", "Бот StomChat 🤖:", "StomChat:")):
-                context_msgs[i] = context_msgs[i].replace("Бот Учимся Вместе 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("Учимся Вместе:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("Бот StomChat 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:").replace("StomChat:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+            if any(k in context_msgs[i] for k in ("Бот Учимся Вместе 🤖:", "Учимся Вместе:", "Бот StomChat 🤖:", "StomChat:", "Бот EndoChat 🤖:", "EndoChat:")):
+                context_msgs[i] = (
+                    context_msgs[i]
+                    .replace("Бот Учимся Вместе 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                    .replace("Учимся Вместе:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                    .replace("Бот StomChat 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                    .replace("StomChat:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                    .replace("Бот EndoChat 🤖:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                    .replace("EndoChat:", "[ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]:")
+                )
+
+        rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
+        web_prompt_section = f"\nСвежие технические данные и спецификации из открытых источников:\n{web_corpus}\n" if web_corpus else ""
 
         if is_dialogue:
             prompt = f"""
@@ -4561,18 +4634,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 {user_memory_context}
 
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sanitize_user_input_xml(sender_first_name or "коллеги")}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос! Если ты видишь свои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и не соглашаться с самим собой!
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Похожие обсуждения из Архива чата:
-{archive_corpus}
-
-Свежие технические данные и спецификации из открытых источников:
-{web_corpus if web_corpus else "Нет дополнительных внешних спецификаций."}
-
+{rag_prompt_section}{web_prompt_section}
 ИНСТРУКЦИИ:
 1. {address_line}
 2. АДАПТИВНАЯ ДЛИНА И ВЕРБОЗИТИ:
@@ -4651,18 +4713,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 {user_memory_context}
 
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sanitize_user_input_xml(sender_first_name or "коллеги")}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения! Если в переписке есть твои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и ни в коем случае не соглашаться с самим собой от третьего лица!
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Похожие обсуждения из Архива чата:
-{archive_corpus}
-
-Свежие технические данные и спецификации из открытых источников:
-{web_corpus if web_corpus else "Нет дополнительных внешних спецификаций."}
-
+{rag_prompt_section}{web_prompt_section}
 ИНСТРУКЦИИ:
 1. {address_line}
 2. АДАПТИВНАЯ ДЛИНА И ВЕРБОЗИТИ:
@@ -5086,6 +5137,32 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         )
         return
 
+    # Проверяем, не написал ли автор снимка уточняющие реплики/вопросы, пока снимок обрабатывался
+    # Выполняем ДО извлечения ключевых слов и поиска в RAG, чтобы вопрос вдогонку попал в поиск
+    sender_id = getattr(message, 'sender_id', None)
+    if sender_id and msg_id:
+        try:
+            followup_rows = await query_db_async(
+                "SELECT msg_id, text, date FROM messages "
+                "WHERE sender_id = ? AND msg_id > ? "
+                "ORDER BY msg_id ASC LIMIT 4",
+                (sender_id, msg_id)
+            )
+            if followup_rows:
+                msg_dt = getattr(message, 'date', None)
+                valid_followups = []
+                for r in followup_rows:
+                    r_text = (r[1] or "").strip()
+                    r_date = _parse_db_date(r[2]) if len(r) > 2 and r[2] else None
+                    if r_text and (msg_dt is None or r_date is None or abs((r_date - msg_dt).total_seconds()) <= 300):
+                        valid_followups.append(r_text)
+                if valid_followups:
+                    extra_followup = "\n".join(valid_followups)
+                    caption_text = f"{caption_text}\n[Последующие сообщения автора кейса]: {extra_followup}" if caption_text else extra_followup
+                    logger.info("Media Assistant attached %d follow-up messages from sender %s to caption before RAG", len(valid_followups), sender_id)
+        except Exception as fe:
+            logger.debug("Error checking media sender follow-up messages: %s", fe)
+
     sanitized_media_desc = "" if is_non_dental_img else strip_vision_negations(media_description)
     full_context_str = caption_text + " " + sanitized_media_desc
     keywords = extract_keywords(full_context_str)
@@ -5107,7 +5184,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         triggered = True
         trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic})"
         is_dental = True
-        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=caption_text or text, context_type="vision")
+        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=caption_text or text or sanitized_media_desc, context_type="vision")
     else:
         # Non-dental Meme/Screenshot/Coffee: Trigger chitchat only if NOT passive (direct reply/mention)
         if not is_passive:
@@ -5140,31 +5217,6 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     )
     context_str = "\n".join(context_msgs) if context_msgs else "Нет предыдущего контекста."
 
-    # Проверяем, не написал ли автор снимка уточняющие реплики/вопросы, пока снимок обрабатывался
-    sender_id = getattr(message, 'sender_id', None)
-    if sender_id and msg_id:
-        try:
-            followup_rows = await query_db_async(
-                "SELECT msg_id, text, date FROM messages "
-                "WHERE sender_id = ? AND msg_id > ? "
-                "ORDER BY msg_id ASC LIMIT 4",
-                (sender_id, msg_id)
-            )
-            if followup_rows:
-                msg_dt = getattr(message, 'date', None)
-                valid_followups = []
-                for r in followup_rows:
-                    r_text = (r[1] or "").strip()
-                    r_date = _parse_db_date(r[2]) if len(r) > 2 and r[2] else None
-                    if r_text and (msg_dt is None or r_date is None or abs((r_date - msg_dt).total_seconds()) <= 300):
-                        valid_followups.append(r_text)
-                if valid_followups:
-                    extra_followup = "\n".join(valid_followups)
-                    caption_text = f"{caption_text}\n[Последующие сообщения автора кейса]: {extra_followup}" if caption_text else extra_followup
-                    logger.info("Media Assistant attached %d follow-up messages from sender %s to caption", len(valid_followups), sender_id)
-        except Exception as fe:
-            logger.debug("Error checking media sender follow-up messages: %s", fe)
-
     is_dialogue = is_direct_reply or is_mentioned
     ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
     if is_dialogue:
@@ -5180,6 +5232,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     if is_dental:
         length_guideline = calculate_context_length_guidelines(recent_texts, is_clinical_case=True, query_text=caption_text)
+        rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
 
         prompt = f"""
 Ты — практикующий оперирующий стоматолог, ортопед и хирург у кресла с 15-летним стажем клинической практики. Читаешь чат коллег "StomChat". Тебе прислали клиническое изображение/снимок.
@@ -5196,15 +5249,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
 Подпись пользователя к изображению (если есть):
 {caption_text}
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Похожие обсуждения из Архива чата:
-{archive_corpus}
-
+{rag_prompt_section}
 ИНСТРУКЦИИ:
 1. АДАПТИВНАЯ ВЕРБОЗИТИ И ДЛИНА ОТВЕТА:
    - Полная адаптивность: соизмеряй объем и формат ответа с контекстом и вопросом врача!
@@ -10262,29 +10307,45 @@ async def handle_private_message(bot_client, event):
         user_group_messages = await database.get_user_recent_group_messages(chat_id, limit=15)
         group_msgs_str = "\n".join([f"- {m}" for m in user_group_messages]) if user_group_messages else "(нет сообщений в группе)"
 
-        # 4. RAG-поиск по стоматологической базе знаний с учетом контекста переписки
-        # Собираем текст текущего запроса и последних 3 сообщений ВРАЧА для детекции
-        # клинической темы. search_context_text (без реплик бота) определён выше —
-        # почему именно так, написано там же.
-        full_context_str = (text or "") + " " + (media_description or "") + " " + search_context_text
-        full_context_str_lower = full_context_str.lower()
+        # 4. RAG-поиск по стоматологической базе знаний с изолированием диалоговых тем
+        # Red-Team:
+        # a) На чисто разговорные реплики (спасибо, привет, ок) RAG полностью глушится
+        # b) Если в текущей реплике уже есть клинические термины — ищем строго по ней (без каши из старых тем)
+        # c) Прошлые реплики врача (search_context_text) подключаются ТОЛЬКО если текущая реплика — уточняющий вопрос (follow-up)
+        current_text = (text or "").strip()
+        is_conversational_turn = bool(_CONVERSATIONAL_INTENT_RE.match(current_text)) and not has_media
 
-        # Клиническая тема — по словам, а не подстрокой (см. has_dental_term):
-        # подстрочная проверка на 20 000 живых сообщений давала 1291 лишнее
-        # срабатывание, из них 901 из-за «кт» внутри «кто» и «эффективно».
-        has_dental_topic = has_dental_term(full_context_str)
-
-        # Запрос ссылок, архива, опыта коллег или поиска в чате
-        has_search_or_link_intent = any(k in full_context_str_lower for k in ["ссылк", "чат", "где писали", "кто говорил", "поиск", "найти", "источник"])
-
-        # Извлекаем ключевые слова из всего контекста (текущий запрос + медиа + история), чтобы искать статьи
-        keywords = extract_keywords(full_context_str)
+        current_clinical_str = (text or "") + " " + (media_description or "")
+        current_has_dental = has_dental_term(current_clinical_str)
+        current_text_lower = current_text.lower()
+        has_search_or_link_intent = any(k in current_text_lower for k in ["ссылк", "чат", "где писали", "кто говорил", "поиск", "найти", "источник"])
 
         wiki_corpus, archive_corpus = "", ""
-        if has_dental_topic or has_media or has_search_or_link_intent:
-            # Ищем совпадения в стоматологической базе
-            search_keywords = select_search_keywords(keywords)
-            wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=full_context_str, context_type="pm")
+        has_dental_topic = False
+
+        if not is_conversational_turn:
+            if current_has_dental or has_media or has_search_or_link_intent:
+                # Первичный клинический запрос или снимок — ищем строго по текущему вопросу без загрязнения старыми темами
+                has_dental_topic = current_has_dental or has_media
+                rag_query_str = current_clinical_str
+                keywords = extract_keywords(rag_query_str)
+                search_keywords = select_search_keywords(keywords)
+                if search_keywords:
+                    wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=rag_query_str, context_type="pm")
+            elif search_context_text and has_dental_term(search_context_text):
+                # Проверяем, является ли реплика уточняющим вопросом к предыдущей клинической теме (follow-up)
+                is_followup = bool(
+                    re.search(r'\?|\b(?:а\s+|сколько|почему|как|если|можно(?:\s+ли)?|что|куда|зачем)\b', current_text, re.IGNORECASE)
+                )
+                if is_followup:
+                    has_dental_topic = True
+                    rag_query_str = current_clinical_str + " " + search_context_text
+                    keywords = extract_keywords(rag_query_str)
+                    search_keywords = select_search_keywords(keywords)
+                    if search_keywords:
+                        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=rag_query_str, context_type="pm")
+
+        rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
 
         raw_chat_id = str(getattr(config, "SOURCE_CHAT_ID", "") or "")
         clean_chat_id = raw_chat_id[4:] if raw_chat_id.startswith("-100") else raw_chat_id.lstrip("-")
@@ -10327,15 +10388,7 @@ async def handle_private_message(bot_client, event):
 
 Вопрос или подпись пользователя:
 {text or "(без подписи)"}
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии!]
-
-Похожие обсуждения из Архива и чата:
-{archive_corpus}
-
+{rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
 {clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE}
@@ -10439,15 +10492,7 @@ async def handle_private_message(bot_client, event):
 
 История вашего диалога (последние сообщения):
 {chr(10).join(_fit_pm_history(context_msgs))}
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus or "(не найдено — свободная беседа)"}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Похожие обсуждения из Архива чата:
-{archive_corpus or ""}
-
+{rag_prompt_section}
 {instructions}
 """
 
@@ -10741,8 +10786,14 @@ NO — если это случайное упоминание, обсужден
         users_chunk_context = await user_memory.format_users_chunk_context(sender_ids)
 
         # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
-        mention_keywords = extract_keywords(text or "")
-        mention_wiki, _ = await search_knowledge_corpus(mention_keywords, context_type="wiki_only") if mention_keywords else ("", "")
+        mention_rag_block = ""
+        if has_dental_term(text or ""):
+            mention_keywords = extract_keywords(text or "")
+            search_kws = select_search_keywords(mention_keywords)
+            if search_kws:
+                mention_wiki, _ = await search_knowledge_corpus(search_kws, context_type="wiki_only")
+                if mention_wiki and mention_wiki.strip():
+                    mention_rag_block = f"\n\nСправка из Базы Знаний (stomat_wiki):\n{mention_wiki.strip()}\n[КРИТИЧЕСКОЕ ПРАВИЛО: Игнорируй факты из справки, не относящиеся к вопросу. Фильтруй через EBM!]"
 
         # ЭТАП 2: Сгенерировать живой ответ
         reply_prompt = f"""Ты — клинический консультант и эксперт сообщества "StomChat". 
@@ -10751,10 +10802,7 @@ NO — если это случайное упоминание, обсужден
 {context_str}
 
 {users_chunk_context}
-
-Справка из Базы Знаний (stomat_wiki):
-{mention_wiki or "(нет данных)"}
-[КРИТИЧЕСКОЕ ПРАВИЛО: Игнорируй факты из справки, не относящиеся к вопросу. Фильтруй через EBM!]
+{mention_rag_block}
 
 Задачи:
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
@@ -11097,8 +11145,15 @@ async def handle_group_direct_ask(bot_client, event, question):
                     + "\n"
                 )
 
-        keywords = extract_keywords(question + (" " + " ".join(reply_chain_lines) if reply_chain_lines else ""))
-        wiki_corpus, archive_corpus = await search_knowledge_corpus(keywords, query_text=question, context_type="group_reply")
+        full_query = question + (" " + " ".join(reply_chain_lines) if reply_chain_lines else "")
+        wiki_corpus, archive_corpus = "", ""
+        if has_dental_term(full_query):
+            keywords = extract_keywords(full_query)
+            search_kws = select_search_keywords(keywords)
+            if search_kws:
+                wiki_corpus, archive_corpus = await search_knowledge_corpus(search_kws, query_text=question, context_type="group_reply")
+
+        rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
 
         prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
@@ -11106,15 +11161,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 {reply_context_block}
 Вопрос коллеги:
 {sanitize_user_input_xml(question)}
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
-Похожие обсуждения из Архива чата:
-{archive_corpus}
-
+{rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
 1. Максимально 600 символов. Никаких приветствий, обращений и пожеланий. Сразу ответ.
@@ -14279,19 +14326,15 @@ async def check_and_trigger_referee(bot_client, event, text):
     chain_str = "\n".join(chain_msgs) if chain_msgs else text
 
     # Поиск по базе RAG для содержательного EBM-арбитража
-    keywords = extract_keywords(text + " " + " ".join(chain_msgs))
+    keywords = select_search_keywords(extract_keywords(text + " " + " ".join(chain_msgs)))
     wiki_corpus, _ = await search_knowledge_corpus(keywords, query_text=chain_str, context_type="referee")
+    rag_prompt_section = format_rag_prompt_block(wiki_corpus, "")
 
     prompt = f"""
 Ты — опытный врач-стоматолог, коллега у кресла в профессиональном сообществе "StomChat". Говоришь на равных, емко и строго по делу, как врач врачу.
 Коллеги обсуждают сложный клинический вопрос или тактику лечения:
 {chain_str}
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus or "(нет точных справочных данных по теме)"}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Фильтруй всё через призму доказательной медицины (EBM), международных стандартов (ADA, ESE, ITI, Cochrane) и клинических протоколов.]
-
+{rag_prompt_section}
 {clinical_cognitive_core.DISPUTE_REFEREE_ARCHITECTURE}
 ТРЕБОВАНИЯ К ФОРМАТУ:
 1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вставлять в текст ответа слова 'Вердикт:', 'EBM-Арбитраж:', 'Арбитраж:', 'Решение:', 'Заключение:' или любые судейские/канцелярские штампы! Пиши сразу по клинической сути.
@@ -14366,18 +14409,14 @@ async def handle_term_explainer(bot_client, event, term):
         )
         return
 
-    keywords = extract_keywords(term)
+    keywords = select_search_keywords(extract_keywords(term))
     wiki_corpus, _ = await search_knowledge_corpus(keywords, query_text=term, context_type="term")
+    rag_prompt_section = format_rag_prompt_block(wiki_corpus, "")
 
     prompt = f"""
 Ты — толковый словарь стоматологического сообщества "StomChat".
 Объясни стоматологический термин или аббревиатуру: "{term}".
-
-Справка из Базы Знаний (stomat_wiki):
-{wiki_corpus}
-[КРИТИЧЕСКОЕ ПРАВИЛО ДЛЯ СПРАВКИ: Игнорируй любые факты из справки, которые не относятся напрямую к текущему вопросу. Не начинай цитировать случайную теорию или инструкции, если об этом прямо не просили!]
-[КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка и архив содержат живые чаты участников, где могут быть ошибки, заблуждения или галлюцинации. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО слепо подтверждать или копировать сомнительные, ненаучные утверждения из базы. Фильтруй всё через призму доказательной медицины (EBM), здравого клинического смысла и золотых стандартов стоматологии! Если совет из базы кажется сомнительным, устаревшим или небезопасным — укажи на это или проигнорируй его.]
-
+{rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
 1. Объясни термин ровно в 1-2 предложениях (не более 350 символов). Предельно кратко и научно-популярно для коллег.
 2. Никаких приветствий, «Данный термин означает...» и прочей воды. Сразу определение.

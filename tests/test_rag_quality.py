@@ -278,6 +278,72 @@ async def run():
     check("инквизиция: мусорная запись без клинических терминов отсечена",
           len(ranked) == 1 and "циркония" in ranked[0], f"got {ranked}")
 
+    print("\n[11] Red-Team: toxic practice gate, non-clinical isolation & clean prompt assembly")
+    # 6. Toxic practice gate: arsenic / depulpin / resorcin-formalin blocked unless explicit query
+    toxic_candidates = [
+        "Врач: При остром пульпите положи мышьяк на 48 часов под дентин-пасту.",
+        "Врач: Для девитализации пульпы используй депулпин.",
+        "Врач: Мы пломбировали каналы пастой форедент и резорцин-формалином.",
+        "Врач: При пульпите показана витальная экстирпация и ирригация гипохлоритом 3%.",
+    ]
+    ranked_toxic = assistant._rank_corpus_entries(toxic_candidates, ["пульпит", "лечение"])
+    check("toxic practice gate: мышьяк, депулпин, резорцин отсечены при обычном запросе",
+          len(ranked_toxic) == 1 and "гипохлоритом" in ranked_toxic[0], f"got {ranked_toxic}")
+
+    ranked_allow_toxic = assistant._rank_corpus_entries(toxic_candidates, ["распломбировка", "резорцин", "формалин"])
+    check("toxic practice gate: при прямом вопросе о резорцине фрагмент разрешён",
+          any("резорцин" in r for r in ranked_allow_toxic), f"got {ranked_allow_toxic}")
+
+    # 7. Non-clinical query isolation
+    nc_wiki, nc_arch = await assistant.search_knowledge_corpus(["погода", "выходные"])
+    check("non-clinical: базы wiki и archive изолированы от неклинических запросов",
+          nc_wiki == "" and nc_arch == "", f"got wiki={nc_wiki!r}, arch={nc_arch!r}")
+
+    # 8. Conversational intent gating
+    conv_positives = [
+        "Спасибо", "Спасибо большое!", "Понял, спасибо коллега", "Привет", "Добрый вечер!",
+        "Ок, все понял", "Благодарю!", "Ясно, спасибо", "Договорились, спасибо!"
+    ]
+    conv_negatives = [
+        "Привет, как лечить пульпит?", "Спасибо, а какой протокол травления?",
+        "Понял, а сколько минут держать гипохлорит?", "Какая экспозиция у ЭДТА?"
+    ]
+    check("conversational intent: все вежливые закрытия определены",
+          all(bool(assistant._CONVERSATIONAL_INTENT_RE.match(t)) for t in conv_positives))
+    check("conversational intent: клинические вопросы НЕ глушатся",
+          all(not bool(assistant._CONVERSATIONAL_INTENT_RE.match(t)) for t in conv_negatives))
+
+    # 9. Clean RAG prompt formatting
+    check("format_rag_prompt_block: пустая справка возвращает пустую строку",
+          assistant.format_rag_prompt_block("", "") == "")
+    wiki_only_block = assistant.format_rag_prompt_block("Факт о цирконии", "")
+    check("format_rag_prompt_block: есть вики, но нет архива",
+          "stomat_wiki" in wiki_only_block and "Архив" not in wiki_only_block)
+    arch_only_block = assistant.format_rag_prompt_block("", "Опыт коллеги о BOPT")
+    check("format_rag_prompt_block: есть архив, но нет вики",
+          "Архив" in arch_only_block and "stomat_wiki" not in arch_only_block)
+
+    print("\n[12] Red-Team Phase 2: составные термины и базовые клинические корни словаря")
+    compound_and_core_terms = [
+        "Протокол фиксации e.max", "Фрезеровка cad/cam", "Графт bio-oss", "Абатмент multi-unit",
+        "Внесли гидроксид кальция в канал", "Протравка эмали и протравить дентин",
+        "Периапикальный очаг и болезненная перкуссия", "Пародонтологическое зондирование и тест на витальность",
+        "Периостит, перикоронит и остеомиелит", "Витальная экстирпация, депульпирование и трепанация",
+        "Пришеечный дефект, праймер и мультиюнит", "Проводниковая, инфильтрационная и мандибулярная",
+        "Подписать ИДС перед ДМЕ (DME)",
+    ]
+    check("has_dental_term распознаёт составные термины (e.max, cad/cam, bio-oss, multi-unit) и базовую клинику",
+          all(assistant.has_dental_term(q) for q in compound_and_core_terms),
+          f"missed: {[q for q in compound_and_core_terms if not assistant.has_dental_term(q)]}")
+
+    false_positive_phrases = [
+        "Протри экран салфеткой", "Позвони Виталию и спроси у Виталии",
+        "Сделай кальку на калькуляторе", "Возьми зонт на улицу",
+    ]
+    check("has_dental_term НЕ срабатывает на бытовые омонимы (протри, Виталия, калька, зонт)",
+          all(not assistant.has_dental_term(q) for q in false_positive_phrases),
+          f"false pos: {[q for q in false_positive_phrases if assistant.has_dental_term(q)]}")
+
 
 asyncio.run(run())
 
