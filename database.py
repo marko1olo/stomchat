@@ -36,10 +36,23 @@ _WAL_READY = set()
 def _connect():
     db = sqlite3.connect(config.DB_PATH, timeout=30)
     db.execute("PRAGMA busy_timeout = 30000")
+    db.execute("PRAGMA synchronous = NORMAL")
+    db.execute("PRAGMA cache_size = -4000")
     if config.DB_PATH not in _WAL_READY:
         db.execute("PRAGMA journal_mode = WAL")
         _WAL_READY.add(config.DB_PATH)
     return db
+
+
+def checkpoint_wal():
+    """Сбрасывает WAL-журнал в основной файл базы данных (TRUNCATE) перед синхронизацией/бекапом."""
+    with _connection() as db:
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+async def checkpoint_wal_async():
+    """Асинхронный сброс WAL через рабочий поток базы данных."""
+    return await _run_db(checkpoint_wal)
 @contextmanager
 def _connection():
     db = _connect()

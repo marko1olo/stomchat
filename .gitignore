@@ -75,6 +75,8 @@ ffmpeg.exe
 *.tgz
 *.tmp
 *~
+snapshots/
+*.bak_*
 scratch/
 scratch_*.py
 

@@ -1,0 +1,40 @@
+[Unit]
+Description=StomChat Telegram Assistant Service (@docendobot)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botrunner
+Group=botrunner
+WorkingDirectory=/opt/stomchat
+ExecStart=/opt/stomchat/venv/bin/python -X utf8 -u main.py
+Restart=always
+RestartSec=5s
+
+# Ресурсный баланс для 1GB RAM микро-VPS:
+# MemoryHigh: мягкое давление ядра Linux на swap и очистку кэша
+# MemoryMax: жесткий потолок перед изоляцией OOM
+MemoryHigh=750M
+MemoryMax=850M
+
+# Изоляция и безопасность ОС
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stomchat
+PrivateTmp=true
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+# Корректное завершение по SIGTERM (до 30с на сброс WAL SQLite)
+TimeoutStopSec=30s
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Логирование через journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stomchat
+
+[Install]
+WantedBy=multi-user.target

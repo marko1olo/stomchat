@@ -3802,6 +3802,9 @@ def acquire_single_instance_lock():
         lock_file = open("bot_instance.lock", "w")
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_file
+    except (BlockingIOError, IOError, OSError) as e:
+        logger.warning(f"Another instance of StomChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
+        sys.exit(0)
     except Exception:
         pass
     return None
@@ -3809,6 +3812,20 @@ def acquire_single_instance_lock():
 
 if __name__ == '__main__':
     _instance_lock = acquire_single_instance_lock()
+
+    if sys.platform != "win32":
+        import signal
+
+        def _handle_sigterm(signum, frame):
+            logger.info("Received SIGTERM from systemd. Initiating graceful shutdown and WAL checkpoint...")
+            try:
+                database.checkpoint_wal()
+            except Exception as e:
+                logger.warning(f"Error during WAL checkpoint on shutdown: {e}")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
     try:
         client.loop.run_until_complete(start_bot())
     except KeyboardInterrupt:

@@ -539,7 +539,23 @@ async def _kill_process_tree(proc):
             pass
 
 
+_MAX_CONCURRENT_SUBPROCESSES = max(1, int(os.getenv("MAX_CONCURRENT_SUBPROCESSES", "2")))
+_SUBPROCESS_SEMAPHORE = None
+
+
+def _get_subprocess_semaphore():
+    global _SUBPROCESS_SEMAPHORE
+    if _SUBPROCESS_SEMAPHORE is None:
+        _SUBPROCESS_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
+    return _SUBPROCESS_SEMAPHORE
+
+
 async def _run_json_tool(action, payload, timeout=None):
+    async with _get_subprocess_semaphore():
+        return await _run_json_tool_guarded(action, payload, timeout=timeout)
+
+
+async def _run_json_tool_guarded(action, payload, timeout=None):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-X",
