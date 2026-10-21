@@ -21,7 +21,7 @@ tests = [
 all_ok = True
 print("==================== RUNNING ALL SUITES FOR STOMCHAT ====================")
 for test in tests:
-    res = subprocess.run([sys.executable, test], capture_output=True, text=True, encoding="utf-8")
+    res = subprocess.run([sys.executable, test], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if res.returncode == 0:
         lines = [l for l in res.stdout.strip().split("\n") if l.strip()]
         last_line = lines[-1] if lines else "OK"

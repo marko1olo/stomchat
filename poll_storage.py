@@ -31,10 +31,11 @@
    - UNIQUE(poll_id, user_id) -- один врач = один голос в опросе
 """
 
+import datetime
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import aiosqlite
 
@@ -43,6 +44,72 @@ logger = logging.getLogger(__name__)
 # Допустимые типы опросов и тематики
 VALID_POLL_TYPES: Set[str] = {"quiz", "regular", "lifestyle"}
 VALID_TOPICS: Set[str] = {"endo", "ortho", "surgery", "therapy", "materials", "lifestyle"}
+
+
+def calculate_quiz_streaks(
+    vote_dates_desc: List[Union[str, datetime.date]],
+    today_date: Optional[datetime.date] = None
+) -> Tuple[int, int]:
+    """
+    Вычисляет (current_streak, max_streak) в днях подряд по списку уникальных дат
+    успешных решений квизов (is_correct=1), отсортированных по убыванию.
+    Учитывает календарные сутки по МСК (UTC+3):
+      - если врач ответил сегодня (день 0) или вчера (день 1) — серия не сгорает;
+      - если пропуск > 1 календарного дня — current_streak сбрасывается в 0;
+      - max_streak сохраняет исторический рекорд побед доктора.
+    """
+    if not vote_dates_desc:
+        return 0, 0
+
+    if today_date is None:
+        today_date = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)).date()
+
+    parsed_dates: List[datetime.date] = []
+    for d in vote_dates_desc:
+        if isinstance(d, str):
+            try:
+                parsed_dates.append(datetime.date.fromisoformat(d.split()[0]))
+            except ValueError:
+                pass
+        elif isinstance(d, datetime.date):
+            parsed_dates.append(d)
+
+    if not parsed_dates:
+        return 0, 0
+
+    unique_dates = sorted(list(set(parsed_dates)), reverse=True)
+
+    max_streak = 0
+    temp_streak = 1
+    for i in range(len(unique_dates) - 1):
+        diff = (unique_dates[i] - unique_dates[i + 1]).days
+        if diff == 1:
+            temp_streak += 1
+        elif diff > 1:
+            if temp_streak > max_streak:
+                max_streak = temp_streak
+            temp_streak = 1
+    if temp_streak > max_streak:
+        max_streak = temp_streak
+
+    current_streak = 0
+    latest = unique_dates[0]
+    days_since_latest = (today_date - latest).days
+
+    if days_since_latest in (0, 1):
+        current_streak = 1
+        for i in range(len(unique_dates) - 1):
+            diff = (unique_dates[i] - unique_dates[i + 1]).days
+            if diff == 1:
+                current_streak += 1
+            else:
+                break
+    else:
+        current_streak = 0
+
+    max_streak = max(max_streak, current_streak)
+    return current_streak, max_streak
+
 
 
 def _resolve_db_path(db_path: Optional[str] = None) -> str:
@@ -399,16 +466,22 @@ async def record_vote(
     target_option = int(selected_option)
 
     async with get_db_connection(db_path) as db:
-        # Автоматическое определение правильности ответа для квизов, если is_correct не задан явно
+        # Автоматическое определение типа опроса и валидация правильности ответа
+        async with db.execute(
+            "SELECT poll_type, correct_option_id FROM daily_polls WHERE id = ?",
+            (target_poll_id,),
+        ) as cursor:
+            poll_row = await cursor.fetchone()
+
+        poll_type = poll_row["poll_type"] if poll_row else "quiz"
+        correct_option_id = poll_row["correct_option_id"] if poll_row else None
+
         evaluated_is_correct = is_correct
-        if evaluated_is_correct is None:
-            async with db.execute(
-                "SELECT poll_type, correct_option_id FROM daily_polls WHERE id = ?",
-                (target_poll_id,),
-            ) as cursor:
-                poll_row = await cursor.fetchone()
-                if poll_row and poll_row["poll_type"] == "quiz" and poll_row["correct_option_id"] is not None:
-                    evaluated_is_correct = target_option == poll_row["correct_option_id"]
+        if str(poll_type).lower() != "quiz":
+            # Для опросов мнений и батлов материалов флаг правильности СТРОГО отсутствует (None)
+            evaluated_is_correct = None
+        elif evaluated_is_correct is None and correct_option_id is not None:
+            evaluated_is_correct = (target_option == correct_option_id)
 
         correct_val: Optional[int] = None
         if evaluated_is_correct is not None:
@@ -580,23 +653,74 @@ async def close_all_active_polls_silently(chat_id: int, db_path: Optional[str] =
         return cursor.rowcount
 
 
-async def has_poll_today(chat_id: int, db_path: Optional[str] = None) -> bool:
+async def has_poll_today(
+    chat_id: int,
+    slot: Optional[str] = None,
+    db_path: Optional[str] = None
+) -> bool:
     """
     Проверяет наличие опроса за сегодняшние календарные сутки по московскому времени (UTC+3).
-    Исключает ночные рассинхроны между UTC и местным временем.
+    Поддерживает проверку временных слотов (09:00 и 15:00):
+      - slot='morning': опрос опубликован до 12:00 МСК
+      - slot='afternoon': опрос опубликован с 12:00 МСК
+      - slot=None: проверка наличия любого опроса за сегодня
     """
+    async with get_db_connection(db_path) as db:
+        if slot == "morning":
+            sql = """
+                SELECT 1 FROM daily_polls 
+                WHERE chat_id = ? 
+                  AND date(created_at, '+3 hours') = date('now', '+3 hours')
+                  AND time(created_at, '+3 hours') < '12:00:00'
+                LIMIT 1
+            """
+        elif slot == "afternoon":
+            sql = """
+                SELECT 1 FROM daily_polls 
+                WHERE chat_id = ? 
+                  AND date(created_at, '+3 hours') = date('now', '+3 hours')
+                  AND time(created_at, '+3 hours') >= '12:00:00'
+                LIMIT 1
+            """
+        else:
+            sql = """
+                SELECT 1 FROM daily_polls 
+                WHERE chat_id = ? 
+                  AND date(created_at, '+3 hours') = date('now', '+3 hours')
+                LIMIT 1
+            """
+        async with db.execute(sql, (int(chat_id),)) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
+
+
+async def has_poll_in_slot(chat_id: int, slot: str, db_path: Optional[str] = None) -> bool:
+    """Проверяет наличие опубликованного опроса в конкретном временном слоте ('morning' / 'afternoon')."""
+    return await has_poll_today(chat_id, slot=slot, db_path=db_path)
+
+
+async def get_recent_poll_topics(limit: int = 7, db_path: Optional[str] = None) -> List[Dict[str, str]]:
+    """Возвращает список недавних тем и вопросов опросов для исключения дублирования."""
     async with get_db_connection(db_path) as db:
         async with db.execute(
             """
-            SELECT 1 FROM daily_polls 
-            WHERE chat_id = ? 
-              AND date(created_at, '+3 hours') = date('now', '+3 hours')
-            LIMIT 1
+            SELECT topic, poll_type, question, created_at
+            FROM daily_polls
+            ORDER BY created_at DESC
+            LIMIT ?
             """,
-            (int(chat_id),),
+            (int(limit),)
         ) as cursor:
-            row = await cursor.fetchone()
-            return row is not None
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "topic": r["topic"],
+                    "poll_type": r["poll_type"],
+                    "question": r["question"],
+                    "created_at": str(r["created_at"])
+                }
+                for r in rows
+            ]
 
 
 
@@ -626,18 +750,31 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
         async with db.execute(query, (target_user_id,)) as cursor:
             rows = await cursor.fetchall()
 
+        # Запрос уникальных календарных дат успешных решений квизов (МСК UTC+3) для подсчета стриков
+        streak_query = """
+            SELECT DISTINCT date(v.voted_at, '+3 hours') as vote_date
+            FROM poll_votes v
+            LEFT JOIN daily_polls p ON v.poll_id = p.id
+            WHERE v.user_id = ?
+              AND v.is_correct IN (1, 1.0)
+              AND (p.poll_type = 'quiz' OR p.poll_type IS NULL)
+            ORDER BY vote_date DESC
+        """
+        async with db.execute(streak_query, (target_user_id,)) as cursor:
+            date_rows = await cursor.fetchall()
+            vote_dates = [r["vote_date"] for r in date_rows if r["vote_date"]]
+
     total_quiz_answers = 0
     correct_quiz_answers = 0
     total_all_votes = len(rows)
     topic_data: Dict[str, Dict[str, Any]] = {}
 
     for row in rows:
-        poll_type = row["poll_type"] or "quiz"
+        poll_type = str(row["poll_type"] or "quiz").lower()
         is_correct = row["is_correct"]
 
-        # Квизом считается опрос с типом quiz либо голос с явно вычисленным флагом правильности
-        is_quiz = (poll_type == "quiz") or (is_correct is not None)
-        if not is_quiz:
+        # Квизом СТРОГО считается опрос типа 'quiz'
+        if poll_type != "quiz":
             continue
 
         total_quiz_answers += 1
@@ -665,6 +802,8 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
     else:
         accuracy_percent = 0.0
 
+    current_streak, max_streak = calculate_quiz_streaks(vote_dates)
+
     return {
         "user_id": target_user_id,
         "total_answers": total_quiz_answers,
@@ -672,6 +811,11 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
         "incorrect_answers": total_quiz_answers - correct_quiz_answers,
         "accuracy_percent": accuracy_percent,
         "by_topic": topic_data,
+        # Clinical Quiz Streaks (дней подряд решения квизов)
+        "current_streak": current_streak,
+        "max_streak": max_streak,
+        "streak_days": current_streak,
+        "last_quiz_date": vote_dates[0] if vote_dates else None,
         # Синонимы и алиасы для максимального удобства вызывающего кода
         "total": total_quiz_answers,
         "correct": correct_quiz_answers,

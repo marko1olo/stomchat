@@ -908,8 +908,9 @@ def get_weekly_rubric(dt: Optional[datetime.datetime] = None) -> Dict[str, Any]:
     rubric = dict(base_rubric)
     subtopics = base_rubric.get("subtopics", [])
     if subtopics:
-        # Ротация по номеру недели в месяце (0..len(subtopics)-1)
-        week_idx = ((now.day - 1) // 7) % len(subtopics)
+        # Ротация по номеру недели в месяце с учетом времени суток (утро < 13:00 vs день >= 13:00)
+        slot_offset = 1 if now.hour >= 13 else 0
+        week_idx = (((now.day - 1) // 7) + slot_offset) % len(subtopics)
         chosen_subtopic = subtopics[week_idx]
         rubric["subtopic"] = chosen_subtopic
         rubric["topic"] = f"{base_rubric['topic'].split('(')[0].strip()}: {chosen_subtopic}"
@@ -1471,7 +1472,8 @@ async def review_poll_quality(
 
 def get_fallback_preset(
     category: Optional[str] = None,
-    poll_type: Optional[PollType] = None
+    poll_type: Optional[PollType] = None,
+    exclude_topics: Optional[List[str]] = None
 ) -> PollPayload:
     """
     Выбирает проверенный клинический пресет из пула фолбэков.
@@ -1488,6 +1490,12 @@ def get_fallback_preset(
         filtered_by_type = [p for p in candidates if p.get("poll_type") == poll_type]
         if filtered_by_type:
             candidates = filtered_by_type
+
+    if exclude_topics:
+        excluded_set = {t.strip().lower() for t in exclude_topics if t}
+        non_excluded = [p for p in candidates if str(p.get("topic", "")).strip().lower() not in excluded_set]
+        if non_excluded:
+            candidates = non_excluded
 
     chosen = dict(random.choice(candidates))
     chosen["source"] = "fallback"
@@ -1563,16 +1571,22 @@ def build_poll_media(
     clean_q = truncate_html_aware(question, MAX_QUESTION_LEN)
     clean_options = [truncate_html_aware(opt, MAX_OPTION_LEN) for opt in options]
 
-    # Обработка HTML-сущностей вопроса
+    # Обработка HTML-сущностей вопроса с гарантией лимита <= 300 символов
     q_text, q_entities = html.parse(clean_q)
+    if len(q_text) > MAX_QUESTION_LEN:
+        q_text = q_text[:MAX_QUESTION_LEN]
+        q_entities = None
     q_twe = types.TextWithEntities(text=q_text, entities=q_entities or [])
 
-    # Сборка ответов опроса
+    # Сборка ответов опроса с гарантией лимита <= 100 символов на каждый вариант
     poll_answers: List[types.PollAnswer] = []
     correct_answers_bytes: Optional[List[bytes]] = [] if is_quiz else None
 
     for i, opt in enumerate(clean_options):
         opt_text, opt_entities = html.parse(opt)
+        if len(opt_text) > MAX_OPTION_LEN:
+            opt_text = opt_text[:MAX_OPTION_LEN]
+            opt_entities = None
         opt_twe = types.TextWithEntities(text=opt_text, entities=opt_entities or [])
         opt_bytes = str(i).encode("utf-8")
         poll_answers.append(types.PollAnswer(text=opt_twe, option=opt_bytes))
@@ -1580,12 +1594,15 @@ def build_poll_media(
         if is_quiz and i == correct_idx:
             correct_answers_bytes.append(opt_bytes)
 
-    # Обработка лампочки (solution) для quiz
+    # Обработка лампочки (solution) для quiz с гарантией лимита <= 200 символов
     sol_text: Optional[str] = None
     sol_entities: Optional[List[types.TypeMessageEntity]] = None
     if is_quiz and explanation:
         clean_exp = truncate_html_aware(explanation, MAX_EXPLANATION_LEN)
         sol_text, sol_entities = html.parse(clean_exp)
+        if sol_text and len(sol_text) > MAX_EXPLANATION_LEN:
+            sol_text = sol_text[:MAX_EXPLANATION_LEN]
+            sol_entities = None
 
     # Генерация уникального ID опроса
     poll_id = random.randint(1, (1 << 63) - 1)

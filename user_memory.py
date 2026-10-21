@@ -848,6 +848,13 @@ def format_user_profile_card(memory: dict, display_name: str, quiz_stats: Option
             correct = quiz_stats.get("correct_answers", 0)
             acc = quiz_stats.get("accuracy_percent", 0.0)
             card.append(f"\n🎯 <b>Клинические квизы:</b> решено {total} (точность {acc}%, верных: {correct})")
+            streak_cur = quiz_stats.get("current_streak", 0)
+            streak_max = quiz_stats.get("max_streak", 0)
+            if streak_max > 0:
+                if streak_cur > 0:
+                    card.append(f"🔥 <b>Клинический стрик:</b> {streak_cur} дн. подряд (рекорд: {streak_max})")
+                else:
+                    card.append(f"🔥 <b>Клинический стрик:</b> 0 дн. (рекорд: {streak_max} дн.)")
         return "\n".join(card)
 
     specialty = html.escape(memory.get("specialty") or "Стоматолог общей практики / Врач-стоматолог")
@@ -867,6 +874,13 @@ def format_user_profile_card(memory: dict, display_name: str, quiz_stats: Option
         correct = quiz_stats.get("correct_answers", 0)
         acc = quiz_stats.get("accuracy_percent", 0.0)
         lines.append(f"🎯 <b>Клинические квизы:</b> решено {total} (точность {acc}%, верных: {correct})")
+        streak_cur = quiz_stats.get("current_streak", 0)
+        streak_max = quiz_stats.get("max_streak", 0)
+        if streak_max > 0:
+            if streak_cur > 0:
+                lines.append(f"🔥 <b>Клинический стрик:</b> {streak_cur} дн. подряд (рекорд: {streak_max})")
+            else:
+                lines.append(f"🔥 <b>Клинический стрик:</b> 0 дн. (рекорд: {streak_max} дн.)")
 
         topics = quiz_stats.get("by_topic") or quiz_stats.get("topics") or {}
         if topics:

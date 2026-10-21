@@ -32,6 +32,7 @@ from collections import deque
 import database
 import assistant
 import user_memory
+import reaction_engine
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -2895,7 +2896,6 @@ async def handle_new_message(event):
             )
             is_cmd = bool(text and text.strip().startswith("/"))
             if event.chat_id == config.SOURCE_CHAT_ID and not is_direct_bot_call and not is_cmd:
-                import reaction_engine
                 runtime_guard.create_task(
                     reaction_engine.process_incoming_event(
                         event=event,
@@ -3963,6 +3963,7 @@ async def start_bot():
             type(bot_err).__name__, bot_err, delay
         )
         await stop_media_analysis_workers()
+        reaction_engine.stop_engine_worker()
         await client.disconnect()
         raise
 
@@ -3986,6 +3987,7 @@ async def start_bot():
     runtime_guard.create_task(user_memory.group_memory_daemon_loop(), "group_memory_daemon")
     import clinical_rescue
     runtime_guard.create_task(clinical_rescue.clinical_rescue_daemon(bot_client), "clinical_rescue_daemon")
+    reaction_engine.start_engine_worker()
 
     async def periodic_wal_checkpoint_loop():
         """Периодический сброс SQLite WAL (раз в 30 минут) для предотвращения разрастания WAL-файла."""
@@ -4005,6 +4007,7 @@ async def start_bot():
         await client.run_until_disconnected()
     finally:
         await stop_media_analysis_workers()
+        reaction_engine.stop_engine_worker()
         runtime_guard.stop_watchdog()
 
 

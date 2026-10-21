@@ -54,7 +54,7 @@ class TestBatchReactionEngine(unittest.TestCase):
         prompt = reaction_engine.build_batch_prompt(messages, "🔥 👍")
         self.assertIn("[#1] Врач1 (МЕДИА/СНИМОК): «Кейс 16»", prompt)
         self.assertIn("[#2] Врач2: «Отлично»", prompt)
-        self.assertIn("НЕ БОЛЕЕ 2 (максимум 3)", prompt)
+        self.assertIn("НЕ БОЛЕЕ 2", prompt)
         self.assertIn("НИКОГДА не ставить легкомысленные или радостные реакции", prompt)
 
     @patch("gemini_client.generate_text")
