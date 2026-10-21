@@ -3171,6 +3171,10 @@ async def handle_callback_query(event):
         data_bytes = getattr(event, "data", b"")
         data_str = data_bytes.decode('utf-8', errors='ignore') if isinstance(data_bytes, bytes) else str(data_bytes or "")
 
+        if data_str == "noop":
+            await event.answer("ℹ️ Информационный раздел", alert=False)
+            return
+
         import chairside_tools
         if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
             answered = True

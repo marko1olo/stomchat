@@ -10290,6 +10290,10 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=wiki_text, buttons=buttons, parse_mode='html')
             return
 
+        import chairside_tools
+        if await chairside_tools.dispatch_chairside_pm_command(bot_client, event, text):
+            return
+
         if text.lower() == "/calc" or text.lower().startswith("/calc "):
             calc_arg = text[5:].strip() if text.lower().startswith("/calc ") else ""
             if calc_arg:
@@ -14071,6 +14075,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     btns.append([Button.inline(b_title, data=b_cb), Button.inline("⬅️ В главное меню", data="nav:main")])
 
     await edit_callback_message(bot_client, event, final_text, f"edit_message:{section_type}_ai_result", buttons=btns, parse_mode='html')
+    await event.answer()
 
 async def handle_quiz_callback(bot_client, event):
     """

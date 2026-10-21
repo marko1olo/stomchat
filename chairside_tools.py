@@ -2030,6 +2030,10 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
         await handle_aae_command(bot_client, event, arg)
         return True
     elif cmd_name in ("/sos", "/обломок"):
+        clean_lower = arg.strip().lower()
+        fast_sos_keywords = ("file", "обломок", "сепарац", "поломк", "hypo", "гипохлорит", "авари", "anes", "анестези", "пульпит", "боль")
+        if clean_lower and not any(k in clean_lower for k in fast_sos_keywords):
+            return False
         await handle_sos_command(bot_client, event, arg)
         return True
     elif cmd_name in ("/pharma", "/антибиотики", "/нпвп"):
