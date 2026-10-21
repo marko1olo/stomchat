@@ -1719,7 +1719,7 @@ async def transcribe_group_voice(message):
         # куда уборщик не заходит.
         os.makedirs(MEDIA_TEMP_DIR, exist_ok=True)
         temp_path = await asyncio.wait_for(
-            message.download_media(file="temp_media/"),
+            message.download_media(file=os.path.join(MEDIA_TEMP_DIR, "")),
             timeout=VOICE_DOWNLOAD_TIMEOUT_SECONDS,
         )
         if not temp_path or not os.path.exists(temp_path):
@@ -1772,9 +1772,15 @@ async def transcribe_group_voice(message):
         if not transcribed:
             return None, VOICE_FAILURE_SILENCE
 
+        # Предотвращение лишних трат токенов и задержки: отсекаем галлюцинации Whisper ДО вызова LLM
+        clean_raw = transcribed.lower().rstrip(".").rstrip(",").strip()
+        if clean_raw in SILENCE_HALLUCINATIONS or (
+            len(clean_raw) < 45 and any(h in clean_raw for h in ("дима торжок", "dimatorzhok", "субтитры сделал", "редактор субтитров", "синецкая"))
+        ):
+            logger.info("voice transcription discarded as silence hallucination pre-correction msg_id=%s", msg_id)
+            return None, VOICE_FAILURE_SILENCE
+
         corrected = await blocking_tools.correct_dental_transcription_async(transcribed.strip())
-        # Правка терминов идёт через LLM и вполне может вернуть пустое —
-        # тогда остаётся сырая расшифровка, а не молчание.
         text = (corrected or transcribed).strip()
         if not text:
             return None, VOICE_FAILURE_SILENCE
@@ -2732,17 +2738,16 @@ async def handle_new_message(event):
                 if ask_match or mentioned:
                     if ask_match:
                         raw_q = ask_match.group(1) or ""
-                        # Убираем повторные упоминания бота из тела вопроса, если они есть
                         _, question = strip_bot_mention(raw_q)
                         question = question.strip()
-                        # Команда /ask сама подтянет родительский пост, окружающую дискуссию или
-                        # предшествующие сообщения доктора и коллег (снимки, жалобы),
-                        # а при полном отсутствии клинического контекста отправит аккуратную подсказку.
+                        if await assistant.check_and_apply_silence(event, question or text, reply_to_msg_id):
+                            return True
                         await assistant.handle_group_direct_ask(bot_client, event, question)
                         return True
                     else:
                         question = without_mention.strip()
-                        # Простое упоминание @botname без текста и без реплая — поглощаем без вызова LLM
+                        if await assistant.check_and_apply_silence(event, question or text, reply_to_msg_id):
+                            return True
                         if question or reply_to_msg_id:
                             await assistant.handle_group_direct_ask(bot_client, event, question)
                         return True
@@ -2768,7 +2773,7 @@ async def handle_new_message(event):
                             is_admin_user = False
 
                     if not is_admin_user:
-                        uname = (getattr(assistant, "BOT_USERNAME", None) or os.getenv("BOT_USERNAME") or "docendobot").lstrip("@")
+                        uname = (getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot")).lstrip("@")
                         await bot_client.send_message(
                             entity=event.chat_id,
                             message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{uname} (команда /quiz).",
@@ -2781,10 +2786,10 @@ async def handle_new_message(event):
                     return True
 
                 # 4. Толковый словарь (объяснение терминов)
-                if cmd_lower.startswith(("/what ", "/что ")):
-                    term = cmd[6:].strip() if cmd_lower.startswith("/what ") else cmd[5:].strip()
-                    if term:
-                        await assistant.handle_term_explainer(bot_client, event, term)
+                if cmd_lower == "/what" or cmd_lower.startswith("/what ") or cmd_lower == "/что" or cmd_lower.startswith("/что "):
+                    parts = cmd.split(maxsplit=1)
+                    term = parts[1].strip() if len(parts) > 1 else ""
+                    await assistant.handle_term_explainer(bot_client, event, term)
                     return True
 
                 # 5. Клинические калькуляторы и анестезия прямо в группе

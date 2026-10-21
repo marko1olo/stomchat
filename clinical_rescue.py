@@ -56,7 +56,9 @@ CHECK_INTERVAL_SECONDS = 180    # проверка раз в 3 минуты
 def ensure_rescue_table(db_path: str):
     """Гарантирует существование таблицы clinical_rescues в БД."""
     try:
-        with sqlite3.connect(db_path, timeout=10.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS clinical_rescues (
                     msg_id INTEGER PRIMARY KEY,
@@ -64,6 +66,7 @@ def ensure_rescue_table(db_path: str):
                     rescued_at TEXT
                 )
             """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_clinical_rescues_chat_date ON clinical_rescues(chat_id, rescued_at)")
             conn.commit()
     except Exception as e:
         logger.warning("Failed to ensure clinical_rescues table: %s", e)
@@ -96,10 +99,12 @@ def _get_table_columns(conn, table_name: str) -> set:
 def check_recent_chat_activity(db_path: str, chat_id: int, minutes: int = 5) -> int:
     """Считает число сообщений в чате за последние N минут (Activity Guard)."""
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
             cols = _get_table_columns(conn, "messages")
             date_col = "date" if "date" in cols else "timestamp"
-            where_clauses = [f"datetime({date_col}) >= datetime('now', ?)"]
+            where_clauses = [f"{date_col} >= datetime('now', ?)"]
             params = [f"-{minutes} minutes"]
             if "chat_id" in cols:
                 where_clauses.append("chat_id = ?")
@@ -127,7 +132,10 @@ def find_unanswered_clinical_candidates(
     ensure_rescue_table(db_path)
     candidates = []
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA cache_size = -4000")
             conn.row_factory = sqlite3.Row
             cols = _get_table_columns(conn, "messages")
             bot_cols = _get_table_columns(conn, "bot_sent_messages")
@@ -137,12 +145,12 @@ def find_unanswered_clinical_candidates(
             text_col = "text" if "text" in cols else "message"
 
             where_clauses = [
-                f"datetime(m.{date_col}) >= datetime('now', ?)",
-                f"datetime(m.{date_col}) <= datetime('now', ?)",
+                f"m.{date_col} >= datetime('now', ?)",
+                f"m.{date_col} <= datetime('now', ?)",
                 "m.sender_id != ?",
                 "m.reply_to_msg_id IS NULL",
-                f"m.{id_col} NOT IN (SELECT reply_to_msg_id FROM messages WHERE reply_to_msg_id IS NOT NULL AND sender_id != m.sender_id)",
-                f"m.{id_col} NOT IN (SELECT msg_id FROM clinical_rescues)"
+                f"NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to_msg_id = m.{id_col} AND r.sender_id != m.sender_id)",
+                f"NOT EXISTS (SELECT 1 FROM clinical_rescues cr WHERE cr.msg_id = m.{id_col})"
             ]
             params: List[Any] = [
                 f"-{max_age_minutes} minutes",
@@ -191,7 +199,9 @@ def find_unanswered_clinical_candidates(
 def mark_case_rescued(db_path: str, msg_id: int, chat_id: int):
     """Помечает сообщение как спасенное в БД."""
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
             now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute("""
                 INSERT OR REPLACE INTO clinical_rescues (msg_id, chat_id, rescued_at)
@@ -205,7 +215,9 @@ def mark_case_rescued(db_path: str, msg_id: int, chat_id: int):
 def get_rescues_count_24h(db_path: str, chat_id: int) -> int:
     """Возвращает число спасений за последние 24 часа."""
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COUNT(*) FROM clinical_rescues

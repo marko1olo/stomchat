@@ -164,6 +164,7 @@ async def init_db():
             db.execute("CREATE INDEX IF NOT EXISTS idx_date ON messages(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sender ON messages(sender_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_messages_sender_msg ON messages(sender_id, msg_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_messages_date_msg ON messages(date, msg_id)")
             # Ответы в чате читаются по родителю, а не по себе: на КАЖДОЕ
             # сообщение-ответ под медиа-постом assistant.py делает
             # COUNT(*) WHERE reply_to_msg_id = ?, а затем выборку всей ветки
@@ -634,13 +635,19 @@ async def get_texts_by_ids(msg_ids):
         return {}
 
     def operation():
-        placeholders = ",".join("?" for _ in clean_ids)
+        result = {}
         with _connection() as db:
-            rows = db.execute(
-                f"SELECT msg_id, sender_name, text FROM messages WHERE msg_id IN ({placeholders})",
-                clean_ids,
-            ).fetchall()
-            return {row[0]: (row[1], row[2]) for row in rows}
+            chunk_size = 500
+            for i in range(0, len(clean_ids), chunk_size):
+                batch = clean_ids[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    f"SELECT msg_id, sender_name, text FROM messages WHERE msg_id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    result[row[0]] = (row[1], row[2])
+        return result
 
     return await _run_db(operation)
 

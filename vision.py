@@ -296,6 +296,7 @@ def _load_vision_cache() -> dict:
 
 def _save_vision_cache(cache_data: dict) -> None:
     tmp_path = None
+    global _VISION_CACHE
     try:
         if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
             sorted_items = sorted(
@@ -303,7 +304,10 @@ def _save_vision_cache(cache_data: dict) -> None:
                 key=lambda item: item[1].get("ts", 0) if isinstance(item[1], dict) else 0,
                 reverse=True,
             )
-            cache_data = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
+            trimmed = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
+            _VISION_CACHE.clear()
+            _VISION_CACHE.update(trimmed)
+            cache_data = trimmed
 
         # Unique tmp_path prevents collision between concurrent processes / threads
         tmp_path = f"{VISION_CACHE_FILE}.{os.getpid()}_{time.time_ns()}_{random.randint(1000, 9999)}.tmp"
@@ -354,6 +358,9 @@ def _compute_vision_cache_key(image_bytes_list: list[bytes], caption: str = None
     hasher = hashlib.sha256()
     for b in image_bytes_list:
         hasher.update(b)
+    if caption:
+        hasher.update(b"\x00caption:\x00")
+        hasher.update(caption.strip().lower().encode("utf-8", errors="ignore"))
     return hasher.hexdigest()
 
 

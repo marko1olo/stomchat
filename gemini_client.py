@@ -1510,7 +1510,7 @@ def generate_text(prompt, status_context=None, timeout=None):
 # Форматы, которые Whisper-API принимает как есть. Голосовые Telegram — это
 # ogg/opus, то есть штатный вход, и перегонять их в PCM незачем.
 _WHISPER_NATIVE_EXTENSIONS = frozenset({
-    ".ogg", ".oga", ".opus", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm", ".wav", ".flac",
+    ".ogg", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm", ".wav", ".flac",
 })
 
 # Потолок размера файла у провайдера. Значение внешнее (документация Groq), и я
@@ -1765,8 +1765,21 @@ async def transcribe_audio_gemini_multimodal(
     if len(raw_bytes) < 32:
         return None, "file too small"
 
-    b64_audio = base64.b64encode(raw_bytes).decode("utf-8")
-    mime_type = "video/mp4" if is_video_note else "audio/ogg"
+        b64_audio = base64.b64encode(raw_bytes).decode("utf-8")
+    _ext = os.path.splitext(file_path)[1].lower()
+    _MIME_MAP = {
+        ".mp3": "audio/mp3",
+        ".wav": "audio/wav",
+        ".m4a": "audio/m4a",
+        ".aac": "audio/aac",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".mp4": "video/mp4",
+    }
+    mime_type = "video/mp4" if is_video_note else _MIME_MAP.get(_ext, "audio/ogg")
 
     dental_prompt = (
         "Ты — медицинский транскрибатор для врача-стоматолога.\n"

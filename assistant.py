@@ -1133,6 +1133,17 @@ def calculate_anesthesia_instant(text: str) -> str | None:
     if weight < 3 or weight > 300:
         return f"⚠️ <i>Указан некорректный вес ({weight} кг). Пожалуйста, укажите реальный вес пациента.</i>"
 
+    # Педиатрический стоп-фактор: артикаин строго противопоказан до 4 лет (< 15 кг)
+    if weight < 15.0 and (drug == "articaine" or drug is None):
+        return (
+            f"⛔ <b>ПЕДИАТРИЧЕСКАЯ БЕЗОПАСНОСТЬ (Вес {weight:g} кг / возраст < 4 лет):</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "• <b>4% Артикаин КАТЕГОРИЧЕСКИ ПРОТИВОПОКАЗАН</b> детям до 4 лет (масса тела < 15 кг) согласно инструкции МЗ РФ!\n"
+            "• <b>Препарат выбора у детей раннего возраста:</b> Мепивакаин 3% без вазоконстриктора или Лидокаин 2% строго по расчету мг/кг.\n"
+            f"• <b>Мепивакаин 3%:</b> максимум {int((weight * 4.4) / 54.0)} карпулы ({weight * 4.4:.1f} мг).\n"
+            "⚠️ <i>Округление доз у детей — строго ВНИЗ к меньшему целому!</i>"
+        )
+
     if weight < 35:
         is_child = True
 
@@ -4105,7 +4116,7 @@ async def fetch_dynamic_chat_context(
             # --- Путь 2: Общий поток с естественным адаптивным окном ---
             raw_rows = await query_db_async(
                 "SELECT msg_id, reply_to_msg_id, sender_id, sender_name, text, date, media_description "
-                "FROM messages WHERE msg_id <= ? ORDER BY date DESC, msg_id DESC LIMIT ?",
+                "FROM messages INDEXED BY idx_date WHERE msg_id <= ? ORDER BY date DESC, msg_id DESC LIMIT ?",
                 (msg_id, max_limit),
             )
             all_rows = [_normalize_row(x) for x in raw_rows]
@@ -9167,12 +9178,11 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
             logger.info(f"PM supplement discarded before generation: context changed for chat_id={chat_id}")
             return
 
-        async with _safe_typing_action(bot_client, chat_id):
-            supplement_text, error = await generate_pm_supplement_async(
-                user_question=user_question,
-                initial_answer=initial_answer,
-                timeout=140.0,
-            )
+        supplement_text, error = await generate_pm_supplement_async(
+            user_question=user_question,
+            initial_answer=initial_answer,
+            timeout=90.0,
+        )
 
         if error or not supplement_text:
             logger.info(f"PM supplement empty/error for chat_id={chat_id}: {error}")
@@ -10045,7 +10055,7 @@ async def handle_private_message(bot_client, event):
                 "Оценка риска ятрогенных осложнений и целесообразности работы под микроскопом:\n\n"
                 "<b>Шаг 1 из 3:</b> Выберите анатомическую группу зуба:"
             )
-            buttons = chairside_tools.build_aae_step1_markup()
+            buttons = chairside_tools.build_aae_markup(step=1, tooth_str="Клинический кейс")
             await bot_client.send_message(entity=chat_id, message=aae_intro, buttons=buttons, parse_mode='html')
             return
 
@@ -11320,8 +11330,9 @@ async def handle_private_message(bot_client, event):
                 try:
                     p_text = await generate_user_portrait(chat_id)
                     last_msg_id = await database.get_last_msg_id()
-                    await database.set_user_portrait(chat_id, p_text, last_msg_id)
-                    await database.save_user_memory(chat_id, clinical_summary=p_text, message_count=1)
+                    if p_text and "недостаточно" not in p_text.lower() and "ошибка" not in p_text.lower():
+                        await database.set_user_portrait(chat_id, p_text, last_msg_id)
+                        await database.save_user_memory(chat_id, clinical_summary=p_text, message_count=1)
                     logger.info(f"Generated and saved initial portrait/memory for user {chat_id}: {p_text}")
                 except Exception as p_err:
                     logger.error(f"Error in bg portrait gen: {p_err}")
@@ -11994,7 +12005,7 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
         return False
 
     from telethon import Button
-    username = (BOT_USERNAME or os.getenv("STOMCHAT_BOT_USERNAME", "docendobot")).lstrip("@")
+    username = (BOT_USERNAME or os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot")).lstrip("@")
     reply_to = getattr(event, "id", None) or getattr(getattr(event, "message", None), "id", None)
 
     if is_profile:
@@ -12085,6 +12096,16 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
             rows = await database.get_last_n_messages(limit=SUMMARY_RECENT_LIMIT)
             chat_rows = [r for r in rows if r[3] and r[3].strip()]
             scope_note = f"последние {SUMMARY_RECENT_LIMIT} сообщений"
+
+        if len(chat_rows) < 3:
+            await tg_safety.edit_message(
+                bot_client, chat_id, status_msg.id,
+                f"ℹ️ <i>В выбранной ветке недостаточно сообщений для составления клинической сводки (найдено всего {len(chat_rows)}). Сводка дискуссии имеет смысл от 3–4 реплик.</i>",
+                timeout=SUMMARY_DELIVERY_TIMEOUT_SECONDS,
+                op="edit_message:group_summary_insufficient", logger=logger,
+                parse_mode='html',
+            )
+            return
 
         if not chat_rows:
             # И на отказе граница нужна: без неё задача висит навсегда на
@@ -12205,6 +12226,9 @@ async def handle_group_direct_ask(bot_client, event, question):
     """Ответ на прямой клинический вопрос пользователя в группе."""
     chat_id = event.chat_id
     msg_id = event.message.id
+
+    if await check_and_apply_silence(event, question or getattr(getattr(event, "message", None), "message", ""), getattr(event, "reply_to_msg_id", None)):
+        return
 
     cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
     if cooldown > 0:
@@ -12678,34 +12702,35 @@ async def handle_group_direct_ask(bot_client, event, question):
             reply_text += get_ad_hint(reply_text)
 
         sent_msg = None
+        import html_safe
+        chunks = list(html_safe.split_html(reply_text, limit=3800)) or [reply_text]
         try:
-            sent_msg = await bot_client.send_message(
-                entity=chat_id,
-                message=reply_text,
-                reply_to=msg_id,
-                parse_mode='html'
-            )
-        except Exception as e:
-            logger.warning("Failed to send direct ask reply with HTML/reply_to (%s). Retrying with plain text/no reply_to fallback.", e)
-            try:
-                import html_safe
-                plain = html_safe.html_to_plain(reply_text)
-                sent_msg = await bot_client.send_message(
+            for idx, chunk in enumerate(chunks):
+                c_reply_to = msg_id if idx == 0 else None
+                cur_msg = await bot_client.send_message(
                     entity=chat_id,
-                    message=plain,
-                    reply_to=msg_id
+                    message=chunk,
+                    reply_to=c_reply_to,
+                    parse_mode='html'
                 )
-            except Exception as e2:
-                try:
-                    import html_safe
-                    plain = html_safe.html_to_plain(reply_text)
-                    sent_msg = await bot_client.send_message(
+                if sent_msg is None:
+                    sent_msg = cur_msg
+        except Exception as e:
+            logger.warning("Failed to send direct ask reply with HTML/reply_to (%s). Retrying with plain text chunks.", e)
+            try:
+                for idx, chunk in enumerate(chunks):
+                    c_reply_to = msg_id if idx == 0 else None
+                    plain = html_safe.html_to_plain(chunk)
+                    cur_msg = await bot_client.send_message(
                         entity=chat_id,
-                        message=plain
+                        message=plain,
+                        reply_to=c_reply_to
                     )
-                except Exception as e3:
-                    logger.error(f"Failed to send group direct ask reply completely: {e3}")
-                    sent_msg = None
+                    if sent_msg is None:
+                        sent_msg = cur_msg
+            except Exception as e2:
+                logger.error(f"Failed to send group direct ask reply completely: {e2}")
+                sent_msg = None
 
         if sent_msg and hasattr(sent_msg, 'id'):
             logger.info(f"Sent group direct ask reply to msg_id={msg_id}")
@@ -15177,8 +15202,9 @@ async def handle_quiz_callback(bot_client, event):
                 pass
             return
 
-        elif case_sub == "opt":
-            opt_letter = parts[2] if len(parts) > 2 else "A"
+        elif case_sub.startswith("opt:") or case_sub == "opt":
+            opt_parts = data_str.split(":")
+            opt_letter = opt_parts[2] if len(opt_parts) > 2 else "A"
             user_state = await database.get_user_interactive_state(event.sender_id)
             if not user_state or user_state.get("state_type") != "case":
                 await event.answer("Кейс уже завершен или устарел. Нажмите «🚀 Начать клинический кейс».", alert=True)

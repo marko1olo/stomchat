@@ -453,10 +453,8 @@ async def format_users_chunk_context(
             doc_label = " ".join(name_parts) if name_parts else f"Врач #{uid}"
 
             spec = mem.get("specialty", "").strip()
-            # Берем память беседы (group_summary), а при ее отсутствии — часть ЛС памяти
+            # Берем строго память беседы (group_summary). Запрещено подмешивать приватную память ЛС!
             grp_sum = mem.get("group_summary", "").strip()
-            if not grp_sum:
-                grp_sum = mem.get("clinical_summary", "").strip()
 
             profile_text = ""
             if grp_sum:
@@ -674,12 +672,15 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
     Если новых сообщений не было — запросы к нейросети не производятся.
     """
     try:
-        bot_id = 7971556097
+        bot_id = None
         try:
             import config
-            bot_id = getattr(config, "BOT_ID", bot_id) or bot_id
+            bot_id = getattr(config, "BOT_ID", None)
+            if not bot_id and getattr(config, "BOT_TOKEN", None):
+                bot_id = int(config.BOT_TOKEN.split(":", 1)[0])
         except Exception:
             pass
+        bot_id = bot_id or (7971556097)
 
         users_to_process = await database.get_unprocessed_group_users(
             min_new_messages=min_new_messages,
@@ -717,6 +718,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             msgs = await database.get_user_messages_since(user_id, since_msg_id=last_analyzed, limit=25)
             if not msgs:
                 continue
+            last_processed_id = msgs[-1]["msg_id"]
 
             msgs_text = "\n".join([f"- {m['text']}" for m in msgs])
 
@@ -796,7 +798,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
                 group_summary=final_grp_summary,
                 facts_json=json.dumps(current_facts, ensure_ascii=False),
                 group_message_count=mem.get("group_message_count", 0) + len(msgs),
-                last_group_analyzed_id=max_id,
+                last_group_analyzed_id=last_processed_id,
                 username=sender_username,
                 first_name=sender_name
             )

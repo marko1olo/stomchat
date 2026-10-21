@@ -1610,11 +1610,29 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
 
 def calculate_anesthesia_carpules(weight_kg: float) -> str:
     """Расчет предельных доз местных анестетиков в карпулах по весу пациента."""
-    w = max(5.0, min(140.0, float(weight_kg)))
+    import math
+    raw_w = float(weight_kg)
+    if raw_w < 3.0 or raw_w > 300.0:
+        return f"⚠️ <i>Некорректный вес ({raw_w} кг). Укажите реальную массу тела.</i>"
+
+    # Педиатрический стоп-фактор: артикаин строго противопоказан до 4 лет (< 15 кг)
+    if raw_w < 15.0:
+        return (
+            f"⛔ <b>ПЕДИАТРИЧЕСКАЯ БЕЗОПАСНОСТЬ (Вес {raw_w:.1f} кг / возраст < 4 лет):</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "• <b>4% Артикаин КАТЕГОРИЧЕСКИ ПРОТИВОПОКАЗАН</b> детям до 4 лет (масса тела < 15 кг) согласно инструкции МЗ РФ!\n"
+            "• <b>Препарат выбора у детей раннего возраста:</b> Мепивакаин 3% без вазоконстриктора или Лидокаин 2% строго по расчету мг/кг.\n"
+            f"• <b>Мепивакаин 3%:</b> максимум {math.floor((raw_w * 4.4) / 54.0)} карпулы ({raw_w * 4.4:.1f} мг).\n"
+            "⚠️ <i>Округление доз у детей — строго ВНИЗ к меньшему целому!</i>"
+        )
+
+    w = min(140.0, raw_w)
+    is_child = (raw_w < 40.0)
+    art_mg_kg = 5.0 if is_child else 7.0
     
-    max_articaine_mg = min(w * 7.0, 500.0)
-    carpules_art_17 = round(max_articaine_mg / 68.0, 1)
-    carpules_art_18 = round(max_articaine_mg / 72.0, 1)
+    max_articaine_mg = min(w * art_mg_kg, 500.0)
+    carpules_art_17 = math.floor(max_articaine_mg / 68.0) if is_child else round(max_articaine_mg / 68.0, 1)
+    carpules_art_18 = math.floor(max_articaine_mg / 72.0) if is_child else round(max_articaine_mg / 72.0, 1)
 
     max_lido_mg = min(w * 4.4, 300.0)
     carpules_lido_18 = round(max_lido_mg / 36.0, 1)
@@ -1651,7 +1669,7 @@ def calculate_anesthesia_carpules(weight_kg: float) -> str:
 def format_naocl_accident_card() -> str:
     """Экстренный протокол действий при выведении гипохлорита за апекс."""
     return (
-        "🚨 <b>Экстренный EBM-протокол: Гипохлоритовая авария (выведение NaOCl за апекс)</b>\n"
+        "🚨 <b>Экстренный клинический протокол: Гипохлоритовая авария (выведение NaOCl за апекс)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<b>1. Немедленная остановка:</b>\n"
         "• Прекратить подачу гипохлорита! Обильно промыть канал <b>0.9% стерильным физраствором</b> (10–20 мл) для разбавления и аспирации остатков NaOCl. Кислоты (лимонную, ЭДТА) НЕ лить!\n\n"

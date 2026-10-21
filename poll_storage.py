@@ -65,6 +65,8 @@ async def get_db_connection(db_path: Optional[str] = None) -> AsyncIterator[aios
     target_path = _resolve_db_path(db_path)
     async with aiosqlite.connect(target_path, timeout=30.0) as db:
         await db.execute("PRAGMA busy_timeout = 30000")
+        await db.execute("PRAGMA synchronous = NORMAL")
+        await db.execute("PRAGMA cache_size = -4000")
         if target_path not in _WAL_INITIALIZED:
             try:
                 await db.execute("PRAGMA journal_mode = WAL")
