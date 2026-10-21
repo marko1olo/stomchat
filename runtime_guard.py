@@ -84,6 +84,31 @@ WATCHDOG_DUMP_PATH = "bot_watchdog_dump.txt"
 HEARTBEAT_INTERVAL_SECONDS = 30
 WATCHDOG_STALE_SECONDS = 300
 
+
+def get_previous_heartbeat_utc():
+    """Возвращает метку времени UTC (datetime) предыдущего сердцебиения из файла HEARTBEAT_PATH."""
+    try:
+        if os.path.exists(HEARTBEAT_PATH):
+            with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                utc_str = data.get("utc")
+                if utc_str:
+                    dt = datetime.fromisoformat(utc_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+    except Exception:
+        pass
+    return None
+
+
+_PRE_STARTUP_HEARTBEAT_UTC = get_previous_heartbeat_utc()
+
+
+def get_pre_startup_heartbeat_utc():
+    """Возвращает зафиксированную при импорте метку времени последнего сердцебиения до текущего запуска."""
+    return _PRE_STARTUP_HEARTBEAT_UTC
+
 # Сколько сторож даёт себе на запись дампа и строки в журнал перед os._exit(78).
 # См. _arm_hard_exit: выход не имеет права зависеть от того, удалась ли запись.
 WATCHDOG_LOG_GRACE_SECONDS = 5.0

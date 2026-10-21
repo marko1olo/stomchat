@@ -20,8 +20,16 @@ for name in ("vision", "database", "config", "blocking_tools", "runtime_guard"):
 sys.modules["config"].DENTAL_KEYWORDS = []
 sys.modules["blocking_tools"].generate_gemini_text_async = None
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ASSISTANT_PATH = os.path.join(_REPO_ROOT, "assistant.py")
+if not os.path.exists(_ASSISTANT_PATH):
+    _ASSISTANT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
+
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 spec = importlib.util.spec_from_file_location(
-    "assistant_under_test", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
+    "assistant_under_test", _ASSISTANT_PATH
 )
 A = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(A)

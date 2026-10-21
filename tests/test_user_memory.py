@@ -23,6 +23,10 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import config
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_test_mem_")
 config.DB_PATH = os.path.join(_TMPDIR, "test_mem.db")

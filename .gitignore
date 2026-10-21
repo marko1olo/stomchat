@@ -126,3 +126,7 @@ _skeptic_*.py
 # TITAN_PROMPTS, а они в репозитории нигде больше не встречаются.
 /stomchat/
 start_nbfc_admin.bat
+
+.mem.json
+*.log
+__pycache__/

@@ -1307,23 +1307,26 @@ async def patched_send_message(*args, **kwargs):
             chat_id = telethon_utils.get_peer_id(sent_msg.peer_id)
             if chat_id:
                 await database.save_bot_sent_message(sent_msg.id, chat_id)
-                try:
-                    reply_to_id = kwargs.get("reply_to")
-                    if reply_to_id is None and len(args) > 3:
-                        reply_to_id = args[3]
-                    bot_text = getattr(sent_msg, 'message', '') or (text if isinstance(text, str) else '')
-                    if bot_text:
-                        await database.save_message(
-                            msg_id=sent_msg.id,
-                            sender_id=getattr(config, "STOMCHAT_BOT_ID", FALLBACK_BOT_ID) or getattr(sent_msg, 'sender_id', None) or 7971556097,
-                            sender_name=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "StomChat",
-                            sender_username=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "docendobot",
-                            text=bot_text,
-                            date=getattr(sent_msg, 'date', None) or datetime.utcnow(),
-                            reply_to_msg_id=reply_to_id,
-                        )
-                except Exception as save_msg_err:
-                    logger.debug(f"Could not save outgoing bot message to messages table: {save_msg_err}")
+                # В общую таблицу messages сохраняем ТОЛЬКО сообщения из группы SOURCE_CHAT_ID,
+                # чтобы исключить коллизии msg_id между личкой и группой в SQLite!
+                if chat_id == config.SOURCE_CHAT_ID:
+                    try:
+                        reply_to_id = kwargs.get("reply_to")
+                        if reply_to_id is None and len(args) > 3:
+                            reply_to_id = args[3]
+                        bot_text = getattr(sent_msg, 'message', '') or (text if isinstance(text, str) else '')
+                        if bot_text:
+                            await database.save_message(
+                                msg_id=sent_msg.id,
+                                sender_id=getattr(config, "STOMCHAT_BOT_ID", FALLBACK_BOT_ID) or getattr(sent_msg, 'sender_id', None) or 7971556097,
+                                sender_name=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "StomChat",
+                                sender_username=getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "docendobot",
+                                text=bot_text,
+                                date=getattr(sent_msg, 'date', None) or datetime.utcnow(),
+                                reply_to_msg_id=reply_to_id,
+                            )
+                    except Exception as save_msg_err:
+                        logger.debug(f"Could not save outgoing bot message to messages table: {save_msg_err}")
         except Exception as e:
             logger.error(f"Error saving bot outgoing message ID: {e}")
     return sent_msg
@@ -1568,7 +1571,7 @@ def bot_mention_names():
         val = (os.getenv(env_key) or "").lstrip("@").lower()
         if val and val not in names:
             names.append(val)
-    for fallback in ("docendobot", "stomchat_bot", "endochatbot"):
+    for fallback in ("docendobot", "stomchat_bot", "stomat_bot", "endohelp_bot", "endochatbot", "endo_bot"):
         if fallback not in names:
             names.append(fallback)
     return names
@@ -2121,6 +2124,8 @@ async def _mark_media_processed(messages, msg_id, reason):
 
 
 async def process_media_message(messages, msg_id, text, media_type_hint=None, trigger_assistant=True):
+    if messages:
+        messages = sorted(messages, key=lambda m: getattr(m, "id", 0))
     files_to_analyze = []
     # Чьи именно снимки дошли до Vision. Нужно потому, что описание одно на
     # вызов, а строк в базе столько же, сколько сообщений в альбоме.
@@ -2172,6 +2177,12 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                 timeout=MEDIA_ANALYSIS_TIMEOUT_SECONDS,
             )
             if media_description:
+                if hasattr(media_description, "image_urls") and media_description.image_urls:
+                    from media_tools import cache_image_data_url
+                    for idx, a_id in enumerate(sorted(analyzed_msg_ids)):
+                        if idx < len(media_description.image_urls):
+                            cache_image_data_url(a_id, media_description.image_urls[idx])
+
                 # Извлекаем short_caption из VisionDescription, если он там есть
                 _vision_short_caption = getattr(media_description, "short_caption", None)
                 if not _vision_short_caption and media_description:
@@ -2214,12 +2225,15 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                         logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
 
                 # Запуск медиа-ассистента (только для свежих живых сообщений)
-                if trigger_assistant:
+                # [RACE-01 FIX]: Если на сообщения альбома или на реплай уже ответил /ask или прямой ассистент, не отвечаем повторно!
+                already_replied = any(getattr(m, "id", None) in assistant.REPLIED_MSG_IDS for m in messages)
+                if trigger_assistant and not already_replied:
                     async def run_media_assistant_safe():
                         try:
                             media_replied = await assistant.check_and_trigger_assistant_media(
                                 bot_client, messages[0], msg_id, text, media_description,
                                 image_urls=getattr(media_description, "image_urls", None),
+                                album_msg_ids=[m.id for m in messages] if messages else None,
                             )
                             if media_replied:
                                 lifeline_manager.cancel_question(msg_id, reason="media_assistant_replied")
@@ -2227,7 +2241,10 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                             logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
                     runtime_guard.create_task(run_media_assistant_safe(), name=f"media_{msg_id}")
                 else:
-                    logger.info("Media analysis completed for msg_id=%s (trigger_assistant=False, background sync/recovery)", msg_id)
+                    if already_replied:
+                        logger.info("Media assistant skipped for msg_id=%s: already replied by direct ask/dialogue", msg_id)
+                    else:
+                        logger.info("Media analysis completed for msg_id=%s (trigger_assistant=False, background sync/recovery)", msg_id)
             else:
                 logger.info("media analysis returned empty description msg_id=%s, marking as processed", msg_id)
                 for message in messages:
@@ -2598,13 +2615,16 @@ async def handle_new_message(event):
                     logger.error(f"Failed to save clinical bookmark: {bookmark_exc}")
 
             # Анализ медиа (фото, видео), игнорируя стикеры/гифки
-            # Не запускаем авто-анализ медиа, если подпись является интерактивной командой (чтобы избежать двойного ответа)
+            # Если подпись является интерактивной командой (/ask, /calc), медиа ВСЁ РАВНО
+            # ставится в очередь анализа для базы и CDN, но trigger_assistant отключается,
+            # чтобы избежать двойного ответа.
             is_media_command = False
             if text:
                 cmd_test = text.strip().lower()
                 is_media_command = cmd_test.startswith(("/", "итог", "викторина", "опрос", "удалить", "wipe"))
 
-            if (event.photo or event.video or snapshot_document is not None) and not is_media_command:
+            if (event.photo or event.video or snapshot_document is not None):
+                should_trigger_media = not is_media_command
                 if getattr(event, "grouped_id", None):
                     # [SYS-03 FIX] Guard against late-arriving frames after album was already processed.
                     g_id = event.grouped_id
@@ -2615,7 +2635,7 @@ async def handle_new_message(event):
                     if g_id not in _pending_albums:
                         _pending_albums[g_id] = []
 
-                        async def _process_album_after_delay(target_gid):
+                        async def _process_album_after_delay(target_gid, trig_asst=should_trigger_media):
                             try:
                                 last_len = 0
                                 # Wait for album to stabilize (up to 10s, 5 intervals of 2s)
@@ -2632,18 +2652,18 @@ async def handle_new_message(event):
                                 _processed_album_ids[target_gid] = True
                                 if msgs:
                                     combined_text = "\n".join([m.message for m in msgs if m.message]).strip()
-                                    await enqueue_media_analysis(msgs, msgs[0].id, combined_text)
+                                    await enqueue_media_analysis(msgs, msgs[0].id, combined_text, trigger_assistant=trig_asst)
                             except Exception as album_err:
                                 logger.error(f"Error processing album {target_gid}: {album_err}")
                             finally:
                                 # Only remove our own slot — not a newly arrived frame
                                 _pending_albums.pop(target_gid, None)
 
-                        runtime_guard.create_task(_process_album_after_delay(g_id), name=f"album_{g_id}")
+                        runtime_guard.create_task(_process_album_after_delay(g_id, should_trigger_media), name=f"album_{g_id}")
 
                     _pending_albums[g_id].append(event.message)
                 else:
-                    await enqueue_media_analysis([event.message], msg_id, text)
+                    await enqueue_media_analysis([event.message], msg_id, text, trigger_assistant=should_trigger_media)
         # Групповые команды и модерация
         async def run_group_features():
             try:
@@ -2652,6 +2672,11 @@ async def handle_new_message(event):
 
                 # Перехват команд лички с перенаправлением в ЛС
                 if await assistant.handle_group_pm_redirect(bot_client, event, cmd):
+                    return True
+
+                # Chairside tools in group (/chairside, /fdi, /aae)
+                import chairside_tools
+                if await chairside_tools.handle_if_chairside_command(bot_client, event, cmd):
                     return True
 
                 # 0. Экстренное удаление сообщений (админское)
@@ -2698,16 +2723,29 @@ async def handle_new_message(event):
                     return True
 
                 # 2. Прямой запрос к боту
+                # Поддерживаем любые варианты команды /ask:
+                # /ask, /ask <вопрос>, /ask@botname, /ask@botname <вопрос>
+                # а также прямое обращение к боту через @username.
+                is_ask = cmd_lower.startswith("/ask")
+                ask_match = re.match(r"^/ask(?:@\w+)?(?:\s+(.*))?$", cmd, re.DOTALL | re.IGNORECASE) if is_ask else None
                 mentioned, without_mention = strip_bot_mention(cmd)
-                if cmd_lower.startswith("/ask ") or mentioned:
-                    if cmd_lower.startswith("/ask "):
-                        question = cmd[5:].strip()
-                    else:
-                        question = without_mention
-
-                    if question:
+                if ask_match or mentioned:
+                    if ask_match:
+                        raw_q = ask_match.group(1) or ""
+                        # Убираем повторные упоминания бота из тела вопроса, если они есть
+                        _, question = strip_bot_mention(raw_q)
+                        question = question.strip()
+                        # Команда /ask сама подтянет родительский пост, окружающую дискуссию или
+                        # предшествующие сообщения доктора и коллег (снимки, жалобы),
+                        # а при полном отсутствии клинического контекста отправит аккуратную подсказку.
                         await assistant.handle_group_direct_ask(bot_client, event, question)
-                    return True
+                        return True
+                    else:
+                        question = without_mention.strip()
+                        # Простое упоминание @botname без текста и без реплая — поглощаем без вызова LLM
+                        if question or reply_to_msg_id:
+                            await assistant.handle_group_direct_ask(bot_client, event, question)
+                        return True
 
                 # 3. Викторина/Опрос в группе — тоже только со слешем.
                 # Тот же класс: «Опрос» одним словом в архиве встречается как
@@ -2717,7 +2755,7 @@ async def handle_new_message(event):
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
                 # 3. Нативные опросы и викторины в группе (через poll_engine) — строго для админов!
                 # Обычные врачи решают кейсы в ЛС бота: @docendobot (/quiz), чтобы не спамить в чат 750 человек.
-                if cmd_lower in ("/poll", "/опрос", "/батл", "/quiz", "/кейс", "/викторина"):
+                if cmd_lower in ("/poll", "/кейс"):
                     is_admin_user = False
                     if event.sender_id in (7716348189, 1890028643):
                         is_admin_user = True
@@ -2730,14 +2768,15 @@ async def handle_new_message(event):
                             is_admin_user = False
 
                     if not is_admin_user:
+                        uname = (getattr(assistant, "BOT_USERNAME", None) or os.getenv("BOT_USERNAME") or "docendobot").lstrip("@")
                         await bot_client.send_message(
                             entity=event.chat_id,
-                            message="💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @docendobot (команда /quiz).",
+                            message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{uname} (команда /quiz).",
                             reply_to=msg_id
                         )
                         return True
 
-                    force_poll = "regular" if cmd_lower in ("/poll", "/опрос", "/батл") else "quiz"
+                    force_poll = "regular" if cmd_lower == "/poll" else "quiz"
                     await assistant.handle_native_group_poll(bot_client, event, force_type=force_poll)
                     return True
 
@@ -2751,8 +2790,8 @@ async def handle_new_message(event):
                 # 5. Клинические калькуляторы и анестезия прямо в группе
                 cmd_no_mention = strip_bot_mention(cmd)[1].strip()
                 cmd_no_mention_lower = cmd_no_mention.lower()
-                if cmd_no_mention_lower == "/calc" or cmd_no_mention_lower.startswith("/calc "):
-                    calc_arg = cmd_no_mention[5:].strip() if cmd_no_mention_lower.startswith("/calc ") else ""
+                if assistant.is_calc_command(cmd_no_mention_lower):
+                    calc_arg = cmd_no_mention[len("/calc"):].strip()
                     await assistant.handle_group_calc(bot_client, event, calc_arg)
                     return True
 
@@ -2840,17 +2879,28 @@ async def handle_new_message(event):
                 except Exception as proto_e:
                     logger.warning("Protocol extractor check failed msg_id=%s: %s", msg_id, proto_e)
 
-            # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
-            # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
+            # Reaction Engine: выделенный движок реакций (Tier 1 эвристика + Tier 2 in-process)
+            # Снята блокировка 'and text' для поддержки фото и снимков без текста
             bot_uname = (assistant.BOT_USERNAME or getattr(config, "STOMCHAT_BOT_USERNAME", "") or "docendobot").lower().lstrip("@")
+            clean_text_for_bot_chk = (text or "").lower()
             is_direct_bot_call = bool(
-                (bot_uname and f"@{bot_uname}" in text.lower())
-                or (bot_uname and bot_uname in text.lower())
-                or "бот" in text.lower()
+                (bot_uname and f"@{bot_uname}" in clean_text_for_bot_chk)
+                or (bot_uname and bot_uname in clean_text_for_bot_chk)
+                or "бот" in clean_text_for_bot_chk
             )
-            if event.chat_id == config.SOURCE_CHAT_ID and text and not is_direct_bot_call:
+            is_cmd = bool(text and text.strip().startswith("/"))
+            if event.chat_id == config.SOURCE_CHAT_ID and not is_direct_bot_call and not is_cmd:
+                import reaction_engine
                 runtime_guard.create_task(
-                    assistant.check_and_react_standalone(event, msg_id, text, sender_name or "Коллега"),
+                    reaction_engine.process_incoming_event(
+                        event=event,
+                        msg_id=msg_id,
+                        chat_id=event.chat_id,
+                        sender_id=sender_id,
+                        sender_name=sender_name or "Коллега",
+                        text=text or "",
+                        has_media=has_media
+                    ),
                     name=f"react_{msg_id}"
                 )
 
@@ -2999,8 +3049,12 @@ async def handle_private_message(event):
     chat_id = event.chat_id
     raw_text = (event.message.message or "").strip()
 
-    # Команды (/start, /case, /quiz, /calc, /help, /wipe) исполняются сразу, без задержки
+    # Команды (/start, /case, /quiz, /calc, /help, /wipe, /chairside, /fdi, /aae) исполняются сразу, без задержки
     if raw_text.startswith("/"):
+        import chairside_tools
+        if await chairside_tools.handle_if_chairside_command(bot_client, event, raw_text):
+            return
+
         async def run_pm_cmd():
             try:
                 async with _pm_user_lock(chat_id):
@@ -3109,8 +3163,15 @@ async def handle_callback_query(event):
 
     answered = False
     try:
-        await assistant.handle_quiz_callback(bot_client, event)
-        answered = True
+        data_bytes = getattr(event, "data", b"")
+        data_str = data_bytes.decode('utf-8', errors='ignore') if isinstance(data_bytes, bytes) else str(data_bytes or "")
+
+        import chairside_tools
+        if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
+            answered = True
+        else:
+            await assistant.handle_quiz_callback(bot_client, event)
+            answered = True
     except Exception as e:
         if "MessageNotModifiedError" in type(e).__name__ or "Content of the message was not modified" in str(e):
             pass
@@ -3578,6 +3639,7 @@ async def health_watchdog_task():
                         local_id,
                     )
                     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
+                    await sync_recent_messages(bot_client)
 
             failure_score = 0.0
         except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -3616,74 +3678,215 @@ async def health_watchdog_task():
             await client.disconnect()
             return
 
-async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
-    """При рестарте: ищем сообщения из БД за последние window_minutes минут
-    на которые бот не ответил — отвечаем через check_bot_mention_trigger.
-    Работает даже если @mention был удалён другим ботом, т.к. само сообщение в БД."""
+async def sync_recent_messages(bot_client=None, max_lookback_hours: int = 24, max_replies: int = 10):
+    """
+    Безопасный доответ на пропущенные прямые обращения к боту во время офлайна/перезагрузки.
+
+    1. Определяет диапазон времени офлайна:
+       - по последнему зафиксированному heartbeat (до текущего запуска)
+       - по последнему сообщению бота в базе
+       - ограничен окном не более max_lookback_hours (по умолчанию 24 ч).
+    2. Извлекает входящие сообщения за время офлайна (не от бота) в хронологическом порядке (ASC).
+    3. Отфильтровывает ТОЛЬКО прямые обращения:
+       - @username бота или тег "бот"
+       - команда /ask
+       - реплай на реплику бота в активном диалоге
+       Строго игнорирует общий флуд и пассивные реплики чата.
+    4. Проверяет, отвечал ли бот на них ранее (по базе messages и bot_sent_messages, а также REPLIED_MSG_IDS).
+    5. Ставит в очередь и последовательно отвечает через handle_group_direct_ask или check_and_trigger_assistant,
+       соблюдая паузу (cooldown) между ответами против спама и лимитов API.
+    """
+    if bot_client is None:
+        bot_client = globals().get("bot_client")
+    if not bot_client:
+        logger.warning("sync_recent_messages: bot_client недоступен")
+        return 0
+
     try:
-        bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "stomchat_bot").lstrip("@").lower()
+        bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "").lstrip("@").lower()
         bot_id = getattr(assistant, "BOT_ID", None) or FALLBACK_BOT_ID
-        chat_id = config.SOURCE_CHAT_ID
-        cutoff_utc = (datetime.utcnow() - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        known_bots = assistant.get_known_bot_ids() if hasattr(assistant, "get_known_bot_ids") else set()
+        if bot_id:
+            known_bots.add(bot_id)
 
-        # Берём из БД сообщения за окно — не от бота
-        rows = await database.query_db_async(
-            """SELECT msg_id, sender_id, sender_name, text, has_media, media_description
-               FROM messages
-               WHERE date >= ? AND sender_id != ?
-               ORDER BY msg_id DESC LIMIT 60""",
-            (cutoff_utc, bot_id)
-        )
-        if not rows:
-            return
+        now_utc = datetime.now(timezone.utc)
+        max_window = timedelta(hours=max_lookback_hours)
+        earliest_allowed = now_utc - max_window
 
-        # id сообщений бота за то же окно
-        bot_rows = await database.query_db_async(
-            """SELECT reply_to_msg_id FROM messages
-               WHERE date >= ? AND sender_id = ? AND reply_to_msg_id IS NOT NULL""",
-            (cutoff_utc, bot_id)
-        )
-        bot_replied_to = {r[0] for r in bot_rows if r[0]}
+        # 1) Heartbeat перед текущим стартом
+        pre_hb = runtime_guard.get_pre_startup_heartbeat_utc() if hasattr(runtime_guard, "get_pre_startup_heartbeat_utc") else None
+        if pre_hb and pre_hb.tzinfo is None:
+            pre_hb = pre_hb.replace(tzinfo=timezone.utc)
 
-        # Ищем: @bot_username в тексте ИЛИ медиа с текстом-призывом оценить/помочь — без ответа бота
-        target = None
-        for row in rows:
-            msg_id, sender_id, sender_name, text, has_media, media_desc = row
-            if msg_id in bot_replied_to:
-                continue
-            text = text or ""
-            # прямое упоминание
-            is_mention = f"@{bot_username}" in text.lower()
-            # медиа с призывом (короткий текст + фото — просьба оценить)
-            is_media_ask = has_media and len(text.strip()) > 0 and len(text.strip()) < 80
-            if is_mention or is_media_ask:
-                target = (msg_id, sender_name, text, has_media, media_desc)
-                break  # самое свежее
-
-        if not target:
-            return
-
-        msg_id, sender_name, text, has_media, media_desc = target
-        logger.info("📬 Catchup: пропущенный msg_id=%s от %s, генерим ответ...", msg_id, sender_name)
-
-        # Получаем объект сообщения из Telegram для передачи в trigger
-        try:
-            tg_msg = await asyncio.wait_for(client.get_messages(chat_id, ids=msg_id), timeout=15)
-        except Exception:
-            tg_msg = None
-
-        if tg_msg:
+        # 2) Последнее сообщение бота в базе
+        last_bot_date_str = await database.get_last_bot_activity_timestamp(known_bots)
+        last_bot_dt = None
+        if last_bot_date_str:
             try:
-                await asyncio.wait_for(
-                    assistant.check_bot_mention_trigger(bot_client, tg_msg, msg_id, text, sender_name),
-                    timeout=90
-                )
-            except Exception as ce:
-                logger.warning("Catchup reply failed for msg_id=%s: %s", msg_id, ce)
+                last_bot_dt = datetime.fromisoformat(last_bot_date_str)
+            except Exception:
+                try:
+                    last_bot_dt = datetime.strptime(last_bot_date_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+            if last_bot_dt and last_bot_dt.tzinfo is None:
+                last_bot_dt = last_bot_dt.replace(tzinfo=timezone.utc)
+
+        candidates = [t for t in [pre_hb, last_bot_dt] if t]
+        if candidates:
+            detected_active = max(candidates)
+            offline_start = detected_active - timedelta(minutes=3)
         else:
-            logger.warning("Catchup: не удалось получить msg_id=%s из Telegram (возможно удалено)", msg_id)
+            offline_start = now_utc - timedelta(hours=12)
+
+        if offline_start < earliest_allowed:
+            offline_start = earliest_allowed
+        if offline_start > now_utc:
+            offline_start = now_utc - timedelta(minutes=15)
+
+        cutoff_str = offline_start.strftime("%Y-%m-%d %H:%M:%S")
+        hours_offline = (now_utc - offline_start).total_seconds() / 3600.0
+        logger.info("📬 sync_recent_messages: поиск пропущенных обращений с %s (окно офлайна %.1f ч)", cutoff_str, hours_offline)
+
+        rows = await database.get_candidate_messages_for_catchup(cutoff_str, known_bots, limit=100)
+        if not rows:
+            logger.info("📬 sync_recent_messages: входящих сообщений за окно офлайна не обнаружено")
+            return 0
+
+        replies_count = 0
+        for row in rows:
+            if replies_count >= max_replies:
+                logger.info("📬 sync_recent_messages: достигнут лимит ответов за проход (%s)", max_replies)
+                break
+
+            msg_id, reply_to_msg_id, sender_id, sender_name, sender_username, text, date_str, has_media, media_type, media_desc = row
+
+            if msg_id in assistant.REPLIED_MSG_IDS:
+                continue
+
+            if await database.has_bot_replied_to_message(msg_id, known_bots):
+                continue
+
+            # Предохранитель 24 часа
+            msg_dt = None
+            if date_str:
+                try:
+                    msg_dt = datetime.fromisoformat(str(date_str))
+                except Exception:
+                    try:
+                        msg_dt = datetime.strptime(str(date_str), "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+            if msg_dt:
+                if msg_dt.tzinfo is not None:
+                    msg_dt_utc = msg_dt.astimezone(timezone.utc)
+                else:
+                    msg_dt_utc = msg_dt.replace(tzinfo=timezone.utc)
+                if (now_utc - msg_dt_utc).total_seconds() > 24 * 3600:
+                    logger.info("Catchup: msg_id=%s старше 24 часов (%s), пропуск", msg_id, date_str)
+                    continue
+
+            text_clean = (text or "").strip()
+            text_lower = text_clean.lower()
+
+            is_mention = False
+            mentioned, without_mention = strip_bot_mention(text_clean)
+            if mentioned:
+                is_mention = True
+            elif bot_username and f"@{bot_username}" in text_lower:
+                is_mention = True
+            elif any(f"@{h}" in text_lower for h in ("docendobot", "stomchat_bot", "stomat_bot", "endohelp_bot", "endochatbot", "endo_bot")):
+                is_mention = True
+            elif text_lower.startswith("бот,") or text_lower.startswith("бот ") or text_lower == "бот":
+                is_mention = True
+
+            is_ask = text_lower.startswith("/ask")
+
+            is_reply_to_bot = False
+            if reply_to_msg_id:
+                is_reply_to_bot = await database.is_bot_message_or_sender(reply_to_msg_id, known_bots, config.SOURCE_CHAT_ID)
+
+            if not (is_mention or is_ask or is_reply_to_bot):
+                continue
+
+            logger.info("📬 Catchup: обрабатываем пропущенное обращение msg_id=%s от %s (mention=%s, ask=%s, reply_to_bot=%s)", msg_id, sender_name, is_mention, is_ask, is_reply_to_bot)
+
+            try:
+                tg_msg = await asyncio.wait_for(client.get_messages(config.SOURCE_CHAT_ID, ids=msg_id), timeout=15)
+            except Exception as fetch_err:
+                logger.warning("Catchup: не удалось получить msg_id=%s из Telegram: %s", msg_id, fetch_err)
+                continue
+
+            if not tg_msg:
+                logger.warning("Catchup: сообщение msg_id=%s удалено из Telegram", msg_id)
+                continue
+
+            assistant.REPLIED_MSG_IDS[msg_id] = True
+            global PROCESSED_MSG_IDS
+            key = (config.SOURCE_CHAT_ID, msg_id)
+            if key not in PROCESSED_MSG_IDS and msg_id not in PROCESSED_MSG_IDS:
+                PROCESSED_MSG_IDS.append(key)
+                if len(PROCESSED_MSG_IDS) > 1000:
+                    PROCESSED_MSG_IDS.pop(0)
+
+            adapter_event = TelethonEventAdapter(tg_msg)
+            replied_ok = False
+
+            try:
+                if is_ask:
+                    ask_match = re.match(r"^/ask(?:@\w+)?(?:\s+(.*))?$", text_clean, re.DOTALL | re.IGNORECASE)
+                    raw_q = ask_match.group(1) if ask_match else text_clean[len("/ask"):].strip()
+                    _, question = strip_bot_mention(raw_q or "")
+                    question = question.strip()
+                    await asyncio.wait_for(
+                        assistant.handle_group_direct_ask(bot_client, adapter_event, question),
+                        timeout=120
+                    )
+                    replied_ok = True
+                elif is_mention:
+                    question = without_mention.strip()
+                    if question or reply_to_msg_id:
+                        await asyncio.wait_for(
+                            assistant.handle_group_direct_ask(bot_client, adapter_event, question),
+                            timeout=120
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            assistant.check_bot_mention_trigger(bot_client, adapter_event, msg_id, text_clean, sender_name),
+                            timeout=90
+                        )
+                    replied_ok = True
+                elif is_reply_to_bot:
+                    res = await asyncio.wait_for(
+                        assistant.check_and_trigger_assistant(
+                            bot_client, adapter_event, msg_id, text_clean, reply_to_msg_id,
+                            sender_first_name=sender_name
+                        ),
+                        timeout=120
+                    )
+                    if not res:
+                        await asyncio.wait_for(
+                            assistant.check_bot_mention_trigger(bot_client, adapter_event, msg_id, text_clean, sender_name),
+                            timeout=90
+                        )
+                    replied_ok = True
+            except Exception as e:
+                logger.warning("Catchup reply execution failed for msg_id=%s: %s", msg_id, e)
+
+            if replied_ok:
+                replies_count += 1
+                await asyncio.sleep(2.5)
+
+        logger.info("📬 sync_recent_messages завершен: ответов отправлено=%s", replies_count)
+        return replies_count
     except Exception as e:
-        logger.warning("_catchup_missed_mentions error: %s", e)
+        logger.warning("sync_recent_messages error: %s", e)
+        return 0
+
+
+async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
+    """Совместимость со старым именем функции: делегирует в sync_recent_messages."""
+    return await sync_recent_messages(bot_client)
 
 
 # --- ОБНОВЛЕННЫЙ START_BOT ---
@@ -3762,7 +3965,7 @@ async def start_bot():
     # СИНХРОНИЗАЦИЯ ПЕРЕД ЗАПУСКОМ СЛУШАТЕЛЯ
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()
-    await _catchup_missed_mentions(bot_client)
+    await sync_recent_messages(bot_client)
 
     # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
@@ -3772,6 +3975,22 @@ async def start_bot():
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")
     runtime_guard.create_task(media_recovery_task(), "media_recovery")
     runtime_guard.create_task(user_memory.group_memory_daemon_loop(), "group_memory_daemon")
+    import clinical_rescue
+    runtime_guard.create_task(clinical_rescue.clinical_rescue_daemon(bot_client), "clinical_rescue_daemon")
+
+    async def periodic_wal_checkpoint_loop():
+        """Периодический сброс SQLite WAL (раз в 30 минут) для предотвращения разрастания WAL-файла."""
+        while True:
+            try:
+                await asyncio.sleep(1800)
+                await database.checkpoint_wal_async()
+                logger.info("Periodic SQLite WAL checkpoint completed")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Periodic WAL checkpoint failed: %s", e)
+
+    runtime_guard.create_task(periodic_wal_checkpoint_loop(), "wal_checkpoint_daemon")
     logger.info("bot started, history synchronized, chat listener active")
     try:
         await client.run_until_disconnected()
@@ -3819,6 +4038,8 @@ if __name__ == '__main__':
         def _handle_sigterm(signum, frame):
             logger.info("Received SIGTERM from systemd. Initiating graceful shutdown and WAL checkpoint...")
             try:
+                if hasattr(database, "_DB_EXECUTOR"):
+                    database._DB_EXECUTOR.shutdown(wait=False)
                 database.checkpoint_wal()
             except Exception as e:
                 logger.warning(f"Error during WAL checkpoint on shutdown: {e}")

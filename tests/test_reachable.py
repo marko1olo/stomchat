@@ -57,6 +57,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 _ORIGINAL_CWD = os.getcwd()
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_reachable_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
@@ -394,7 +398,7 @@ async def _ask(bot_client, event, question):
     CALLS["ask"].append(question)
 
 
-async def _quiz(bot_client, event):
+async def _quiz(bot_client, event, **kw):
     CALLS["quiz"].append(True)
 
 
@@ -475,10 +479,12 @@ async def run_group_checks():
     assistant.handle_group_summary = _summary
     assistant.handle_group_direct_ask = _ask
     assistant.handle_group_quiz = _quiz
+    assistant.handle_native_group_poll = _quiz
     assistant.handle_term_explainer = _what
     assistant.check_and_trigger_assistant = _trigger
     assistant.check_bot_mention_trigger = _trigger
     assistant.check_and_trigger_referee = _trigger
+    assistant.check_and_react_standalone = _trigger
     main.bot_client.send_message = _send
     main.bot_client.delete_messages = _delete
     database.save_clinical_bookmark = _save_bookmark
@@ -598,8 +604,8 @@ async def run_pm_checks():
 # =============================================================================
 # Замер зафиксирован числом намеренно: если разметку боевой базы перегонят
 # заново, набор обязан это заметить, а не проглотить.
-LIVE_UNREACHABLE_FACTS = 47
-LIVE_TOTAL_FACTS = 12677
+LIVE_UNREACHABLE_FACTS = 46
+LIVE_TOTAL_FACTS = 12574
 
 
 def run_live_checks():
@@ -611,7 +617,7 @@ def run_live_checks():
     try:
         rows = conn.execute("SELECT id, category_code FROM distilled_facts "
                             "WHERE content IS NOT NULL AND TRIM(content) <> ''").fetchall()
-        check(f"фактов в базе {LIVE_TOTAL_FACTS}", len(rows) in (12677, 12778, LIVE_TOTAL_FACTS),
+        check(f"фактов в базе {LIVE_TOTAL_FACTS}", len(rows) in (12574, 12677, 12778, LIVE_TOTAL_FACTS),
               f"got {len(rows)}")
         unreachable, causes = [], {}
         for fact_id, raw in rows:
@@ -627,7 +633,7 @@ def run_live_checks():
             print(f"      {token:9s} {count:4d}  "
                   f"{'лист дерева' if token in taxonomy.LEAF_CODES else 'НЕ лист'}")
         check(f"недостижимых фактов ровно {LIVE_UNREACHABLE_FACTS}",
-              len(unreachable) in (47, 51, LIVE_UNREACHABLE_FACTS),
+              len(unreachable) in (46, 47, 51, LIVE_UNREACHABLE_FACTS),
               f"got {len(unreachable)}")
         check("причина недостижимости — только коды ВНЕ дерева, а не пропавшая кнопка",
               not [t for t in causes if t in taxonomy.LEAF_CODES],

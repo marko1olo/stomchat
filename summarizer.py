@@ -93,7 +93,7 @@ def _get_bot_deep_link():
     except Exception:
         username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
     if not username:
-        username = "docendobot"
+        username = "stomchat_bot"
     return f'<a href="https://t.me/{username}?start=consult">@{username}</a>'
 
 
@@ -113,7 +113,7 @@ def build_clinical_assistant_cta(format_type: str = "telegraph") -> str:
     except Exception:
         username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
     if not username:
-        username = "docendobot"
+        username = "stomchat_bot"
 
     if format_type == "telegraph":
         return (

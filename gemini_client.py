@@ -57,13 +57,17 @@ def strip_reasoning(text):
     """
     if not text:
         return ""
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    if "<think>" in cleaned:
-        # Тег открыт и не закрыт: всё от него до конца — незавершённый черновик.
-        cleaned = cleaned.split("<think>", 1)[0]
-    if "</think>" in cleaned:
-        # Закрывающий без открывающего: начало ответа срезано, годен только хвост.
-        cleaned = cleaned.split("</think>", 1)[1]
+    # 1. Удаляем закрытые теги think / thought / reasoning без учета регистра
+    cleaned = re.sub(r"(?is)<(think|thought|reasoning)>.*?</\1>", "", text)
+    cleaned = re.sub(r"(?is)```(?:thought|reasoning|think).*?```", "", cleaned)
+    # 2. Срезаем незакрытые теги (обрыв по лимиту токенов)
+    m_open = re.search(r"(?i)<(think|thought|reasoning)>", cleaned)
+    if m_open:
+        cleaned = cleaned[:m_open.start()]
+    # 3. Срезаем осиротевшие закрывающие теги
+    m_close = re.search(r"(?i)</(think|thought|reasoning)>", cleaned)
+    if m_close:
+        cleaned = cleaned[m_close.end():]
     return cleaned.strip()
 
 
@@ -237,9 +241,9 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
 # Перегруженную модель убираем из каскада на это время. Значение было вписано
 # числом прямо в обработчик ошибки; вынесено, потому что решение о бане теперь
 # принимает note_key_failure, и величина не должна разъехаться по копиям.
-MODEL_BAN_INITIAL_503_SECONDS = 60    # 1-я ошибка 503/504: короткий бан на 60 сек
-MODEL_BAN_REPEAT_503_SECONDS = 300   # Повторная ошибка 503 подряд: 5 минут
-MODEL_BAN_SECONDS = 1200             # 20 минут на устойчивый отказ
+MODEL_BAN_INITIAL_503_SECONDS = 30    # 1-я ошибка 503/504: короткий бан на 30 сек
+MODEL_BAN_REPEAT_503_SECONDS = 90     # Повторная ошибка 503 подряд: 1.5 минуты
+MODEL_BAN_SECONDS = 180               # 3 минуты потолок на устойчивый отказ (исключает 20-минутный паралич)
 MODEL_FAILURES_FILE = "model_failures.json"
 
 
@@ -567,29 +571,28 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
 
     if any(m in err_msg for m in ("404", "not_found", "not found", "does not exist")):
         if model_name:
-            ban_model(model_name, 86400) # 24 hours
-            logger.warning(f"{provider.capitalize()} model {model_name} not found (404). Banned for 24h.")
+            ban_model(model_name, 3600) # 1 hour
+            logger.warning(f"{provider.capitalize()} model {model_name} not found (404). Banned for 1h.")
         _record_failure("model_not_found", error_text, api_key)
         return "model_not_found"
 
-    if "403" in err_msg or "permission" in err_msg or "forbidden" in err_msg:
+    is_auth_error = any(m in err_msg for m in ("401", "403", "unauthorized", "invalid_api_key", "incorrect api key", "permission", "forbidden", "key has been revoked"))
+    if is_auth_error:
         if provider == "gemini":
-            # Проверяем, является ли это постоянным отказом самого API (отозванный/невалидный ключ)
-            # или транзиентным сетевым сбоем (прокси, Cloudflare, gateway).
             is_api_permanent = any(m in err_msg for m in (
                 "api_key_invalid", "permission_denied", "consumer_invalid",
-                "key has been revoked", "unregistered_callers", "not registered"
+                "key has been revoked", "unregistered_callers", "not registered", "401"
             ))
             if is_api_permanent:
                 ban_duration = 31536000  # 365 days for google
                 set_key_cooldown(provider, api_key, ban_duration)
                 logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
             else:
-                # Транзиентный 403 от шлюза/прокси/Cloudflare — кулдаун максимум на 1 час (3600 с) вместо 1 года!
                 set_key_cooldown(provider, api_key, 3600)
                 logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
         else:
-            logger.warning(f"{provider.capitalize()} key denied (403): {err_msg[:120]}")
+            set_key_cooldown(provider, api_key, 86400)
+            logger.warning(f"{provider.capitalize()} key denied/invalid (401/403): {err_msg[:120]}. Placed on cooldown 24h.")
         _record_failure("key_denied", error_text, api_key)
         return "key_denied"
 
@@ -631,6 +634,11 @@ CHAT_KINDS = frozenset({
     "daemon_memory",
     "dialogue_fallback",
     "media_fallback",
+    "dialogue_ebm_fallback",
+    "group_ask_ebm_fallback",
+    "media_ebm_fallback",
+    "pm_cautious_ebm",
+    "clinical_rescue",
 })
 # Генерация контента опроса — только Gemini, без Qwen/GPT.
 # Qwen 3.8-27B при русских промптах выдаёт chinese thinking leaks:
@@ -644,9 +652,8 @@ POLL_GEN_KINDS = frozenset({
 # тяжёлый каскад: там качество важнее задержки, и бюджет там 2100 с.
 
 
-# Ниже этого одна попытка бессмысленна: запрос рвётся на генерации. Значение
-# увеличено 4x для предотвращения обрыва тяжелых рассуждающих моделей Gemini.
-MIN_REQUEST_SECONDS = 32.0
+# Базовый минимальный порог на модель при планировании бюджета.
+MIN_REQUEST_SECONDS = 4.0
 # Дробить долю модели на несколько попыток по разным ключам стоит только если
 # каждой достанется хотя бы столько: иначе ротация ключей превращается в серию
 # запросов, убитых по таймауту на середине ответа.
@@ -752,22 +759,79 @@ def is_media_task(status_context=None, prompt=None) -> bool:
     return False
 
 
+def _adapt_prompt_for_text_model(prompt: str, status_context: dict | None = None) -> str:
+    """
+    Адаптирует промпт для чисто текстовых моделей (DeepSeek, Groq), не имеющих нативного зрения:
+    1. Срезает директивы мультимодального зрения и запреты «не писать что снимки не загрузились».
+    2. Заменяет плейсхолдеры прикрепленных картинок на текстовое клиническое описание из Vision.
+    3. Добавляет ясную инструкцию клинического разбора по представленным данным без галлюцинаций.
+    """
+    if not prompt:
+        return prompt
+
+    effective_prompt = prompt
+    media_desc = ""
+    if isinstance(status_context, dict):
+        media_desc = str(status_context.get("media_description") or "").strip()
+
+    had_vision_directive = bool(
+        re.search(r"\[МУЛЬТИМОДАЛЬНО[ЕЙ]\s+ЗРЕНИ[ЕЯ]", effective_prompt, re.IGNORECASE)
+        or re.search(r"\[Оригинальное изображение прикреплено к запросу", effective_prompt)
+        or re.search(r"\[Ожидается разбор изображения\]", effective_prompt)
+    )
+
+    # Срезаем блоки мультимодального зрения
+    effective_prompt = re.sub(
+        r"\[МУЛЬТИМОДАЛЬНО[ЕЙ]\s+ЗРЕНИ[ЕЯ][^\]]*\][\s\S]*?(?=\n\n|\Z)",
+        "",
+        effective_prompt,
+        flags=re.IGNORECASE
+    )
+    effective_prompt = re.sub(
+        r"[-\s*•]*КАТЕГОРИЧЕСКИ\s+ЗАПРЕЩЕНО\s+писать\s+[«\"]снимки\s+не\s+загрузились[»\"][^\n]*",
+        "",
+        effective_prompt,
+        flags=re.IGNORECASE
+    )
+
+    placeholder_pattern = r"\[Оригинальное изображение прикреплено к запросу[^\]]*\]|\[Ожидается разбор изображения\]"
+    if media_desc:
+        replacement_text = f"[Клинико-рентгенологическое описание снимка]: {media_desc}"
+        if re.search(placeholder_pattern, effective_prompt):
+            effective_prompt = re.sub(placeholder_pattern, replacement_text, effective_prompt)
+        elif media_desc not in effective_prompt and had_vision_directive:
+            effective_prompt += f"\n\n[КЛИНИКО-РЕНТГЕНОЛОГИЧЕСКОЕ ОПИСАНИЕ СНИМКА]:\n{media_desc}\n"
+    else:
+        effective_prompt = re.sub(
+            placeholder_pattern,
+            "[Клинический снимок: опирайся на вопрос врача и контекст обсуждения, укажи ключевые рентгенологические ориентиры для проверки]",
+            effective_prompt
+        )
+
+    if had_vision_directive and "[РЕЖИМ ТЕКСТОВОГО РАЗБОРА" not in effective_prompt:
+        effective_prompt = (
+            "[РЕЖИМ ТЕКСТОВОГО РАЗБОРА КЛИНИЧЕСКОГО СЛУЧАЯ (РЕЗЕРВНЫЙ ТЕКСТОВЫЙ КАСКАД)]:\n"
+            "Разбор проводится по клиническому контексту и описанию случая. "
+            "Дай доказательный EBM-разбор, дифдиагноз и тактику лечения.\n\n"
+            + effective_prompt.strip()
+        )
+
+    return effective_prompt
+
+
 def cascade_for_context(status_context=None, prompt=None):
     """
     Формирует каскад (model_name, provider) в зависимости от контекста задачи.
-    Для медиа/фото/рентгена: СТРОГО мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> lite).
-    Никакого DeepSeek или Groq для задач со снимками!
+    Для медиа/фото/рентгена: мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> lite) первыми,
+    затем надежный текстовый резерв (DeepSeek через AgentRouter и Groq) на случай отказа Google.
     Для CHAT_KINDS: gemini-3.5-flash-lite в начале для быстрых ответов (при LOW/MEDIUM),
     но gemini-3.8-flash доступен для глубоких рассуждений (при HIGH).
     Для daemon_memory и простых задач с LOW не проваливается во флагманский gemini-3.8-flash.
     """
     if is_media_task(status_context, prompt):
-        # При наличии фото/рентгена — СТРОГО мультимодальные модели Gemini!
-        # Категорический запрет чисто текстовых моделей (DeepSeek, Groq):
-        # они не видят пикселей, работают как «испорченный телефон» и галлюцинируют
-        # выдуманные зубы, культевые вкладки и развилки.
-        # Приоритет умных reasoning-моделей (3.8, 3.7, 3.6), затем стабильный резерв.
-        return [
+        has_agentrouter = bool(provider_pool("agentrouter"))
+        groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
+        cascade = [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -775,6 +839,10 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
         ]
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.append((groq_primary, "groq"))
+        return cascade
 
     kind = status_context.get("kind") if status_context else None
     is_triage = kind in TRIAGE_KINDS
@@ -788,13 +856,15 @@ def cascade_for_context(status_context=None, prompt=None):
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
     has_agentrouter = bool(provider_pool("agentrouter"))
+    groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
+    groq_secondary = "openai/gpt-oss-120b"
 
     if is_triage:
         base = [
             ("gemini-3.5-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
+            (groq_primary, "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_secondary, "groq"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -802,20 +872,31 @@ def cascade_for_context(status_context=None, prompt=None):
         if has_agentrouter:
             base.append(("deepseek-v4-flash", "agentrouter"))
         return base
+    elif kind == "daemon_memory":
+        # Фоновое обновление досье врача: используем легкие Flash-Lite и Groq
+        cascade = [
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            (groq_primary, "groq"),
+            ("gemini-3.6-flash", "gemini"),
+        ]
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        return cascade
     elif is_clinical_review:
         # Независимый кросс-модельный рецензент: опрос от Gemini проверяет DeepSeek / Qwen!
         if has_agentrouter:
             return [
                 ("deepseek-v4-flash", "agentrouter"),
-                ("qwen/qwen3.8-27b", "groq"),
-                ("openai/gpt-oss-120b", "groq"),
+                (groq_primary, "groq"),
+                (groq_secondary, "groq"),
                 ("gemini-3.8-flash", "gemini"),
                 ("gemini-3.7-flash", "gemini"),
                 ("gemini-3.5-flash-lite", "gemini"),
             ]
         return [
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_primary, "groq"),
+            (groq_secondary, "groq"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
@@ -837,11 +918,8 @@ def cascade_for_context(status_context=None, prompt=None):
         kind in ("assistant_media", "assistant_media_pm")
         or (status_context and (status_context.get("image_urls") or status_context.get("has_media")))
     ):
-        # При наличии фото/рентгена — СТРОГО мультимодальные модели (Gemini)!
-        # Категорический запрет чисто текстовых моделей (DeepSeek, Groq):
-        # они не видят пикселей, работают как «испорченный телефон» и галлюцинируют
-        # выдуманные зубы, культевые вкладки и развилки.
-        return [
+        has_agentrouter = bool(provider_pool("agentrouter"))
+        cascade = [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -849,6 +927,10 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
         ]
+        if has_agentrouter:
+            cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.append((groq_primary, "groq"))
+        return cascade
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         cascade = []
         if has_agentrouter:
@@ -858,9 +940,9 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
+            (groq_primary, "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_secondary, "groq"),
         ])
         return cascade
     elif is_chatbot:
@@ -872,9 +954,9 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
+            (groq_primary, "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_secondary, "groq"),
         ])
         return cascade
     elif kind in summary_kinds:
@@ -900,8 +982,8 @@ def cascade_for_context(status_context=None, prompt=None):
             cascade.append(("deepseek-v4-flash", "agentrouter"))
         cascade.extend([
             ("gemini-3.1-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_primary, "groq"),
+            (groq_secondary, "groq"),
         ])
         return cascade
     else:
@@ -924,8 +1006,8 @@ def cascade_for_context(status_context=None, prompt=None):
             cascade.append(("deepseek-v4-flash", "agentrouter"))
         cascade.extend([
             ("gemini-3.1-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
+            (groq_primary, "groq"),
+            (groq_secondary, "groq"),
         ])
         return cascade
 
@@ -963,11 +1045,6 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     models_cascade = cascade_for_context(status_context, prompt=prompt)
     active_cascade = active_models(models_cascade)
-    if is_media:
-        # Для медиа-задач категорически исключаем любые сторонние модели (DeepSeek, Groq)
-        gemini_only = [(m, p) for m, p in active_cascade if p == "gemini"]
-        if gemini_only:
-            active_cascade = gemini_only
 
     max_attempts = _env_int("STOMCHAT_GEMINI_MAX_ATTEMPTS", 3)
 
@@ -994,8 +1071,9 @@ def generate_text(prompt, status_context=None, timeout=None):
         # На резерв не жертвуем последней попыткой: при совсем малом бюджете
         # (меньше 8 с такие вызывающие сейчас не передают) лучше один запрос на
         # весь бюджет, чем ноль запросов и гарантированный None.
+        min_req_step = 2.0 if is_triage else 4.0
         usable = max(min(budget, MIN_REQUEST_SECONDS), budget * BUDGET_RESERVE_SHARE)
-        models_fit = max(1, min(len(active_cascade), int(usable // MIN_REQUEST_SECONDS)))
+        models_fit = max(1, min(len(active_cascade), int(usable // min_req_step)))
         # НЕ обрезаем каскад: быстрые резервные модели (Groq/Qwen) отвечают за 0.8-1.5с.
         # Если ранние модели Google сбоят (503/400/timeout), Groq должен получить попытку.
         # Дедлайн (deadline) динамически страхует от вылета за общий бюджет.
@@ -1006,16 +1084,20 @@ def generate_text(prompt, status_context=None, timeout=None):
             )
         share_divisor = max(1, min(models_fit, len(active_cascade)))
         model_share = usable / share_divisor
-        max_attempts = max(1, min(max_attempts, int(model_share // COMFORT_REQUEST_SECONDS)))
+        comfort_step = 4.0 if is_triage else 12.0
+        max_attempts = max(1, min(max_attempts, int(model_share // comfort_step)))
         req_timeout = model_share / max_attempts
         # Интерактивные потолки таймаута на один HTTP-запрос к провайдеру:
         # Для triage/валидатора: максимум 15с (ответ классификатора нужен за секунды).
         # Для живого чата: максимум 60с (даем reasoning-моделям Gemini/DeepSeek время
         # на генерацию подробных клинических ответов без ложных срывов по ReadTimeout).
         if is_triage:
-            req_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, 15.0))
+            req_timeout = max(2.5, min(req_timeout, 15.0))
         elif is_chatbot:
-            req_timeout = max(10.0, min(req_timeout, 60.0))
+            # Для HIGH мышления даем до 240с на глубокий клинический разбор,
+            # для MEDIUM — до 150с. Не режем CoT искусственным потолком в 60с!
+            chat_max = 240.0 if thinking_level == "HIGH" else 150.0
+            req_timeout = max(15.0, min(req_timeout, chat_max))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
         deadline = time.monotonic() + usable
@@ -1033,8 +1115,9 @@ def generate_text(prompt, status_context=None, timeout=None):
     while media_round < max_media_rounds and not out_of_budget:
         min_cooldown_seen = float('inf')
         for model_index, (model_name, provider) in enumerate(active_cascade):
-            if is_media and provider != "gemini" and any(p == "gemini" for _, p in active_cascade):
-                continue
+            # Для медиа-задач Gemini пробуются первыми (в начале active_cascade).
+            # Если все Gemini в раунде исчерпаны/на кулдауне, каскад переключается на
+            # резервные текстовые модели (AgentRouter / DeepSeek, Groq) через _adapt_prompt_for_text_model.
             keys = list(provider_pool(provider))
             # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
             # здесь были источником, с которого их скопировали остальные пути.
@@ -1086,23 +1169,39 @@ def generate_text(prompt, status_context=None, timeout=None):
                 # него влез, а ноль запросов — это гарантированное молчание бота.
                 if deadline is not None and requests_made:
                     remaining = deadline - time.monotonic()
-                    if provider == "agentrouter":
-                        min_needed = 8.0
+                    if provider == "groq":
+                        min_needed = 1.5
+                    elif provider == "agentrouter":
+                        min_needed = 2.5
+                    elif "lite" in model_name:
+                        min_needed = 2.0
                     else:
-                        min_needed = MIN_REQUEST_SECONDS
+                        min_needed = 3.5
+
                     if remaining < min_needed:
-                        # Запрос, который не успеет закончиться до убийства процесса,
-                        # начинать нечего: его ответ никто не прочитает.
-                        logger.warning(
-                            "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
-                            max(0.0, remaining), min_needed, model_name
-                        )
-                        _record_failure(
-                            "budget_exhausted",
-                            f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
-                        )
-                        out_of_budget = True
-                        break
+                        subsequent_models = active_cascade[model_index + 1:]
+                        subsequent_min_needed = min(
+                            (1.5 if p == "groq" else (2.0 if "lite" in m else (2.5 if p == "agentrouter" else 3.5)))
+                            for m, p in subsequent_models
+                        ) if subsequent_models else 999.0
+
+                        if remaining < 1.5 or remaining < subsequent_min_needed:
+                            logger.warning(
+                                "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
+                                max(0.0, remaining), min_needed, model_name
+                            )
+                            _record_failure(
+                                "budget_exhausted",
+                                f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
+                            )
+                            out_of_budget = True
+                            break
+                        else:
+                            logger.info(
+                                "Skipping slow model %s (%.1fs left < %.1fs needed); proceeding to faster fallback in cascade.",
+                                model_name, max(0.0, remaining), min_needed
+                            )
+                            break
                     # Последнему запросу отдаём ровно остаток бюджета, а не полную
                     # долю: сумма таймаутов запросов не должна вылезать за timeout.
                     req_timeout = min(req_timeout, remaining)
@@ -1110,8 +1209,14 @@ def generate_text(prompt, status_context=None, timeout=None):
                 call_timeout = req_timeout
                 if is_chatbot:
                     if provider in ("gemini", "agentrouter"):
-                        rem = (deadline - time.monotonic()) if deadline else 60.0
-                        call_timeout = max(call_timeout, min(60.0, max(15.0, rem)))
+                        rem = (deadline - time.monotonic()) if deadline else 240.0
+                        has_more_models = (model_index < len(active_cascade) - 1)
+                        # Сохраняем 12с резерва на случай полного краха первой модели,
+                        # но даем флагману (Gemini 3.8 / 3.7 / DeepSeek) до 240с на глубокий клинический CoT!
+                        fallback_reserve = 12.0 if len(active_cascade) > 2 else 4.0
+                        max_allowed_for_model = max(30.0, rem - fallback_reserve) if has_more_models else rem
+                        chat_ceiling = 240.0 if thinking_level == "HIGH" else 150.0
+                        call_timeout = max(call_timeout, min(chat_ceiling, max_allowed_for_model))
                 elif provider == "agentrouter":
                     rem = (deadline - time.monotonic()) if deadline else 140.0
                     if kind in summary_kinds:
@@ -1138,12 +1243,13 @@ def generate_text(prompt, status_context=None, timeout=None):
 
                     if can_vision and image_urls:
                         user_content = [{"type": "text", "text": prompt}]
-                        max_imgs = 6 if provider == "gemini" else 3
+                        max_imgs = 16 if provider == "gemini" else 3
                         for iu in image_urls[:max_imgs]:
                             user_content.append({"type": "image_url", "image_url": {"url": iu}})
                         messages_payload = [{"role": "user", "content": user_content}]
                     else:
-                        messages_payload = [{"role": "user", "content": prompt}]
+                        adapted_prompt = _adapt_prompt_for_text_model(prompt, status_context)
+                        messages_payload = [{"role": "user", "content": adapted_prompt}]
 
                     # Using OpenAI SDK for BOTH Groq and Gemini now
                     ctx_temp = status_context.get("temperature") if isinstance(status_context, dict) else None
@@ -1166,14 +1272,18 @@ def generate_text(prompt, status_context=None, timeout=None):
                         create_kwargs["max_tokens"] = 2048
 
                     # Лимит OTPM для Groq (особенно бесплатные квоты Qwen): потолок 1000 токенов/мин
-                    if provider == "groq" and "max_tokens" in create_kwargs:
-                        create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
+                    # Лимит токенов для Groq (учитываем reasoning-модели типа Qwen-32B / DeepSeek):
+                    if provider == "groq":
+                        if "max_tokens" in create_kwargs:
+                            create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 2500)
+                        elif "qwen" in model_name.lower() or "deepseek" in model_name.lower() or "reason" in model_name.lower():
+                            create_kwargs["max_tokens"] = 2500
 
                     # Для AgentRouter (DeepSeek / рассуждающие модели) не ограничиваем токенами:
-                    # Даем просторный лимит (минимум 4096), чтобы reasoning tokens не съедали ответ.
+                    # Даем просторный лимит (минимум 8192 для HIGH), чтобы reasoning tokens не съедали ответ.
                     # Для дайджестов выделяем расширенный лимит 16384 токенов.
                     if provider == "agentrouter":
-                        default_max = 16384 if kind in summary_kinds else 4096
+                        default_max = 16384 if kind in summary_kinds else (8192 if thinking_level == "HIGH" else 4096)
                         create_kwargs["max_tokens"] = max(default_max, int(ctx_max_tokens or default_max))
 
                     # Нативный параметр размышлений для моделей:
@@ -1181,6 +1291,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                     # Google OpenAI endpoint поддерживает только 'low', 'medium', 'high'.
                     # Значение 'none' вызывает 400 INVALID_ARGUMENT, поэтому для none/triage опускаем параметр.
                     if provider == "gemini":
+                        if not is_triage:
+                            # Thinking tokens входят в max_tokens на Google OpenAI endpoint!
+                            # Даем 8192 токенов для HIGH (16384 для summary), чтобы CoT не вызывал finish_reason: length!
+                            gemini_default_max = 16384 if kind in summary_kinds else (8192 if thinking_level == "HIGH" else 4096)
+                            create_kwargs["max_tokens"] = max(gemini_default_max, int(ctx_max_tokens or gemini_default_max))
                         if is_triage or thinking_level in ("NONE", "none"):
                             pass
                         elif thinking_level == "LOW":
@@ -1203,9 +1318,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                         if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
                             create_kwargs.pop("reasoning_effort", None)
                             retry_needed = True
-                        if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
-                            logger.warning("Model %s rejected multimodal payload; retrying with text only", model_name)
-                            create_kwargs["messages"] = [{"role": "user", "content": prompt}]
+                        if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content", "payload too large", "413", "entity too large")):
+                            logger.warning("Model %s rejected multimodal payload (%s); retrying with text only", model_name, err_str[:120])
+                            adapted_prompt = _adapt_prompt_for_text_model(prompt, status_context)
+                            create_kwargs["messages"] = [{"role": "user", "content": adapted_prompt}]
                             retry_needed = True
                         if retry_needed:
                             response = client.chat.completions.create(**create_kwargs)
@@ -1266,11 +1382,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                     )
                     if is_fatal_400:
                         logger.warning(
-                            f"{provider.capitalize()} fatal deterministic 400 Bad Request ({err_msg[:120]}). "
-                            "Aborting cascade immediately with fatal_invalid_request."
+                            f"{provider.capitalize()} deterministic 400 Bad Request for {model_name} ({err_msg[:120]}). "
+                            "Skipping this model and moving to next in cascade."
                         )
-                        _record_failure("fatal_invalid_request", str(exc), api_key)
-                        out_of_budget = True
+                        _record_failure("model_invalid_request", str(exc), api_key)
                         break
 
                     if _is_retryable_gemini_error(err_msg):
@@ -1919,6 +2034,9 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         "3. КЛИНИЧЕСКАЯ ДЕЛЬТА (когда дополнение РЕАЛЬНО нужно):\n"
         "   - Выдавай дополнение ТОЛЬКО если упущены критические риски осложнений, анатомические ориентиры, точные дозировки или обязательные протокольные этапы (изоляция, экспозиция, выбор цемента/файлов).\n"
         "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+        "   - Педиатрическая токсичность: для детей (<12 лет) артикаин строго не более 5.0 мг/кг (до 4 лет / <15 кг противопоказан). Никогда не указывать 7 мг/кг для ребенка!\n"
+        "   - Перфорация дна гайморовой пазухи: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО советовать электрокоагуляцию верхушки/пазухи или адреналиновые тампоны в пазуху! Допустима только бережная коллагеновая губка без проталкивания в синус, герметичное ушивание, антибиотики, сосудосуживающие капли и ЛОР.\n"
+        "   - Топографическая подмена: строго следовать зубу и возрасту из запроса врача, не выдумывать другой зуб или возраст.\n"
         "   - Вступать в диалог при смолл-токе, здороваться или объяснять причину отсутствия дополнений.\n"
         "   - Повторять или пересказывать то, что уже сказано в первом ответе.\n"
         "   - Писать вводные фразы («Конечно, дополняю:», «В дополнение к сказанному...»).\n"
@@ -1931,9 +2049,11 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         "Выдай клинические дополнения (или строго NONE, если дополнять нечего):"
     )
 
+    groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
+    groq_secondary = "openai/gpt-oss-120b"
     cascade = [
-        ("qwen/qwen3.8-27b", "groq"),
-        ("openai/gpt-oss-120b", "groq"),
+        (groq_primary, "groq"),
+        (groq_secondary, "groq"),
         ("gemini-3.8-flash", "gemini"),
         ("gemini-3.7-flash", "gemini"),
     ]

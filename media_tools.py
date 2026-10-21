@@ -343,6 +343,108 @@ def image_document(message):
     return document if mime.startswith("image/") else None
 
 
+_IMAGE_BASE64_CACHE: dict[int, str] = {}
+
+
+def cache_image_data_url(msg_id: int, data_url: str):
+    """Кэширует data:image/jpeg;base64,... URL по msg_id для мгновенного доступа."""
+    if msg_id and data_url:
+        _IMAGE_BASE64_CACHE[msg_id] = data_url
+        if len(_IMAGE_BASE64_CACHE) > 200:
+            _IMAGE_BASE64_CACHE.pop(next(iter(_IMAGE_BASE64_CACHE)))
+
+
+def get_cached_image_data_url(msg_id: int) -> str | None:
+    """Возвращает кэшированный data URL или None."""
+    return _IMAGE_BASE64_CACHE.get(msg_id)
+
+
+def prepare_image_bytes_sync(raw_bytes: bytes, max_dim: int = 1200, quality: int = 80) -> str | None:
+    """Пережимает байты изображения в памяти в четкий JPEG до 1200px с сохранением апикальных деталей."""
+    if not raw_bytes:
+        return None
+    from PIL import Image
+    try:
+        Image.MAX_IMAGE_PIXELS = 49_000_000
+        with Image.open(io.BytesIO(raw_bytes)) as source:
+            source.load()
+            img = source.convert("RGB") if source.mode != "RGB" else source.copy()
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        with io.BytesIO() as buffer:
+            img.save(buffer, format="JPEG", quality=quality, optimize=True)
+            jpeg_bytes = buffer.getvalue()
+        return f"data:image/jpeg;base64,{base64.b64encode(jpeg_bytes).decode('ascii')}"
+    except Exception as exc:
+        logger.warning("prepare_image_bytes_sync error: %s", exc)
+        return None
+
+
+async def extract_multimodal_images_async(client, chat_id, message_ids: list[int], max_images: int = 16) -> list[str]:
+    """
+    Параллельно извлекает data:image/jpeg;base64,... URL для списка ID сообщений.
+    Сначала проверяет память-кэш _IMAGE_BASE64_CACHE.
+    Если нет в кэше — подтягивает через Telethon get_messages + download_media(file=bytes)
+    и пережимает в память (до 1200px, quality=80) для нативной передачи в Gemini.
+    """
+    if not message_ids:
+        return []
+
+    unique_ids = []
+    seen = set()
+    for mid in message_ids:
+        if mid and mid not in seen:
+            seen.add(mid)
+            unique_ids.append(mid)
+
+    results = {}
+    missing_ids = []
+    for mid in unique_ids[:max_images]:
+        cached = get_cached_image_data_url(mid)
+        if cached:
+            results[mid] = cached
+        else:
+            missing_ids.append(mid)
+
+    if not missing_ids or not client or not chat_id:
+        return [results[mid] for mid in unique_ids if mid in results]
+
+    try:
+        msgs = await client.get_messages(chat_id, ids=missing_ids)
+        if not isinstance(msgs, list):
+            msgs = [msgs] if msgs else []
+    except Exception as fetch_err:
+        logger.warning("extract_multimodal_images_async get_messages error: %s", fetch_err)
+        return [results[mid] for mid in unique_ids if mid in results]
+
+    sem = asyncio.Semaphore(4)
+
+    async def _fetch_one(m):
+        if not m:
+            return
+        if not (getattr(m, "photo", None) or image_document(m) is not None):
+            return
+        async with sem:
+            try:
+                raw_bytes = await asyncio.wait_for(
+                    client.download_media(m, file=bytes),
+                    timeout=10.0
+                )
+                if raw_bytes and isinstance(raw_bytes, (bytes, bytearray)):
+                    data_url = await asyncio.to_thread(prepare_image_bytes_sync, raw_bytes)
+                    if data_url:
+                        cache_image_data_url(m.id, data_url)
+                        results[m.id] = data_url
+            except Exception as dl_err:
+                logger.warning("extract_multimodal_images_async download error for msg %s: %s", getattr(m, "id", None), dl_err)
+
+    tasks = [_fetch_one(m) for m in msgs if m]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    return [results[mid] for mid in unique_ids if mid in results][:max_images]
+
+
 def clinical_media_kind(message):
     """
     Что из сообщения имеет смысл вести в разбор: "photo", "video" или None.

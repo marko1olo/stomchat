@@ -354,8 +354,6 @@ def _compute_vision_cache_key(image_bytes_list: list[bytes], caption: str = None
     hasher = hashlib.sha256()
     for b in image_bytes_list:
         hasher.update(b)
-    norm_caption = (caption or "").strip()[:500]
-    hasher.update(norm_caption.encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -505,7 +503,6 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
-                ("qwen/qwen3.8-27b", "groq"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()
@@ -678,8 +675,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 logger.warning(f"Vision provider {provider} model {model_name} does not support image input: {e}")
                                 break
                             if any(s in err_str for s in ("404", "not_found", "does not exist", "not found")):
-                                gemini_client.ban_model(model_name, 86400)
-                                logger.warning(f"Vision {provider} model {model_name} not found (404). Banned for 24h.")
+                                logger.warning(f"Vision {provider} model {model_name} not found or unsupported for vision (404). Skipping provider.")
                                 break
                             # Коды статусов — по границе слова. Подстрочный поиск
                             # "500" находил его в "1500 tokens" и "500000 tokens",

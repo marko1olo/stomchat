@@ -23,6 +23,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import config
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_routing_")
@@ -35,6 +39,7 @@ config.SOURCE_CHAT_ID = TEST_CHAT_ID
 import database
 import main
 import assistant
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
 import runtime_guard
 from telethon.tl import types
 

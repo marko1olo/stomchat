@@ -43,7 +43,8 @@ def check(name, cond, detail=""):
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = io.open(os.path.join(HERE, "main.py"), encoding="utf-8-sig").read()
+MAIN_PATH = os.path.join(HERE, "main.py") if os.path.exists(os.path.join(HERE, "main.py")) else os.path.join(HERE, "..", "main.py")
+SRC = io.open(MAIN_PATH, encoding="utf-8-sig").read()
 
 
 def literal_tuple(anchor):
@@ -59,7 +60,7 @@ def literal_tuple(anchor):
 
 
 SUMMARY = literal_tuple(r"if cmd_lower\.startswith\(\(([^)]*)\)\):\s*\n\s*await assistant\.handle_group_summary")
-QUIZ = literal_tuple(r"if cmd_lower in \(([^)]*)\):\s*\n\s*await assistant\.handle_group_quiz")
+QUIZ = literal_tuple(r"if cmd_lower in \(([^)]*)\):\s*\n\s*(?:is_admin_user|await assistant\.(?:handle_group_quiz|handle_native_group_poll))")
 SAVE = literal_tuple(r'if cmd_clean in \(([^)]*)\) and reply_to_msg_id')
 
 print("[1] Условия найдены в живом main.py, а не выдуманы тестом")

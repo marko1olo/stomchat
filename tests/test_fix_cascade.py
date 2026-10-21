@@ -49,7 +49,7 @@ config.GOOGLE_KEYS = GOOGLE_KEYS
 config.GROQ_KEYS = GROQ_KEYS
 config.AGENTROUTER_KEYS = []
 config.GEMINI_MODEL = "gemini-3.6-flash"
-config.GROQ_MODEL = "llama-3.3-70b-versatile"
+config.GROQ_MODEL = "qwen/qwen3.8-27b"
 
 PASS, FAIL = [], []
 

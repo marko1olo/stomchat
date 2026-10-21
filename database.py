@@ -405,6 +405,7 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100, al
                 SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 WHERE date >= ? AND date <= ?
+                  AND (has_media = 0 OR (media_description IS NOT NULL AND media_description != '') OR date < datetime('now', '-5 minutes'))
                 ORDER BY date ASC
                 """,
                 (_date_text(start_time), _date_text(end_time)),
@@ -456,6 +457,7 @@ async def get_messages_for_range(start_dt, end_dt):
                 SELECT msg_id, sender_name, sender_username, text, media_description, date, reply_to_msg_id, media_remote_url, sender_id, media_short_caption
                 FROM messages
                 WHERE date >= ? AND date <= ?
+                  AND (has_media = 0 OR (media_description IS NOT NULL AND media_description != '') OR date < datetime('now', '-5 minutes'))
                 ORDER BY date ASC
                 """,
                 (_date_text(start_dt), _date_text(end_dt)),
@@ -1183,7 +1185,7 @@ async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
     """
     Проверяет, является ли сообщение сообщением бота:
     1) По таблице bot_sent_messages (id всех сообщений, отправленных ботом)
-    2) Если передан bot_id, дополнительно сверяет sender_id в messages.
+    2) Если передан bot_id (или набор id), дополнительно сверяет sender_id в messages.
     """
     if not msg_id:
         return False
@@ -1194,21 +1196,143 @@ async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
                     "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? AND chat_id = ? LIMIT 1",
                     (msg_id, chat_id)
                 ).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? LIMIT 1",
-                    (msg_id,)
-                ).fetchone()
+                if row:
+                    return True
+            row = db.execute(
+                "SELECT 1 FROM bot_sent_messages WHERE msg_id = ? LIMIT 1",
+                (msg_id,)
+            ).fetchone()
             if row:
                 return True
             if bot_id:
-                m_row = db.execute(
-                    "SELECT 1 FROM messages WHERE msg_id = ? AND sender_id = ? LIMIT 1",
-                    (msg_id, bot_id)
-                ).fetchone()
-                if m_row:
-                    return True
+                if isinstance(bot_id, (set, list, tuple)):
+                    bot_ids = [int(b) for b in bot_id if b is not None]
+                    if bot_ids:
+                        placeholders = ",".join("?" for _ in bot_ids)
+                        m_row = db.execute(
+                            f"SELECT 1 FROM messages WHERE msg_id = ? AND sender_id IN ({placeholders}) LIMIT 1",
+                            [msg_id] + bot_ids
+                        ).fetchone()
+                        if m_row:
+                            return True
+                else:
+                    m_row = db.execute(
+                        "SELECT 1 FROM messages WHERE msg_id = ? AND sender_id = ? LIMIT 1",
+                        (msg_id, bot_id)
+                    ).fetchone()
+                    if m_row:
+                        return True
+            # 3) Сверка по имени/юзернейму бота или известным id в таблице messages
+            bot_meta_row = db.execute(
+                """
+                SELECT 1 FROM messages 
+                WHERE msg_id = ? AND (
+                    LOWER(IFNULL(sender_username, '')) IN ('stomchat_bot', 'docendobot', 'endohelp_bot', 'stomat_bot', 'endochatbot', 'endo_bot')
+                    OR LOWER(IFNULL(sender_name, '')) LIKE '%bot%'
+                    OR LOWER(IFNULL(sender_name, '')) LIKE '%учимся вместе%'
+                    OR sender_id IN (7716348189, 7886475630, 8140417978, 7971556097, 7475073041, 8775535374)
+                ) LIMIT 1
+                """,
+                (msg_id,)
+            ).fetchone()
+            if bot_meta_row:
+                return True
             return False
+    return await _run_db(operation)
+
+
+async def get_last_bot_activity_timestamp(known_bot_ids=None):
+    """
+    Возвращает дату (строку вида 'YYYY-MM-DD HH:MM:SS' или None) последней активности бота.
+    Сверяет messages (по sender_id бота) и bot_sent_messages.
+    """
+    def operation():
+        with _connection() as db:
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            latest_dates = []
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                row = db.execute(
+                    f"SELECT MAX(date) FROM messages WHERE sender_id IN ({placeholders})",
+                    ids
+                ).fetchone()
+                if row and row[0]:
+                    latest_dates.append(str(row[0]))
+            row = db.execute(
+                """SELECT MAX(m.date) FROM messages m
+                   JOIN bot_sent_messages b ON m.msg_id = b.msg_id"""
+            ).fetchone()
+            if row and row[0]:
+                latest_dates.append(str(row[0]))
+            if latest_dates:
+                return max(latest_dates)
+            return None
+    return await _run_db(operation)
+
+
+async def has_bot_replied_to_message(msg_id, known_bot_ids=None):
+    """
+    Проверяет по базе данных, отвечал ли бот на сообщение msg_id:
+    1) Ищет сообщение в messages с reply_to_msg_id = msg_id от sender_id бота
+    2) Ищет сообщение в messages с reply_to_msg_id = msg_id, чей msg_id числится в bot_sent_messages
+    """
+    if not msg_id:
+        return False
+    def operation():
+        with _connection() as db:
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                row = db.execute(
+                    f"""SELECT 1 FROM messages
+                       WHERE reply_to_msg_id = ?
+                         AND (sender_id IN ({placeholders})
+                              OR msg_id IN (SELECT msg_id FROM bot_sent_messages))
+                       LIMIT 1""",
+                    [msg_id] + ids
+                ).fetchone()
+            else:
+                row = db.execute(
+                    """SELECT 1 FROM messages
+                       WHERE reply_to_msg_id = ?
+                         AND msg_id IN (SELECT msg_id FROM bot_sent_messages)
+                       LIMIT 1""",
+                    (msg_id,)
+                ).fetchone()
+            return bool(row)
+    return await _run_db(operation)
+
+
+async def get_candidate_messages_for_catchup(since_date_str, known_bot_ids=None, limit=100):
+    """
+    Возвращает сообщения из messages начиная с since_date_str, исключая сообщения бота,
+    в хронологическом порядке (ASC) для обработки пропущенных прямых обращений.
+    """
+    def operation():
+        with _connection() as db:
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                query = f"""
+                    SELECT msg_id, reply_to_msg_id, sender_id, sender_name, sender_username, text, date, has_media, media_type, media_description
+                    FROM messages
+                    WHERE date >= ?
+                      AND (sender_id IS NULL OR sender_id NOT IN ({placeholders}))
+                      AND msg_id NOT IN (SELECT msg_id FROM bot_sent_messages)
+                    ORDER BY msg_id ASC
+                    LIMIT ?
+                """
+                return db.execute(query, [since_date_str] + ids + [limit]).fetchall()
+            else:
+                query = """
+                    SELECT msg_id, reply_to_msg_id, sender_id, sender_name, sender_username, text, date, has_media, media_type, media_description
+                    FROM messages
+                    WHERE date >= ?
+                      AND msg_id NOT IN (SELECT msg_id FROM bot_sent_messages)
+                    ORDER BY msg_id ASC
+                    LIMIT ?
+                """
+                return db.execute(query, (since_date_str, limit)).fetchall()
     return await _run_db(operation)
 
 

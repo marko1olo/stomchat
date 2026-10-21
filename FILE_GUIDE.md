@@ -96,7 +96,21 @@ stomchat/
 | [`web_lookup.py`](file:///c:/Users/danat/Desktop/stomchat/web_lookup.py) & [`search_engine_safe.py`](file:///c:/Users/danat/Desktop/stomchat/search_engine_safe.py) | Модуль заземлённого поиска в научной периодике (PubMed, Cochrane, JOE, IEJ). Отфильтровывает пациентскую рекламу клиник и строит ответ строго по найденным рефератам с цитированием источников `[1]`, `[2]`. |
 | [`summarizer.py`](file:///c:/Users/danat/Desktop/stomchat/summarizer.py) & [`digest_pdf.py`](file:///c:/Users/danat/Desktop/stomchat/digest_pdf.py) | Аналитическая редакция бота. Генерирует ежедневные панорамы дня и еженедельные клинические лонгриды с привязкой рентгенограмм (`[IMG_ID]`), публикует статьи в Telegraph и верстает иллюстрированные PDF-сводки в `pdf_digests/`. |
 | [`poll_engine.py`](file:///c:/Users/danat/Desktop/stomchat/poll_engine.py) & [`poll_storage.py`](file:///c:/Users/danat/Desktop/stomchat/poll_storage.py) | Полный цикл клинических опросов: утренний триаж горячих тем чата, генерация клинической виньетки и 4 конкурирующих тактик, жёсткая валидация главным врачом-редактором по 13 критериям и вечерний разбор ошибок большинства. |
-| [`distiller.py`](file:///c:/Users/danat/Desktop/stomchat/distiller.py), [`reclass.py`](file:///c:/Users/danat/Desktop/stomchat/reclass.py), [`taxonomy.py`](file:///c:/Users/danat/Desktop/stomchat/taxonomy.py), [`videosi.py`](file:///c:/Users/danat/Desktop/stomchat/videosi.py), [`prompter.py`](file:///c:/Users/danat/Desktop/stomchat/prompter.py), [`checker.py`](file:///c:/Users/danat/Desktop/stomchat/checker.py) | Инструментальный конвейер создания и обслуживания «Стоматологической Википедии» (`stomat_wiki.db` — 12 778 верифицированных фактов): дистилляция логов чата в энциклопедические статьи, классификация по трёхуровневому дереву L1–L3, импорт видеокурсов и сборка монографий TITAN. |
+| [`distiller.py`](file:///c:/Users/danat/Desktop/stomchat/distiller.py), [`reclass.py`](file:///c:/Users/danat/Desktop/stomchat/reclass.py), [`taxonomy.py`](file:///c:/Users/danat/Desktop/stomchat/taxonomy.py), [`videosi.py`](file:///c:/Users/danat/Desktop/stomchat/videosi.py), [`prompter.py`](file:///c:/Users/danat/Desktop/stomchat/prompter.py), [`checker.py`](file:///c:/Users/danat/Desktop/stomchat/checker.py) | Инструментальный конвейер создания и обслуживания «Стоматологической Википедии» (`stomat_wiki.db` — 12 574 верифицированных фактов): дистилляция логов чата в энциклопедические статьи, классификация по трёхуровневому дереву L1–L3, импорт видеокурсов и сборка монографий TITAN. |
+
+### 2.4. Адаптивный балансировщик RAG-контекста и фильтрация шума
+Конвейер поиска справки (`assistant.search_knowledge_corpus` + `_rank_corpus_entries` + `_fit_corpus_budget`) решает фундаментальную задачу баланса между полнотой знаний и чистотой контекстного окна нейросети:
+* **Адаптивные лимиты фактов по профилям:** вмещает до 6–10 емких фактов (вместо жесткого ограничения в 2–4), если они релевантны и не содержат воды:
+  * `pm` (ЛС): до 10 фактов, бюджет 4000 символов.
+  * `vision` (снимки/КЛКТ): до 8 фактов, бюджет 3500 символов (архив чата исключен).
+  * `passive` (наблюдение в группе): до 8 фактов, бюджет 3000 символов.
+  * `wiki_only` / `referee`: до 6–10 фактов (бюджет 2500–4000 символов).
+  * `group_reply`: до 6 фактов, бюджет 2500 символов.
+* **Компактизация протоколов (`_fit_corpus_budget`):** при наличии нескольких записей длинные протоколы EBM и видеоразборы аккуратно обрезаются по границе предложений до 1050–1300 символов, освобождая место для 3–6 конкретных фактов базы знаний.
+* **Группировка концептов (Concept Groups):** объединяет перекрывающиеся синонимы (напр., «отломок» + «сломался», «обход» + «байпас»), предотвращая ложную накрутку весов.
+* **Отсечение междисциплинарных коллизий:** жесткие барьеры между эндодонтией, хирургией, имплантологией и лабораторией (`_ENDO_QUERY_RE`, `_IMPLANT_QUERY_RE`, `_SINUS_QUERY_RE`, `_LAB_QUERY_RE`).
+* **Клинические модификаторы (`_CLINICAL_SEARCH_MODIFIERS`):** сохранение в поисковом запросе специализированных терминов оптики, света, осадков, цементного зазора, нагрева.
+* **Лазерная фильтрация неклинического шума (`_RAG_OFFTOPIC_JUNK_RE`):** полное исключение бытовых дискуссий (VPN, Telegram-блокировки, реклама сторонних каналов, троллинг в соцсетях) из контекста модели.
 
 ---
 
@@ -106,8 +120,8 @@ stomchat/
 > Перечисленные ниже файлы являются живым состоянием работающего бота. Их нельзя удалять, перемещать или копировать «на горячую» без `PRAGMA wal_checkpoint(TRUNCATE)` или остановки службы (`scripts/failover.py`).
 
 ### 3.1. Базы данных SQLite (в корне проекта)
-* **`stomat_bot.db`** — основная оперативная база бота: живые сообщения группы (`messages`), личные диалоги (`pm_messages`), профили и память врачей (`user_profiles`, `user_memory`),46+ эталонных клинических протоколов (`clinical_protocols`), опросник (`clinical_polls`) и состояния симуляторов (`user_interactive_states`).
-* **`stomat_wiki.db`** — фундаментальная база знаний («Стоматологическая Википедия»): **12 778** дистиллированных клинических фактов и кейсов с индексом полнотекстового поиска FTS5 (`distilled_facts`, `facts_fts`).
+* **`stomat_bot.db`** — основная оперативная база бота: живые сообщения группы (`messages`), личные диалоги (`pm_messages`), профили и память врачей (`user_profiles`, `user_memory`), 46+ эталонных клинических протоколов (`clinical_protocols`), опросник (`clinical_polls`) и состояния симуляторов (`user_interactive_states`).
+* **`stomat_wiki.db`** — фундаментальная база знаний («Стоматологическая Википедия»): **12 574** дистиллированных клинических фактов и кейсов с индексом полнотекстового поиска FTS5 (`distilled_facts`, `facts_fts`, уникальный индекс `idx_content_hash`).
 * **`stomat_archive.db`** — полный исторический архив профессионального сообщества (**117 847+** сообщений врачей с описаниями медиафайлов).
 
 ### 3.2. Сессии Telethon (`*.session`)
