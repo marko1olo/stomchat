@@ -19,6 +19,7 @@ import time
 from typing import Optional, List, Dict, Tuple, Any, Sequence
 from cachetools import TTLCache
 
+import runtime_guard
 import blocking_tools
 import clinical_cognitive_core
 import config
@@ -12945,7 +12946,10 @@ async def handle_private_message(bot_client, event):
                 )  # [SYS-06 FIX] was bare asyncio.create_task -> GC could silently drop the task
 
     except Exception as e:
-        logger.exception(f"Unexpected error in handle_private_message: {e}")
+        if type(e).__name__ == "UserIsBlockedError" or "User is blocked" in str(e):
+            logger.info(f"User {chat_id} has blocked the bot in PM; response skipped.")
+        else:
+            logger.exception(f"Unexpected error in handle_private_message: {e}")
     finally:
         if 'ticker' in locals() and ticker:
             try:

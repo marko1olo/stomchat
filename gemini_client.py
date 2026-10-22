@@ -1342,11 +1342,14 @@ def generate_text(prompt, status_context=None, timeout=None):
                             if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
                                 create_kwargs.pop("reasoning_effort", None)
                                 continue
-                            if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content", "payload too large", "413", "entity too large")):
+                            if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
                                 logger.warning("Model %s rejected multimodal payload (%s); retrying with text only", model_name, err_str[:120])
                                 adapted_prompt = _adapt_prompt_for_text_model(prompt, status_context)
                                 create_kwargs["messages"] = [{"role": "user", "content": adapted_prompt}]
                                 continue
+                            if any(kw in err_str for kw in ("payload too large", "413", "entity too large", "request too large")):
+                                logger.warning("Model %s payload too large for provider limit (%s); falling back to next model", model_name, err_str[:120])
+                                break
                             raise
                     text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
                     if response.choices and len(response.choices) > 0:
@@ -1506,10 +1509,17 @@ def generate_text(prompt, status_context=None, timeout=None):
         "reason": "no_attempts_made",
         "detail": "каскад не сделал ни одного запроса",
     }
-    logger.error(
-        "All AI attempts exhausted: reason=%s detail=%s",
-        failure["reason"], failure["detail"]
-    )
+    is_quiet_kind = isinstance(status_context, dict) and status_context.get("kind") in ("batch_reactions", "reaction", "light_check", "spellcheck")
+    if is_quiet_kind:
+        logger.info(
+            "All AI attempts exhausted: reason=%s detail=%s (quiet background task %s)",
+            failure["reason"], failure["detail"], status_context.get("kind")
+        )
+    else:
+        logger.error(
+            "All AI attempts exhausted: reason=%s detail=%s",
+            failure["reason"], failure["detail"]
+        )
     _write_generation_status(
         status_context, stage="all_exhausted", max_attempts=max_attempts,
         failure_reason=failure["reason"], error=failure["detail"]
