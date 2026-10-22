@@ -87,14 +87,30 @@ _safe_cut_index = html_safe.safe_cut_index
 _safe_truncate_html = html_safe.safe_truncate_html
 
 
-def _get_bot_deep_link():
+def _get_bot_username() -> str:
+    """Возвращает актуальный username бота для формирования диплинков и промо-карточек."""
     try:
         import assistant
-        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+        u = getattr(assistant, "BOT_USERNAME", None)
+        if u:
+            return str(u).lstrip("@")
     except Exception:
-        username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    if not username:
-        username = "stomchat_bot"
+        pass
+    try:
+        import config
+        u = getattr(config, "BOT_USERNAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", None)
+        if u:
+            return str(u).lstrip("@")
+    except Exception:
+        pass
+    u = os.getenv("BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME")
+    if u:
+        return u.lstrip("@")
+    return "stomchat_bot"
+
+
+def _get_bot_deep_link():
+    username = _get_bot_username()
     return f'<a href="https://t.me/{username}?start=consult">@{username}</a>'
 
 
@@ -108,13 +124,7 @@ def build_clinical_assistant_cta(format_type: str = "telegraph") -> str:
     - Клиническая память доктора (/profile);
     - Симулятор клинических кейсов.
     """
-    try:
-        import assistant
-        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    except Exception:
-        username = os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    if not username:
-        username = "stomchat_bot"
+    username = _get_bot_username()
 
     if format_type == "telegraph":
         return (

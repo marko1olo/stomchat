@@ -28,6 +28,27 @@ LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "d
 # чтобы гарантированно укладываться в потолок 750M cgroup на 1GB micro-VPS.
 _PDF_SEMAPHORE = asyncio.Semaphore(1)
 
+def _get_bot_username() -> str:
+    """Возвращает актуальный username бота для колонтитулов и промо-блоков PDF."""
+    try:
+        import assistant
+        u = getattr(assistant, "BOT_USERNAME", None)
+        if u:
+            return str(u).lstrip("@")
+    except Exception:
+        pass
+    try:
+        import config
+        u = getattr(config, "BOT_USERNAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", None)
+        if u:
+            return str(u).lstrip("@")
+    except Exception:
+        pass
+    u = os.getenv("BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME")
+    if u:
+        return u.lstrip("@")
+    return "stomchat_bot"
+
 
 def cleanup_old_digests(output_dir: str = PDF_OUTPUT_DIR, max_age_days: int = 3, max_files: int = 15) -> int:
     """
@@ -85,7 +106,8 @@ def _build_journal_html(
     """Оборачивает фрагменты разбора в полноценный HTML-документ журнальной верстки."""
     now_date = date_str or datetime.now().strftime("%d.%m.%Y")
     clean_title = html.escape(title)
-    clean_subtitle = html.escape(subtitle or "Клинический дайджест сообщества «Учимся вместе» (@docendobot)")
+    bot_username = _get_bot_username()
+    clean_subtitle = html.escape(subtitle or f"Клинический дайджест сообщества «StomChat» (@{bot_username})")
     logo_b64 = _get_logo_base64()
 
     # 1. Если во входящем HTML уже присутствует текстовый CTA ассистента (из Telegraph),
@@ -791,7 +813,7 @@ def _build_journal_html(
 
     <div class="journal-closing-block">
         <div class="assistant-promo-card">
-            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @DOCENDOBOT • ПОМОЩНИК НА ПРИЕМЕ</div>
+            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @{bot_username.upper()} • ПОМОЩНИК НА ПРИЕМЕ</div>
             <div class="assistant-promo-desc">
                 Коллеги, бот сообщества — это ваш персональный клинический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
             </div>
@@ -814,13 +836,13 @@ def _build_journal_html(
                 </div>
             </div>
             <div class="assistant-promo-cta">
-                👉 <strong>Напишите боту в личные сообщения: @docendobot</strong> — разберите клинический кейс или снимок прямо сейчас.
+                👉 <strong>Напишите боту в личные сообщения: @{bot_username}</strong> — разберите клинический кейс или снимок прямо сейчас.
             </div>
         </div>
 
         <div class="journal-footer">
-            Материалы подготовлены на основе клинических обсуждений врачебного сообщества «Учимся вместе» (Docendo Discimus).
-            Предназначено исключительно для врачей-стоматологов в образовательных и профессиональных целях. Бот: @docendobot
+            Материалы подготовлены на основе клинических обсуждений врачебного сообщества StomChat.
+            Предназначено исключительно для врачей-стоматологов в образовательных и профессиональных целях. Бот: @{bot_username}
         </div>
     </div>
 </body>
@@ -831,7 +853,7 @@ def _build_journal_html(
 
 async def generate_digest_pdf(
     html_content: str,
-    title: str = "DOCENDO DISCIMUS • Клинический Вестник",
+    title: str = "STOMCHAT • Клинический Вестник",
     subtitle: str = "",
     msg_count: int = 0,
     date_str: str = "",

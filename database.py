@@ -1082,7 +1082,7 @@ async def clear_user_interactive_state(user_id):
     return await _run_db(operation)
 
 
-async def cleanup_stale_interactive_states(max_age_seconds=7200):
+async def cleanup_stale_interactive_states(max_age_seconds=3600):
     """Удаляет зависшие интерактивные сессии (старше max_age_seconds)."""
     now = time.time()
     def operation():
@@ -1238,7 +1238,7 @@ async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
                     LOWER(IFNULL(sender_username, '')) IN ('stomchat_bot', 'docendobot', 'endohelp_bot', 'stomat_bot', 'endochatbot', 'endo_bot')
                     OR LOWER(IFNULL(sender_name, '')) LIKE '%bot%'
                     OR LOWER(IFNULL(sender_name, '')) LIKE '%учимся вместе%'
-                    OR sender_id IN (7716348189, 7886475630, 8140417978, 7971556097, 7475073041, 8775535374)
+                    OR sender_id IN (7886475630, 8140417978, 7971556097, 7475073041, 8775535374)
                 ) LIMIT 1
                 """,
                 (msg_id,)
@@ -1559,9 +1559,11 @@ async def save_user_memory(
 ):
     # Лимит объема на одного пользователя в БД: строго до 64 КБ для ЛС и до 8 КБ для беседы
     if clinical_summary and len(clinical_summary) > 64000:
-        clinical_summary = clinical_summary[:64000]
+        import html_safe
+        clinical_summary = html_safe.clip_at_sentence_text(clinical_summary, 64000)
     if group_summary and len(group_summary) > 8000:
-        group_summary = group_summary[:8000]
+        import html_safe
+        group_summary = html_safe.clip_at_sentence_text(group_summary, 8000)
     def operation():
         with _connection() as db:
             existing = db.execute(

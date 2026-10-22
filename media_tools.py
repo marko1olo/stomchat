@@ -343,6 +343,33 @@ def image_document(message):
     return document if mime.startswith("image/") else None
 
 
+def audio_document(message):
+    """
+    Аудиозапись или голосовое, присланное как ДОКУМЕНТ (Document), а не аудиозаметка.
+    Возвращает документ или None.
+    Охватывает .ogg, .mp3, .m4a, .wav, .aac, .flac, .webm, .opus, .oga.
+    """
+    if getattr(message, "sticker", None) is not None:
+        return None
+    document = getattr(message, "document", None)
+    if document is None:
+        return None
+    mime = (getattr(document, "mime_type", "") or "").lower()
+    if mime.startswith("audio/"):
+        return document
+    file_name = getattr(document, "file_name", "") or ""
+    if not file_name:
+        for attr in getattr(document, "attributes", []):
+            attr_name = getattr(attr, "file_name", None)
+            if attr_name:
+                file_name = attr_name
+                break
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext in {".ogg", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".webm", ".opus", ".oga"}:
+        return document
+    return None
+
+
 _IMAGE_BASE64_CACHE: dict[int, str] = {}
 
 

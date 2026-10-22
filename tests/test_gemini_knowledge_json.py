@@ -35,6 +35,12 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 import config
 
 # Боевые ключи в тест не попадают ни при каком исходе.

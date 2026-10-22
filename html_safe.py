@@ -82,7 +82,7 @@ _SENTENCE_END_RE = re.compile(r"[.!?;]\s")
 # Номер следующего пункта списка не должен остаться сиротой: разрез после
 # "...в пустоту.\n\n5." оставлял висящее "5." без текста, и врач видел пункт,
 # которого в статье нет.
-_HANGING_NUMBER_RE = re.compile(r"\s*\n?\s*\d+\.\s*$")
+_HANGING_NUMBER_RE = re.compile(r"(?:\n|^)\s*\d+[\.\)]\s*$")
 _TRAILING_TOKEN_RE = re.compile(r"\S+$")
 
 

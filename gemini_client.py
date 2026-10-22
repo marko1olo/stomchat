@@ -161,8 +161,9 @@ def get_openai_client(api_key, base_url, timeout=120.0, **kwargs):
     if "default_headers" in kwargs and kwargs["default_headers"]:
         client_kwargs["default_headers"] = kwargs["default_headers"]
     return OpenAI(**client_kwargs)
-BANNED_MODELS_FILE = "banned_models.json"
-KEY_COOLDOWN_FILE = "key_cooldowns.json"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BANNED_MODELS_FILE = os.path.join(_BASE_DIR, "banned_models.json")
+KEY_COOLDOWN_FILE = os.path.join(_BASE_DIR, "key_cooldowns.json")
 KEY_COOLDOWN_SECONDS = 300
 
 
@@ -252,7 +253,7 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
 MODEL_BAN_INITIAL_503_SECONDS = 60    # 1-я ошибка 503/504: бан на 60 сек (полный срок)
 MODEL_BAN_REPEAT_503_SECONDS = 90     # Повторная ошибка 503 подряд: 1.5 минуты
 MODEL_BAN_SECONDS = 180               # 3 минуты потолок на устойчивый отказ (исключает 20-минутный паралич)
-MODEL_FAILURES_FILE = "model_failures.json"
+MODEL_FAILURES_FILE = os.path.join(_BASE_DIR, "model_failures.json")
 
 
 def _clear_failure_history(model_name):
@@ -845,15 +846,17 @@ def cascade_for_context(status_context=None, prompt=None):
         groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
         cascade = [
             ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
         ]
         if has_agentrouter:
             cascade.append(("deepseek-v4-flash", "agentrouter"))
-        cascade.append((groq_primary, "groq"))
+        cascade.extend([
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            (groq_primary, "groq"),
+        ])
         return cascade
 
     kind = status_context.get("kind") if status_context else None
@@ -1108,9 +1111,10 @@ def generate_text(prompt, status_context=None, timeout=None):
         if is_triage:
             req_timeout = max(7.0 if budget >= 7.0 else 2.5, min(req_timeout, 15.0))
         elif is_chatbot:
-            # Для HIGH мышления даем до 240с на глубокий клинический разбор,
-            # для MEDIUM — до 150с. Не режем CoT искусственным потолком в 60с!
-            chat_max = 240.0 if thinking_level == "HIGH" else 150.0
+            # Chairside потолок таймаута на один HTTP-запрос в живом чате у кресла:
+            # Не позволяем первичному вызову висеть 110+ секунд!
+            # Для HIGH: максимум 50с. Для MEDIUM: максимум 35с.
+            chat_max = 50.0 if thinking_level == "HIGH" else 35.0
             req_timeout = max(15.0, min(req_timeout, chat_max))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
@@ -1220,15 +1224,16 @@ def generate_text(prompt, status_context=None, timeout=None):
                 call_timeout = req_timeout
                 if is_chatbot:
                     if provider in ("gemini", "agentrouter"):
-                        rem = (deadline - time.monotonic()) if deadline else 240.0
+                        rem = (deadline - time.monotonic()) if deadline else 120.0
                         has_more_models = (model_index < len(active_cascade) - 1)
                         fallback_reserve = 12.0 if len(active_cascade) > 2 else 4.0
                         if has_more_models and rem > fallback_reserve:
                             max_allowed_for_model = min(rem, max(MIN_REQUEST_SECONDS, rem - fallback_reserve))
                         else:
                             max_allowed_for_model = rem
-                        chat_ceiling = 240.0 if thinking_level == "HIGH" else 150.0
-                        call_timeout = max(min(req_timeout, rem), min(chat_ceiling, max_allowed_for_model))
+                        # Chairside потолок ожидания врача: не перебивать req_timeout гигантским числом!
+                        chat_ceiling = 50.0 if thinking_level == "HIGH" else 35.0
+                        call_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
                 elif provider == "agentrouter":
                     rem = (deadline - time.monotonic()) if deadline else 140.0
                     if kind in summary_kinds:
@@ -1669,12 +1674,12 @@ def convert_to_wav(file_path):
     if size > _WHISPER_MAX_UPLOAD_BYTES:
         # Сжимаем, а не раздуваем: цель — влезть в потолок провайдера.
         packed = _ffmpeg_to(file_path, base + "_converted.ogg",
-                            ["-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "24k"])
+                            ["-vn", "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "24k"])
         if packed:
             logger.info("Audio recompressed: %s -> %s bytes", size, os.path.getsize(packed))
             return packed
 
-    wav = _ffmpeg_to(file_path, base + "_converted.wav", ["-ar", "16000", "-ac", "1"])
+    wav = _ffmpeg_to(file_path, base + "_converted.wav", ["-vn", "-ar", "16000", "-ac", "1"])
     return wav or file_path
 
 
@@ -1780,7 +1785,7 @@ async def transcribe_audio_gemini_multimodal(
     if len(raw_bytes) < 32:
         return None, "file too small"
 
-        b64_audio = base64.b64encode(raw_bytes).decode("utf-8")
+    b64_audio = base64.b64encode(raw_bytes).decode("utf-8")
     _ext = os.path.splitext(file_path)[1].lower()
     _MIME_MAP = {
         ".mp3": "audio/mp3",
@@ -1867,10 +1872,14 @@ async def transcribe_audio_gemini_multimodal(
                             last_error = f"{model_name}: empty response"
                         elif resp.status_code == 429:
                             logger.info(
-                                "Gemini multimodal STT: 429 key=...%s model=%s",
-                                gkey[-4:], model_name,
+                                "Gemini multimodal STT: 429 key=...%s model=%s. Placing key on %ds cooldown.",
+                                gkey[-4:], model_name, KEY_COOLDOWN_SECONDS,
                             )
+                            set_key_cooldown("gemini", gkey, KEY_COOLDOWN_SECONDS)
                             last_error = f"429 on {model_name}"
+                            # Обязательная пауза >= 2.5с перед следующим ключом (Iron Rule)
+                            import asyncio as _asyncio
+                            await _asyncio.sleep(2.5)
                             break  # следующий ключ
                         else:
                             last_error = f"{model_name}: HTTP {resp.status_code}"
@@ -1979,7 +1988,7 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             logger.info(f"Attempting transcription key={key_id} file={actual_file_path}")
             client = get_provider_client("groq", api_key, timeout=per_attempt)
             whisper_model = getattr(config, "GROQ_WHISPER_MODEL", None) or "whisper-large-v3-turbo"
-            whisper_prompt = getattr(config, "WHISPER_PROMPT", None) or "Разговорная речь врача-стоматолога. Стоматологическая терминология, препараты, протоколы, без субтитров."
+            whisper_prompt = getattr(config, "WHISPER_PROMPT", None) or "Клиническая диктовка врача-стоматолога: зуб, каналы, кариес, пульпит, периодонтит, коффердам, раббердам, гипохлорит натрия, хлоргексидин, ЭДТА, МТА, апекслокатор, эндомотор, слюноотсос, эндочак, депофорез, ProTaper, Reciproc, OptiBond FL, AH Plus, визиограф, КЛКТ, анестезия, ультракаин, перкуссия, холодовая проба."
             create_kwargs = {
                 "model": whisper_model,
                 "response_format": "text",
@@ -2018,10 +2027,12 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             # и бан модели на 20 минут оставил бы врача вообще без расшифровок.
             failure_reason = note_key_failure("groq", api_key, str(e))
             if failure_reason == "key_rate_limited":
-                # Пауза не длиннее остатка бюджета: иначе она съедает время,
-                # которого хватило бы на следующий, свежий ключ.
-                left = (usable - (time.monotonic() - started)) if usable else 2.0
-                time.sleep(max(0.0, min(2.0, left)))
+                # Пауза строго >= 2.5-3.0 сек согласно Iron Law для защиты от блокировок
+                rate_delay = 2.5
+                if usable:
+                    left = usable - (time.monotonic() - started)
+                    rate_delay = max(2.5, min(3.0, left))
+                time.sleep(rate_delay)
             continue
 
     if actual_file_path != file_path and os.path.exists(actual_file_path):

@@ -292,8 +292,8 @@ async def flush_chat_batch(chat_id: int):
         if chat_cooldown > 0:
             logger.debug("[BatchReactions] Chat %s cooldown active (%.1fs remaining). Skipping flush.", chat_id, chat_cooldown)
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[BatchReactions] tg_safety cooldown check failed for chat %s: %s", chat_id, e)
 
     # 2. Защита от параллельного сброса батчей одного чата
     global _CHATS_BEING_FLUSHED
@@ -359,8 +359,8 @@ async def flush_chat_batch(chat_id: int):
                     if already_reacted:
                         logger.debug("[BatchReactions] Client already reacted to msg_id=%s. Skipping.", mid)
                         continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[BatchReactions] Check existing reactions exception for msg_id=%s: %s", mid, e)
 
             try:
                 await asyncio.wait_for(
@@ -390,8 +390,8 @@ async def flush_chat_batch(chat_id: int):
                     try:
                         import tg_safety
                         tg_safety.default_cooldown().block(chat_id, wait_sec)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("[BatchReactions] Failed to set FloodWait cooldown in tg_safety for chat %s: %s", chat_id, e)
                     logger.warning("[BatchReactions] FloodWaitError on reaction send: backing off %ds. Reactions paused globally and for chat %s.", wait_sec, chat_id)
                     break
 
@@ -485,7 +485,8 @@ async def process_incoming_event(
             sender_id = getattr(sender, "id", 0)
             if not sender_name:
                 sender_name = getattr(sender, "first_name", "") or getattr(sender, "username", "") or f"Doctor_{sender_id}"
-        except Exception:
+        except Exception as e:
+            logger.debug("[BatchReactions] Failed to get sender for event in chat %s: %s", chat_id, e)
             return False
     elif not sender_id:
         return False
@@ -516,8 +517,8 @@ async def process_incoming_event(
         try:
             loop = asyncio.get_running_loop()
             start_engine_worker(loop)
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            logger.debug("[BatchReactions] No running event loop detected when starting engine worker: %s", e)
 
     item = BufferedMessage(
         msg_id=msg_id,

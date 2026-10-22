@@ -43,6 +43,11 @@ for _stream in (sys.stdout, sys.stderr):
 _TMP = tempfile.mkdtemp(prefix="stomchat_distill_")
 os.environ["STOMCHAT_DISTILLER_LOG"] = os.path.join(_TMP, "distiller_test.log")
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 import distiller as D  # noqa: E402
 import dental_vocab as V  # noqa: E402
 

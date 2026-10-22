@@ -70,6 +70,11 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_websearch_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
 

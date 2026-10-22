@@ -253,8 +253,8 @@ def parse_weight_from_text(text: str) -> Optional[float]:
 
     cleaned = text.lower().replace(',', '.')
 
-    # 1. Точное совпадение: (опциональный знак минус) число + маркер кг/килограмм
-    m = re.search(r'(-?\d+(?:\.\d+)?)\s*(?:кг|kg|килограмм\w*|кило\b)\b', cleaned)
+    # 1. Точное совпадение: вес от 1 до 3 знаков и до 2 знаков дробной части (ReDoS-защита)
+    m = re.search(r'(?<!\w)(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*|кило\b)\b', cleaned)
     if m:
         try:
             val = float(m.group(1))
@@ -262,8 +262,8 @@ def parse_weight_from_text(text: str) -> Optional[float]:
         except ValueError:
             pass
 
-    # 2. Контекстный предлог/маркер: «на 70», «для 80», «вес 65», «весом 18.5»
-    m_ctx = re.search(r'(?:вес[а-я]*|на|для|масс[а-я]*)\s+(-?\d+(?:\.\d+)?)\b', cleaned)
+    # 2. Контекстный предлог/маркер: «на 70», «для 80», «вес 65», «весом 18.5» (с поддержкой буквы «ё»)
+    m_ctx = re.search(r'\b(?:вес[а-яё]*|на|для|масс[а-яё]*)\s+(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\b', cleaned)
     if m_ctx:
         try:
             val = float(m_ctx.group(1))
@@ -271,8 +271,8 @@ def parse_weight_from_text(text: str) -> Optional[float]:
         except ValueError:
             pass
 
-    # 3. Числительные словами перед единицами веса
-    tokens = re.findall(r'[а-яa-z]+', cleaned)
+    # 3. Числительные словами перед единицами веса (с поддержкой буквы «ё»)
+    tokens = re.findall(r'[а-яёa-z]+', cleaned)
     for i, tok in enumerate(tokens):
         if tok in ("кг", "kg", "килограмм", "килограмма", "килограммов", "кило"):
             acc = 0

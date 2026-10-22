@@ -22,6 +22,10 @@ tests = [
     "tests/test_protocols_ui.py",
     "tests/test_intent_routing.py",
     "tests/test_memory_redteam_inquisitor.py",
+    "tests/test_clinician_memory_hygiene.py",
+    "tests/test_voice_media_inquisitor.py",
+    "tests/test_pm_clinical_flow_inquisitor.py",
+    "tests/test_llm_load_balance_inquisitor.py",
 ]
 
 all_ok = True

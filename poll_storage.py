@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Допустимые типы опросов и тематики
 VALID_POLL_TYPES: Set[str] = {"quiz", "regular", "lifestyle"}
-VALID_TOPICS: Set[str] = {"endo", "ortho", "surgery", "therapy", "materials", "lifestyle"}
+VALID_TOPICS: Set[str] = {"endo", "ortho", "surgery", "therapy", "materials", "lifestyle", "pharma"}
 
 
 def calculate_quiz_streaks(

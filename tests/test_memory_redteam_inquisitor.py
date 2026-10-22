@@ -387,6 +387,141 @@ def run_clinician_memory_sanitization_and_protection_tests():
           rec3 == "Стоматолог-ортопед")
 
 
+
+
+def run_fdi_teeth_and_case_tracking_tests():
+    print("\n[Suite 6] FDI Tooth Tracking, Case Follow-up & Dynamic Updates")
+
+    # Test 6.1: FDI teeth numbers detection in short clinical follow-ups
+    test_cases = [
+        ("Зуб 4.6: временная пломба выпала, боли при накусывании.", True),
+        ("В 4.6 нашли МВ2, прошли до апекса на 21 мм. Наложили Каласепт под временную пломбу.", True),
+        ("Зуб 1.6: перелечивание каналов, найден и пройден МВ2.", True),
+        ("Зуб 2.1: перелом коронки, эндокоронка по BOPT протоколу.", True),
+        ("Зуб 4.7: глубокий кариес, непрямая реставрация с IDS.", True),
+        ("Привет, как дела?", False),
+        ("Спасибо большое за консультацию!", False),
+    ]
+
+    for msg, expected in test_cases:
+        has_tooth_fdi = bool(re.search(r'\b[1-4][1-8]\b', msg))
+        has_clinical_kws = any(w in msg.lower() for w in (
+            "снимок", "рентген", "клкт", "оптг", "визиограф", "прицельн", "пациент", "кейс", "bopt", "ids",
+            "имплант", "канал", "мв2", "mb2", "апекс", "силер", "обтурац", "протокол", "пульпит",
+            "периодонтит", "кариес", "коронк", "винир", "эндокоронк", "зуб", "зуба", "зубе", "зубы"
+        ))
+        is_rich = len(msg) > 250 or has_tooth_fdi or has_clinical_kws
+        check(f"FDI Case Detection: '{msg[:40]}...' -> {is_rich}", is_rich == expected)
+
+    # Test 6.2: Structured clinical dossier preserves all 4 sections and FDI teeth
+    full_dossier = """Специализация: Эндодонтист, ортопед
+
+Арсенал и оснащение:
+• Микроскоп Leica M320, бинокуляры ExamVision 3.5x.
+• Силеры TotalFill BC Sealer, AH Plus.
+
+Клинические протоколы:
+• BOPT препарирование без уступа при глубоких дефектах.
+• IDS немедленная герметизация дентина с OptiBond FL.
+
+Кейсы:
+• Зуб 1.6: перелечивание каналов, найден МВ2.
+• Зуб 2.1: перелом коронки, BOPT уступ.
+• Зуб 4.6: деструкция костной ткани, найден МВ2, временная гидроокись кальция.
+• Зуб 4.7: глубокий кариес, реставрация с IDS."""
+
+    deduped = user_memory.deduplicate_clinical_summary(full_dossier)
+    check("Кейсы: зуб 1.6 сохранен в досье", "1.6" in deduped)
+    check("Кейсы: зуб 2.1 сохранен в досье", "2.1" in deduped)
+    check("Кейсы: зуб 4.6 сохранен в досье", "4.6" in deduped)
+    check("Кейсы: зуб 4.7 сохранен в досье", "4.7" in deduped)
+    check("Разделы: Арсенал и оснащение сохранен", "Арсенал и оснащение:" in deduped)
+    check("Разделы: Клинические протоколы сохранен", "Клинические протоколы:" in deduped)
+    check("Разделы: Кейсы сохранен", "Кейсы:" in deduped)
+
+
+def run_offtopic_and_noise_sanitization_tests():
+    print("\n[Suite 7] Offtopic Noise & Domestic Chatter Sanitization")
+
+    offtopic_facts = [
+        "Спрашивает про прогноз погоды в Москве",
+        "Любит пить кофе перед приемом пациентов",
+        "Сегодня у врача отличное веселое настроение",
+        "Интересуется рецептом борща и кулинарией",
+        "Просит рассказать смешной анекдот",
+        "Тестирует бота провокационными вопросами",
+        "Критикует ответы ассистента за медлительность",
+        "Делится впечатлениями от просмотра нового фильма",
+        "Устал после сложной рабочей смены",
+        "Шутит про зарплату и курс доллара",
+        # Отрицательные многословные псевдо-факты
+        "Информация об используемом микроскопе отсутствует",
+        "Сведения о протоколах ирригации не предоставлены",
+        "Данные об опыте работы доктора отсутствуют",
+        # Клинически валидные факты (должны остаться)
+        "Использует ультразвуковые насадки ProUltra при перелечивании",
+        "Применяет постоянную обтурацию биокерамическим силером TotalFill BC Sealer",
+    ]
+
+    cleaned = user_memory.clean_clinician_facts(offtopic_facts)
+    check("Offtopic: Погода отфильтрована", not any("погод" in f.lower() for f in cleaned))
+    check("Offtopic: Кофе и кулинария отфильтрованы", not any("кофе" in f.lower() or "борщ" in f.lower() for f in cleaned))
+    check("Offtopic: Настроение и усталость отфильтрованы", not any("настроен" in f.lower() or "устал" in f.lower() for f in cleaned))
+    check("Offtopic: Анекдоты и юмор отфильтрованы", not any("анекдот" in f.lower() or "шутк" in f.lower() for f in cleaned))
+    check("Offtopic: Тестирование бота отфильтровано", not any("тестиру" in f.lower() or "медлительн" in f.lower() for f in cleaned))
+    check("Offtopic: Фильмы и валюты отфильтрованы", not any("фильм" in f.lower() or "доллар" in f.lower() for f in cleaned))
+    check("Negative Meta: 'Информация об используемом микроскопе отсутствует' отфильтрована",
+          not any("микроскоп" in f.lower() and "отсутств" in f.lower() for f in cleaned))
+    check("Negative Meta: 'Сведения о протоколах ирригации не предоставлены' отфильтрована",
+          not any("не предоставлен" in f.lower() for f in cleaned))
+    check("Valid Clinical: Клинические факты ProUltra и TotalFill BC Sealer сохранены",
+          len(cleaned) == 2 and any("ProUltra" in f for f in cleaned) and any("TotalFill" in f for f in cleaned))
+
+
+def run_history_budget_and_markup_balancing_tests():
+    print("\n[Suite 8] History Budget, Safe Clipping & Markup Balancing")
+
+    import html_safe
+
+    # Test 8.1: _safe_balance_history_line closes HTML tags and code fences
+    broken_html_line = 'Assistant: <b>Клинический протокол обработки каналов 4.6:</b> <pre><code>{\n  "step": 1,\n  "irrigation": "NaOCl 3%"'
+    balanced = assistant._safe_balance_history_line(broken_html_line)
+    cleaned, unclosed = html_safe.balance_html(balanced)
+    check("Markup Balancing: Незакрытые теги pre/code сбалансированы", len(unclosed) == 0)
+    check("Markup Balancing: Добавлены закрывающие теги </code></pre>", balanced.endswith("</code></pre>"))
+
+    broken_code_fence = 'Assistant: Пример протокола:\n```json\n{"tooth": 4.6, "sealer": "TotalFill"}'
+    balanced_fence = assistant._safe_balance_history_line(broken_code_fence)
+    check("Markup Balancing: Незакрытый code fence (```) закрыт", balanced_fence.count("```") % 2 == 0)
+
+    # Test 8.2: _fit_pm_history with oversized lines guarantees valid balanced markup
+    oversized_assistant_reply = "Assistant: <b>Клинический разбор зуба 4.6:</b> <pre><code>" + ("Очень длинный текст протокола с описанием каждого шага. " * 150) + "</code></pre>"
+    lines = [
+        "User: Расскажи протокол постоянной обтурации зуба 4.6",
+        oversized_assistant_reply,
+        "User: Помнишь зуб 4.6, где мы искали МВ2? Пациент пришел на постоянную обтурацию"
+    ]
+
+    fitted = assistant._fit_pm_history(lines)
+    check("_fit_pm_history: История уложена в бюджет", len(fitted) >= 2)
+    check("_fit_pm_history: Самая свежая реплика сохранена без обрезки", "Пациент пришел на постоянную обтурацию" in fitted[-1])
+
+    # Проверяем, что в репликах истории нет незакрытых тегов
+    all_unclosed = []
+    for line in fitted:
+        _, unc = html_safe.balance_html(line)
+        if unc:
+            all_unclosed.extend(unc)
+    check("_fit_pm_history: Во всех возвращенных репликах 0 незакрытых HTML тегов", len(all_unclosed) == 0)
+
+    # Test 8.3: Safe clipping in database / user_memory at sentence boundary
+    long_summary = ("Кейс по зубу 4.6: проведена хемомеханическая обработка, найден МВ2. " * 2000)
+    check("Тестовое summary превышает 64 КБ", len(long_summary) > 64000)
+    clipped_sum = html_safe.clip_at_sentence_text(long_summary, 64000)
+    check("Безопасная обрезка уложилась в 64000 символов", len(clipped_sum) <= 64000)
+    check("Безопасная обрезка заканчивается точкой (граница предложения)", clipped_sum.endswith("."))
+
+
 def main():
     print("=" * 70)
     print("  RED TEAM INQUISITOR AUDIT: MEMORY & PERSISTENT STATE INVARIANTS")
@@ -398,6 +533,9 @@ def main():
     run_fact_sanitization_and_anti_injection_tests()
     run_clean_portrait_tests()
     run_clinician_memory_sanitization_and_protection_tests()
+    run_fdi_teeth_and_case_tracking_tests()
+    run_offtopic_and_noise_sanitization_tests()
+    run_history_budget_and_markup_balancing_tests()
 
     print("\n" + "=" * 70)
     print(f"  ИТОГОВЫЙ СТАТУС: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")

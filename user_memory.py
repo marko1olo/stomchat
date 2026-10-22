@@ -183,24 +183,12 @@ def _extract_json_object(text: str) -> Optional[dict]:
 
 _NEGATIVE_META_RE = re.compile(
     r'(?i)\b('
-    r'не\s+упомина[а-яё]*|'
-    r'не\s+указа[а-яё]*|'
-    r'не\s+сообща[а-яё]*|'
-    r'не\s+назва[а-яё]*|'
-    r'не\s+определе[а-яё]*|'
-    r'не\s+уточне[а-яё]*|'
-    r'не\s+приводит[а-яё]*|'
-    r'не\s+раскрыт[а-яё]*|'
-    r'не\s+найден[а-яё]*|'
+    r'не\s+(?:\S+\s+){0,3}(?:упомина[а-яё]*|указа[а-яё]*|сообща[а-яё]*|назва[а-яё]*|определе[а-яё]*|уточне[а-яё]*|приводит[а-яё]*|раскрыт[а-яё]*|найден[а-яё]*|предоставлен[а-яё]*|зафиксирован[а-яё]*|отражен[а-яё]*|обсужда[а-яё]*)|'
+    r'(?:информаци[а-яё]*|данны[а-яё]*|сведени[а-яё]*)\s+(?:\S+\s+){0,4}отсутству[а-яё]*|'
+    r'отсутству[а-яё]*\s+(?:\S+\s+){0,4}(?:информаци[а-яё]*|данны[а-яё]*|сведени[а-яё]*|клиническ[а-яё]*|протокол[а-яё]*|релевантн[а-яё]*)|'
     r'нет\s+данных|'
     r'нет\s+сведений|'
     r'нет\s+информаци[а-яё]*|'
-    r'информаци[а-яё]+\s+отсутству[а-яё]*|'
-    r'данны[а-яё]+\s+отсутству[а-яё]*|'
-    r'сведени[а-яё]+\s+отсутству[а-яё]*|'
-    r'отсутству[а-яё]+\s+информаци[а-яё]*|'
-    r'отсутству[а-яё]+\s+данны[а-яё]*|'
-    r'отсутству[а-яё]+\s+сведени[а-яё]*|'
     r'пока\s+не\s+известн[а-яё]*|'
     r'пока\s+не\s+установлен[а-яё]*|'
     r'неизвестн[а-яё]+|'
@@ -208,7 +196,26 @@ _NEGATIVE_META_RE = re.compile(
     r'контекст\s+не\s+раскрыт|'
     r'методика\s+не\s+раскрыта|'
     r'объект\s+не\s+раскрыт|'
-    r'в\s+сообщениях\s+не\s+раскрыт[а-яё]*'
+    r'в\s+сообщениях\s+не\s+раскрыт[а-яё]*|'
+    r'не\s+обновляет[а-яё]*\s+из-за\s+отсутстви[а-яё]*|'
+    r'данных\s+о\s+(?:\S+\s+){0,8}в\s+беседе\s+нет'
+    r')\b'
+)
+
+# Паттерн неклинического / бытового мусора (погода, кулинария, фильмы, крипта, анекдоты, настроение)
+_OFFTOPIC_FACT_RE = re.compile(
+    r'(?i)\b('
+    r'погод[аеыу]|прогноз|дожд[ьяе]|снег|температур[аеыу]\s+на\s+улице|'
+    r'кофе|чай|латте|капучино|завтрак|обед|ужин|рецепт[а-яё]*|борщ[а-яё]*|пицц[а-яё]*|кулинар[а-яё]*|'
+    r'плов[а-яё]*|'
+    r'дн[её]м\s+рождени[яе]|поздравл[а-яё]*\s+(?:коллег|с\s+дн[её]м)|'
+    r'фильм[а-яё]*|кино|сериал[а-яё]*|музык[а-яё]*|песн[яиею]|концерт[а-яё]*|'
+    r'криптовалют[а-яё]*|биткоин[а-яё]*|курс\s+доллар[а-яё]*|курс\s+валют|зарплат[а-яё]*|инвестиц[а-яё]*|'
+    r'спорт[а-яё]*|футбол[а-яё]*|матч[а-яё]*|тренировк[а-яё]*|'
+    r'анекдот[а-яё]*|шутк[а-яё]*|юмор[а-яё]*|смешн[а-яё]*|'
+    r'настроени[еяю]|устал[а-яё]*|отдых[а-яё]*|отпуск[а-яё]*|выходн[а-яё]*|сон|спать|'
+    r'тестиру[а-яё]*|провокационн[а-яё]*|проверяет\s+реакцию|'
+    r'скорость\s+ответа|медлительност[а-яё]*|отвечает\s+медленно'
     r')\b'
 )
 
@@ -243,9 +250,11 @@ _FORBIDDEN_FACT_SUBSTRINGS = (
 # Паттерны мета-коммуникационных фактов без клинического содержания (болталка, опросы, троллинг)
 _PURE_META_FACT_RE = re.compile(
     r'(?i)^('
-    r'.*участвует\s+в\s+(?:неформальн[а-яё]*\s+|стоматологическ[а-яё]*\s+|профессиональн[а-яё]*\s+|эндодонтическ[а-яё]*\s+)?(?:чате|сообществе|дискуссиях|обсуждениях|опросах)\b.*|'
-    r'.*общается\s+в\s+(?:неформальн[а-яё]*|игрив[а-яё]*|шутлив[а-яё]*)\s+тоне\b.*|'
-    r'.*(?:дружеский\s+троллинг|шутливые\s+метафоры|использует\s+эмодзи|короткие\s+реплики)\b.*|'
+    r'.*участвует\s+в\s+(?:[а-яё\-]+\s+){0,4}(?:чате|сообществе|опросах|бесед[а-яё]*|жизни\s+сообщества)\b.*|'
+    r'.*участвует\s+в\s+(?:стоматологических\s+)?диагностических\s+обсуждениях\s*\.?$|'
+    r'.*(?:под\s+ником|никнейм|@\w+)\b.*|'
+    r'.*(?:общается|диалогах)\s+в\s+(?:неформальн[а-яё]*|игрив[а-яё]*|шутлив[а-яё]*|непринужденн[а-яё]*)\s+(?:тоне|манере|диалогах)\b.*|'
+    r'.*(?:дружеский\s+троллинг|шутливые\s+метафоры|использует\s+эмодзи|короткие\s+реплики|чувство\s+юмора)\b.*|'
     r'.*проявляет\s+интерес\s+к\s+результатам\s+голосований\b.*|'
     r'.*иронично\s+относится\s+к\s+составлению\s+досье\b.*|'
     r'.*в\s+неформальном\s+чате\s+шутит\b.*|'
@@ -253,7 +262,8 @@ _PURE_META_FACT_RE = re.compile(
     r'.*поддерживает\s+идею\s+сообщества\s+стоматологов.*переклички\b.*|'
     r'.*хочет\s+получать\s+ответы\s+живых\s+коллег\s+в\s+чате\b.*|'
     r'.*недоволен[а-яё]*\s+формальным\s+ответом\s+техподдержки\b.*|'
-    r'.*в\s+шутливой\s+переписке\s+использует\b.*'
+    r'.*в\s+шутливой\s+переписке\s+использует\b.*|'
+    r'.*(?:чат-?бот[а-яё]*|оказался\s+ботом|собеседник\s+может\s+быть\s+ботом|это\s+бот|воспринимает.*как.*бот[а-яё]*|научен\s+ответить)\b.*'
     r')$'
 )
 
@@ -290,8 +300,11 @@ def clean_clinician_facts(facts: list) -> list:
             continue
         if any(bot_tok in lower_f for bot_tok in (
             "stomchat", "endochat", "endohelper", "бот отвечает", "ассистент дал",
-            "полезен бот", "бот полезен", "бот помогает", "ты бот", "ты — бот", "pirate bot", "техподдержк"
+            "полезен бот", "бот полезен", "бот помогает", "ты бот", "ты — бот", "pirate bot", "техподдержк",
+            "чат-бот", "чатбот", "чат бот", "оказался ботом", "быть ботом", "это бот", "собеседник оказался ботом"
         )):
+            continue
+        if _OFFTOPIC_FACT_RE.search(lower_f):
             continue
         if _PURE_META_FACT_RE.match(f_str):
             continue
@@ -526,9 +539,16 @@ def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = ""
         norm1 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part1))
         norm2 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part2))
 
+        is_p1_generic = norm1 in _GENERIC_SPECIALTY_PATTERNS or norm1.replace(" ", "") in _GENERIC_SPECIALTY_PATTERNS
+        is_p2_generic = norm2 in _GENERIC_SPECIALTY_PATTERNS or norm2.replace(" ", "") in _GENERIC_SPECIALTY_PATTERNS
+
         if not part2:
             p = part1
         elif norm1 == norm2:
+            p = part1
+        elif is_p1_generic and not is_p2_generic:
+            p = part2
+        elif is_p2_generic and not is_p1_generic:
             p = part1
         elif norm2.startswith(norm1):
             p = part2
@@ -554,7 +574,12 @@ def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = ""
                 if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', l, re.IGNORECASE):
                     continue
                 sub_l = _PORTRAIT_SECTION_STRIP_RE.sub('', l).strip()
-                if sub_l and "недостаточно сообщений" not in sub_l.lower():
+                if (
+                    sub_l
+                    and "недостаточно сообщений" not in sub_l.lower()
+                    and not is_negative_meta_sentence(sub_l)
+                    and sub_l.lower() not in ("не определена", "не указана", "нет данных", "неизвестно")
+                ):
                     p = sub_l
                     break
 
@@ -803,12 +828,16 @@ async def update_clinician_memory_async(
         current_pm_count = await database.increment_user_pm_count(user_id, username=username, first_name=first_name)
 
         # Проверяем, наступил ли интервал обновления (раз в PM_UPDATE_EVERY_N_MESSAGES реплик)
-        # либо это первое сообщение или объемный клинический кейс
+        # либо это первое сообщение или объемный/содержательный клинический кейс (FDI зубы, патологии, протоколы)
         is_first_time = not current_summary
         is_interval = (current_pm_count % PM_UPDATE_EVERY_N_MESSAGES == 0)
-        has_rich_case = len(user_message) > 250 or any(w in user_message.lower() for w in (
-            "снимок", "рентген", "клкт", "пациент", "кейс", "bopt", "имплант", "канал", "протокол"
+        has_tooth_fdi = bool(re.search(r'\b[1-4][1-8]\b', user_message))
+        has_clinical_keywords = any(w in user_message.lower() for w in (
+            "снимок", "рентген", "клкт", "оптг", "визиограф", "прицельн", "пациент", "кейс", "bopt", "ids",
+            "имплант", "канал", "мв2", "mb2", "апекс", "силер", "обтурац", "протокол", "пульпит",
+            "периодонтит", "кариес", "коронк", "винир", "эндокоронк", "зуб", "зуба", "зубе", "зубы"
         ))
+        has_rich_case = len(user_message) > 250 or has_tooth_fdi or has_clinical_keywords
 
         if not (is_first_time or is_interval or has_rich_case):
             # Счетчик сообщений уже атомарно обновлен в БД
@@ -892,9 +921,10 @@ async def update_clinician_memory_async(
         final_summary = rewritten_summary if rewritten_summary else current_summary
         final_summary = deduplicate_clinical_summary(final_summary)
 
-        # Жесткий потолок 64 КБ
+        # Жесткий потолок 64 КБ с безопасной обрезкой по предложению/строке
         if len(final_summary) > PM_USER_MEMORY_LIMIT:
-            final_summary = final_summary[:PM_USER_MEMORY_LIMIT]
+            import html_safe
+            final_summary = html_safe.clip_at_sentence_text(final_summary, PM_USER_MEMORY_LIMIT)
 
         # Сохраняем актуализированную память в БД
         await database.save_user_memory(
@@ -952,12 +982,16 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
         bot_id = None
         try:
             import config
-            bot_id = getattr(config, "BOT_ID", None)
+            bot_id = getattr(config, "BOT_ID", None) or getattr(config, "STOMCHAT_BOT_ID", None)
             if not bot_id and getattr(config, "BOT_TOKEN", None):
                 bot_id = int(config.BOT_TOKEN.split(":", 1)[0])
         except Exception:
             pass
-        bot_id = bot_id or (7971556097)
+        if not bot_id:
+            env_id = os.getenv("BOT_ID") or os.getenv("STOMCHAT_BOT_ID")
+            if env_id and env_id.isdigit():
+                bot_id = int(env_id)
+        bot_id = bot_id or 7971556097
 
         users_to_process = await database.get_unprocessed_group_users(
             min_new_messages=min_new_messages,
@@ -1057,9 +1091,10 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             if len(current_facts) > 30:
                 current_facts = current_facts[-30:]
 
-            # Жесткий потолок 8 КБ для беседы
+            # Жесткий потолок 8 КБ для беседы с безопасной обрезкой по предложению/строке
             if len(final_grp_summary) > GROUP_USER_MEMORY_LIMIT:
-                final_grp_summary = final_grp_summary[:GROUP_USER_MEMORY_LIMIT]
+                import html_safe
+                final_grp_summary = html_safe.clip_at_sentence_text(final_grp_summary, GROUP_USER_MEMORY_LIMIT)
 
             await database.save_user_memory(
                 user_id=user_id,

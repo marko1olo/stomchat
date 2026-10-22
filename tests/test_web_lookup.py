@@ -18,7 +18,13 @@ blocking_tools.web_search_async) и тесты. Функции у бота не 
 import ast
 import io
 import logging
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 for _stream in (sys.stdout, sys.stderr):
     try:

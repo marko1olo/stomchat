@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 
+from typing import Optional, List, Dict, Tuple, Any
 from cachetools import TTLCache
 
 import blocking_tools
@@ -1163,7 +1164,7 @@ def calculate_anesthesia_instant(text: str) -> str | None:
 
     # 3. Извлечение веса
     weight = None
-    weight_match = re.search(r'\b(\d+(?:[.,]\d+)?)\s*(?:кг|kg|килограмм\w*)\b', lower)
+    weight_match = re.search(r'\b(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*)\b', lower)
     if weight_match:
         try:
             weight = float(weight_match.group(1).replace(',', '.'))
@@ -2587,7 +2588,9 @@ _RAG_WATER_PENALTY_RE = re.compile(
 
 _RAG_CONCRETE_BOOST_RE = re.compile(
     r"(?:"
-    r"\d+(?:[.,]\d+)?\s*(?:%|мм|мкм|сек|мин|мл|мг|нсм|n\.?cm|об/мин|rpm|кГц|°|градус|iso)"
+    r"\b\d{1,5}(?:[.,]\d{1,3})?\s*(?:%|мм|мкм|сек|мин|мл|мг|нсм|n\.?cm|об/мин|rpm|кГц|°|градус|iso)\b"
+    r"|\b1:\d{5,6}\b"
+    r"|\bph\s*\d{1,2}(?:[.,]\d{1,2})?\b"
     r"|(?:№|#)\s*\d{1,3}\b"
     r"|\b\d{2}\s*[./]\s*0[2468]\b"
     r")",
@@ -2948,6 +2951,24 @@ _PM_HISTORY_MAX_CHARS = 25000
 _PM_HISTORY_ENTRY_MAX_CHARS = 4000
 
 
+def _safe_balance_history_line(line: str) -> str:
+    """
+    Балансирует HTML-теги и markdown code fences в строке истории переписки.
+    Предотвращает отравление разметки промпта при подрезке длинных реплик ассистента.
+    """
+    if not line:
+        return ""
+    res = line
+    # 1. Закрываем незакрытые Markdown code fences (```)
+    if res.count("```") % 2 != 0:
+        res = res.rstrip() + "\n```"
+    # 2. Балансируем HTML теги
+    cleaned, unclosed = html_safe.balance_html(res)
+    if unclosed:
+        res = res.rstrip() + "".join(f"</{tag}>" for tag in reversed(unclosed))
+    return res
+
+
 def _fit_pm_history(lines):
     """
     Укладывает историю ЛС в бюджет по символам, сохраняя САМЫЕ СВЕЖИЕ реплики.
@@ -2969,6 +2990,8 @@ def _fit_pm_history(lines):
     for position, line in enumerate(reversed(lines)):
         if position > 0 and len(line) > _PM_HISTORY_ENTRY_MAX_CHARS:
             line = _clip_at_sentence(line, _PM_HISTORY_ENTRY_MAX_CHARS)
+        # Балансируем HTML и блоки кода после обрезки, чтобы не сломать промпт LLM
+        line = _safe_balance_history_line(line)
         # Реплики склеиваются через "\n", и разделитель тоже занимает место:
         # без его учёта блок выходил за бюджет на число строк минус одна.
         cost = len(line) + (1 if kept else 0)
@@ -3556,7 +3579,7 @@ _EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
     r'скриншот\w*\s+[^.\n]{0,30}(?:интерфейс\w*|приложен\w*|соцсет\w*|социальн\w*\s+сет\w*|профил\w*|переписк\w*|чат\w*|экран\w*|сайт\w*|мессенджер\w*|бот\w*|канал\w*|программ\w*)|'
     r'интерфейс\w*\s+[^.\n]{0,30}(?:цифров\w*|программн\w*|telegram|телеграм|бот\w*|мессенджер\w*|приложен\w*|комплекс\w*)|'
     r'карточк\w*\s+спикер\w*|рекламн\w*\s+баннер\w*|афиш\w*|презентационн\w*\s+карточк\w*|'
-    r'мем\b|мем[а-я]*|комикс\w*|карикатур\w*|юмористическ\w*|'
+    r'мем\b|мем[а-яё]*|комикс\w*|карикатур\w*|юмористическ\w*|'
     r'чек\b|квитанци\w*|накладн\w*|банковск\w*\s+(?:перевод|чек|выписк\w*)|прайс[- ]?лист\w*|'
     r'фотографи\w*\s+(?:человек\w*|лиц\w*|селфи)|портрет\b|'
     r'(?:медицинск\w*|анатомическ\w*|стоматологическ\w*|зубочелюстн\w*|зубн\w*|внутриротов\w*|рентгенолог\w*)\s+[^.\n]{0,60}(?:структур\w*|объект\w*|патолог\w*|элемент\w*|снимк\w*|ряд\w*|данные)\s+[^.\n]{0,40}(?:не\s+дифференциру\w*|не\s+визуализиру\w*|отсутству\w*|не\s+обнаружен\w*)|'
@@ -3625,7 +3648,7 @@ def clean_html_formatting(text):
             break
     text = clean_vertex_redirect_urls(text)
     # Strip database codes/fact indexes (e.g. [2.1.1], [1.3])
-    text = re.sub(r'\s*\[\d+(?:\.\d+)+\]', '', text)
+    text = re.sub(r'\s*\[\d{1,2}(?:\.\d{1,2}){1,3}\]', '', text)
 
     plain = re.sub(r'<[^>]+>', '', text)
     if len(plain) > _ARTICLE_PLAIN_MAX_CHARS:
@@ -3650,7 +3673,7 @@ def clean_html_formatting(text):
         return plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     # Convert Markdown bold **text** to HTML bold <b>text</b>
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', text)
     # Convert unsupported HTML lists (ul/ol/li) and paragraphs/breaks before tag escaping
     text = re.sub(r'</p\s*>', '\n\n', text, flags=re.IGNORECASE)
     text = re.sub(r'<p[^>]*>', '', text, flags=re.IGNORECASE)
@@ -3941,6 +3964,8 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 10. Ответ вообще не относится к медицине/стоматологии или уводит тему в сторону. [ИСКЛЮЧЕНИЕ]: Если врач просит обобщить дискуссию, выделить предмет спора, тезис и антитезис обсуждения коллег в чате — это законный профессиональный мета-запрос, черновик с синтезом позиций коллег ОТКЛОНЯТЬ НЕЛЬЗЯ!
 11. Топографическое или анатомическое несоответствие: рекомендации относятся к поверхностям, контактам или тканям, не затронутым вмешательством, либо смешиваются протоколы несовместимых дисциплин.
 12. Беспочвенная ритуальная критика: выдумывание несуществующих дефектов или дежурные шаблонные придирки без объективных оснований в клиническом контексте.
+13. ПАЦИЕНТСКИЕ ДИСКЛЕЙМЕРЫ: Черновик содержит шаблонные фразы для пациентов («обратитесь к очному врачу», «нужен очный осмотр», «я всего лишь ИИ», «диагноз ставит очный врач»). Собеседник — дипломированный врач-стоматолог, такие отмазки в коллегиальном диалоге НЕДОПУСТИМЫ!
+14. САМОБИЧЕВАНИЕ И СПОР О СОФТЕ: Черновик содержит оправдания про серверы, пиковые нагрузки, раздутые запросы, критику надежности софта («рассчитывать на зависающий софт рискованно») или спор с врачом о скорости работы. Если врач замечает медлительность — допустимо только спокойное профессиональное объяснение («глубокий анализ снимка с проверкой анатомии и рисков занимает до 60–90 секунд») с сохранением достоинства и указанием, что разбор формируется или уже готов в ЛС.
 
 Одобри черновик (ok: true), если:
 — Ответ клинически грамотен, профессионален, спокоен, по теме и безопасен.
@@ -4690,7 +4715,7 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
         except ValueError:
             weight = None
     else:
-        w_alt = re.search(r'(?:вес[а-я]*|на|для)\s+(\d+(?:[.,]\d+)?)\b', lower)
+        w_alt = re.search(r'\b(?:вес[а-яё]*|на|для)\s+(\d{1,3}(?:[.,]\d{1,2})?)\b', lower)
         if w_alt:
             try:
                 val = float(w_alt.group(1).replace(',', '.'))
@@ -5768,7 +5793,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти замечание рецензента, исправь неточности и перепиши ответ строго доказательно.
 """
             async with _safe_typing_action(bot_client, event.chat_id):
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=480)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
             if error:
                 logger.error(f"Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -5796,7 +5821,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     logger.info("reaction extracted from LLM: %r for msg_id=%s", _pending_reaction, msg_id)
                 else:
                     logger.debug("reaction %r rejected (not in ALLOWED_REACTIONS)", _react_emoji)
-            candidate_text = re.sub(r'(?i)\s*REACTION:\s*\S+', '', candidate_text).rstrip()
+            candidate_text = re.sub(r'(?i)(?:^|\n|\s+)REACTION:\s*\S+', '', candidate_text).rstrip()
 
             if not is_dialogue:
                 reply_clean = re.sub(r'[^A-Z]', '', candidate_text.strip().upper())
@@ -6407,13 +6432,13 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Предыдущий вариант разбора отклонён рецензентом: "{last_media_reason}".
 НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти критику рецензента, не ставь категоричных диагнозов без достаточных ориентиров, исключи недостоверные утверждения и перепиши разбор строго доказательно.
 """
-        status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH", "has_media": True}
+        status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "MEDIUM", "has_media": True}
         if image_urls:
             status_ctx["image_urls"] = image_urls
         if has_text_desc:
             status_ctx["media_description"] = str(media_description).strip()
         async with _safe_typing_action(bot_client, event.chat_id):
-            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=480)
+            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
         if error:
             logger.error(f"Media Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -6455,7 +6480,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 logger.info("media reaction extracted from LLM: %r for msg_id=%s", _media_pending_reaction, msg_id)
             else:
                 logger.debug("media reaction %r rejected (not in ALLOWED_REACTIONS)", _media_react_emoji)
-        candidate_text = re.sub(r'(?i)\s*REACTION:\s*\S+', '', candidate_text).rstrip()
+        candidate_text = re.sub(r'(?i)(?:^|\n|\s+)REACTION:\s*\S+', '', candidate_text).rstrip()
 
         if is_dental:
             reply_clean = re.sub(r'[^A-Z]', '', candidate_text.strip().upper())
@@ -9413,6 +9438,7 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         supplement_text = re.sub(r'\n{3,}', '\n\n', supplement_text)
         formatted_message = f"🔍 <b>Дополнительные клинические нюансы:</b>\n\n{supplement_text}"
         formatted_message = clean_html_formatting(formatted_message)
+        formatted_message = sanitize_clinical_pm_output(formatted_message)
         formatted_message = re.sub(r'\n{3,}', '\n\n', formatted_message.strip())
 
         # Валидация качества фонового дополнения рецензентом
@@ -9514,6 +9540,7 @@ async def handle_private_message_bundle(bot_client, events_burst):
             (getattr(msg, "voice", None) is not None and type(msg.voice).__name__ != "MagicMock")
             or (getattr(msg, "audio", None) is not None and type(msg.audio).__name__ != "MagicMock")
             or (getattr(msg, "video_note", None) is not None and type(msg.video_note).__name__ != "MagicMock")
+            or (media_tools.audio_document(msg) is not None)
         )
         has_pic = (
             getattr(msg, "photo", None) is not None
@@ -9543,17 +9570,24 @@ async def handle_private_message_bundle(bot_client, events_burst):
             if temp_p and os.path.exists(temp_p):
                 import gemini_client as _gc
                 import blocking_tools
-                g_text, g_err = await _gc.transcribe_audio_gemini_multimodal(temp_p, duration_secs=0.0)
-                if not g_err and g_text:
-                    clean_t = await blocking_tools.correct_dental_transcription_async(g_text.strip())
-                    if clean_t:
-                        transcribed_voices.append(clean_t)
+                if _gc.is_audio_silent_or_empty(temp_p):
+                    logger.info("PM bundle: silence detected via volumedetect for %s", vev.message.id)
                 else:
-                    t_text, _ = await blocking_tools.transcribe_audio_async(temp_p, timeout=50)
-                    if t_text:
-                        clean_t = await blocking_tools.correct_dental_transcription_async(t_text.strip())
-                        if clean_t:
+                    g_text, g_err = await _gc.transcribe_audio_gemini_multimodal(temp_p, duration_secs=0.0)
+                    bundle_voice_found = False
+                    if not g_err and g_text and not blocking_tools.is_silence_or_whisper_hallucination(g_text.strip()):
+                        clean_t = await blocking_tools.correct_dental_transcription_async(g_text.strip())
+                        if clean_t and not blocking_tools.is_silence_or_whisper_hallucination(clean_t):
                             transcribed_voices.append(clean_t)
+                            bundle_voice_found = True
+
+                    if not bundle_voice_found:
+                        # Резервная попытка через Groq Whisper при тишине/ошибке Gemini
+                        t_text, _ = await blocking_tools.transcribe_audio_async(temp_p, timeout=50)
+                        if t_text and not blocking_tools.is_silence_or_whisper_hallucination(t_text.strip()):
+                            clean_t = await blocking_tools.correct_dental_transcription_async(t_text.strip())
+                            if clean_t and not blocking_tools.is_silence_or_whisper_hallucination(clean_t):
+                                transcribed_voices.append(clean_t)
         except Exception as ve:
             logger.warning("Error transcribing voice in PM bundle: %s", ve)
         finally:
@@ -9562,6 +9596,17 @@ async def handle_private_message_bundle(bot_client, events_burst):
                     os.remove(temp_p)
                 except Exception:
                     pass
+            prefix = f"bundle_v_{vev.message.id}_"
+            try:
+                if os.path.exists(media_tools.MEDIA_TEMP_DIR):
+                    for fname in os.listdir(media_tools.MEDIA_TEMP_DIR):
+                        if fname.startswith(prefix):
+                            try:
+                                os.remove(os.path.join(media_tools.MEDIA_TEMP_DIR, fname))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
     combined_elements = []
     if text_parts:
@@ -9578,6 +9623,189 @@ async def handle_private_message_bundle(bot_client, events_burst):
         target_event.message.message = unified_text
 
     await handle_private_message(bot_client, target_event)
+
+def detect_pm_emergency(text: str) -> Optional[str]:
+    """
+    Высокоточный детектор острых экстренных состояний у стоматологического кресла (Rule MED-06).
+    """
+    if not text:
+        return None
+    norm = text.lower()
+    
+    # 1. Анафилаксия / анафилактический шок / аллергический коллапс
+    if re.search(r'\b(анафилак|анафилактическ|anaphylaxis)\w*', norm) or \
+       (re.search(r'\b(шок|коллапс|удушь|отек\s+квинке|отёк\s+квинке)\b', norm) and re.search(r'\b(анестез|анестетик|артикаин|ультракаин|лидокаин|укол|в кресле|на приеме|на приёме)\b', norm)):
+        return "anaphylaxis"
+    
+    # 2. Гипохлоритовая авария / NaOCl за апекс
+    if re.search(r'\b(гипохлорит\w*\s+авар\w*|авар\w*\s+гипохлорит\w*)\b', norm) or \
+       (re.search(r'\b(гипохлорит|naocl|белизн)\w*', norm) and re.search(r'\b(за\s+апекс|в\s+периодонт|в\s+кость|раздут|ожог|отек\s+лиц|отёк\s+лиц|гематом|вывел|вывели|выдавлен)\w*', norm)):
+        return "hypochlorite"
+    
+    # 3. Перфорация (дна полости, корня, фуркации)
+    if re.search(r'\b(перфорац|стрип-перфорац|strip-перфорац)\w*', norm) and \
+       re.search(r'\b(дн[аоеё]|полост|корн|фуркац|стенк|канал|бором|кровит|кровь)\w*', norm):
+        return "perforation"
+    
+    # 4. Перелом инструмента / отломок файла за апекс
+    if re.search(r'\b(файлолом|сломал\w*\s+файл|отломил\w*\s+файл|сепарац\w*\s+файл|сломал\w*\s+инструмент|отломил\w*\s+инструмент)\b', norm) or \
+       (re.search(r'\b(файл|инструмент|отломок|обломок)\w*', norm) and re.search(r'\b(за\s+апекс|в\s+канал|верхушк|периапикал)\w*', norm) and re.search(r'\b(сломал|отломал|сепарац|застрял|хруст)\w*', norm)):
+        return "file_fracture"
+    
+    # 5. Флегмона / ангина Людвига / отек дна рта / асфиксия
+    if re.search(r'\b(флегмон|ангин\w*\s+людвиг|людвиг)\w*', norm) or \
+       (re.search(r'\b(отек|отёк|инфильтрат)\w*', norm) and re.search(r'\b(дна\s+полости\s+рта|дна\s+рта|шеи|подчелюстн)\w*', norm) and re.search(r'\b(асфикси|задыха|трудно\s+дышать|стридор|стеноз)\w*', norm)):
+        return "phlegmon_airway"
+        
+    return None
+
+
+def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
+    """
+    Формирует мгновенный экстренный протокол первой строкой по Правилу MED-06.
+    """
+    from telethon import Button
+    if sos_category == "anaphylaxis":
+        text = (
+            "🚨 <b>СКОРАЯ 112 НЕМЕДЛЕННО! ЭКСТРЕННАЯ РЕАНИМАЦИЯ: АНАФИЛАКТИЧЕСКИЙ ШОК</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. <b>ПРЕКРАТИТЬ</b> введение анестетика/препарата! Не оставлять пациента одного!\n"
+            "2. <b>АДРЕНАЛИН (Эпинефрин) 0.1% (1 мг/мл) В/М:</b>\n"
+            "   • Взрослые: <b>0.5 мл</b> (0.5 мг) в/м в среднюю треть передне-боковой поверхности бедра!\n"
+            "   • Дети: <b>0.01 мг/кг</b> (макс 0.3 мл) в/м в бедро.\n"
+            "   • При отсутствии эффекта через 5 минут — <b>повторить 0.5 мл в/м</b>.\n"
+            "3. <b>Уложить горизонтально</b> с приподнятыми ногами (положение Тренделенбурга). При рвоте — голову набок. НЕ сажать резко (синдром пустого сердца)!\n"
+            "4. <b>Кислород</b> 10–15 л/мин через маску.\n"
+            "5. <b>Венозный доступ:</b> 0.9% NaCl болюсно (взрослым 1000 мл за 15–20 мин).\n"
+            "6. <b>Второй эшелон:</b> Преднизолон 90–120 мг в/в (или Дексаметазон 8–16 мг) + Супрастин 2% 1–2 мл в/м."
+        )
+        buttons = [
+            [Button.inline("🧪 LAST / Токсичность (Интралипид)", data="sos:last")],
+            [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
+        ]
+        return text, buttons
+
+    elif sos_category == "hypochlorite":
+        text = (
+            "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ГИПОХЛОРИТОВАЯ АВАРИЯ (NaOCl ЗА АПЕКС)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. <b>НЕМЕДЛЕННО ПРЕКРАТИТЬ</b> подачу NaOCl! Сохранять спокойствие, успокоить пациента.\n"
+            "2. <b>ОБИЛЬНАЯ ПРОМЫВКА</b> стерильным <b>0.9% физраствором</b> (10–20 мл) через эндоиглу без давления для разбавления и эвакуации гипохлорита.\n"
+            "   ⚠️ <i>Категорически ЗАПРЕЩЕНО вводить лимонную кислоту или ЭДТА (риск термического и химического ожога тканей)!</i>\n"
+            "3. <b>ОБЕЗБОЛИВАНИЕ:</b> Инфильтрационная анестезия (без адреналина или с 1:200к) для купирования острейшего болевого синдрома.\n"
+            "4. <b>ХОЛОД СНАРУЖИ:</b> Приложить лед к щеке на 15 мин с перерывами по 15 мин в первые сутки (вазоконстрикция, ограничение гематомы и отека).\n"
+            "5. <b>ГЛЮКОКОРТИКОИДЫ:</b> Дексаметазон <b>4–8 мг в/м или в/в</b> немедленно (купирование некроза и отека).\n"
+            "6. <b>АНТИБИОТИКИ & НПВП:</b> Амоксиклав 1000 мг 2 р/д (7 дней) + Ибупрофен 600 мг 3 р/д.\n"
+            "7. Зуб оставить под стерильным шариком на 30–60 мин для оттока экссудата, затем временная повязка с гидроксидом кальция Ca(OH)2. При нарастании отека шеи — экстренная госпитализация в ЧЛХ!"
+        )
+        buttons = [
+            [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
+            [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
+        ]
+        return text, buttons
+
+    elif sos_category == "perforation":
+        text = (
+            "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ПЕРФОРАЦИЯ СТЕНКИ / ДНА ПОЛОСТИ ЗУБА</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. <b>ГЕМОСТАЗ:</b> Промывание стерильным 0.9% NaCl, прижатие стерильной гемостатической губкой или валиком.\n"
+            "   ⚠️ <i>КАТЕГОРИЧЕСКИ НЕ промывать гипохлоритом NaOCl под давлением в зоне перфорации!</i>\n"
+            "2. <b>ОЦЕНКА ЛОКАЛИЗАЦИИ:</b>\n"
+            "   • Дно полости / фуркация: прогноз зависит от скорости закрытия (закрыть СЕГОДНЯ до инфицирования периодонта!).\n"
+            "   • Апикальная / средняя треть корня: закрытие под увеличением (микроскоп / бинокуляры).\n"
+            "3. <b>МАТЕРИАЛ ВЫБОРА:</b> Биокерамика (Biodentine / ProRoot MTA / Bio-C Repair).\n"
+            "   • При дефекте дна: создать барьер из коллагеновой губки (Gelatamp/Коллапол), поверх внести порцию МТА слоем ≥ 2 мм.\n"
+            "4. <b>ГЕРМЕТИЗАЦИЯ:</b> Поверх биокерамики — стеклоиономерный цемент (Fuji IX) или текучий композит.\n"
+            "5. <b>ЮРИДИЧЕСКАЯ ФИКСАЦИЯ:</b> Рентген-контроль, запись в карту 043/у («ятрогенное сообщение герметизировано МТА»), информирование пациента."
+        )
+        buttons = [
+            [Button.inline("📐 Оценка феррула (/preserve)", data="preserve:ferrule")],
+            [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
+        ]
+        return text, buttons
+
+    elif sos_category == "file_fracture":
+        text = (
+            "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: СЕПАРАЦИЯ ИНСТРУМЕНТА В КАНАЛЕ (ФАЙЛОЛОМ)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. <b>СТОП:</b> Немедленно прекратить машинную обработку! Не пытаться сверлить бором или агрессивным ультразвуком без микроскопа (риск ленточной перфорации корня).\n"
+            "2. <b>РЕНТГЕН-ДИАГНОСТИКА:</b> Прицельный снимок в 2 проекциях:\n"
+            "   • Оценка уровня сепарации (коронковая / средняя / апикальная треть / выход за апекс).\n"
+            "   • Длина фрагмента и анатомия кривизны канала.\n"
+            "3. <b>КЛИНИЧЕСКАЯ ТАКТИКА:</b>\n"
+            "   • <b>Выход за апекс:</b> Извлечение через канал часто невозможно без разрушения апикального уступа. Тактика: обтурация канала до отломка биокерамикой + наблюдение / плановая апикальная микрохирургия (резекция верхушки корня с ретроградным пломбированием MTA).\n"
+            "   • <b>В пределах канала:</b> Создание коронкового доступа (Staging platform тонким ультразвуковым кончиком на малой мощности против часовой стрелки) ИЛИ обход инструмента (Bypass) ручными файлами C-Pilot #08–#10 с 17% ЭДТА.\n"
+            "4. <b>РАЗГОВОР С ПАЦИЕНТОМ:</b> Спокойно сообщить: «В ходе сложной анатомической обработки произошла сепарация рабочего кончика инструмента из никель-титана. Канал полностью стерилен, фрагмент биологически инертен». Запись в 043/у."
+        )
+        buttons = [
+            [Button.inline("💔 Матрица решений по файлам", data="sos:file_matrix")],
+            [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
+        ]
+        return text, buttons
+
+    elif sos_category == "phlegmon_airway":
+        text = (
+            "🚨 <b>СКОРАЯ 112 НЕМЕДЛЕННО! ЭКСТРЕННАЯ ГОСПИТАЛИЗАЦИЯ В СТАЦИОНАР ЧЛХ!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>УГРОЗА ЖИЗНИ: СТЕНОЗ ДЫХАТЕЛЬНЫХ ПУТЕЙ / АСФИКСИЯ</b>\n\n"
+            "1. <b>ВЫЗОВ СМП:</b> Сообщить: «Острое одонтогенное гнойное воспаление, флегмона дна полости рта / ангина Людвига, нарастающая асфиксия, угроза обструкции гортани».\n"
+            "2. <b>КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:</b> Отпускать пациента домой, назначать амбулаторные таблетки или пытаться производить разрезы в кресле без условий реанимации!\n"
+            "3. <b>ПОЛОЖЕНИЕ ПАЦИЕНТА:</b> Строго сидя или полусидя с наклоном вперед (профилактика западения корня языка и удушья). НЕ укладывать горизонтально!\n"
+            "4. <b>ДО ПРИЕЗДА СКОРОЙ:</b>\n"
+            "   • Оксигенотерапия (ингаляция увлажненного кислорода 10–15 л/мин).\n"
+            "   • Мониторинг АД, пульса, частоты дыхания и SpO2.\n"
+            "   • Дексаметазон 8–16 мг в/м или Преднизолон 90–120 мг в/в (замедление отека гортани).\n"
+            "   • Готовность к экстренной коникотомии при острой обструкции дыхательных путей."
+        )
+        buttons = [
+            [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
+        ]
+        return text, buttons
+
+    return "", []
+
+
+def sanitize_clinical_pm_output(reply_text: str) -> str:
+    """
+    Бескомпромиссная санитария клинического ответа в ЛС (Врач — Врачу):
+    1. Исключает пациентские дисклеймеры («обратитесь к врачу», «нужен очный осмотр», «я всего лишь ИИ»).
+    2. Удаляет пустые дежурные вопросы в конце («Вам все понятно?», «Хотите узнать больше?»).
+    """
+    if not reply_text:
+        return ""
+    
+    text = reply_text
+    
+    # 1. Запрет пациентских отмазок (Zero Patient Disclaimers Rule)
+    patient_disclaimer_patterns = [
+        r'(?i)(?:обратитесь|обратиться|рекомендуется\s+обратиться|необходимо\s+обратиться|следует\s+обратиться)\s+к\s+(?:очному\s+)?(?:врачу|стоматологу|специалисту|доктору)[^.!?\n]*[.!?]?',
+        r'(?i)(?:необходим|требуется|нужен|обязателен)\s+(?:очный\s+)?(?:осмотр|при[её]м|визит|консультаци[яи])[^.!?\n]*[.!?]?',
+        r'(?i)(?:помните,?\s*)?(?:я\s+всего\s+лишь|я\s+являюсь|как|будучи)\s+(?:искусственный\s+интеллект|ии|языковая\s+модель|виртуальн\w*\s+ассистент\w*)[^.!?\n]*[.!?]?',
+        r'(?i)(?:данная\s+информация|этот\s+разбор|ответ|материал)\s+не\s+заменяет\s+(?:очную\s+)?(?:консультаци[юи]|при[её]м|осмотр)[^.!?\n]*[.!?]?',
+        r'(?i)диагноз\s+может\s+поставить\s+только\s+очный\s+врач[^.!?\n]*[.!?]?',
+        r'(?i)(?:не\s+занимайтесь\s+самолечением|самолечение\s+опасно)[^.!?\n]*[.!?]?',
+        r'(?i)проконсультируйтесь\s+с\s+(?:лечащим\s+)?врачом[^.!?\n]*[.!?]?',
+        r'(?i)я\s+не\s+(?:являюсь\s+врачом|имею\s+медицинского\s+диплома)[^.!?\n]*[.!?]?',
+        r'(?i)для\s+постановки\s+точного\s+диагноза\s+обратитесь[^.!?\n]*[.!?]?',
+    ]
+    for pat in patient_disclaimer_patterns:
+        text = re.sub(pat, '', text)
+    
+    # 2. Удаление пустых дежурных вопросов в конце (до 3 итераций) с защитой от ReDoS и поддержкой «ё»
+    cliche_closing_re = re.compile(
+        r'(?i)(?:вам\s+вс[её]\s+понятно\??|хотите\s+узнать\s+больше\??|хотите\s+разобрать\s+подробнее\??|если\s+у\s+вас\s+(?:есть\s+)?вопросы[^.!?\n]*[.!?]?|остались\s+ли\s+вопросы\??|чем\s+ещ[её]\s+могу\s+помочь\??|буду\s+рад[а]?\s+помочь\??|готов[а]?\s+ответить\s+на\s+вопросы\??)\s*$'
+    )
+    for _ in range(3):
+        tail = text[-500:] if len(text) > 500 else text
+        m = cliche_closing_re.search(tail)
+        if m:
+            cut_pos = len(text) - len(tail) + m.start()
+            text = text[:cut_pos].rstrip()
+        else:
+            break
+    
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text
 
 
 async def handle_private_message(bot_client, event):
@@ -9764,8 +9992,10 @@ async def handle_private_message(bot_client, event):
         is_voice = hasattr(event.message, "voice") and event.message.voice is not None and type(event.message.voice).__name__ != "MagicMock"
         is_audio_file = hasattr(event.message, "audio") and event.message.audio is not None and type(event.message.audio).__name__ != "MagicMock"
         is_video_note = hasattr(event.message, "video_note") and event.message.video_note is not None and type(event.message.video_note).__name__ != "MagicMock"
-        is_audio = is_voice or is_audio_file or is_video_note
+        audio_doc = media_tools.audio_document(event.message)
+        is_audio = is_voice or is_audio_file or is_video_note or (audio_doc is not None)
         transcribed_text = None
+        is_silence = False
         if is_audio:
             file_obj = getattr(getattr(event, "message", None), "file", None)
             file_size = getattr(file_obj, "size", 0) or 0
@@ -9788,19 +10018,6 @@ async def handle_private_message(bot_client, event):
             status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
             temp_path = None
             try:
-                # download_media собственного таймаута НЕ имеет. Это было
-                # единственное скачивание в проекте без бюджета: в группе его
-                # ограничили (VOICE_DOWNLOAD_TIMEOUT_SECONDS), фото в ЛС тоже
-                # (PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS), а голосовое в ЛС осталось.
-                #
-                # Последствия складывались втройне. Обработчик личных сообщений
-                # держит замок на пользователя всё время работы, поэтому ВСЕ
-                # следующие сообщения этого врача встают в очередь за зависшим и
-                # не получают ответа до перезапуска процесса. Блок finally не
-                # выполняется — статус «Распознаю аудиосообщение… Подождите»
-                # висит в диалоге навсегда, а скачанный кусок файла остаётся на
-                # диске. Сторож не спасает: он следит за живостью цикла событий,
-                # а цикл жив.
                 temp_path = await asyncio.wait_for(
                     event.message.download_media(
                         file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"{event.message.id}_")
@@ -9811,44 +10028,55 @@ async def handle_private_message(bot_client, event):
                     import blocking_tools
                     import gemini_client as _gc
 
-                    # Attempt 1: Gemini multimodal primary STT
-                    _dur = 0.0
-                    try:
-                        _ma = (
-                            getattr(event.message, "video_note", None)
-                            or getattr(event.message, "voice", None)
-                            or getattr(event.message, "audio", None)
-                        )
-                        _dur = float(getattr(_ma, "duration", 0) or 0)
-                    except Exception:
-                        pass
+                    # Pre-flight: проверка тишины через ffmpeg volumedetect
+                    if _gc.is_audio_silent_or_empty(temp_path):
+                        logger.info("PM STT: Pre-flight volumedetect detected silence/empty audio")
+                        is_silence = True
+                    else:
+                        # Attempt 1: Gemini multimodal primary STT
+                        _dur = 0.0
+                        try:
+                            _ma = (
+                                getattr(event.message, "video_note", None)
+                                or getattr(event.message, "voice", None)
+                                or getattr(event.message, "audio", None)
+                            )
+                            _dur = float(getattr(_ma, "duration", 0) or 0)
+                        except Exception:
+                            pass
 
-                    gemini_text, gemini_err = await _gc.transcribe_audio_gemini_multimodal(
-                        temp_path,
-                        duration_secs=_dur,
-                        is_video_note=is_video_note,
-                    )
-                    if gemini_err is None:
-                        transcribed = gemini_text
+                        gemini_text, gemini_err = await _gc.transcribe_audio_gemini_multimodal(
+                            temp_path,
+                            duration_secs=_dur,
+                            is_video_note=is_video_note,
+                        )
+                        transcribed = None
                         error = None
-                        if transcribed:
+
+                        if gemini_err is None and gemini_text and not blocking_tools.is_silence_or_whisper_hallucination(gemini_text.strip()):
+                            transcribed = gemini_text
                             logger.info("PM STT: Gemini multimodal success (%d chars)", len(transcribed))
                         else:
-                            logger.info("PM STT: Gemini multimodal -> silence")
-                    else:
-                        logger.info(
-                            "PM STT: Gemini failed (%s), falling back to Groq Whisper",
-                            gemini_err,
-                        )
-                        transcribed, error = await blocking_tools.transcribe_audio_async(
-                            temp_path, timeout=60
-                        )
+                            # Если Gemini вернул ошибку, пустой текст или тишину, пробуем Groq Whisper
+                            logger.info(
+                                "PM STT: Gemini did not produce valid speech (err=%s, empty=%s), falling back to Groq Whisper",
+                                gemini_err, gemini_text == "" or (gemini_text and blocking_tools.is_silence_or_whisper_hallucination(gemini_text.strip()))
+                            )
+                            transcribed, error = await blocking_tools.transcribe_audio_async(
+                                temp_path, timeout=60
+                            )
 
-                    if error:
-                        logger.error(f"Audio transcription error: {error}")
-                    elif transcribed:
-                        raw_transcribed = transcribed.strip()
-                        transcribed_text = await blocking_tools.correct_dental_transcription_async(raw_transcribed)
+                        if error:
+                            logger.error(f"Audio transcription error: {error}")
+                        elif transcribed:
+                            raw_transcribed = transcribed.strip()
+                            if blocking_tools.is_silence_or_whisper_hallucination(raw_transcribed):
+                                is_silence = True
+                                logger.info(f"Filtered suspected Whisper silence hallucination: '{raw_transcribed}'")
+                            else:
+                                transcribed_text = await blocking_tools.correct_dental_transcription_async(raw_transcribed)
+                        else:
+                            is_silence = True
             except Exception as audio_err:
                 logger.error(f"Error handling voice note: {audio_err}")
             finally:
@@ -9862,33 +10090,37 @@ async def handle_private_message(bot_client, event):
                         os.remove(temp_path)
                     except Exception:
                         pass
+                prefix = f"{event.message.id}_"
+                try:
+                    if os.path.exists(media_tools.MEDIA_TEMP_DIR):
+                        for fname in os.listdir(media_tools.MEDIA_TEMP_DIR):
+                            if fname.startswith(prefix):
+                                try:
+                                    os.remove(os.path.join(media_tools.MEDIA_TEMP_DIR, fname))
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
             if transcribed_text:
                 text = transcribed_text
-                # Filter common Whisper silence hallucinations
-                silence_hallucinations = {
-                    "you", "thank you", "bye", "подпишитесь",
-                    "продолжение следует", "редактор субтитров", "субтитры",
-                    "youtube", "собачья чушь", "спасибо",
-                    "дима торжок", "dimatorzhok", "dima torzhok",
-                    "субтитры сделал", "синецкая", "перевод субтитров",
-                    "переведено", "озвучено", "тишина", "[тишина]", "тишина.", "тишина...",
-                }
-                clean_transcribed = text.strip().lower().rstrip(".").rstrip(",")
-                if clean_transcribed in silence_hallucinations or (
-                    len(clean_transcribed) < 45 and any(h in clean_transcribed for h in ("дима торжок", "dimatorzhok", "субтитры сделал", "редактор субтитров", "синецкая"))
-                ):
-                    logger.info(f"Filtered suspected Whisper silence hallucination: '{text}'")
-                    silence_reply = (
-                        "📹 <i>(Тишина или фоновый шум в видео) Пожалуйста, говорите громче или напишите текстом.</i>"
-                        if is_video_note else
-                        "🎤 <i>(Тишина или фоновый шум) Пожалуйста, говорите громче или пишите текстом.</i>"
-                    )
-                    await bot_client.send_message(entity=chat_id, message=silence_reply, parse_mode='html')
-                    return
-                header_icon = "📹 <b>Распознано из видео:</b>" if is_video_note else "🎤 <b>Распознано:</b>"
-                await bot_client.send_message(entity=chat_id, message=f"{header_icon} «{text}»", parse_mode='html')
-            else:
+                import blocking_tools
+                if blocking_tools.is_silence_or_whisper_hallucination(text):
+                    is_silence = True
+                else:
+                    header_icon = "📹 <b>Распознано из видео:</b>" if is_video_note else "🎤 <b>Распознано:</b>"
+                    await bot_client.send_message(entity=chat_id, message=f"{header_icon} «{text}»", parse_mode='html')
+
+            if is_silence:
+                silence_reply = (
+                    "📹 <i>Не удалось разобрать голос в видеосообщении из-за шума или тишины. Пожалуйста, повторите или напишите текстом.</i>"
+                    if is_video_note else
+                    "🎤 <i>Не удалось разобрать голос из-за шума или тишины. Пожалуйста, повторите или напишите текстом.</i>"
+                )
+                await bot_client.send_message(entity=chat_id, message=silence_reply, parse_mode='html')
+                return
+
+            if not transcribed_text and not is_silence:
                 fail_reply = (
                     "❌ <i>Не удалось распознать речь в видеосообщении. Пожалуйста, повторите или напишите текстом.</i>"
                     if is_video_note else
@@ -9929,6 +10161,27 @@ async def handle_private_message(bot_client, event):
                             )
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
+
+        # FAST-PATH: SOS и экстренная клиническая помощь в ЛС (Правило MED-06)
+        sos_category = detect_pm_emergency(text)
+        if sos_category and not (text or "").startswith("/"):
+            if user_state and user_state.get("state_type") == "case":
+                await database.clear_user_interactive_state(chat_id)
+                user_state = None
+            sos_text, sos_buttons = format_emergency_response(sos_category)
+            if sos_text:
+                await send_message_chunks_async(
+                    bot_client,
+                    chat_id,
+                    sos_text,
+                    buttons=sos_buttons,
+                    parse_mode='html'
+                )
+                if has_media_intent:
+                    await database.save_pm_message(chat_id, "User", text)
+                await database.save_pm_message(chat_id, "Assistant", sos_text)
+                logger.warning(f"RULE MED-06 SOS Fast-Path triggered for chat_id={chat_id}, type={sos_category}")
+                return
 
         # Natural Language Intent Routing (Zero-Slash Routing)
         if text and not text.startswith("/") and not has_media_intent:
@@ -11371,10 +11624,15 @@ async def handle_private_message(bot_client, event):
             total_size = 0
             for a_ev in album_events:
                 f_obj = getattr(getattr(a_ev, "message", None), "file", None)
-                total_size += (getattr(f_obj, "size", 0) or 0)
+                try:
+                    f_size = getattr(f_obj, 'size', 0)
+                    if isinstance(f_size, (int, float)):
+                        total_size += int(f_size)
+                except (TypeError, ValueError):
+                    pass
 
             MAX_MEDIA_SIZE = 50 * 1024 * 1024  # 50 МБ потолок
-            if total_size > MAX_MEDIA_SIZE:
+            if isinstance(total_size, (int, float)) and total_size > MAX_MEDIA_SIZE:
                 await bot_client.send_message(
                     entity=chat_id,
                     message="⚠️ <i>Медиафайл(ы) превышают 50 МБ. Пожалуйста, сожмите файлы или пришлите их по отдельности.</i>",
@@ -11387,11 +11645,11 @@ async def handle_private_message(bot_client, event):
             temp_paths_to_clean = set()
             status_msg = None
             try:
-                # Отправляем статус ожидания
+                # Отправляем статус ожидания (Этап 1: Скачиваю и подготавливаю снимок)
                 status_text = (
-                    f"📥 <i>Скачиваю и анализирую {len(album_events)} медиафайла(ов)... Подождите немного.</i>"
+                    f"📥 <i>Скачиваю и подготавливаю снимки ({len(album_events)} шт.)...</i>"
                     if len(album_events) > 1
-                    else "📥 <i>Скачиваю и анализирую медиафайл... Подождите немного.</i>"
+                    else "📥 <i>Скачиваю и подготавливаю снимок...</i>"
                 )
                 status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
 
@@ -11414,13 +11672,18 @@ async def handle_private_message(bot_client, event):
                             files_to_analyze.append(temp_path)
 
                 if files_to_analyze:
+                    # Этап 2: Динамический статус зрения и анализа анатомии (ZERO DEAD SCREEN)
+                    if status_msg:
+                        await tg_safety.edit_message(
+                            bot_client, chat_id, status_msg.id,
+                            "🔍 <i>Изучаю анатомию, каналы и рентген-статус...</i>",
+                            timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                            op="edit_message:pm_vision_status", logger=logger,
+                            parse_mode='html',
+                        )
                     # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
                     vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
                     media_description = await vision.describe_image(files_to_analyze, caption=vision_caption, is_passive=False)
-
-                # Удаляем статусное сообщение
-                if status_msg:
-                    await bot_client.delete_messages(chat_id, status_msg.id)
             except Exception as e:
                 logger.error(f"Error analyzing media in PM: {e}")
                 media_error_shown = True
@@ -11432,6 +11695,7 @@ async def handle_private_message(bot_client, event):
                         op="edit_message:pm_media_failed", logger=logger,
                         parse_mode='html',
                     )
+                    status_msg = None
                     if not notified.ok:
                         media_error_shown = False
                         logger.warning(
@@ -11598,6 +11862,27 @@ async def handle_private_message(bot_client, event):
 
         # 5. Сборка индивидуального глубокого промпта
         if media_description:
+            uncaptioned_clinical_directive = ""
+            clean_user_caption = (text or "").strip()
+            if not clean_user_caption or len(clean_user_caption) < 6:
+                uncaptioned_clinical_directive = """
+[КЛИНИЧЕСКИЙ РАЗБОР СНИМКА ПО УМОЛЧАНИЮ (FULL CONCILIUM PROTOCOL)]:
+Врач предоставил рентгенограмму / клинический снимок без уточняющего вопроса. Выдай исчерпывающий, структурированный EBM-разбор консилиума строго по следующим блокам:
+1. <b>Анатомический и рентгенологический статус:</b>
+   • Номер зуба по FDI (11–48) или квадрант.
+   • Анатомия корней и каналов (конфигурация, кривизна, проходимость, подозрение на MB2 / добавочные каналы, состояние обтурации).
+   • Периапикальные ткани: периодонтальная щель, кортикальная пластинка, периапикальный индекс (PAI 1–5), очаги деструкции кости или разрежения.
+   • Краевое прилегание: вторичный кариес, нависающие края пломб/коронок, нарушение биологической ширины, дефект феррула.
+2. <b>Дифференциальный диагноз:</b>
+   • 2–3 наиболее вероятные патологии с анатомическим и рентгенологическим обоснованием (например: Хронический апикальный периодонтит PAI 3 vs Радикулярная киста vs Обострение периодонтита).
+3. <b>Пошаговый EBM-протокол лечения:</b>
+   • Ирригация: 3–5.25% подогретый NaOCl (≥15–20 мл/канал) + 17% ЭДТА (экспозиция 60 сек).
+   • Активация: пассивная ультразвуковая ирригация (PUI) или звуковая активация насадкой 3 цикла по 20 сек.
+   • Обтурация: гидравлическая биокерамика (BioRoot / TotalFill) одиночным конусом ИЛИ непрерывная волна конденсации.
+   • Билдап и реставрация: адгезивный протокол с изоляцией коффердамом, стекловолоконный штифт/билдап, ортопедическое перекрытие коронкой/оверлеем для защиты от верховых расколов корня.
+4. <b>Завершение:</b>
+   • БЕЗ дежурных вопросов! Заканчивай точкой. Ровно 1 вопрос допускается ТОЛЬКО если критически не хватает скрытых клинических данных (тест на витальность / анамнез травмы).
+"""
             length_guideline = (
                 "Разбор клинического снимка. Дай структурированный, исчерпывающий EBM-разбор по существу "
                 "(до 1500–2500 символов, четкие пункты протокола: рентген-статус, дифдиагноз, пошаговая тактика без воды)."
@@ -11634,6 +11919,7 @@ async def handle_private_message(bot_client, event):
 
 Вопрос или подпись пользователя:
 {text or "(без подписи)"}
+{uncaptioned_clinical_directive}
 {rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
@@ -11769,6 +12055,25 @@ async def handle_private_message(bot_client, event):
             "клиндамицин", "флегмон", "асфикс", "госпитализ", "летальн", "смерт", "отравлен"
         )
 
+        # Этап 3: Формирую доказательный протокол лечения (ZERO DEAD SCREEN)
+        if status_msg:
+            await tg_safety.edit_message(
+                bot_client, chat_id, status_msg.id,
+                "🧪 <i>Формирую доказательный протокол лечения...</i>",
+                timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                op="edit_message:pm_protocol_status", logger=logger,
+                parse_mode='html',
+            )
+        elif has_clinical_topic and not is_conversational_turn and not (text or "").startswith("/"):
+            try:
+                status_msg = await bot_client.send_message(
+                    entity=chat_id,
+                    message="🧪 <i>Формирую доказательный протокол лечения...</i>",
+                    parse_mode='html',
+                )
+            except Exception as st_err:
+                logger.debug("Failed to send PM text clinical status: %s", st_err)
+
         async with _safe_typing_action(bot_client, chat_id):
             for attempt in range(max_retries + 1):
                 if attempt > 0:
@@ -11802,7 +12107,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=480)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -11858,7 +12163,7 @@ async def handle_private_message(bot_client, event):
                 c_ctx["kind"] = "pm_cautious_ebm"
                 c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=180)
                 if c_resp and getattr(c_resp, "text", None):
-                    reply_text = c_resp.text.strip()
+                    reply_text = sanitize_clinical_pm_output(c_resp.text.strip())
                 if not reply_text:
                     err_msg = "👨‍⚕️ <i>Коллега, в запросе недостаточно клинических данных для однозначного протокола. Уточните детали случая (снимок/КТ, анамнез).</i>"
                     await bot_client.send_message(entity=chat_id, message=err_msg, parse_mode='html')
@@ -11869,6 +12174,7 @@ async def handle_private_message(bot_client, event):
                     return
 
             reply_text = clean_html_formatting(reply_text)
+            reply_text = sanitize_clinical_pm_output(reply_text)
             reply_text = re.sub(
                 r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*|здравствуйте,?\s*коллег[аи],?\s*|добрый\s+(?:день|вечер),?\s*коллег[аи],?\s*)',
                 '',
@@ -11885,6 +12191,18 @@ async def handle_private_message(bot_client, event):
             tooth_match_pm = re.search(r'\b([1-4][1-8])\b', f"{text or ''} {reply_text}")
             detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
             nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth)
+
+            # Удаляем статусное сообщение прямо перед доставкой итогового ответа
+            if status_msg:
+                try:
+                    await tg_safety.delete_messages(
+                        bot_client, chat_id, [status_msg.id],
+                        timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                        op="delete_message:pm_status_complete", logger=logger,
+                    )
+                    status_msg = None
+                except Exception as del_err:
+                    logger.debug("Failed to delete completed PM status_msg: %s", del_err)
 
             # Отправка развернутого ответа (Этап 1: Быстрый ответ с кнопками NBA)
             await send_message_chunks_async(
@@ -11935,6 +12253,12 @@ async def handle_private_message(bot_client, event):
 
     except Exception as e:
         logger.exception(f"Unexpected error in handle_private_message: {e}")
+    finally:
+        if 'status_msg' in locals() and status_msg:
+            try:
+                await bot_client.delete_messages(chat_id, status_msg.id)
+            except Exception:
+                pass
 
 
 async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_first_name=None):
@@ -11949,6 +12273,18 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     # 1. Проверяем глобальную критику / требование выключить бота
     if await check_and_apply_silence(event, text, getattr(event.message, 'reply_to_msg_id', None)):
         return True
+
+    # 1.1. Перехват критики скорости/работы бота («тупит», «тормозит», «завис», «глючит», «долго отвечает», «бот тупой»)
+    # Врач констатирует задержку или высказывает технический отзыв коллегам в чате.
+    # Бот НЕ должен считать это приглашением поспорить, оправдываться или встревать!
+    _BOT_PERF_CRITIQUE_RE = re.compile(
+        r'(?i)\b(?:тупит|тормозит|завис\w*|глючит|лагает|долго\s+(?:отвечает|думает|грузит|обрабатывает)|'
+        r'(?:бот\s+)?туп(?:ой|ит)|мертв\w*|не\s+отвечает)\b'
+    )
+    if _BOT_PERF_CRITIQUE_RE.search((text or "").lower()):
+        if not has_dental_term(text or "") and "?" not in (text or ""):
+            logger.info("Bot mention triage: suppressed technical critique/speed complaint without clinical question: %r", text)
+            return False
 
     # Тишина проверяется и ЗДЕСЬ. Этот путь был четвёртым и единственным без
     # проверки, и вызывается он ровно тогда, когда основной ассистент промолчал,
@@ -12038,8 +12374,10 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
 Реши: стоит ли боту вступить в разговор с живым ответом?
 
 Отвечай строго одним словом:
-YES — если человек обращается к боту, задаёт вопрос, хочет чем-то помочь, или ждёт реакции.
-NO — если это случайное упоминание, обсуждение другого бота, ругательство, или контекст никак не требует реакции бота.
+YES — если человек обращается к боту, задаёт клинический вопрос, просит совета, зовёт на консилиум или ждёт ответа по делу.
+NO — если это:
+- жалоба или критика скорости/работы («тупит», «тормозит», «завис», «глючит», «долго отвечает», «бот тупой» и т.п.) — это технический отзыв, бот НЕ должен оправдываться, спорить или встревать!
+- случайное упоминание, обсуждение другого бота, ругательство, или контекст не требует ответа бота.
 """
             triage_ctx = {"kind": "bot_mention_triage", "chat_id": chat_id, "thinking_level": "LOW"}
             triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=180)
@@ -12100,6 +12438,10 @@ NO — если это случайное упоминание, обсужден
 7. ЕСЛИ ТЕБЯ СПРАШИВАЮТ "что ты умеешь", коротко перечисли функционал (анализ снимков, энциклопедия, кейсы) и позови в ЛС.
 8. [КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: Справка содержит живые чаты, где могут быть ошибки. Фильтруй через EBM и здравый смысл!]
 9. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — зафиксируй сухой репликой («Понял, молчу.») без извинений и умолкни.
+10. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ САМОБИЧЕВАНИЯ И СПОРОВ О СОФТЕ:
+    Запрещено критиковать софт, серверы, пиковые нагрузки или спорить с врачом («рассчитывать на софт рискованно», «серверы перегружены», «раздутые запросы» и любые подобные оправдания/самобичевания СТРОГО ЗАПРЕЩЕНЫ).
+    Если вопрос касается скорости работы — отвечай с достоинством, спокойно и с клинической пользой:
+    «Да, глубокий анализ снимка с проверкой анатомии и рисков занимает до 60–90 секунд, так как модель пошагово рассчитывает протокол. В ЛС ответ уже готов!» (или «ответ формируется в ЛС»). Никакого нытья про технику и ненадежность!
 
 ВАЖНОЕ ПРАВИЛО ФОКУСА — ОТВЕТ СТРОГО НА ВЫДЕЛЕННОЕ СООБЩЕНИЕ:
 Вся переписка выше дана тебе исключительно для понимания контекста!
@@ -12609,7 +12951,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                     break
 
         if target_media_ids and not target_media_desc:
-            for _ in range(7):
+            for _ in range(24):
                 fetched_desc = await database.get_media_description(target_media_ids[0])
                 if fetched_desc and str(fetched_desc).strip() not in ("-", "None", "MEDIA_UNAVAILABLE", "[медиа — ошибка анализа]", "[Клинический снимок/рентген]"):
                     target_media_desc = str(fetched_desc).strip()
@@ -12834,7 +13176,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                 status_ctx["image_urls"] = multimodal_image_urls
             if target_media_desc:
                 status_ctx["media_description"] = target_media_desc
-            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=480)
+            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
             if error or not response or not getattr(response, "text", None):
                 logger.warning("Group direct ask generation error on attempt %s: %s", attempt, error)
@@ -14325,6 +14667,12 @@ async def handle_quiz_callback(bot_client, event):
         await handle_nba_callback(bot_client, event, data_str)
         return
 
+    # CHAIRSIDE CLINICAL SUITE & TOOLS
+    if data_str.startswith(("chairside:", "fdi:", "aae:", "files:", "file_sys:", "pres_st:", "pres_eval:", "preserve:", "anes_sos:", "sos:anesthesia_buffering", "sos:file_matrix", "file_frag:", "pharma:")):
+        import chairside_tools
+        if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
+            return
+
     # 1. ОБЩИЙ НАВИГАЦИОННЫЙ ДИСПЕТЧЕР nav:* И menu:*
     if data_str.startswith("nav:") or data_str.startswith("menu:"):
         nav_target = data_str.split(":", 1)[1]
@@ -15531,8 +15879,14 @@ async def handle_quiz_callback(bot_client, event):
     if data_str.startswith("proto:view:"):
         import protocol_extractor
         try:
-            proto_id = int(data_str[11:].strip())
-            proto = await database.get_clinical_protocol_by_id(proto_id)
+            proto_arg = data_str[11:].strip()
+            proto = None
+            if proto_arg.isdigit():
+                proto = await database.get_clinical_protocol_by_id(int(proto_arg))
+            if not proto:
+                found = await database.search_clinical_protocols(proto_arg, limit=1)
+                if found:
+                    proto = found[0]
             if proto:
                 msg_text, btns = protocol_extractor.format_protocol_view(proto)
                 await edit_callback_message(bot_client, event, msg_text,
@@ -15783,6 +16137,10 @@ async def handle_quiz_callback(bot_client, event):
         return
 
     if not data_str.startswith("qa:"):
+        try:
+            await event.answer()
+        except Exception:
+            pass
         return
 
     parts = data_str.split(":")
@@ -15843,7 +16201,7 @@ async def handle_quiz_callback(bot_client, event):
 
             new_lines = []
             opt_regex = re.compile(r'^(?:<b>|\*\*)?([A-D])[:.](?:</b>|\*\*)?\s*(.*)', re.IGNORECASE)
-            suffix_regex = re.compile(r'\s*\(\d+\s*гол\S*\s*\|\s*\d+%\)\s*$', re.IGNORECASE)
+            suffix_regex = re.compile(r'(?:\s+|^)\(\d+\s*гол\S*\s*\|\s*\d+%\)\s*$', re.IGNORECASE)
 
             for line in lines:
                 stripped = line.strip()
