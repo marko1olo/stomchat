@@ -733,7 +733,7 @@ async def scheduler_task(bot_client):
 
     while True:
         try:
-            now = datetime.now()
+            now = assistant.get_msk_now()
 
             # 1. ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ (Daily)
             daily_key = ("daily", now.date())
@@ -1232,30 +1232,36 @@ async def pm_ping_scheduler_task(bot_client):
     logger.info("📅 Планировщик пингов в ЛС активен.")
     while True:
         try:
-            await asyncio.wait_for(
-                assistant.check_and_send_pm_pings(bot_client),
-                timeout=PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "PM pings timed out after %ss — проход прерван, цикл продолжается",
-                PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
+            if assistant.is_ping_quiet_hours():
+                logger.debug("pm_ping_scheduler_task: quiet hours active in Europe/Moscow (22:00-09:00), skipping cycle.")
+            else:
+                try:
+                    await asyncio.wait_for(
+                        assistant.check_and_send_pm_pings(bot_client),
+                        timeout=PING_PHASE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "PM pings timed out after %ss — проход прерван, цикл продолжается",
+                        PING_PHASE_TIMEOUT_SECONDS,
+                    )
+                except Exception as e:
+                    logger.error(f"Error in pm_ping_scheduler_task (PM pings): {e}")
 
-        try:
-            await asyncio.wait_for(
-                assistant.check_and_send_group_activity_pings(bot_client),
-                timeout=PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "Group activity pings timed out after %ss — проход прерван, цикл продолжается",
-                PING_PHASE_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.error(f"Error in pm_ping_scheduler_task (group pings): {e}")
+                try:
+                    await asyncio.wait_for(
+                        assistant.check_and_send_group_activity_pings(bot_client),
+                        timeout=PING_PHASE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Group activity pings timed out after %ss — проход прерван, цикл продолжается",
+                        PING_PHASE_TIMEOUT_SECONDS,
+                    )
+                except Exception as e:
+                    logger.error(f"Error in pm_ping_scheduler_task (group pings): {e}")
+        except Exception as loop_err:
+            logger.error(f"Global error in pm_ping_scheduler_task loop: {loop_err}")
 
         await asyncio.sleep(3600)  # Проверка каждый час
 
@@ -3207,6 +3213,9 @@ async def handle_private_message(event):
         if not assistant.check_user_cooldown(chat_id, chat_id, "pm_busy_status", seconds=15):
             async def send_busy_hint():
                 try:
+                    await asyncio.sleep(1.0)
+                    if not _PM_BURST_WORKERS.get(chat_id):
+                        return
                     await tg_safety.send_message(
                         bot_client, chat_id,
                         "⏳ <i>Принял, обрабатываю ваш предыдущий запрос. Отвечу по порядку...</i>",

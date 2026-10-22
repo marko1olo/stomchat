@@ -2127,9 +2127,12 @@ async def handle_pharma_command(bot_client, event, arg: str = ""):
     if clean_arg:
         if any(k in clean_arg for k in ["профилактик", "эндокардит", "aha", "клапан"]):
             allergy = any(k in clean_arg for k in ["аллерги", "пенициллин"])
-            clean_norm = clean_arg.replace(',', '.')
-            num_match = re.search(r"\b\d{1,3}(?:\.\d{1,2})?\b", clean_norm)
-            w = float(num_match.group(0)) if num_match else 70.0
+            parsed_w = ac.parse_weight_from_text(clean_arg)
+            if parsed_w is not None and 3.0 <= parsed_w <= 300.0:
+                w = parsed_w
+            else:
+                num_match = re.search(r"(?<!\d)\d{1,3}(?:[.,]\d{1,2})?(?!\d)", clean_arg)
+                w = float(num_match.group(0).replace(',', '.')) if num_match else 70.0
             is_child = w < 40.0 or any(k in clean_arg for k in ["ребен", "дет"])
             res = calculate_antibiotic(w, is_child=is_child, allergy_penicillin=allergy, is_prophylaxis=True)
             buttons = [
@@ -2138,10 +2141,10 @@ async def handle_pharma_command(bot_client, event, arg: str = ""):
             ]
             await _safe_send_chairside(bot_client, event, res.patient_message_text, buttons=buttons)
             return
-        clean_norm = clean_arg.replace(',', '.')
-        num_match = re.search(r"\b\d{1,3}(?:\.\d{1,2})?\b", clean_norm)
-        if num_match and not any(k in clean_arg for k in ["декса", "отек", "боль"]):
-            weight = float(num_match.group(0))
+
+        parsed_w = ac.parse_weight_from_text(clean_arg)
+        if parsed_w is not None and 3.0 <= parsed_w <= 300.0 and not any(k in clean_arg for k in ["декса", "отек", "боль"]):
+            weight = parsed_w
             allergy = any(k in clean_arg for k in ["аллерги", "пенициллин"])
             res = calculate_antibiotic(weight, allergy_penicillin=allergy)
             analg = calculate_analgesia()
@@ -2210,7 +2213,7 @@ async def handle_fdi_command(bot_client, event, arg: str = ""):
     clean_arg = arg.strip()
     import re
     if clean_arg:
-        num_match = re.search(r"\b(1[1-8]|2[1-8]|3[1-8]|4[1-8])\b", clean_arg)
+        num_match = re.search(r"(?<!\d)(1[1-8]|2[1-8]|3[1-8]|4[1-8])(?!\d)", clean_arg)
         if num_match:
             tooth_num = int(num_match.group(0))
             anat = get_tooth_anatomy(tooth_num)
@@ -2296,7 +2299,7 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
         ]
         await _safe_send_chairside(bot_client, event, card, buttons=buttons)
         return True
-    elif cmd_name in ("/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция"):
+    elif cmd_name in ("/preserve", "/феррул", "/сохранение"):
         await handle_preserve_command(bot_client, event, arg)
         return True
     return False

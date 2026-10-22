@@ -24,6 +24,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import config
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_gping_")
@@ -98,7 +102,7 @@ async def seed_chat_and_users(user_ids):
             sender_name=f"Врач {i}",
             sender_username=None,
             text=f"обсуждаем уступ, реплика {i}",
-            date=datetime.now(),
+            date=assistant.get_msk_now(),
         )
 
 
@@ -130,7 +134,7 @@ async def run():
                     if str(rec.get("last_activity", "")).startswith("2000-01-01")]
     check("ни одной записи с эпохой", epoch_seeded == [], f"эпоха у {epoch_seeded}")
 
-    now = datetime.now()
+    now = assistant.get_msk_now()
     fresh = []
     for uid, rec in pings.items():
         try:
@@ -145,7 +149,7 @@ async def run():
 
     print("\n[3] Молчащий трое суток получает приглашение")
     reset()
-    silent = (datetime.now() - timedelta(days=3)).isoformat()
+    silent = (assistant.get_msk_now() - timedelta(days=3, hours=1)).isoformat()
     write_state({str(u): {"last_activity": silent, "ping_sent": False} for u in users})
     await assistant.check_and_send_group_activity_pings(BOT)
     check("приглашение ушло", len(SENT) >= 1, f"got {SENT}")
@@ -167,7 +171,7 @@ async def run():
 
     print("\n[6] Недавний групповой пинг держит 48-часовой кулдаун")
     reset()
-    recent_ping = (datetime.now() - timedelta(hours=5)).isoformat()
+    recent_ping = (assistant.get_msk_now() - timedelta(hours=5)).isoformat()
     write_state({str(u): {"last_activity": silent, "last_group_ping": recent_ping} for u in users})
     await assistant.check_and_send_group_activity_pings(BOT)
     check("ни одного приглашения", SENT == [], f"got {SENT}")

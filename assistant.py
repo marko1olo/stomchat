@@ -61,6 +61,32 @@ BOT_ID = None
 # имя оставался литерал, зашитый в main.py.
 BOT_USERNAME = None
 
+try:
+    from zoneinfo import ZoneInfo
+    MSK_TZ = ZoneInfo("Europe/Moscow")
+except Exception:
+    MSK_TZ = timezone(timedelta(hours=3))
+
+
+def get_msk_now(now_dt=None, naive: bool = True) -> datetime:
+    """
+    Возвращает текущее время строго в часовом поясе Europe/Moscow (MSK, UTC+3).
+    Если naive=True (по умолчанию), возвращает naive datetime с московскими настенными часами
+    для 100% совместимости со всеми операциями вычитания и сериализации в assistant_state.json.
+    Если передан now_dt с tzinfo — конвертирует в MSK.
+    Если передан наивный now_dt — трактует его как московское время.
+    """
+    if now_dt is None:
+        dt = datetime.now(MSK_TZ)
+    elif hasattr(now_dt, "tzinfo") and now_dt.tzinfo is not None:
+        dt = now_dt.astimezone(MSK_TZ)
+    else:
+        dt = now_dt
+
+    if naive and hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
 
 def get_known_bot_ids():
     """Возвращает множество известных ID ботов (динамический BOT_ID + tg_safety + окружение + конфиг)."""
@@ -1467,23 +1493,16 @@ def calculate_anesthesia_instant(text: str) -> str | None:
     # 2. Определение возраста/статуса
     is_child = bool(re.search(r'\b(?:ребен|детск|ребёнк|малыш|детям)\w*', lower))
 
-    # 3. Извлечение веса
-    weight = None
-    weight_match = re.search(r'\b(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*)\b', lower)
-    if weight_match:
-        try:
-            weight = float(weight_match.group(1).replace(',', '.'))
-        except ValueError:
-            weight = None
-    else:
-        num_match = re.search(r'(?:на|для|вес|весом)\s+(\d+(?:[.,]\d+)?)\b', lower)
-        if num_match:
+    # 3. Извлечение веса через клинический санитизатор (защита от номеров зубов FDI и АД)
+    import anesthesia_calc as _ac_module
+    weight = _ac_module.parse_weight_from_text(lower)
+    if weight is None:
+        weight_match = re.search(r'(?<!\d)(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*)(?!\d)', lower)
+        if weight_match:
             try:
-                val = float(num_match.group(1).replace(',', '.'))
-                if 5 <= val <= 250:
-                    weight = val
+                weight = float(weight_match.group(1).replace(',', '.'))
             except ValueError:
-                pass
+                weight = None
 
     if weight is None:
         if drug == "articaine":
@@ -1788,7 +1807,7 @@ def build_nba_markup(topic_query="", has_media=False, tooth_num=None):
     # Если в запросе или ответе фигурирует конкретный зуб (FDI 11-48), добавляем целевую кнопку
     resolved_tooth = tooth_num
     if not resolved_tooth and tag:
-        t_match = re.search(r'\b([1-4][1-8])\b', tag)
+        t_match = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', tag)
         if t_match:
             resolved_tooth = int(t_match.group(1))
 
@@ -4101,6 +4120,44 @@ def is_negative_feedback(text):
     return bool(_SILENCE_DEMAND_RE.search(text_lower))
 
 
+_OPT_OUT_EXACT_WORDS = {
+    "стоп", "stop", "хватит", "отстань", "отстаньте", "замолчи",
+    "хватит писать", "перестань писать", "перестань", "не беспокой",
+    "не беспокойте", "без напоминаний", "стоп спам",
+}
+
+_OPT_OUT_PATTERNS = re.compile(
+    r"(?i)\b("
+    r"не\s+пиши(?:те)?(?:\s+мне)?|"
+    r"не\s+надо\s+(?:мне\s+)?писать|"
+    r"не\s+присылай(?:те)?(?:\s+мне)?(?:\s+ничего)?|"
+    r"перестань(?:те)?\s+писать|"
+    r"хватит\s+писать|"
+    r"хватит\s+спамить|"
+    r"хватит\s+напоминать|"
+    r"хватит\s+сообщений|"
+    r"(?:отключи|выключи|отключите|выключите|убери|уберите)\s+(?:проактив\w*|пинг\w*|напоминани\w*|сообщени\w*|рассылк\w*)|"
+    r"стоп\s+спам|"
+    r"не\s+спамь(?:те)?"
+    r")\b"
+)
+
+
+def is_ping_opt_out_request(text: str) -> bool:
+    """
+    Проверяет, требует ли врач в ЛС прекратить проактивные сообщения / пинги / напоминания.
+    Безопасен для клинического диалога, но мгновенно отключает проактивность при 'стоп', 'хватит', 'не пиши'.
+    """
+    if not text:
+        return False
+    cleaned = text.strip().lower().rstrip(".!,?")
+    if cleaned in _OPT_OUT_EXACT_WORDS:
+        return True
+    if _OPT_OUT_PATTERNS.search(cleaned):
+        return True
+    return is_negative_feedback(cleaned)
+
+
 _CLOSER_PATTERNS = re.compile(
     r"^(?:спасибо(?:чки|\s+большое|\s+огромное)?|"
     r"благодарю(?: вас)?(?:,\s*помогло)?|"
@@ -5027,23 +5084,16 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
         lower
     ))
 
-    # Извлечение веса
-    weight = None
-    w_match = re.search(r'\b(\d+(?:[.,]\d+)?)\s*(?:кг|kg|килограмм\w*)\b', lower)
-    if w_match:
-        try:
-            weight = float(w_match.group(1).replace(',', '.'))
-        except ValueError:
-            weight = None
-    else:
-        w_alt = re.search(r'\b(?:вес[а-яё]*|на|для)\s+(\d{1,3}(?:[.,]\d{1,2})?)\b', lower)
-        if w_alt:
+    # Извлечение веса через клинический санитизатор (защита от номеров зубов FDI)
+    import anesthesia_calc as _ac_module
+    weight = _ac_module.parse_weight_from_text(lower)
+    if weight is None:
+        w_match = re.search(r'(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:кг|kg|килограмм\w*)(?!\d)', lower)
+        if w_match:
             try:
-                val = float(w_alt.group(1).replace(',', '.'))
-                if 4 <= val <= 180:
-                    weight = val
+                weight = float(w_match.group(1).replace(',', '.'))
             except ValueError:
-                pass
+                weight = None
 
     if weight is not None and weight < 40:
         is_pediatric = True
@@ -10010,7 +10060,7 @@ def is_clinical_consultation_query(text: str, has_media: bool, has_dental_topic:
     if has_dental_topic:
         return True
 
-    tooth_match = re.search(r"\b(?:[1-4][1-8]|[5-8][1-5])\b", text_clean) or re.search(r"\bзуб\w*", text_clean)
+    tooth_match = re.search(r"(?<!\d)(?:[1-4][1-8]|[5-8][1-5])(?!\d)", text_clean) or re.search(r"\bзуб\w*", text_clean)
     medical_markers = (
         "боль", "болит", "отек", "пломб", "кариес", "пульпит", "периодонт",
         "имплант", "коронк", "снимок", "кт", "клкт", "рентген", "уступ",
@@ -10122,36 +10172,81 @@ async def handle_private_message_bundle(bot_client, events_burst):
 def detect_pm_emergency(text: str) -> Optional[str]:
     """
     Высокоточный детектор острых экстренных состояний у стоматологического кресла (Rule MED-06).
+    Устойчив к кириллическим падежам, глагольным формам, беглым гласным и клиническому сленгу врачей.
     """
     if not text:
         return None
     norm = text.lower()
-    
-    # 1. Анафилаксия / анафилактический шок / аллергический коллапс
-    if re.search(r'\b(анафилак|анафилактическ|anaphylaxis)\w*', norm) or \
-       (re.search(r'\b(шок|коллапс|удушь|отек\s+квинке|отёк\s+квинке)\b', norm) and re.search(r'\b(анестез|анестетик|артикаин|ультракаин|лидокаин|укол|в кресле|на приеме|на приёме)\b', norm)):
+
+    # 1. Анафилаксия / острый коллапс / шок / потеря сознания
+    if re.search(r'\b(?:анафилак\w*|anaphylaxis)\b', norm):
         return "anaphylaxis"
-    
-    # 2. Гипохлоритовая авария / NaOCl за апекс
-    if re.search(r'\b(гипохлорит\w*\s+авар\w*|авар\w*\s+гипохлорит\w*)\b', norm) or \
-       (re.search(r'\b(гипохлорит|naocl|белизн)\w*', norm) and re.search(r'\b(за\s+апекс|в\s+периодонт|в\s+кость|раздут|ожог|отек\s+лиц|отёк\s+лиц|гематом|вывел|вывели|выдавлен)\w*', norm)):
+
+    acute_cond = re.search(
+        r'\b(?:шок\w*|коллапс\w*|удуш[ьяе]\w*|отек\w*\s+квинке|отёк\w*\s+квинке|'
+        r'потер[ял|яла|яли]\s+сознани\w*|без\s+сознани\w*|перестал\w*\s+дышать|'
+        r'остановк\w*\s+дыхани\w*|ласт-синдром|last)\b',
+        norm
+    )
+    dental_context = re.search(
+        r'\b(?:анестез\w*|анестетик\w*|артикаин\w*|ультракаин\w*|септонест\w*|'
+        r'убистезин\w*|лидокаин\w*|скандонест\w*|мепивакаин\w*|укол\w*|инъекци\w*|'
+        r'в\s+кресле|на\s+прием\w*|на\s+приём\w*)\b',
+        norm
+    )
+    if acute_cond and dental_context:
+        return "anaphylaxis"
+
+    # 2. Гипохлоритовая авария / NaOCl за апекс / за верхушку
+    if re.search(r'\b(?:гипохлорит\w*\s+авар\w*|авар\w*\s+гипохлорит\w*|naocl\s+accident)\b', norm):
         return "hypochlorite"
-    
+
+    chem_agent = re.search(r'\b(?:гипохлорит\w*|naocl|белизн\w*|хлорк\w*)\b', norm)
+    chem_disaster = re.search(
+        r'\b(?:за\s+апекс\w*|за\s+верхушк\w*|в\s+периодонт\w*|в\s+кость\w*|раздут\w*|ожог\w*|'
+        r'отек\w*\s+лиц\w*|отёк\w*\s+лиц\w*|гематом\w*|вывел\w*|выдавлен\w*|промыл\w*\s+за|'
+        r'вытек\w*\s+за|боль\s+при\s+ирригаци\w*)\b',
+        norm
+    )
+    if chem_agent and chem_disaster:
+        return "hypochlorite"
+
     # 3. Перфорация (дна полости, корня, фуркации)
-    if re.search(r'\b(перфорац|стрип-перфорац|strip-перфорац)\w*', norm) and \
-       re.search(r'\b(дн[аоеё]|полост|корн|фуркац|стенк|канал|бором|кровит|кровь)\w*', norm):
+    has_perf_verb = re.search(r'\b(?:перфор\w*|стрип-перфор\w*|strip-перфор\w*|пробил\w*)\b', norm)
+    has_perf_loc = re.search(r'\b(?:дн[аоеё]\w*|полост\w*|кор[её]?н\w*|фуркац\w*|стенк\w*|канал\w*|бором\w*|кровит\w*|кровь\w*)\b', norm)
+    if has_perf_verb and has_perf_loc:
         return "perforation"
-    
-    # 4. Перелом инструмента / отломок файла за апекс
-    if re.search(r'\b(файлолом|сломал\w*\s+файл|отломил\w*\s+файл|сепарац\w*\s+файл|сломал\w*\s+инструмент|отломил\w*\s+инструмент)\b', norm) or \
-       (re.search(r'\b(файл|инструмент|отломок|обломок)\w*', norm) and re.search(r'\b(за\s+апекс|в\s+канал|верхушк|периапикал)\w*', norm) and re.search(r'\b(сломал|отломал|сепарац|застрял|хруст)\w*', norm)):
+
+    # 4. Перелом инструмента / отломок файла
+    if re.search(r'\b(?:файлолом\w*|сепарац\w*\s+(?:файл\w*|инструмент\w*))\b', norm):
         return "file_fracture"
-    
+
+    break_pair = re.search(
+        r'\b(?:сломал\w*|отломал\w*|отломил\w*|обломал\w*|поломк\w*|хрустнул\w*)\s+(?:файл\w*|инструмент\w*|лентуло|ример\w*|к-файл\w*)\b',
+        norm
+    ) or re.search(
+        r'\b(?:файл\w*|инструмент\w*|лентуло|ример\w*|к-файл\w*)\s+(?:сломал\w*|отломал\w*|отломил\w*|обломал\w*|застрял\w*|хрустнул\w*)\b',
+        norm
+    )
+    if break_pair:
+        return "file_fracture"
+
+    has_tool_fragment = re.search(r'\b(?:файл\w*|инструмент\w*|отломок\w*|обломок\w*|фрагмент\w*)\b', norm)
+    has_canal_loc = re.search(r'\b(?:за\s+апекс\w*|в\s+канал\w*|верхушк\w*|периапикал\w*)\b', norm)
+    has_break_action = re.search(r'\b(?:сломал\w*|отломал\w*|отломил\w*|обломал\w*|сепарац\w*|застрял\w*|хруст\w*)\b', norm)
+    if has_tool_fragment and has_canal_loc and has_break_action:
+        return "file_fracture"
+
     # 5. Флегмона / ангина Людвига / отек дна рта / асфиксия
-    if re.search(r'\b(флегмон|ангин\w*\s+людвиг|людвиг)\w*', norm) or \
-       (re.search(r'\b(отек|отёк|инфильтрат)\w*', norm) and re.search(r'\b(дна\s+полости\s+рта|дна\s+рта|шеи|подчелюстн)\w*', norm) and re.search(r'\b(асфикси|задыха|трудно\s+дышать|стридор|стеноз)\w*', norm)):
+    if re.search(r'\b(?:флегмон\w*|ангин\w*\s+людвиг\w*|людвиг\w*)\b', norm):
         return "phlegmon_airway"
-        
+
+    airway_edema = re.search(r'\b(?:отек\w*|отёк\w*|инфильтрат\w*|припухлост\w*)\b', norm)
+    airway_loc = re.search(r'\b(?:дна\s+полости\s+рта|дна\s+рта|шеи|подчелюстн\w*)\b', norm)
+    airway_danger = re.search(r'\b(?:асфикси\w*|задыха\w*|трудно\s+дышать|тяжело\s+дышать|стридор\w*|стеноз\w*)\b', norm)
+    if airway_edema and airway_loc and airway_danger:
+        return "phlegmon_airway"
+
     return None
 
 
@@ -10399,6 +10494,7 @@ async def handle_private_message(bot_client, event):
 
         # Обновляем ID активного запроса для инвалидации устаревших фоновых задач дополнения
         _ACTIVE_PM_REQUESTS[chat_id] = time.time()
+        pm_user_msg_saved = False
 
         # 0. Мгновенное распознавание текстовых кнопок меню ДО rate limit (Zero Delay Navigation)
         mapped_cmd = TEXT_MENU_COMMAND_MAP.get(text.lower())
@@ -10414,6 +10510,7 @@ async def handle_private_message(bot_client, event):
                 if text:
                     try:
                         await database.save_pm_message(chat_id, "User", text)
+                        pm_user_msg_saved = True
                     except Exception as save_err:
                         logger.error(f"Failed to persist PM message: {save_err}")
 
@@ -10457,13 +10554,13 @@ async def handle_private_message(bot_client, event):
         # получать и ЛС-пинги, и приглашения в чат. Флаг гасит только исходящую
         # инициативу бота — на вопросы он отвечать не перестаёт, поэтому цена
         # ложного срабатывания невелика, а цена пропуска — навязчивые DM.
-        if text and is_negative_feedback(text):
+        if text and is_ping_opt_out_request(text):
             try:
                 set_ping_opt_out(chat_id, text)
                 await tg_safety.send_message(
                     bot_client,
                     chat_id,
-                    "Понял, сам писать больше не буду. Вопросы задавайте когда угодно — на них отвечаю всегда.",
+                    "Принято, проактивные сообщения и напоминания полностью отключены. Вы всегда можете обратиться ко мне с любым клиническим вопросом — я на связи.",
                     timeout=10.0,
                 )
             except Exception as opt_err:
@@ -10629,8 +10726,9 @@ async def handle_private_message(bot_client, event):
             or image_document is not None
         )
 
-        if text and not text.startswith("/") and not has_media_intent:
+        if not pm_user_msg_saved and text and not text.startswith("/") and not has_media_intent:
             await database.save_pm_message(chat_id, "User", text)
+            pm_user_msg_saved = True
 
         # 0.5. Interactive Simulator State Routing & Abort Check
         user_state = await database.get_user_interactive_state(chat_id)
@@ -12268,20 +12366,30 @@ async def handle_private_message(bot_client, event):
                 return
 
         # Persist media clinical case into PM history for subsequent turns
-        if has_media:
-            if media_description:
+        if not pm_user_msg_saved:
+            if has_media and media_description:
                 pm_user_entry = f"[Прикреплён клинический снимок: {media_description}]"
                 if text:
                     pm_user_entry += f"\nВопрос врача: {text}"
                 try:
                     await database.save_pm_message(chat_id, "User", pm_user_entry)
+                    pm_user_msg_saved = True
                 except Exception as pm_save_err:
                     logger.error(f"Failed to persist PM media user message: {pm_save_err}")
             elif text and not text.startswith("/"):
                 try:
                     await database.save_pm_message(chat_id, "User", text)
+                    pm_user_msg_saved = True
                 except Exception as pm_save_err:
                     logger.error(f"Failed to persist PM fallback user message: {pm_save_err}")
+            elif has_media_intent and not has_media:
+                # [REDTEAM FIX] Если медиа упало по таймауту или сетевому сбою, не теряем контекст врача!
+                entry = f"[Клинический снимок (сбой загрузки)]: {text}" if text else "[Клинический снимок (сбой загрузки)]"
+                try:
+                    await database.save_pm_message(chat_id, "User", entry)
+                    pm_user_msg_saved = True
+                except Exception as pm_save_err:
+                    logger.error(f"Failed to persist fallback user entry: {pm_save_err}")
 
         # Проверка намерения записи на консультацию / связи с куратором (Адиля / администрация)
         text_lower = (text or "").lower()
@@ -12652,6 +12760,12 @@ async def handle_private_message(bot_client, event):
 
                 if error:
                     logger.error("PM Gemini generation error on attempt %s: %s", attempt, error)
+                    if ticker:
+                        try:
+                            await ticker.finish()
+                            ticker = None
+                        except Exception:
+                            pass
                     # Если генерация упала после всех ретраев каскада (включая бэкофф 30с, 60с, 90с)
                     await bot_client.send_message(
                         entity=chat_id,
@@ -12729,7 +12843,7 @@ async def handle_private_message(bot_client, event):
             if has_dental_topic or wiki_corpus:
                 words = re.findall(r'[а-яёa-z]{4,}', (text or '').lower())
                 nba_tag = words[0] if words else "dental"
-            tooth_match_pm = re.search(r'\b([1-4][1-8])\b', f"{text or ''} {reply_text}")
+            tooth_match_pm = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{text or ''} {reply_text}")
             detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
             nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth)
 
@@ -12768,7 +12882,12 @@ async def handle_private_message(bot_client, event):
                 sender = getattr(event, "sender", None)
                 sender_username = getattr(sender, "username", "") or ""
                 sender_first_name = getattr(sender, "first_name", "") or ""
-                user_msg_summary = text or (f"Снимок: {media_description}" if media_description else "")
+                if media_description and text:
+                    user_msg_summary = f"[Клинический снимок: {media_description}]\nВопрос врача: {text}"
+                elif media_description:
+                    user_msg_summary = f"[Клинический снимок: {media_description}]"
+                else:
+                    user_msg_summary = text or ""
                 import runtime_guard
                 runtime_guard.create_task(
                     user_memory.update_clinician_memory_async(
@@ -17421,35 +17540,26 @@ async def handle_group_calc(bot_client, event, calc_arg: str = ""):
     logger.info("Sent group calc menu card to chat %s", chat_id)
 
 
-PING_QUIET_START_HOUR = 22   # с 22:00 …
-PING_QUIET_END_HOUR = 9      # … до 09:00 проактивных сообщений не шлём
+PING_QUIET_START_HOUR = 22   # с 22:00 по Москве (Europe/Moscow, UTC+3) — тихие часы
+PING_QUIET_END_HOUR = 9      # … до 09:00 по Москве проактивных сообщений не шлём
 MAX_PINGS_PER_CYCLE = 5      # чтобы джоб не занимал LLM-шлюз на минуты
 MAX_PING_FAILURES = 3        # после стольких неудач подряд перестаём долбиться
-# Потолок на пачку приглашений в чат. Без него бралось 20% активных кандидатов:
-# при 749 врачах это до 150 личных сообщений подряд без единой паузы. По журналам
-# доминирующий отказ у этого бота — обрыв связи (51 723 события), но FloodWait по
-# ним НЕ измерить: telethon спит внутри вызова молча, а его логгер приглушён до
-# ERROR. Так что потолок ставится по конструкции, а не по замеру, и это сказано
-# прямо.
+# Окно клинического рабочего времени для ЛС follow-up (проактивный интерес по пациенту):
+# Только в дневное рабочее время (11:00-17:00 MSK), чтобы никогда не тревожить врача на отдыхе
+PM_PING_WORK_START_HOUR = 11  # 11:00 MSK
+PM_PING_WORK_END_HOUR = 17    # 17:00 MSK
+
+# Окно давности клинического случая: строго от 3 до 7 дней (72-168 ч)
+MIN_CLINICAL_PING_DELAY_HOURS = 72    # минимум 3 дня (дать время на динамику симптомов)
+MAX_CLINICAL_PING_DELAY_HOURS = 168   # максимум 7 дней (после недели кейс неактуален)
+
 GROUP_PING_BATCH_MAX = 25
-# Пауза между отправками в пачке: Telegram ограничивает не только объём, но и
-# частоту. 25 сообщений по секунде — это 25 секунд на цикл, приемлемо для джоба.
 GROUP_PING_DELAY_SECONDS = 1.0
 
 
 def select_ping_targets(candidates, batch_max=None):
     """
     Кому из кандидатов уходит приглашение в этом цикле.
-
-    Вынесено из тела рассылки отдельной функцией, чтобы потолок проверялся
-    поведением, а не наличием константы: проверка «константа объявлена и разумна»
-    проходила и после того, как применение потолка убрали, — то есть не значила
-    ничего.
-
-    Берём случайные 20% (минимум один), но не больше потолка. Без потолка при 749
-    врачах уходило до 150 личных сообщений подряд, настолько быстро, насколько
-    успевает сеть. Урезание пишется в журнал: разослать 25 из 150 и промолчать
-    значит соврать о покрытии.
     """
     if not candidates:
         return []
@@ -17469,17 +17579,27 @@ def select_ping_targets(candidates, batch_max=None):
 
 def is_ping_quiet_hours(now=None):
     """
-    Ночное окно, когда проактивные сообщения запрещены.
+    Ночное окно (тихие часы), когда любые проактивные сообщения СТРОГО запрещены.
 
-    Планировщик крутится круглосуточно, и "как продвигается твой случай?"
-    или "🔥 в чате горячо спорят" прилетало в 03:40. Часовой пояс конкретного
-    врача нам неизвестен, поэтому ориентируемся на локальное время бота —
-    аудитория чата в основном с ним в одном поясе.
+    Время вычисляется СТРОГО в часовом поясе аудитории врачей — Europe/Moscow (UTC+3),
+    независимо от системного часового пояса сервера VPS (UTC, CET, EST и т.д.).
+    С 22:00 до 09:00 MSK любые проактивные инициации заблокированы на 100%.
     """
-    hour = (now or datetime.now()).hour
+    msk_dt = get_msk_now(now)
+    hour = msk_dt.hour
     if PING_QUIET_START_HOUR > PING_QUIET_END_HOUR:  # окно переходит через полночь
         return hour >= PING_QUIET_START_HOUR or hour < PING_QUIET_END_HOUR
     return PING_QUIET_START_HOUR <= hour < PING_QUIET_END_HOUR
+
+
+def is_pm_ping_work_hours(now=None):
+    """
+    Разрешено ли отправлять персональный клинический follow-up по пациенту.
+    Разрешено строго в дневное рабочее время: 11:00 - 17:00 MSK.
+    """
+    msk_dt = get_msk_now(now)
+    hour = msk_dt.hour
+    return PM_PING_WORK_START_HOUR <= hour < PM_PING_WORK_END_HOUR
 
 
 def commit_pm_ping(chat_id_str, **fields):
@@ -17517,8 +17637,13 @@ async def check_and_send_pm_pings(bot_client):
         logger.debug("check_and_send_pm_pings skipped: PM proactive broadcast disabled in config.")
         return
     try:
+        # Строгая защита: тихие часы 22:00-09:00 MSK и рабочее клиническое окно 11:00-17:00 MSK
         if is_ping_quiet_hours():
-            logger.debug("PM pings skipped: quiet hours.")
+            logger.debug("PM pings skipped: quiet hours (Europe/Moscow 22:00-09:00).")
+            return
+
+        if not is_pm_ping_work_hours():
+            logger.debug("PM pings skipped: outside clinical work hours (11:00-17:00 MSK).")
             return
 
         state = load_state()
@@ -17526,23 +17651,19 @@ async def check_and_send_pm_pings(bot_client):
         if not pings:
             return
 
-        now = datetime.now()
-        updated = False
+        now = get_msk_now()
         sent_this_cycle = 0
 
         for chat_id_str, info in list(pings.items()):
             try:
                 if sent_this_cycle >= MAX_PINGS_PER_CYCLE:
-                    logger.info(f"PM ping cycle limit reached ({MAX_PINGS_PER_CYCLE}); rest will be handled next hour.")
+                    logger.info(f"PM ping cycle limit reached ({MAX_PINGS_PER_CYCLE}); rest will be handled next cycle.")
                     break
 
                 # Отписавшихся не трогаем никогда.
                 if info.get("pings_opted_out"):
                     continue
 
-                # Заблокировавший бота пользователь раньше получал свежий
-                # 60-секундный LLM-вызов и попытку отправки КАЖДЫЙ час
-                # бесконечно: ping_sent выставлялся только после успеха.
                 if info.get("ping_failures", 0) >= MAX_PING_FAILURES:
                     continue
 
@@ -17550,109 +17671,113 @@ async def check_and_send_pm_pings(bot_client):
                 ping_sent = info.get("ping_sent", False)
                 unanswered_pings = info.get("unanswered_pings", 0)
 
-                # Если пользователь пропустил даже 1 пинг — никогда больше не навязываемся
+                # АНТИСПАМ: если пользователь пропустил даже 1 пинг — никогда больше не навязываемся!
                 if unanswered_pings >= 1 or ping_sent:
                     continue
 
-                # Редкий график: первый и единственный вежливый фоллоу-ап через 7 дней (168 ч)
-                delay_hours = 168
+                hours_since = (now - last_activity).total_seconds() / 3600.0
 
-                # Если прошла неделя с момента переписки и пинг еще не отправлялся
-                if now - last_activity > timedelta(hours=delay_hours):
-                    chat_id = int(chat_id_str)
-                    days_ago = 7
-                    logger.info(
-                        f"Generating proactive DM ping for chat_id={chat_id} "
-                        f"(unanswered={unanswered_pings}, delay={delay_hours}h)..."
-                    )
+                # Если прошло больше 7 дней — клинический момент упущен, архивируем кейс без спама
+                if hours_since > MAX_CLINICAL_PING_DELAY_HOURS:
+                    commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    continue
 
-                    # Загружаем последние сообщения и профиль, чтобы сформировать контекстный живой пинг
-                    history = await database.get_last_pm_messages(chat_id, limit=6)
-                    context_str = "\n".join([f"{m['sender_name']}: {m['text']}" for m in history])
+                # Клиническое окно: строго от 3 до 7 дней (72-168 часов)
+                if hours_since < MIN_CLINICAL_PING_DELAY_HOURS:
+                    continue
 
-                    user_profile = await database.get_user_profile(chat_id)
-                    portrait = user_profile.get("profile_portrait") or ""
-                    portrait_hint = f"\nКлинический профиль врача: {portrait}\n" if portrait else ""
+                chat_id = int(chat_id_str)
+                days_ago = max(3, int(hours_since // 24))
+                logger.info(
+                    f"Evaluating clinical follow-up for chat_id={chat_id} "
+                    f"(silence={hours_since:.1f}h / {days_ago}d ago)..."
+                )
 
-                    prompt = f"""Ты — клинический консультант доказательного сообщества "StomChat". 
-Врач обращался к тебе в ЛС {days_ago} дней назад.
-{portrait_hint}
-История вашей последней переписки:
-{context_str}
+                # Загружаем последние 10 сообщений для полного клинического контекста
+                history = await database.get_last_pm_messages(chat_id, limit=10)
+                if not history:
+                    commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    continue
 
-Задачи:
-1. Проанализируй переписку: обсуждался ли в ней РЕАЛЬНЫЙ клинический случай, сложный пациент, снимки, методика или выбор тактики лечения (например: эндодонтия зуба, боль после вмешательства, скол, фиксация, анестезия сложного пациента, имплантат)?
-2. ЕСЛИ реального клинического кейса НЕ БЫЛО (врач просто открывал меню, нажимал кнопки, тестировал команды или задавал пустые общие вопросы) — верни СТРОГО ОДНО СЛОВО: NONE. Запрещено навязываться и слать пустые приветствия!
-3. ЕСЛИ обсуждался реальный клинический случай — напиши строго 1 короткую, сдержанную реплику по существу клинической динамики (например: «Как динамика по зубу 3.6?»). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать обращение «Коллега» и дежурные навязчивые вопросы.
-4. Тон: сдержанный, уважительный, профессиональный. Без панибратства, без фамильярности («ты куда пропал»), без спама.
-5. Разметка: только HTML (<b>жирный</b>, <i>курсив</i>).
-"""
-                    status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+                context_str = "\n".join([f"{m['sender_name']}: {m['text']}" for m in history])
 
-                    if not error and response and getattr(response, "text", None):
-                        reply_text = response.text.strip()
-                        if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:
-                            logger.info(f"PM ping for chat_id={chat_id}: no clinical case to follow up (NONE).")
-                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                user_profile = await database.get_user_profile(chat_id)
+                portrait = user_profile.get("profile_portrait") or ""
+                portrait_hint = f"\nКлинический профиль врача: {portrait}\n" if portrait else ""
+
+                prompt = f"""Ты — клинический консультант доказательного сообщества \"StomChat\".\n"
+                    f"Врач обращался к тебе в ЛС {days_ago} дней назад.\n"
+                    f"{portrait_hint}\n"
+                    f"История вашей последней переписки:\n"
+                    f"{context_str}\n\n"
+                    f"Задачи:\n"
+                    f"1. Проанализируй переписку: обсуждался ли в ней РЕАЛЬНЫЙ клинический случай конкретного пациента, снимки, методика или выбор тактики лечения (например: эндодонтия зуба, боль после вмешательства/пломбировки, глубокий кариес на грани пульпы, подозрение на перфорацию, скол, анестезия, осложнение после удаления)?\n"
+                    f"2. ЕСЛИ реального клинического кейса НЕ БЫЛО (врач просто открывал меню, нажимал кнопки, тестировал команды, смотрел калькулятор, здоровался или задавал пустые общие вопросы) — верни СТРОГО ОДНО СЛОВО: NONE. Запрещено навязываться и слать пустые приветствия!\n"
+                    f"3. ЕСЛИ обсуждался реальный клинический случай — напиши строго 1 короткую, сдержанную, заботливую реплику по существу клинической динамики (например: «Как динамика по зубу 4.6 у пациента? Боль утихла?» или «Как самочувствие пациента после обработки каналов?»).\n"
+                    f"4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+                    f"   • Использовать обращение «Коллега»\n"
+                    f"   • Фразы «ты куда пропал», «давно не общались», «я ждал ответа», «как дела»\n"
+                    f"   • Любые дежурные навязчивые вопросы, спам, лекции\n"
+                    f"5. Тон: сдержанный, уважительный, профессиональный.\n"
+                    f"6. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>).\n"""
+                status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+
+                if not error and response and getattr(response, "text", None):
+                    reply_text = response.text.strip()
+                    if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:
+                        logger.info(f"PM ping for chat_id={chat_id}: no clinical case to follow up (NONE).")
+                        commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                        continue
+
+                    reply_text = clean_html_formatting(reply_text)
+
+                    fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
+                    if fresh.get("pings_opted_out") or fresh.get("ping_sent", False):
+                        continue
+                    if get_msk_now() - _parse_state_dt(fresh.get("last_activity")) < timedelta(hours=MIN_CLINICAL_PING_DELAY_HOURS):
+                        logger.info(f"User {chat_id} became active while ping was generating. Skipping.")
+                        continue
+
+                    try:
+                        await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
+                        await database.save_pm_message(chat_id, "Assistant", reply_text)
+                        commit_pm_ping(
+                            chat_id_str,
+                            ping_sent=True,
+                            ping_failures=0,
+                            unanswered_pings=unanswered_pings + 1,
+                            last_ping_time=get_msk_now().isoformat(),
+                        )
+                        sent_this_cycle += 1
+                    except ValueError as ve:
+                        if "Could not find the input entity" in str(ve):
+                            logger.warning(f"User {chat_id} entity not found. Removing from PM pings.")
+                            drop_pm_ping(chat_id_str)
                             continue
-
-                        reply_text = clean_html_formatting(reply_text)
-
-                        # Генерация заняла десятки секунд. Перечитываем запись:
-                        # врач мог написать сам, пока мы сочиняли ему "ты пропал".
-                        fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
-                        if fresh.get("pings_opted_out") or fresh.get("ping_sent", False):
-                            continue
-                        if datetime.now() - _parse_state_dt(fresh.get("last_activity")) <= timedelta(hours=delay_hours):
-                            logger.info(f"User {chat_id} became active while ping was generating. Skipping.")
-                            continue
-
-                        try:
-                            await bot_client.send_message(entity=chat_id, message=reply_text, parse_mode='html')
-                            await database.save_pm_message(chat_id, "Assistant", reply_text)
-                            # Коммитим сразу, увеличивая счетчик неотвеченных пингов
-                            commit_pm_ping(
-                                chat_id_str,
-                                ping_sent=True,
-                                ping_failures=0,
-                                unanswered_pings=unanswered_pings + 1,
-                                last_ping_time=datetime.now().isoformat(),
-                            )
-                            sent_this_cycle += 1
-                        except ValueError as ve:
-                            if "Could not find the input entity" in str(ve):
-                                logger.warning(f"User {chat_id} entity not found. Removing from PM pings.")
-                                drop_pm_ping(chat_id_str)
-                                continue
-                            raise
-                        except Exception as send_err:
-                            if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
-                                wait_seconds = tg_safety.flood_wait_seconds(send_err)
-                                logger.warning(
-                                    "DM ping hit FloodWait chat_id=%s wait=%ss — счётчик "
-                                    "НЕ увеличен (это наша скорость, не врач), рассылка "
-                                    "остановлена до следующего цикла",
-                                    chat_id, wait_seconds,
-                                )
-                                break
-                            failures = info.get("ping_failures", 0) + 1
-                            commit_pm_ping(chat_id_str, ping_failures=failures)
+                        raise
+                    except Exception as send_err:
+                        if tg_safety.classify(send_err) == tg_safety.KIND_FLOOD:
+                            wait_seconds = tg_safety.flood_wait_seconds(send_err)
                             logger.warning(
-                                f"Failed to deliver DM ping to {chat_id} "
-                                f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                                "DM ping hit FloodWait chat_id=%s wait=%ss — рассылка остановлена до следующего цикла",
+                                chat_id, wait_seconds,
                             )
-                            continue
+                            break
+                        failures = info.get("ping_failures", 0) + 1
+                        commit_pm_ping(chat_id_str, ping_failures=failures)
+                        logger.warning(
+                            f"Failed to deliver DM ping to {chat_id} "
+                            f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                        )
+                        continue
 
-                        updated = True
-                        logger.info(f"Proactive DM ping sent to chat_id={chat_id}: '{reply_text}'")
-                    else:
-                        logger.error(f"Failed to generate DM ping for chat_id={chat_id}: {error}")
-            except Exception as e:
-                logger.error(f"Error processing DM ping for user {chat_id_str}: {e}")
-
-        if updated:
-            logger.info(f"PM ping cycle finished: {sent_this_cycle} ping(s) delivered.")
+                    logger.info(f"Proactive clinical DM ping sent to chat_id={chat_id}: '{reply_text}'")
+                else:
+                    logger.error(f"Failed to generate DM ping for chat_id={chat_id}: {error}")
+            except Exception as single_err:
+                logger.error(f"Error processing PM ping candidate {chat_id_str}: {single_err}")
+                continue
     except Exception as g_err:
         logger.error(f"Global error in check_and_send_pm_pings: {g_err}")
 
@@ -17672,7 +17797,7 @@ async def check_and_send_group_activity_pings(bot_client):
         state = load_state()
         pings = state.setdefault("pm_pings", {})
         changed = False
-        now = datetime.now()
+        now = get_msk_now()
         for uid in active_ids:
             uid_str = str(uid)
             if uid_str not in pings:
@@ -17736,7 +17861,8 @@ async def check_and_send_group_activity_pings(bot_client):
                 # АНТИСПАМ: если врач уже получил групповой пинг и не ответил,
                 # замораживаем рассылку на 30 дней, чтобы не спамить каждые 48 часов
                 unanswered_gp = info.get("unanswered_group_pings", 0)
-                if unanswered_gp >= 1 and (now - last_gp < timedelta(days=30)):
+                # АНТИСПАМ: если врач уже получил групповой пинг и не ответил — никогда больше не спамить!
+                if unanswered_gp >= 1:
                     continue
             last_act = _parse_state_dt(info.get("last_activity"))
             if now - last_act < timedelta(days=GROUP_ACTIVITY_SILENCE_DAYS):

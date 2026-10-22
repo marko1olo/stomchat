@@ -522,6 +522,72 @@ def run_history_budget_and_markup_balancing_tests():
     check("Безопасная обрезка заканчивается точкой (граница предложения)", clipped_sum.endswith("."))
 
 
+def run_anti_inversion_and_attribution_integrity_tests():
+    print("\n[Suite 9] Anti-Inversion & Clinical Fact Attribution Integrity")
+
+    # Test 9.1: Inverted facts copied from assistant lectures are rejected
+    hallucinated_facts = [
+        "Владеет методикой проведения торусальной анестезии с соблюдением протокола безопасности (аспирационная проба, костный контакт).",
+        "владеет техникой мандибулярной анестезии с использованием ориентиров",
+        "Внедрение в протокол диагностики обязательного использования прикусных снимков (bite-wing)",
+        "Активное использование методов трансиллюминации и оптического увеличения",
+        "Приоритет критического анализа анамнеза перед лечением",
+        "Ценит перфекционизм и следование строгим литературным протоколам",
+        # Valid facts that must stay:
+        "Интересуется ориентирами и протоколом торусальной анестезии",
+        "Уточняет возможность фиксации стекловолоконного штифта на Fuji Plus",
+        "Работает на микроскопе Leica M320",
+    ]
+    cleaned = user_memory.clean_clinician_facts(hallucinated_facts)
+    check("Anti-Inversion: факт 'Владеет методикой... торусальной анестезии с соблюдением протокола безопасности' отсечен",
+          not any("торусальн" in f.lower() and "владеет" in f.lower() for f in cleaned))
+    check("Anti-Inversion: факт про ориентиры анестезии отсечен",
+          not any("ориентиров" in f.lower() and "владеет" in f.lower() for f in cleaned))
+    check("Anti-Inversion: лекция бота про bite-wing и трансиллюминацию отсечена",
+          not any("прикусных снимков" in f.lower() or "трансиллюминаци" in f.lower() for f in cleaned))
+    check("Anti-Inversion: лекция бота про перфекционизм и анамнез отсечена",
+          not any("перфекционизм" in f.lower() or "критического анализа" in f.lower() for f in cleaned))
+    check("Anti-Inversion: валидные факты интереса и опыта сохранены",
+          len(cleaned) == 3 and any("Интересуется" in f for f in cleaned) and any("Leica M320" in f for f in cleaned))
+
+    # Test 9.2: Section preservation for Interests and Clinical Experience
+    dossier_with_interests = """Специализация: Терапевт-эндодонтист
+
+Арсенал и оснащение:
+• Дентальный микроскоп Zumax, ультразвук Woodpecker.
+
+Клинический опыт и методики:
+• Первичное эндодонтическое лечение моляров с гипохлоритной ирригацией 3%.
+
+Интересующие темы и клинические вопросы:
+• Интересуется протоколом проведения торусальной анестезии и ориентирами вкола.
+• Уточняет протокол фиксации стекловолоконных штифтов при разрушении ниже уровня десны.
+
+Кейсы:
+• Зуб 3.6: витальная пульпотомия с биокерамикой."""
+
+    deduped = user_memory.deduplicate_clinical_summary(dossier_with_interests)
+    check("Досье: раздел 'Интересующие темы и клинические вопросы:' сохранен",
+          "Интересующие темы и клинические вопросы:" in deduped)
+    check("Досье: раздел 'Клинический опыт и методики:' сохранен",
+          "Клинический опыт и методики:" in deduped)
+    check("Досье: содержание вопросов сохранено",
+          "торусальной анестезии" in deduped and "стекловолоконных штифтов" in deduped)
+    check("Досье: кейс 3.6 сохранен", "3.6" in deduped)
+
+    # Test 9.3: Prompt inspection - ensures anti-inversion directives exist in source
+    import inspect
+    um_src = inspect.getsource(user_memory.update_clinician_memory_async)
+    check("Промпт ЛС: содержит директиву изоляции <assistant_utterance>",
+          "СЛОВА ИИ-АССИСТЕНТА, А НЕ ВРАЧА" in um_src)
+    check("Промпт ЛС: содержит запрет инверсии 'вопрос -> владение'",
+          "ЗАЩИТА ОТ ИНВЕРСИИ ФАКТОВ" in um_src)
+    check("Промпт ЛС: содержит запрет специализации по теме вопроса",
+          "на основе темы одиночного вопроса" in um_src)
+    check("Промпт ЛС: содержит раздел 'Интересующие темы и клинические вопросы:'",
+          "Интересующие темы и клинические вопросы:" in um_src)
+
+
 def main():
     print("=" * 70)
     print("  RED TEAM INQUISITOR AUDIT: MEMORY & PERSISTENT STATE INVARIANTS")
@@ -536,6 +602,7 @@ def main():
     run_fdi_teeth_and_case_tracking_tests()
     run_offtopic_and_noise_sanitization_tests()
     run_history_budget_and_markup_balancing_tests()
+    run_anti_inversion_and_attribution_integrity_tests()
 
     print("\n" + "=" * 70)
     print(f"  ИТОГОВЫЙ СТАТУС: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
