@@ -9999,17 +9999,39 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         formatted_message = sanitize_clinical_pm_output(formatted_message)
         formatted_message = re.sub(r'\n{3,}', '\n\n', formatted_message.strip())
 
-        # Валидация качества фонового дополнения рецензентом
-        supp_ok, supp_reason = await check_response_quality(
-            [f"Врач: {user_question}", f"Ассистент: {initial_answer}"],
-            supplement_text,
-            invited=False
-        )
+        # Проверка полезной длины очищенного текста после санитизации
+        body_only = formatted_message.replace("🔍 <b>Дополнительные клинические нюансы:</b>", "").strip()
+        if not body_only or len(body_only) < 25:
+            logger.info(f"PM supplement discarded after sanitization (too short or empty) for chat_id={chat_id}")
+            return
+
+        # Валидация качества фонового дополнения рецензентом с жестким таймаутом
+        try:
+            supp_ok, supp_reason = await asyncio.wait_for(
+                check_response_quality(
+                    [f"Врач: {user_question}", f"Ассистент: {initial_answer}"],
+                    supplement_text,
+                    invited=False
+                ),
+                timeout=35.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"PM supplement reviewer timed out (>35s) for chat_id={chat_id}: skipping follow-up")
+            return
+        except Exception as supp_rev_err:
+            logger.warning(f"PM supplement reviewer failed for chat_id={chat_id}: {supp_rev_err}")
+            return
+
         if not supp_ok:
             logger.info("PM supplement rejected by reviewer (%s): skipping follow-up", supp_reason)
             return
 
-        await tg_safety.send_message(
+        # Повторная проверка контекста непосредственно перед отправкой после валидатора
+        if _ACTIVE_PM_REQUESTS.get(chat_id) != req_id:
+            logger.info(f"PM supplement aborted before send: context changed during quality review for chat_id={chat_id}")
+            return
+
+        sent = await tg_safety.send_message(
             bot_client,
             chat_id,
             formatted_message,
@@ -10017,6 +10039,10 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
             timeout=20.0,
             logger=logger,
         )
+        if not sent or not sent.ok:
+            logger.warning(f"PM supplement delivery failed for chat_id={chat_id}: {getattr(sent, 'reason', 'unknown')}")
+            return
+
         await database.save_pm_message(chat_id, "Assistant", formatted_message)
         logger.info(f"Successfully sent PM supplement follow-up to chat_id={chat_id}")
     except Exception as e:
@@ -10494,7 +10520,6 @@ async def handle_private_message(bot_client, event):
 
         # Обновляем ID активного запроса для инвалидации устаревших фоновых задач дополнения
         _ACTIVE_PM_REQUESTS[chat_id] = time.time()
-        pm_user_msg_saved = False
 
         # 0. Мгновенное распознавание текстовых кнопок меню ДО rate limit (Zero Delay Navigation)
         mapped_cmd = TEXT_MENU_COMMAND_MAP.get(text.lower())
@@ -10507,13 +10532,6 @@ async def handle_private_message(bot_client, event):
             cooldown_secs = check_user_cooldown(chat_id, chat_id, "pm_chat", seconds=5)
             if cooldown_secs > 0:
                 logger.info(f"PM rate limit pacing for chat_id={chat_id}, waiting={cooldown_secs}s")
-                if text:
-                    try:
-                        await database.save_pm_message(chat_id, "User", text)
-                        pm_user_msg_saved = True
-                    except Exception as save_err:
-                        logger.error(f"Failed to persist PM message: {save_err}")
-
                 # Мягкий статус, если задержка заметна (>= 2с) и недавно не уведомляли
                 if cooldown_secs >= 2 and not check_user_cooldown(chat_id, chat_id, "pm_rate_notice", seconds=15):
                     try:
@@ -10726,9 +10744,19 @@ async def handle_private_message(bot_client, event):
             or image_document is not None
         )
 
-        if not pm_user_msg_saved and text and not text.startswith("/") and not has_media_intent:
-            await database.save_pm_message(chat_id, "User", text)
-            pm_user_msg_saved = True
+        # ЕДИНАЯ ТОЧКА СОХРАНЕНИЯ ВХОДЯЩИХ СООБЩЕНИЙ ВРАЧА В ИСТОРИЮ (РОВНО 1 РАЗ)
+        user_pm_msg_id = None
+        if not text.startswith("/"):
+            if has_media_intent:
+                pm_user_entry = f"[Прикреплён клинический снимок]\nВопрос врача: {text}" if text else "[Прикреплён клинический снимок]"
+            else:
+                pm_user_entry = text
+
+            if pm_user_entry:
+                try:
+                    user_pm_msg_id = await database.save_pm_message(chat_id, "User", pm_user_entry)
+                except Exception as save_err:
+                    logger.error(f"Failed to persist PM message in primary entrypoint for chat_id={chat_id}: {save_err}")
 
         # 0.5. Interactive Simulator State Routing & Abort Check
         user_state = await database.get_user_interactive_state(chat_id)
@@ -10778,8 +10806,7 @@ async def handle_private_message(bot_client, event):
                     buttons=sos_buttons,
                     parse_mode='html'
                 )
-                if has_media_intent:
-                    await database.save_pm_message(chat_id, "User", text)
+                # Сообщение врача уже гарантированно зафиксировано в единой точке входа выше
                 await database.save_pm_message(chat_id, "Assistant", sos_text)
                 logger.warning(f"RULE MED-06 SOS Fast-Path triggered for chat_id={chat_id}, type={sos_category}")
                 return
@@ -10931,12 +10958,7 @@ async def handle_private_message(bot_client, event):
                             parse_mode='html',
                         )
 
-            # Сохраняем действие врача (включая описание снимка/голоса) в историю сообщений ЛС
-            try:
-                await database.save_pm_message(chat_id, "User", text)
-            except Exception as e_save:
-                logger.warning("Failed to save PM message for case action: %s", e_save)
-
+            # Действие врача уже надежно сохранено в единой точке входа в pm_messages
             await handle_interactive_case_step(bot_client, chat_id, text, user_state)
             return
 
@@ -12365,31 +12387,18 @@ async def handle_private_message(bot_client, event):
                     )
                 return
 
-        # Persist media clinical case into PM history for subsequent turns
-        if not pm_user_msg_saved:
-            if has_media and media_description:
-                pm_user_entry = f"[Прикреплён клинический снимок: {media_description}]"
-                if text:
-                    pm_user_entry += f"\nВопрос врача: {text}"
-                try:
-                    await database.save_pm_message(chat_id, "User", pm_user_entry)
-                    pm_user_msg_saved = True
-                except Exception as pm_save_err:
-                    logger.error(f"Failed to persist PM media user message: {pm_save_err}")
-            elif text and not text.startswith("/"):
-                try:
-                    await database.save_pm_message(chat_id, "User", text)
-                    pm_user_msg_saved = True
-                except Exception as pm_save_err:
-                    logger.error(f"Failed to persist PM fallback user message: {pm_save_err}")
-            elif has_media_intent and not has_media:
-                # [REDTEAM FIX] Если медиа упало по таймауту или сетевому сбою, не теряем контекст врача!
-                entry = f"[Клинический снимок (сбой загрузки)]: {text}" if text else "[Клинический снимок (сбой загрузки)]"
-                try:
-                    await database.save_pm_message(chat_id, "User", entry)
-                    pm_user_msg_saved = True
-                except Exception as pm_save_err:
-                    logger.error(f"Failed to persist fallback user entry: {pm_save_err}")
+        # Обогащаем первично сохраненную запись врача детальным описанием снимка от vision-модели
+        if has_media and media_description:
+            enriched_pm_entry = f"[Прикреплён клинический снимок: {media_description}]"
+            if text:
+                enriched_pm_entry += f"\nВопрос врача: {text}"
+            try:
+                if user_pm_msg_id:
+                    await database.update_pm_message_text(user_pm_msg_id, enriched_pm_entry)
+                else:
+                    await database.save_pm_message(chat_id, "User", enriched_pm_entry)
+            except Exception as pm_save_err:
+                logger.error(f"Failed to enrich PM media user message for chat_id={chat_id}: {pm_save_err}")
 
         # Проверка намерения записи на консультацию / связи с куратором (Адиля / администрация)
         text_lower = (text or "").lower()

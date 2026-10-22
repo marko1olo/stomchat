@@ -1474,9 +1474,21 @@ async def get_recent_messages_for_dedup(chat_id=None, limit=50):
 async def save_pm_message(user_id, sender_name, text):
     def operation():
         with _connection() as db:
-            db.execute(
+            cur = db.execute(
                 "INSERT INTO pm_messages (user_id, sender_name, text) VALUES (?, ?, ?)",
                 (user_id, sender_name, text)
+            )
+            return cur.lastrowid
+    return await _run_db(operation)
+
+
+async def update_pm_message_text(message_id, new_text):
+    """Обновляет текст существующей записи в pm_messages по id (например, обогащение описанием снимка)."""
+    def operation():
+        with _connection() as db:
+            db.execute(
+                "UPDATE pm_messages SET text = ? WHERE id = ?",
+                (new_text, message_id)
             )
     return await _run_db(operation)
 

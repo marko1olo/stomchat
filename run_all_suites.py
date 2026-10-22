@@ -31,6 +31,9 @@ tests = [
     "tests/test_interactive_case_quiz_inquisitor.py",
     "tests/test_concurrency_ram_inquisitor.py",
     "tests/test_pm_flow_resiliency_redteam.py",
+    "tests/test_ping_policy.py",
+    "tests/test_group_ping_job.py",
+    "tests/test_pm_persistence_inquisitor.py",
 ]
 
 all_ok = True
