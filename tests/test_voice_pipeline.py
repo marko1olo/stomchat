@@ -38,6 +38,7 @@ config.SOURCE_CHAT_ID = TEST_CHAT_ID
 import database
 import main
 import assistant
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
 import blocking_tools
 from telethon.tl import types
 

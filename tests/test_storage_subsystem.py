@@ -1,3 +1,4 @@
+import pytest
 """
 test_storage_subsystem.py: Тестирование подсистемы хранения (db_worker, backup_db, database).
 
@@ -178,6 +179,7 @@ def test_backup_and_wal_checkpoint():
                         pass
 
 
+@pytest.mark.asyncio
 async def test_async_database_integration():
     print("\n[4] Проверка интеграции database.py с db_worker")
     tmp = tempfile.mktemp(suffix=".db")

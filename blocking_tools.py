@@ -581,13 +581,30 @@ _SUBPROCESS_SEMAPHORE = None
 
 
 def _get_subprocess_semaphore():
-    global _SUBPROCESS_SEMAPHORE
-    if _SUBPROCESS_SEMAPHORE is None:
-        _SUBPROCESS_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
-    return _SUBPROCESS_SEMAPHORE
+    try:
+        import runtime_guard
+        return runtime_guard.get_subprocess_semaphore()
+    except Exception:
+        global _SUBPROCESS_SEMAPHORE
+        if _SUBPROCESS_SEMAPHORE is None:
+            _SUBPROCESS_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
+        return _SUBPROCESS_SEMAPHORE
 
 
 async def _run_json_tool(action, payload, timeout=None):
+    try:
+        import runtime_guard
+        if not runtime_guard.enforce_memory_headroom():
+            _throttled(
+                logging.WARNING,
+                f"mem_shedding:{action}",
+                "подпроцесс отклонён из-за критического давления RAM action=%s",
+                action,
+            )
+            return None, f"{action} rejected: critical host memory pressure"
+    except Exception:
+        pass
+
     async with _get_subprocess_semaphore():
         return await _run_json_tool_guarded(action, payload, timeout=timeout)
 

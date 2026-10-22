@@ -348,6 +348,63 @@ class TestVoiceMediaInquisitor(unittest.TestCase):
             "Промыли зуб 36 гипохлоритом"
         )
 
+    def test_media_download_timeout_invariants(self):
+        """Вектор 4: Инварианты таймаутов на download_media (потолок 35с, предотвращение зависания очереди)."""
+        import assistant
+        self.assertLessEqual(assistant.PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS, 35)
+        self.assertGreaterEqual(assistant.PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS, 5)
+        self.assertLessEqual(media_tools.MEDIA_DOWNLOAD_TIMEOUT_SECONDS, 35.0)
+
+    def test_guaranteed_temp_media_cleanup_on_timeout_and_errors(self):
+        """Вектор 5: Гарантированная очистка временных файлов и отсутствие утечек диска."""
+        import tempfile
+        test_dir = tempfile.mkdtemp(prefix="test_temp_media_")
+        orig_dir = media_tools.MEDIA_TEMP_DIR
+        try:
+            media_tools.MEDIA_TEMP_DIR = test_dir
+            # Имитируем:
+            # 1. Завершенное скачивание (конкретный путь)
+            f_done = os.path.join(test_dir, "pm_999_.jpg")
+            with open(f_done, "wb") as f:
+                f.write(b"full_image_data")
+
+            # 2. Оборванное по таймауту/ошибке скачивание (Telethon создал файл, но путь не вернул)
+            f_part = os.path.join(test_dir, "pm_1000_.part")
+            with open(f_part, "wb") as f:
+                f.write(b"partial_data")
+
+            # 3. Извлеченный первый кадр из видео (cv2.imwrite)
+            f_frame = os.path.join(test_dir, "pm_1001_.mp4.jpg")
+            with open(f_frame, "wb") as f:
+                f.write(b"frame_data")
+
+            # 4. Посторонний файл, который не должен задеваться
+            f_other = os.path.join(test_dir, "other_unrelated_file.txt")
+            with open(f_other, "wb") as f:
+                f.write(b"keep_me")
+
+            # Проверяем комплексную очистку по путям и префиксам (как в блоке finally)
+            removed = media_tools.cleanup_temp_files(
+                {f_done},
+                ["pm_1000_", "pm_1001_"]
+            )
+            self.assertEqual(removed, 3)
+            self.assertFalse(os.path.exists(f_done))
+            self.assertFalse(os.path.exists(f_part))
+            self.assertFalse(os.path.exists(f_frame))
+            self.assertTrue(os.path.exists(f_other))
+        finally:
+            media_tools.MEDIA_TEMP_DIR = orig_dir
+            for fn in os.listdir(test_dir):
+                try:
+                    os.remove(os.path.join(test_dir, fn))
+                except Exception:
+                    pass
+            try:
+                os.rmdir(test_dir)
+            except Exception:
+                pass
+
 
 if __name__ == "__main__":
     suite = unittest.TestLoader().loadTestsFromTestCase(TestVoiceMediaInquisitor)

@@ -208,5 +208,6 @@ if FAIL:
 def test_vocab_checks():
     assert not FAIL, f"Провалено: {', '.join(FAIL)}"
 
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
 

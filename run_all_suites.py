@@ -29,6 +29,8 @@ tests = [
     "tests/test_llm_load_balance_inquisitor.py",
     "tests/test_redteam_group_safety.py",
     "tests/test_interactive_case_quiz_inquisitor.py",
+    "tests/test_concurrency_ram_inquisitor.py",
+    "tests/test_pm_flow_resiliency_redteam.py",
 ]
 
 all_ok = True

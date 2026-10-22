@@ -55,6 +55,17 @@ def checkpoint_wal(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
 async def checkpoint_wal_async(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
     """Асинхронный сброс WAL через рабочий поток базы данных с контролем статуса busy."""
     return await _run_db(lambda: checkpoint_wal(max_retries=max_retries, retry_delay=retry_delay))
+
+def shrink_memory_sync() -> bool:
+    """Выполняет PRAGMA shrink_memory для освобождения неиспользуемых страниц кэша SQLite в ОС."""
+    try:
+        with _connection() as db:
+            db.execute("PRAGMA shrink_memory;")
+        return True
+    except Exception as exc:
+        logger.debug("PRAGMA shrink_memory failed: %s", exc)
+        return False
+
 @contextmanager
 def _connection():
     db = _connect()

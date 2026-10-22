@@ -41,6 +41,10 @@ for _stream in (sys.stdout, sys.stderr):
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_superpowers_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import config
 config.DB_PATH = os.path.join(_TMPDIR, "test_superpowers.db")
 
@@ -636,7 +640,7 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 'sos': set(assistant.CLINICAL_SOS_CARDS.keys()) | {'ai', 'random'},
                 'trans': set(assistant.PATIENT_TRANSLATION_CARDS.keys()) | {'ai', 'random'},
                 'vs': set(assistant.MATERIAL_BATTLE_CARDS.keys()) | {'ai', 'random'},
-                'calc': {'articaine', 'mepivacaine', 'lidocaine'},
+                'calc': {'articaine', 'mepivacaine', 'lidocaine', 'naocl', 'taper', 'torque'},
                 'nav': {'main', 'sos', 'record', 'rx', 'concilium', 'translate', 'vs', 'wiki'}
             }
             total_card_count = 0

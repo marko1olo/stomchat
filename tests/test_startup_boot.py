@@ -253,6 +253,7 @@ async def run_sync_checks():
     import sqlite3
     db_conn = sqlite3.connect(config.DB_PATH)
     db_conn.execute("DELETE FROM messages WHERE msg_id >= 500000;")
+    db_conn.execute("INSERT OR IGNORE INTO messages (msg_id, sender_id, text, date) VALUES (100, 1, 'baseline', '2026-01-01 00:00:00');")
     db_conn.commit()
     db_conn.close()
 
@@ -340,6 +341,13 @@ async def run_media_checks():
     async def iter_messages(*args, **kwargs):
         for message in messages:
             yield message
+
+    import sqlite3
+    db_conn = sqlite3.connect(config.DB_PATH)
+    db_conn.execute("DELETE FROM messages WHERE msg_id >= 700000;")
+    db_conn.execute("INSERT OR IGNORE INTO messages (msg_id, sender_id, text, date) VALUES (100, 1, 'baseline', '2026-01-01 00:00:00');")
+    db_conn.commit()
+    db_conn.close()
 
     real_client = main.client
     real_start = main.start_media_analysis_workers

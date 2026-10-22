@@ -2,6 +2,7 @@
 Тест прогрессивного бэкоффа (30с, 60с, 90с) при вылете всех ключей/моделей для ЛС и группы.
 """
 import asyncio
+import os
 import sys
 
 for stream in (sys.stdout, sys.stderr):
@@ -10,7 +11,11 @@ for stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+import tempfile
 import blocking_tools as B
+import runtime_guard
+
+runtime_guard.SUMMARY_STATUS_PATH = os.path.join(tempfile.gettempdir(), "test_status.json")
 
 PASS, FAIL = [], []
 

@@ -33,6 +33,7 @@ import database
 import assistant
 import user_memory
 import reaction_engine
+import chairside_tools
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -2794,7 +2795,7 @@ async def handle_new_message(event):
                 if await assistant.handle_group_pm_redirect(bot_client, event, cmd):
                     return True
 
-                # Chairside tools in group (/chairside, /fdi, /aae)
+                # Chairside tools in group (/chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve)
                 import chairside_tools
                 if await chairside_tools.handle_if_chairside_command(bot_client, event, cmd):
                     return True
@@ -3174,29 +3175,47 @@ async def handle_private_message(event):
     chat_id = event.chat_id
     raw_text = (event.message.message or "").strip()
 
-    # Команды (/start, /case, /quiz, /calc, /help, /wipe, /chairside, /fdi, /aae) исполняются сразу, без задержки
-    if raw_text.startswith("/"):
-        import chairside_tools
+    # Команды (/start, /case, /quiz, /calc, /help, /wipe, /chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve и текстовые кнопки нижнего меню) исполняются сразу, без задержки очереди
+    text_lower = raw_text.lower()
+    is_fast_cmd = raw_text.startswith("/") or text_lower in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
+    if is_fast_cmd:
         if await chairside_tools.handle_if_chairside_command(bot_client, event, raw_text):
             return
 
         async def run_pm_cmd():
             try:
                 async with _pm_user_lock(chat_id):
-                    await assistant.handle_private_message(bot_client, event)
+                    await asyncio.wait_for(assistant.handle_private_message(bot_client, event), timeout=60.0)
+            except asyncio.TimeoutError:
+                logger.error(f"PM command handler timed out (> 60s) for chat_id={chat_id}, raw_text={raw_text[:40]}")
             except Exception as e:
                 logger.exception(f"Unexpected error in PM command handler: {e}")
 
-        runtime_guard.create_task(run_pm_cmd(), name=f"pm_cmd_{event.message.id}")
+        runtime_guard.create_task(run_pm_cmd(), name=f"pm_cmd_{chat_id}")
         return
 
     # Обычные реплики, снимки и голосовые собираем в очередь для склейки быстрых сообщений
     queue = _PM_PENDING_QUEUES.setdefault(chat_id, [])
+    if len(queue) > 10:
+        _PM_PENDING_QUEUES[chat_id] = queue[-5:]
+        queue = _PM_PENDING_QUEUES[chat_id]
     queue.append(event)
 
     existing_worker = _PM_BURST_WORKERS.get(chat_id)
     if existing_worker and not existing_worker.done():
         # Воркер уже ожидает или обрабатывает этот чат — он заберет новое сообщение из очереди
+        if not assistant.check_user_cooldown(chat_id, chat_id, "pm_busy_status", seconds=15):
+            async def send_busy_hint():
+                try:
+                    await tg_safety.send_message(
+                        bot_client, chat_id,
+                        "⏳ <i>Принял, обрабатываю ваш предыдущий запрос. Отвечу по порядку...</i>",
+                        parse_mode='html',
+                        op="send_message:pm_busy_hint",
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to send PM busy hint: %s", exc)
+            runtime_guard.create_task(send_busy_hint(), name=f"pm_busy_hint_{chat_id}")
         return
 
     async def run_burst_worker():
@@ -3236,10 +3255,15 @@ async def handle_private_message(event):
                     if not burst:
                         break
 
-                    if len(burst) == 1:
-                        await assistant.handle_private_message(bot_client, burst[0])
-                    else:
-                        await assistant.handle_private_message_bundle(bot_client, burst)
+                    try:
+                        if len(burst) == 1:
+                            await asyncio.wait_for(assistant.handle_private_message(bot_client, burst[0]), timeout=180)
+                        else:
+                            await asyncio.wait_for(assistant.handle_private_message_bundle(bot_client, burst), timeout=180)
+                    except asyncio.TimeoutError:
+                        logger.error(f"PM burst item processing timed out (> 180s) for chat_id={chat_id}")
+                    except Exception as item_err:
+                        logger.exception(f"Error processing PM burst item for chat_id={chat_id}: {item_err}")
 
                     # Check if new messages arrived during generation
                     if not _PM_PENDING_QUEUES.get(chat_id):
@@ -3250,8 +3274,10 @@ async def handle_private_message(event):
             logger.exception(f"Unexpected error in PM burst worker: {e}")
         finally:
             _PM_BURST_WORKERS.pop(chat_id, None)
-            # Race guard: if a message landed exactly at exit window, rearm worker
-            if _PM_PENDING_QUEUES.get(chat_id):
+            # Race guard: rearm worker only if task was not cancelled and process is still running
+            current_t = asyncio.current_task()
+            is_cancelled = current_t and current_t.cancelled()
+            if not is_cancelled and _PM_PENDING_QUEUES.get(chat_id):
                 import runtime_guard as _rg
                 task = _rg.create_task(run_burst_worker(), name=f"pm_burst_rearm_{chat_id}")
                 _PM_BURST_WORKERS[chat_id] = task
@@ -3264,6 +3290,23 @@ async def handle_private_message(event):
 # потенциально двойной зачёт ответа.
 HANDLED_CALLBACK_IDS = deque(maxlen=500)
 _HANDLED_CALLBACK_SET = set()
+
+
+# Префиксы callback_data, которые сами показывают всплывающее модальное окно (alert=True)
+# или специфический тост с текстом, поэтому для них ранний пустой event.answer() откладывается.
+DEFERRED_ALERT_PREFIXES = (
+    "qa:",               # Групповой квиз с развернутым клиническим объяснением в alert
+    "wiki_save:",        # Сохранение статьи со всплывающим подтверждением
+    "noop",              # Информационный раздел
+    "sos:ai:",           # Клиническая генерация ИИ (показывает '⚡ Запускаю клинический ИИ...')
+    "file_frag:ai:",     # Извлечение фрагментов с ИИ
+    "anes_sos:ai:",      # SOS анестезия ИИ
+    "pres_eval:ai:",     # Оценка витальности ИИ
+    "bm:export_pdf",     # Формирование PDF
+    "quiz:ans:",         # Тост 'Ответ зафиксирован в профиле!' или 'Разбор открыт!'
+    "case:opt:",         # Тост о выборе варианта в симуляторе
+    "bm:save:",          # Тост о сохранении в закладки
+)
 
 
 @bot_client.on(events.CallbackQuery)
@@ -3286,39 +3329,63 @@ async def handle_callback_query(event):
         HANDLED_CALLBACK_IDS.append(cb_id)
         _HANDLED_CALLBACK_SET.add(cb_id)
 
-    answered = False
-    try:
-        data_bytes = getattr(event, "data", b"")
-        data_str = data_bytes.decode('utf-8', errors='ignore') if isinstance(data_bytes, bytes) else str(data_bytes or "")
+    _orig_answer = event.answer
+    _already_answered = False
 
+    async def _safe_answer(*args, **kwargs):
+        nonlocal _already_answered
+        # Если ответ уже был отправлен и это повторный вызов без текста (пустой ack), безопасно выходим
+        has_text = bool(args) or bool(kwargs.get("message"))
+        if _already_answered and not has_text:
+            return None
+        try:
+            res = await _orig_answer(*args, **kwargs)
+            _already_answered = True
+            return res
+        except Exception as ans_err:
+            _already_answered = True
+            logger.debug("safe_answer caught: %s", ans_err)
+            return None
+
+    event.answer = _safe_answer
+
+    data_bytes = getattr(event, "data", b"")
+    data_str = data_bytes.decode('utf-8', errors='ignore') if isinstance(data_bytes, bytes) else str(data_bytes or "")
+
+    # Мгновенно снимаем спиннер Telegram для чисто навигационных кнопок (< 10 мс)
+    if not data_str.startswith(DEFERRED_ALERT_PREFIXES):
+        try:
+            await asyncio.wait_for(_orig_answer(), timeout=1.5)
+            _already_answered = True
+        except Exception as early_err:
+            logger.debug("Early event.answer timeout or error: %s", early_err)
+
+    try:
+        # Chairside Clinical Tools fast callback dispatcher
         if data_str == "noop":
             await event.answer("ℹ️ Информационный раздел", alert=False)
             return
-
-        import chairside_tools
         if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
-            answered = True
+            pass
         else:
             await assistant.handle_quiz_callback(bot_client, event)
-            answered = True
     except Exception as e:
         if "MessageNotModifiedError" in type(e).__name__ or "Content of the message was not modified" in str(e):
             pass
         else:
             logger.exception(f"Unexpected error in CallbackQuery handler: {e}")
+            if not _already_answered:
+                try:
+                    await _orig_answer("⚠️ Раздел временно недоступен. Попробуйте еще раз.", alert=True)
+                    _already_answered = True
+                except Exception:
+                    pass
     finally:
-        # event.answer() вызывается в начале обработки внутри handle_quiz_callback. Если
-        # исключение случалось раньше, ответ Telegram не уходил и у врача
-        # крутился спиннер на кнопке до таймаута клиента.
-        if not answered:
+        if not _already_answered:
             try:
-                await event.answer()
+                await _orig_answer()
             except Exception as exc:
-                # Последняя попытка снять спиннер провалилась — врач видит вечно
-                # крутящуюся кнопку и не знает, что ответ уже не придёт.
-                logger.warning("callback: спиннер не снят (%s: %s) — у врача "
-                               "кнопка крутится до таймаута клиента",
-                               type(exc).__name__, exc)
+                logger.debug("Final callback answer fallback failed: %s", exc)
 
 
 @bot_client.on(events.Raw(types.UpdateMessagePollVote))
@@ -3754,6 +3821,12 @@ async def health_watchdog_task():
                 if not bot_client.is_connected():
                     raise ConnectionError("Telethon bot client disconnected after 20s wait")
 
+            # Активный пинг bot_client: проверяем, что MTProto-сокет бота реально жив и отвечает
+            await asyncio.wait_for(
+                bot_client.get_me(),
+                timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS,
+            )
+
             if config.SOURCE_CHAT_ID is None:
                 logger.warning("health_check пропущен: SOURCE_CHAT_ID не задан")
                 failure_score = 0.0
@@ -3806,11 +3879,17 @@ async def health_watchdog_task():
             )
 
         if failure_score >= HEALTH_FAILURE_LIMIT:
-            logger.error("health_check forcing restart: отключаю client, start.bat перезапустит процесс")
+            logger.error("health_check forcing restart: отключаю client и bot_client, start.bat перезапустит процесс")
             runtime_guard.record_connection_failure("health_check_failure_limit")
             runtime_guard.dump_runtime_state("health_check_failure_limit")
-            await bot_client.disconnect()
-            await client.disconnect()
+            try:
+                await asyncio.wait_for(bot_client.disconnect(), timeout=10)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=10)
+            except Exception:
+                pass
             return
 
 async def sync_recent_messages(bot_client=None, max_lookback_hours: int = 24, max_replies: int = 10):
@@ -4035,6 +4114,26 @@ async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
 # --- ОБНОВЛЕННЫЙ START_BOT ---
 async def start_bot():
     """Запуск бота и инициализация всех систем."""
+    loop = asyncio.get_running_loop()
+    def _loop_exception_handler(current_loop, context):
+        msg = context.get("message", "Unhandled exception in event loop")
+        exc = context.get("exception")
+        logger.error(
+            "💥 GLOBAL ASYNCIO EXCEPTION: %s, exception=%s, future=%s",
+            msg, exc, context.get("future"), exc_info=exc
+        )
+        if exc and isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            logger.warning("Network connection dropped in background task: %s", exc)
+        else:
+            runtime_guard.throttled_log(
+                logging.ERROR,
+                f"unhandled_loop_exc_{type(exc).__name__ if exc else 'no_exc'}",
+                "Необработанное исключение в asyncio: %s (%s)",
+                msg, exc,
+                logger=logger,
+            )
+    loop.set_exception_handler(_loop_exception_handler)
+
     runtime_guard.start_watchdog()
     runtime_guard.write_heartbeat("start_bot")
     runtime_guard.clear_summary_status("startup")
@@ -4138,7 +4237,25 @@ async def start_bot():
     runtime_guard.create_task(periodic_wal_checkpoint_loop(), "wal_checkpoint_daemon")
     logger.info("bot started, history synchronized, chat listener active")
     try:
-        await client.run_until_disconnected()
+        user_runner = asyncio.create_task(client.run_until_disconnected(), name="user_client_runner")
+        bot_runner = asyncio.create_task(bot_client.run_until_disconnected(), name="bot_client_runner")
+        done, pending = await asyncio.wait(
+            [user_runner, bot_runner],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        for completed_task in done:
+            try:
+                exc = completed_task.exception()
+                if exc:
+                    logger.error("Client runner exited with exception: %s", exc)
+            except (asyncio.CancelledError, Exception) as run_err:
+                logger.debug("Runner task finished: %s", run_err)
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
     finally:
         await stop_media_analysis_workers()
         reaction_engine.stop_engine_worker()

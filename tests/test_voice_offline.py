@@ -54,6 +54,7 @@ runtime_guard.SUMMARY_STATUS_PATH = os.path.join(_TMPDIR, "status.json")
 runtime_guard.WATCHDOG_DUMP_PATH = os.path.join(_TMPDIR, "dump.txt")
 
 import assistant  # noqa: E402
+assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
 import blocking_tools  # noqa: E402
 import database  # noqa: E402
 import main  # noqa: E402

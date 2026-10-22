@@ -520,7 +520,7 @@ NOT_CLINICAL_CASE
         res_text = re.sub(r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*)', '', resp.text.strip()).strip()
         if res_text and res_text[0].islower():
             res_text = res_text[0].upper() + res_text[1:]
-        return res_text
+        return res_text or fallback_text
     except Exception as exc:
         logger.warning("Error generating lifeline response via LLM: %s", exc)
         return fallback_text

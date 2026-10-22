@@ -173,6 +173,64 @@ MEMORY_WARN_MB = 600.0
 MEMORY_HIGH_MB = 750.0
 MEMORY_MAX_MB = 850.0
 
+# Семафор на параллельные дочерние подпроцессы (инвариант 12.4: MAX_CONCURRENT_SUBPROCESSES <= 2)
+_MAX_CONCURRENT_SUBPROCESSES = max(1, int(os.getenv("MAX_CONCURRENT_SUBPROCESSES", "2")))
+_SUBPROCESS_SEMAPHORE = None
+
+
+def get_subprocess_semaphore():
+    """
+    Глобальный семафор на параллельные дочерние подпроцессы (инвариант 12.4: MAX_CONCURRENT_SUBPROCESSES <= 2).
+    Гарантирует, что тяжелые задачи (LLM, Whisper, Telegraph, Vision prep, Frame extract)
+    не поднимают более 2 дочерних процессов Python одновременно, защищая 1GB VPS от OOM.
+    """
+    global _SUBPROCESS_SEMAPHORE
+    if _SUBPROCESS_SEMAPHORE is None:
+        _SUBPROCESS_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
+    return _SUBPROCESS_SEMAPHORE
+
+
+def clear_runtime_memory_caches():
+    """
+    Принудительно очищает локальные кэши в памяти при высоком расходе RAM.
+    Сбрасывает кэш пережатых JPEG, кэш ссылок Vision и сжимает память SQLite (PRAGMA shrink_memory).
+    """
+    try:
+        import media_tools
+        if hasattr(media_tools, "_IMAGE_BASE64_CACHE") and isinstance(media_tools._IMAGE_BASE64_CACHE, dict):
+            media_tools._IMAGE_BASE64_CACHE.clear()
+    except Exception:
+        pass
+
+    try:
+        import vision
+        if hasattr(vision, "_RECENT_IMAGE_URLS") and isinstance(vision._RECENT_IMAGE_URLS, dict):
+            vision._RECENT_IMAGE_URLS.clear()
+    except Exception:
+        pass
+
+    try:
+        import database
+        if hasattr(database, "shrink_memory_sync"):
+            database.shrink_memory_sync()
+    except Exception:
+        pass
+
+
+def enforce_memory_headroom(limit_mb: float = MEMORY_MAX_MB - 50.0) -> bool:
+    """
+    Проверяет, достаточно ли свободной памяти для запуска нового тяжелого подпроцесса.
+    Если память приближается к потолку, форсирует gc.collect() и очистку кэшей.
+    Возвращает True, если запуск безопасен, и False при критическом дефиците памяти.
+    """
+    rss = get_memory_usage_mb()
+    if rss is None:
+        return True
+    if rss >= (MEMORY_HIGH_MB - 30.0):
+        check_and_enforce_memory_limits()
+        rss = get_memory_usage_mb() or rss
+    return rss < limit_mb
+
 
 def get_memory_usage_mb():
     """Возвращает текущий RSS процесса в мегабайтах или None, если недоступно."""
@@ -196,7 +254,7 @@ def get_memory_usage_mb():
 def check_and_enforce_memory_limits():
     """
     Проверяет расход памяти текущего процесса на соответствие потолкам 1GB Micro-VPS.
-    При превышении MEMORY_HIGH_MB (750 MB) запускает graceful gc.collect().
+    При превышении MEMORY_HIGH_MB (750 MB) запускает graceful gc.collect() и сброс кэшей.
     Если память превышает критический порог (>= 820 MB), пишет дамп состояния.
     Возвращает dict с метриками и предпринятыми действиями.
     """
@@ -207,11 +265,13 @@ def check_and_enforce_memory_limits():
     if rss_mb >= MEMORY_HIGH_MB:
         import gc
         collected = gc.collect()
+        clear_runtime_memory_caches()
+        collected += gc.collect()
         after_rss_mb = get_memory_usage_mb() or rss_mb
         throttled_log(
             logging.WARNING,
             "memory_high_threshold",
-            "Превышен порог MemoryHigh (750MB): rss=%.1f MB -> gc.collect() освободил %d объектов, rss после=%.1f MB",
+            "Превышен порог MemoryHigh (750MB): rss=%.1f MB -> gc.collect() и очистка кэшей освободили %d объектов, rss после=%.1f MB",
             rss_mb, collected, after_rss_mb,
         )
         if after_rss_mb >= (MEMORY_MAX_MB - 30.0):
@@ -473,12 +533,38 @@ def release_generation_status(kind=None, reason=None, extra=None):
     return True
 
 
+def dump_active_tasks(dump_file):
+    """Записывает в файл дампа состояние всех активных asyncio-задач с глубиной стека корутин."""
+    try:
+        now_mono = time.monotonic()
+        tasks_snapshot = list(_ACTIVE_TASKS)
+        dump_file.write(f"\n--- ACTIVE ASYNCIO TASKS ({len(tasks_snapshot)} active) ---\n")
+        for t in tasks_snapshot:
+            meta = _ACTIVE_TASK_METADATA.get(t, {})
+            name = meta.get("name", t.get_name() if hasattr(t, "get_name") else "unknown")
+            age = now_mono - meta.get("created_at", now_mono)
+            is_done = t.done() if hasattr(t, "done") else False
+            is_canc = t.cancelled() if hasattr(t, "cancelled") else False
+            dump_file.write(f"Task name={name!r} age={age:.1f}s done={is_done} cancelled={is_canc}\n")
+            if hasattr(t, "get_stack"):
+                stack = t.get_stack()
+                if stack:
+                    import traceback
+                    for frame in stack:
+                        for tbl in traceback.format_stack(frame)[-2:]:
+                            dump_file.write(f"    {tbl.strip()}\n")
+        dump_file.write("--- END ACTIVE ASYNCIO TASKS ---\n")
+    except Exception as exc:
+        dump_file.write(f"--- DUMP ACTIVE TASKS ERROR: {exc} ---\n")
+
+
 def dump_runtime_state(reason):
     try:
         with open(WATCHDOG_DUMP_PATH, "a", encoding="utf-8") as dump_file:
             dump_file.write("\n=== STOMCHAT RUNTIME DUMP ===\n")
             dump_file.write(f"utc={utc_now_text()} pid={os.getpid()} reason={reason}\n")
             faulthandler.dump_traceback(file=dump_file, all_threads=True)
+            dump_active_tasks(dump_file)
             dump_file.write("=== END DUMP ===\n")
             dump_file.flush()
     except Exception as exc:
@@ -573,6 +659,25 @@ def _watchdog_loop():
                 "ошибка проверки лимитов памяти: %s",
                 f"{type(mem_exc).__name__}: {mem_exc}",
             )
+
+        # Мониторинг аномально зависших разовых задач (утечка корутин без таймаута)
+        try:
+            now_mono = time.monotonic()
+            for t, meta in list(_ACTIVE_TASK_METADATA.items()):
+                name = meta.get("name", "")
+                if any(d in name for d in _DAEMON_TASK_NAMES):
+                    continue
+                age = now_mono - meta.get("created_at", now_mono)
+                if age > TASK_STALE_WARN_SECONDS:
+                    throttled_log(
+                        logging.WARNING,
+                        f"stale_task_{name}",
+                        "Обнаружена зависшая фоновая задача: name=%s возраст=%.0f с (порог %.0f с)",
+                        name, age, TASK_STALE_WARN_SECONDS,
+                    )
+        except Exception as task_scan_exc:
+            logger.debug("watchdog task scan error: %s", task_scan_exc)
+
         age = time.monotonic() - _last_heartbeat_monotonic
         if age > WATCHDOG_STALE_SECONDS:
             _arm_hard_exit(78, WATCHDOG_LOG_GRACE_SECONDS)
@@ -584,6 +689,7 @@ def _watchdog_loop():
                         f"utc={utc_now_text()} pid={os.getpid()} reason=event_loop_heartbeat_stale_{age:.1f}s\n"
                     )
                     faulthandler.dump_traceback(file=dump_file, all_threads=True)
+                    dump_active_tasks(dump_file)
                     dump_file.write("=== END WATCHDOG EXIT ===\n")
                     dump_file.flush()
             except Exception as exc:
@@ -614,13 +720,60 @@ def stop_watchdog():
 
 
 _ACTIVE_TASKS = set()
+_ACTIVE_TASK_METADATA = {}  # task -> {"name": str, "created_at": float, "utc": str}
+TASK_STALE_WARN_SECONDS = 900.0  # 15 минут для разовых фоновых задач
+
+# Имена долгоживущих системных демонов, для которых долгое время жизни штатно
+_DAEMON_TASK_NAMES = frozenset({
+    "scheduler",
+    "pm_ping_scheduler",
+    "runtime_telemetry",
+    "summary_watchdog",
+    "health_watchdog",
+    "media_recovery",
+    "group_memory_daemon",
+    "clinical_rescue_daemon",
+    "wal_checkpoint_daemon",
+    "heartbeat",
+    "reaction_engine_worker",
+    "media_analysis",
+})
+
 
 def create_task(coro, name):
     task = asyncio.create_task(coro, name=name)
+    now_mono = time.monotonic()
     _ACTIVE_TASKS.add(task)
-    task.add_done_callback(_ACTIVE_TASKS.discard)
+    _ACTIVE_TASK_METADATA[task] = {
+        "name": name,
+        "created_at": now_mono,
+        "utc": utc_now_text(),
+    }
+
+    def _cleanup_task(t):
+        _ACTIVE_TASKS.discard(t)
+        _ACTIVE_TASK_METADATA.pop(t, None)
+
+    task.add_done_callback(_cleanup_task)
     task.add_done_callback(_log_task_result)
     return task
+
+
+def get_active_tasks_report() -> list[dict]:
+    """Возвращает структурированный отчет обо всех активных задачах для телеметрии и диагностики."""
+    now_mono = time.monotonic()
+    report = []
+    for t, meta in list(_ACTIVE_TASK_METADATA.items()):
+        age = now_mono - meta.get("created_at", now_mono)
+        name = meta.get("name", t.get_name() if hasattr(t, "get_name") else "unknown")
+        report.append({
+            "name": name,
+            "age_seconds": round(age, 1),
+            "done": t.done() if hasattr(t, "done") else False,
+            "cancelled": t.cancelled() if hasattr(t, "cancelled") else False,
+            "is_daemon": any(d in name for d in _DAEMON_TASK_NAMES),
+        })
+    return sorted(report, key=lambda x: x["age_seconds"], reverse=True)
 
 
 def _log_task_result(task):

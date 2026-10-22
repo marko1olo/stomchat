@@ -20,6 +20,71 @@ logger = logging.getLogger(__name__)
 # Место выбрано здесь, а не в main.py: media_tools импортируют и main, и
 # assistant, а обратный импорт был бы круговым.
 MEDIA_TEMP_DIR = os.getenv("STOMCHAT_MEDIA_TEMP_DIR", "temp_media")
+MEDIA_DOWNLOAD_TIMEOUT_SECONDS = float(os.getenv("MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "35.0"))
+
+
+def cleanup_temp_files(*paths_or_prefixes) -> int:
+    """
+    Гарантированно удаляет временные файлы по абсолютным путям или префиксам в MEDIA_TEMP_DIR.
+    Защищает от утечек диска при обрывах Telethon download_media по таймауту,
+    когда файл на диске уже создан/частично записан, но путь вызывающему коду не вернулся.
+    Безопасен к None, пустым строкам, отсутствующим файлам и исключениям файловой системы.
+    """
+    removed = 0
+    if not paths_or_prefixes:
+        return 0
+
+    cleaned_paths = set()
+    prefixes = set()
+
+    def _add_target(item):
+        if not item:
+            return
+        if isinstance(item, (list, tuple, set)):
+            for sub in item:
+                _add_target(sub)
+            return
+        s = str(item).strip()
+        if not s:
+            return
+        if os.path.isabs(s) or ("\\" in s) or ("/" in s):
+            cleaned_paths.add(s)
+            base = os.path.basename(s)
+            if base:
+                prefixes.add(base)
+        else:
+            prefixes.add(s)
+
+    for arg in paths_or_prefixes:
+        _add_target(arg)
+
+    # 1. Прямое удаление известных путей файлов
+    for p in cleaned_paths:
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                removed += 1
+        except OSError as exc:
+            logger.debug("cleanup_temp_files direct remove error %s: %s", p, exc)
+
+    # 2. Сканирование префиксов в MEDIA_TEMP_DIR для очистки оборванных/частичных скачиваний Telethon
+    if prefixes and os.path.isdir(MEDIA_TEMP_DIR):
+        try:
+            for fname in os.listdir(MEDIA_TEMP_DIR):
+                for prefix in prefixes:
+                    if fname.startswith(prefix):
+                        full_p = os.path.join(MEDIA_TEMP_DIR, fname)
+                        try:
+                            if os.path.isfile(full_p):
+                                os.remove(full_p)
+                                removed += 1
+                        except OSError as exc:
+                            logger.debug("cleanup_temp_files prefix remove error %s: %s", full_p, exc)
+                        break
+        except Exception as dir_exc:
+            logger.warning("cleanup_temp_files listdir error: %s", dir_exc)
+
+    return removed
 
 
 def _json_exit(payload, code=0):
@@ -184,6 +249,22 @@ def _tail_lines(raw, lines=_STDERR_TAIL_LINES):
 
 
 async def _run_tool(action, file_path, timeout):
+    try:
+        import runtime_guard
+        sem = runtime_guard.get_subprocess_semaphore()
+        if not runtime_guard.enforce_memory_headroom():
+            logger.warning("media_tools: подпроцесс action=%s отклонён из-за критического давления RAM", action)
+            return None, f"{action} rejected: critical host memory pressure"
+    except Exception:
+        sem = None
+
+    if sem:
+        async with sem:
+            return await _run_tool_guarded(action, file_path, timeout)
+    return await _run_tool_guarded(action, file_path, timeout)
+
+
+async def _run_tool_guarded(action, file_path, timeout):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         os.path.abspath(__file__),
@@ -442,7 +523,7 @@ async def extract_multimodal_images_async(client, chat_id, message_ids: list[int
         logger.warning("extract_multimodal_images_async get_messages error: %s", fetch_err)
         return [results[mid] for mid in unique_ids if mid in results]
 
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(2)
 
     async def _fetch_one(m):
         if not m:
@@ -453,7 +534,7 @@ async def extract_multimodal_images_async(client, chat_id, message_ids: list[int
             try:
                 raw_bytes = await asyncio.wait_for(
                     client.download_media(m, file=bytes),
-                    timeout=10.0
+                    timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS
                 )
                 if raw_bytes and isinstance(raw_bytes, (bytes, bytearray)):
                     data_url = await asyncio.to_thread(prepare_image_bytes_sync, raw_bytes)

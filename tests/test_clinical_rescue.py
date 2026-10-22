@@ -370,16 +370,23 @@ def run_tests():
 
     print("\n[10] Динамический BOT_ID")
     # Тест извлечения из токена бота
-    with patch.dict(os.environ, {"TG_BOT_TOKEN": "7123456789:AAHxyz_sample_token"}):
+    orig_token = os.environ.get("TG_BOT_TOKEN")
+    try:
+        os.environ["TG_BOT_TOKEN"] = "7123456789:AAHxyz_sample_token"
         bid1 = cr.resolve_bot_id()
         check("bot_id извлечен из BOT_TOKEN", bid1 == 7123456789)
 
-    # Тест извлечения из bot_client.me
-    fake_client = MagicMock()
-    fake_client.me = MagicMock(id=555666777)
-    with patch.dict(os.environ, {"TG_BOT_TOKEN": ""}):
+        # Тест извлечения из bot_client.me
+        fake_client = MagicMock()
+        fake_client.me = MagicMock(id=555666777)
+        os.environ["TG_BOT_TOKEN"] = ""
         bid2 = cr.resolve_bot_id(bot_client=fake_client)
         check("bot_id извлечен из bot_client.me", bid2 == 555666777)
+    finally:
+        if orig_token is not None:
+            os.environ["TG_BOT_TOKEN"] = orig_token
+        else:
+            os.environ.pop("TG_BOT_TOKEN", None)
 
     print("\n[11] Red Team верификация: альбомный инцидент, author group cooldown и ложные подстроки")
     # 1. Точный текст описания зрения из инцидента с доктором Елисеевым
