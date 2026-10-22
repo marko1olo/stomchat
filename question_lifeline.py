@@ -53,11 +53,45 @@ CLINICAL_KEYWORDS = [
     "ультразвук", "эндочак", "эндомотор", "термафил", "сквирт"
 ]
 
+NON_CLINICAL_STOPWORDS = [
+    "скриншот", "интерфейс", "мем", "приложение", "меню", "текст",
+    "нет зубов", "зубы отсутствуют", "отсутствуют зубы", "зубов нет",
+    "не является рентгеном", "не содержит зубов", "не относится к стоматологии",
+    "не медицинск", "не клиническ"
+]
+
+_EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
+    r'(?i)(?:'
+    r'не\s+является\s+[^.\n]{0,40}(?:медицинск\w*|стоматолог\w*|клиническ\w*|диагностик\w*|снимк\w*|рентген\w*)|'
+    r'не\s+относит\w*\s+к\s+[^.\n]{0,30}(?:медицин\w*|стоматолог\w*)|'
+    r'не\s+имеет\s+отношения\s+к\s+[^.\n]{0,30}(?:медицин\w*|стоматолог\w*)|'
+    r'(?:картинк\w*|изображен\w*|снимок|фотографи\w*)\s+не\s+(?:является\s+)?(?:медицинск\w*|стоматолог\w*|клиническ\w*)|'
+    r'немедицинск\w*|неклиническ\w*|'
+    r'поздравительн\w*\s+открытк\w*|открытк\w*\s+с\s+праздник\w*|праздничн\w*\s+открытк\w*|'
+    r'скриншот\w*\s+[^.\n]{0,30}(?:интерфейс\w*|приложен\w*|соцсет\w*|социальн\w*\s+сет\w*|профил\w*|переписк\w*|чат\w*|экран\w*|сайт\w*|мессенджер\w*|бот\w*|канал\w*|программ\w*)|'
+    r'интерфейс\w*\s+[^.\n]{0,30}(?:цифров\w*|программн\w*|telegram|телеграм|бот\w*|мессенджер\w*|приложен\w*|комплекс\w*)|'
+    r'карточк\w*\s+спикер\w*|рекламн\w*\s+баннер\w*|афиш\w*|презентационн\w*\s+карточк\w*|'
+    r'мем|мем[а-яё]*|комикс\w*|карикатур\w*|юмористическ\w*|'
+    r'чек|квитанци\w*|накладн\w*|банковск\w*\s+(?:перевод|чек|выписк\w*)|прайс[- ]?лист\w*|'
+    r'фотографи\w*\s+(?:человек\w*|лиц\w*|селфи)|портрет|'
+    r'(?:медицинск\w*|анатомическ\w*|стоматологическ\w*|зубочелюстн\w*|зубн\w*|внутриротов\w*|рентгенолог\w*)\s+[^.\n]{0,60}(?:структур\w*|объект\w*|патолог\w*|элемент\w*|снимк\w*|ряд\w*|данные)\s+[^.\n]{0,40}(?:не\s+дифференциру\w*|не\s+визуализиру\w*|отсутству\w*|не\s+обнаружен\w*)|'
+    r'(?:зуб\w*|коронков\w*|корнев\w*|периодонт\w*|костн\w*\s+ткан\w*|рентгенограмм\w*)\s+[^.\n]{0,40}(?:на\s+(?:изображени\w*|снимк\w*|кадр\w*)\s+)?отсутству\w*'
+    r')'
+)
+
+def is_explicitly_non_dental_media(description: Optional[str]) -> bool:
+    if not description:
+        return False
+    d_clean = description.strip().lower()
+    return any(sw in d_clean for sw in NON_CLINICAL_STOPWORDS) or bool(_EXPLICIT_NON_DENTAL_MEDIA_RE.search(description))
+
+
 
 def is_clinical_question_candidate(
     text: str,
     has_media: bool = False,
-    sender_is_bot: bool = False
+    sender_is_bot: bool = False,
+    media_description: Optional[str] = None
 ) -> bool:
     """
     Эвристически определяет, является ли сообщение клиническим вопросом коллеги,
@@ -85,10 +119,18 @@ def is_clinical_question_candidate(
     if not (has_question_mark or has_inquiry_marker):
         return False
 
+    # Проверка описания медиа на неклинические стоп-слова
+    if media_description and is_explicitly_non_dental_media(media_description):
+        return False
+
     # Проверка клинической специфики (по списку ключевых слов или единому словарю триажа)
     has_clinical_term = any(kw in lower for kw in CLINICAL_KEYWORDS) or has_dental_term(clean_text)
-    if not (has_clinical_term or has_media):
-        return False
+    has_clin_desc = bool(media_description and (any(kw in media_description.lower() for kw in CLINICAL_KEYWORDS) or has_dental_term(media_description)))
+
+    # Ликвидация слепого пролезания с медиа:
+    if not has_clinical_term:
+        if not (has_media and has_clin_desc):
+            return False
 
     return True
 
@@ -327,6 +369,18 @@ class QuestionLifelineManager:
             except Exception as e:
                 logger.warning("Не удалось получить media_description из БД для msg_id=%s: %s", pq.msg_id, e)
 
+        # Non-Dental Filter: если медиа прямо не является стоматологическим — отменяем Lifeline
+        if media_desc and is_explicitly_non_dental_media(media_desc):
+            logger.info("🛑 Lifeline отменен для msg_id=%s: обнаружено не-клиническое изображение (%s)",
+                        pq.msg_id, media_desc[:80])
+            try:
+                import clinical_rescue
+                import config
+                clinical_rescue.mark_case_and_album_rescued(config.DB_PATH, pq.msg_id, pq.chat_id, sender_id=pq.sender_id)
+            except Exception:
+                pass
+            return
+
         logger.info("🚨 Срабатывание Lifeline («Первый ответ») для вопроса msg_id=%s от %s", pq.msg_id, pq.sender_name)
 
         # Резолвим LLM caller
@@ -365,6 +419,12 @@ class QuestionLifelineManager:
 
         if not response_text:
             logger.warning("Lifeline generation returned empty text for msg_id=%s", pq.msg_id)
+            try:
+                import clinical_rescue
+                import config
+                clinical_rescue.mark_case_and_album_rescued(config.DB_PATH, pq.msg_id, pq.chat_id, sender_id=pq.sender_id)
+            except Exception:
+                pass
             return
 
         # Запоминаем отправку
@@ -418,6 +478,13 @@ async def generate_lifeline_response(
     media_context = f"\nОписание прикрепленного снимка/фото: {media_desc}\n" if media_desc else ""
 
     prompt = f"""Ты — опытный врач-стоматолог в профессиональном сообществе врачей StomChat.
+ОБЯЗАТЕЛЬНЫЙ ФИЛЬТР БЕЗОПАСНОСТИ (ESCAPE HATCH):
+Если в вопросе или описании изображения НЕТ стоматологического клинического случая
+(изображен скриншот интерфейса, смартфона, приложения, сайта, бота, программы, меню, текст переписки, мем, документ, лицо человека или бытовая фотография) —
+ты ОБЯЗАН ответить РОВНО ОДНИМ МАРКЕРОМ:
+NOT_CLINICAL_CASE
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать клинические советы для не-стоматологических картинок!
+
 Доктор {doctor_name} задал клинический вопрос:
 \"\"\"{question_text}\"\"\"{media_context}
 
@@ -447,6 +514,9 @@ async def generate_lifeline_response(
         resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=30.0)
         if err or not resp or not getattr(resp, "text", None):
             return fallback_text
+        if "NOT_CLINICAL_CASE" in resp.text.strip().upper():
+            logger.info("🛑 Lifeline model returned NOT_CLINICAL_CASE. Suppressing reply.")
+            return None
         res_text = re.sub(r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*)', '', resp.text.strip()).strip()
         if res_text and res_text[0].islower():
             res_text = res_text[0].upper() + res_text[1:]

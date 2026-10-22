@@ -1043,72 +1043,105 @@ async def count_clinical_bookmarks(saved_by_user_id, query=None):
 async def set_user_interactive_state(user_id, state_type, current_step, case_id, history):
     def operation():
         with _connection() as db:
-            db.execute(
-                """
-                INSERT OR REPLACE INTO user_interactive_states
-                (user_id, state_type, current_step, case_id, history)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (user_id, state_type, current_step, case_id, history),
-            )
+            try:
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO user_interactive_states
+                    (user_id, state_type, current_step, case_id, history)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, state_type, current_step, case_id, history),
+                )
+            except sqlite3.OperationalError:
+                pass
     return await _run_db(operation)
 
 
 async def get_user_interactive_state(user_id):
     def operation():
         with _connection() as db:
-            row = db.execute(
-                "SELECT state_type, current_step, case_id, history FROM user_interactive_states WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if row:
-                return {
-                    "state_type": row[0],
-                    "current_step": row[1],
-                    "case_id": row[2],
-                    "history": row[3]
-                }
-            return None
+            try:
+                row = db.execute(
+                    "SELECT state_type, current_step, case_id, history FROM user_interactive_states WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                if row:
+                    return {
+                        "state_type": row[0],
+                        "current_step": row[1],
+                        "case_id": row[2],
+                        "history": row[3]
+                    }
+                return None
+            except sqlite3.OperationalError:
+                return None
     return await _run_db(operation)
 
 
 async def clear_user_interactive_state(user_id):
     def operation():
         with _connection() as db:
-            db.execute(
-                "DELETE FROM user_interactive_states WHERE user_id = ?",
-                (user_id,),
-            )
+            try:
+                db.execute(
+                    "DELETE FROM user_interactive_states WHERE user_id = ?",
+                    (user_id,),
+                )
+            except sqlite3.OperationalError:
+                pass
     return await _run_db(operation)
 
 
-async def cleanup_stale_interactive_states(max_age_seconds=3600):
-    """Удаляет зависшие интерактивные сессии (старше max_age_seconds)."""
+async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_seconds=259200):
+    """
+    Удаляет зависшие интерактивные сессии симулятора (старше max_age_seconds, по умолчанию 1 час)
+    и устаревшие конфигурации квизов (старше max_quiz_age_seconds, по умолчанию 3 суток).
+    """
     now = time.time()
     def operation():
         with _connection() as db:
-            rows = db.execute("SELECT user_id, history FROM user_interactive_states").fetchall()
+            try:
+                rows = db.execute("SELECT user_id, state_type, history FROM user_interactive_states").fetchall()
+            except sqlite3.OperationalError:
+                return 0
             deleted = 0
-            for user_id, hist_raw in rows:
+            for user_id, state_type, hist_raw in rows:
                 is_stale = False
                 try:
                     if not hist_raw:
                         is_stale = True
                     else:
                         data = json.loads(hist_raw)
-                        if isinstance(data, dict):
-                            ts = data.get("last_updated") or 0
-                            if ts and (now - float(ts) > max_age_seconds):
+                        if state_type == "case":
+                            if isinstance(data, dict):
+                                ts = data.get("last_updated")
+                                if not ts or (now - float(ts) > max_age_seconds):
+                                    is_stale = True
+                            else:
                                 is_stale = True
-                        elif isinstance(data, list):
-                            # Устаревший формат списка без временной метки
+                        elif state_type == "quiz_config":
+                            ts = None
+                            if isinstance(data, dict):
+                                ts = data.get("last_updated") or data.get("created_at")
+                            if not ts:
+                                try:
+                                    u_int = int(user_id)
+                                    if u_int < 0:
+                                        ts = abs(u_int) / 1_000_000.0
+                                except Exception:
+                                    pass
+                            if not ts or (now - float(ts) > max_quiz_age_seconds):
+                                is_stale = True
+                        else:
                             is_stale = True
                 except Exception:
                     is_stale = True
 
                 if is_stale:
-                    db.execute("DELETE FROM user_interactive_states WHERE user_id = ?", (user_id,))
-                    deleted += 1
+                    try:
+                        db.execute("DELETE FROM user_interactive_states WHERE user_id = ?", (user_id,))
+                        deleted += 1
+                    except sqlite3.OperationalError:
+                        pass
             return deleted
     return await _run_db(operation)
 
@@ -1189,6 +1222,42 @@ async def is_bot_sent_message(msg_id, chat_id=None):
     return await _run_db(operation)
 
 
+def _resolve_known_bot_ids() -> tuple:
+    ids = {7886475630, 8140417978, 7971556097, 7475073041, 8775535374}
+    try:
+        import config
+        for k in ("BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID"):
+            v = getattr(config, k, None)
+            if v and isinstance(v, int):
+                ids.add(v)
+            elif v and str(v).isdigit():
+                ids.add(int(v))
+    except Exception:
+        pass
+    for k in ("BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID"):
+        v = os.getenv(k)
+        if v and v.isdigit():
+            ids.add(int(v))
+    return tuple(ids)
+
+
+def _resolve_known_bot_usernames() -> tuple:
+    unames = {'stomchat_bot', 'docendobot', 'endohelp_bot', 'stomat_bot', 'endochatbot', 'endo_bot'}
+    try:
+        import config
+        for k in ("BOT_USERNAME", "STOMCHAT_BOT_USERNAME", "ENDOCHAT_BOT_USERNAME"):
+            v = getattr(config, k, None)
+            if v:
+                unames.add(str(v).lstrip("@").lower())
+    except Exception:
+        pass
+    for k in ("BOT_USERNAME", "STOMCHAT_BOT_USERNAME", "ENDOCHAT_BOT_USERNAME"):
+        v = os.getenv(k)
+        if v:
+            unames.add(v.lstrip("@").lower())
+    return tuple(unames)
+
+
 async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
     """
     Проверяет, является ли сообщение сообщением бота:
@@ -1231,17 +1300,21 @@ async def is_bot_message_or_sender(msg_id, bot_id=None, chat_id=None):
                     if m_row:
                         return True
             # 3) Сверка по имени/юзернейму бота или известным id в таблице messages
+            known_ids = _resolve_known_bot_ids()
+            known_unames = _resolve_known_bot_usernames()
+            ph_ids = ",".join("?" for _ in known_ids)
+            ph_unames = ",".join("?" for _ in known_unames)
             bot_meta_row = db.execute(
-                """
+                f"""
                 SELECT 1 FROM messages 
                 WHERE msg_id = ? AND (
-                    LOWER(IFNULL(sender_username, '')) IN ('stomchat_bot', 'docendobot', 'endohelp_bot', 'stomat_bot', 'endochatbot', 'endo_bot')
+                    LOWER(IFNULL(sender_username, '')) IN ({ph_unames})
                     OR LOWER(IFNULL(sender_name, '')) LIKE '%bot%'
                     OR LOWER(IFNULL(sender_name, '')) LIKE '%учимся вместе%'
-                    OR sender_id IN (7886475630, 8140417978, 7971556097, 7475073041, 8775535374)
+                    OR sender_id IN ({ph_ids})
                 ) LIMIT 1
                 """,
-                (msg_id,)
+                [msg_id] + list(known_unames) + list(known_ids)
             ).fetchone()
             if bot_meta_row:
                 return True
@@ -1256,7 +1329,7 @@ async def get_last_bot_activity_timestamp(known_bot_ids=None):
     """
     def operation():
         with _connection() as db:
-            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids is not None else list(_resolve_known_bot_ids())
             latest_dates = []
             if ids:
                 placeholders = ",".join("?" for _ in ids)
@@ -1288,7 +1361,7 @@ async def has_bot_replied_to_message(msg_id, known_bot_ids=None):
         return False
     def operation():
         with _connection() as db:
-            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids is not None else list(_resolve_known_bot_ids())
             if ids:
                 placeholders = ",".join("?" for _ in ids)
                 row = db.execute(
@@ -1318,7 +1391,7 @@ async def get_candidate_messages_for_catchup(since_date_str, known_bot_ids=None,
     """
     def operation():
         with _connection() as db:
-            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids else []
+            ids = [int(b) for b in known_bot_ids if b] if known_bot_ids is not None else list(_resolve_known_bot_ids())
             if ids:
                 placeholders = ",".join("?" for _ in ids)
                 query = f"""
@@ -1445,11 +1518,13 @@ async def set_user_style(user_id, style):
 
 
 async def set_user_portrait(user_id, portrait, last_msg_id):
+    if user_id in (7971556097, 8775535374):
+        return
     try:
         from user_memory import clean_profile_portrait
         portrait = clean_profile_portrait(portrait)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to clean user portrait for user %s: %s", user_id, exc)
     if not portrait:
         return
     def operation():
@@ -1557,6 +1632,9 @@ async def save_user_memory(
     username=None,
     first_name=None
 ):
+    if user_id in (7971556097, 8775535374):
+        logger.warning(f"save_user_memory called for known bot id {user_id}, ignoring")
+        return
     # Лимит объема на одного пользователя в БД: строго до 64 КБ для ЛС и до 8 КБ для беседы
     if clinical_summary and len(clinical_summary) > 64000:
         import html_safe
@@ -1705,6 +1783,7 @@ async def get_unprocessed_group_users(min_new_messages=3, limit=20, bot_id=None)
                 FROM messages m
                 LEFT JOIN user_memories um ON um.user_id = m.sender_id
                 WHERE m.sender_id IS NOT NULL AND m.sender_id > 0
+                  AND m.sender_id NOT IN (7971556097, 8775535374)
                   AND (? IS NULL OR m.sender_id != ?)
                   AND m.text IS NOT NULL AND LENGTH(TRIM(m.text)) > 15
                   AND m.msg_id > COALESCE(um.last_group_analyzed_id, 0)

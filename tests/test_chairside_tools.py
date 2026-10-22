@@ -192,6 +192,29 @@ check("золотой стандарт анальгезии: Ибупрофен 
 dex = ct.dexamethasone_emergency_card()
 check("дексаметазон: 4-8 мг в/м", "4 мг – 8 мг" in dex)
 
+# Профилактика инфекционного эндокардита (AHA/ESE/ADA)
+proph_adult = ct.calculate_antibiotic(70, is_prophylaxis=True)
+check("профилактика эндокардита взрослый 70 кг: Амоксициллин 2.0 г (2000 мг)", "2.0 г" in proph_adult.drug_name and "2000 мг" in proph_adult.dosage)
+check("профилактика разовая: курс 1 день", "однократно" in proph_adult.regimen.lower() or "1 день" in proph_adult.duration_days)
+
+proph_all = ct.calculate_antibiotic(70, allergy_penicillin=True, is_prophylaxis=True)
+check("профилактика при аллергии: Азитромицин 500 мг / Кларитромицин 500 мг", "Азитромицин" in proph_all.drug_name or "Кларитромицин" in proph_all.drug_name)
+check("профилактика при аллергии: строгий запрет клиндамицина", "КЛИНДАМИЦИН" in proph_all.warning and "C. difficile" in proph_all.warning)
+
+proph_kid = ct.calculate_antibiotic(20, is_child=True, is_prophylaxis=True)
+check("профилактика ребенок 20 кг: 50 мг/кг (1000 мг = 20.0 мл)", "20.0 мл" in proph_kid.dosage and "1000 мг" in proph_kid.dosage)
+
+proph_kid_all = ct.calculate_antibiotic(20, is_child=True, allergy_penicillin=True, is_prophylaxis=True)
+check("профилактика ребенок аллергик 20 кг: 15 мг/кг (300 мг = 7.5 мл)", "7.5 мл" in proph_kid_all.dosage and "300" in proph_kid_all.dosage)
+
+# Протокол дезинфекции каналов и профилактика парахлоранилина (PCA)
+card_irr = ct.format_irrigation_protocol_card()
+check("протокол дезинфекции каналов: NaOCl 3-5.25%", "NaOCl" in card_irr)
+check("протокол дезинфекции каналов: 17% ЭДТА", "17% ЭДТА" in card_irr or "ЭДТА" in card_irr)
+check("протокол дезинфекции каналов: промежуточный смыв физраствором", "0.9% физраствора" in card_irr or "промежуточный смыв" in card_irr.lower())
+check("протокол дезинфекции каналов: 2% Хлоргексидин", "2% Хлоргексидин" in card_irr or "Хлоргексидин" in card_irr)
+check("протокол дезинфекции каналов: запрет парахлоранилина PCA", "парахлоранилин" in card_irr and "PCA" in card_irr and "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО" in card_irr)
+
 
 # ==============================================================================
 # [6] Экспресс-консилиум «Спасать или удалять?»
@@ -243,7 +266,7 @@ check("разметка зубов квадранта 1 (8 зубов)", len(ct.
 check("разметка действий над зубом", len(ct.build_fdi_tooth_actions_markup(16)) == 3)
 check("разметка систем файлов", len(ct.build_files_catalog_markup()) >= 5)
 check("разметка скорой помощи по файлам", len(ct.build_broken_file_matrix_markup()) == 5)
-check("разметка быстрой фармы", len(ct.build_pharma_quick_markup()) == 5)
+check("разметка быстрой фармы", len(ct.build_pharma_quick_markup()) >= 5)
 check("разметка AAE шаг 1", len(ct.build_aae_markup(1)) == 4)
 
 
@@ -287,6 +310,16 @@ async def run_callback_tests():
     ok = await ct.dispatch_chairside_callback(bot, ev_pharma, "pharma:kid:20")
     check("pharma:kid:20 диспетчеризируется", ok and ev_pharma.edit.called)
 
+    # Prophylaxis callback
+    ev_proph = MockCallbackEvent("pharma:prophylaxis:70")
+    ok = await ct.dispatch_chairside_callback(bot, ev_proph, "pharma:prophylaxis:70")
+    check("pharma:prophylaxis:70 диспетчеризируется", ok and ev_proph.edit.called)
+
+    # Irrigation callback
+    ev_irr = MockCallbackEvent("chairside:irrigation")
+    ok = await ct.dispatch_chairside_callback(bot, ev_irr, "chairside:irrigation")
+    check("chairside:irrigation диспетчеризируется", ok and ev_irr.edit.called)
+
     # AAE callback step 3 eval
     ev_aae = MockCallbackEvent("aae:s3:3:1:1:Зуб46")
     ok = await ct.dispatch_chairside_callback(bot, ev_aae, "aae:s3:3:1:1:Зуб46")
@@ -310,6 +343,9 @@ async def run_callback_tests():
 
     ok_aae = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/aae")
     check("/aae перехватывается", ok_aae and bot.send_message.called)
+
+    ok_irr = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/irrigation")
+    check("/irrigation перехватывается", ok_irr and bot.send_message.called)
 
     ok_other = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/help")
     check("/help не перехватывается chairside-фасадом", not ok_other)

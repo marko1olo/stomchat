@@ -638,6 +638,17 @@ check("chat_id=None не создаёт общей записи на всех",
       len(_cd_none) == 0 and _cd_none.remaining(None) == 0.0,
       "безымянный ключ стал бы общим тормозом для всех чатов")
 
+# Нормализация различных типов ключей Telethon (PeerUser, PeerChannel, строковые id)
+from telethon.tl.types import PeerUser, PeerChannel
+_cd_peers = T.FloodCooldown()
+_cd_peers.block(PeerUser(777), 30)
+check("PeerUser нормализуется в integer и блокируется", _cd_peers.remaining(777) > 0)
+check("PeerUser проверяется по объекту PeerUser", _cd_peers.remaining(PeerUser(777)) > 0)
+check("PeerUser проверяется по строке '777'", _cd_peers.remaining("777") > 0)
+
+_cd_peers.block(-1001234567, 30)
+check("Отрицательный channel_id проверяется по строке", _cd_peers.remaining("-1001234567") > 0)
+
 
 print("\n[9] Вина врача отделена от вины Telegram")
 # Замер: assistant.py:5348 (групповые пинги) и 5168 (ЛС-пинги) ловят

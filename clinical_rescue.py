@@ -88,8 +88,8 @@ def resolve_bot_id(bot_client=None) -> int:
             cid = getattr(bot_client, "id", None)
             if cid and isinstance(cid, int) and cid > 0:
                 return cid
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to resolve bot_id from bot_client: %s", exc)
 
     # 2. Из переменных окружения (приоритет над кэшированным config)
     for env_var in ("TG_BOT_TOKEN", "BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):
@@ -111,8 +111,8 @@ def resolve_bot_id(bot_client=None) -> int:
                 prefix = str(token).split(":")[0].strip()
                 if prefix.isdigit() and int(prefix) > 0:
                     return int(prefix)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to resolve bot_id from config: %s", exc)
 
     return 0
 
@@ -345,8 +345,8 @@ def find_unanswered_clinical_candidates(
                 c_dt = None
                 try:
                     c_dt = datetime.datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to parse raw_dt %r in rescue album grouping: %s", raw_dt, exc)
                 matched_group = None
                 if c_dt:
                     for gc in grouped_candidates:
@@ -354,8 +354,8 @@ def find_unanswered_clinical_candidates(
                             g_dt = None
                             try:
                                 g_dt = datetime.datetime.fromisoformat(str(gc["timestamp"]).replace("Z", "+00:00"))
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Failed to parse gc timestamp %r in rescue album grouping: %s", gc.get("timestamp"), exc)
                             if g_dt and abs((c_dt - g_dt).total_seconds()) <= 600:
                                 matched_group = gc
                                 break
@@ -790,8 +790,8 @@ async def clinical_rescue_daemon(
                         me = await bot_client.get_me()
                         if me and getattr(me, "id", None):
                             bot_id = int(me.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to get_me() for bot_id in daemon: %s", exc)
             await run_clinical_rescue_cycle(bot_client, active_db, active_chat, bot_id=bot_id)
         except asyncio.CancelledError:
             logger.info("Clinical Rescue Daemon stopped.")

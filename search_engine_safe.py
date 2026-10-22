@@ -82,6 +82,14 @@ async def perform_search(query: str, max_results: int = 2) -> str:
             short_query = " ".join(clean_query.split()[:4])
             if short_query != clean_query:
                 results, error = await web_search_async(short_query, max_results, timeout=45)
+            else:
+                try:
+                    import web_lookup
+                    sci_query = web_lookup.build_scientific_query(clean_query)
+                    if sci_query and sci_query != clean_query:
+                        results, error = await web_search_async(sci_query, max_results, timeout=45)
+                except Exception as sci_err:
+                    logger.debug("search_engine_safe scientific fallback failed: %s", sci_err)
 
         if error:
             logger.warning("search subprocess failed: %s", error)

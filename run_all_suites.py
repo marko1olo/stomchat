@@ -10,6 +10,7 @@ tests = [
     "tests/test_reaction_engine.py",
     "tests/test_chairside_tools.py",
     "tests/test_clinical_rescue.py",
+    "tests/test_album_antidup.py",
     "tests/test_reachable.py",
     "tests/test_routing_behaviour.py",
     "tests/test_group_command_triggers.py",
@@ -26,6 +27,8 @@ tests = [
     "tests/test_voice_media_inquisitor.py",
     "tests/test_pm_clinical_flow_inquisitor.py",
     "tests/test_llm_load_balance_inquisitor.py",
+    "tests/test_redteam_group_safety.py",
+    "tests/test_interactive_case_quiz_inquisitor.py",
 ]
 
 all_ok = True

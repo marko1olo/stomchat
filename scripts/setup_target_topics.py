@@ -11,13 +11,15 @@ from telethon.tl.functions.messages import (
     GetForumTopicsRequest
 )
 
-sys.path.insert(0, r"c:\Users\danat\Desktop\stomchat")
-os.chdir(r"c:\Users\danat\Desktop\stomchat")
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+os.chdir(root_dir)
 import config
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-TARGET_CHAT_ID = -1003735006121
+TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", getattr(config, "TEST_CHAT_ID", -1003735006121)))
 MAPPING_FILE = "topics_mapping.json"
 
 # Full list of original topics from Секретные материалы

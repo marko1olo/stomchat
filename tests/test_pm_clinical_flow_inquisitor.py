@@ -31,6 +31,10 @@ import tg_safety
 class TestMentionCritiqueSuppression(unittest.IsolatedAsyncioTestCase):
     """1. Ликвидация самобичевания и споров при критике скорости/работы бота."""
 
+    def setUp(self):
+        super().setUp()
+        assistant.USER_COOLDOWNS.clear()
+
     async def test_speed_critique_suppression_deterministic(self):
         """Реплики с жалобой на скорость/зависание без клинического вопроса подавляются в триаже."""
         critiques = [
@@ -51,7 +55,8 @@ class TestMentionCritiqueSuppression(unittest.IsolatedAsyncioTestCase):
         mock_event.message.reply_to_msg_id = None
         mock_event.message.reply_to = None
 
-        with patch("assistant.is_silenced", return_value=False), \
+        with patch("assistant.check_user_cooldown", return_value=0), \
+             patch("assistant.is_silenced", return_value=False), \
              patch("assistant.check_and_apply_silence", AsyncMock(return_value=False)), \
              patch("assistant.generate_gemini_text_async") as mock_gemini:
 
@@ -76,7 +81,8 @@ class TestMentionCritiqueSuppression(unittest.IsolatedAsyncioTestCase):
         mock_event.message.reply_to_msg_id = None
         mock_event.message.reply_to = None
 
-        with patch("assistant.is_silenced", return_value=False), \
+        with patch("assistant.check_user_cooldown", return_value=0), \
+             patch("assistant.is_silenced", return_value=False), \
              patch("assistant.check_and_apply_silence", AsyncMock(return_value=False)), \
              patch("assistant.fetch_dynamic_chat_context", AsyncMock(return_value=(["Dr: бот долго отвечает, подскажи протокол для 3.6"], None, None))), \
              patch("assistant.query_db_async", AsyncMock(return_value=[(101, "Dr", "бот долго отвечает, подскажи протокол для 3.6")])), \
@@ -126,6 +132,10 @@ class TestMentionCritiqueSuppression(unittest.IsolatedAsyncioTestCase):
 
 class TestZeroDeadScreenLiveStatus(unittest.IsolatedAsyncioTestCase):
     """2. Живой прогресс анализа в ЛС (Zero Dead Screen)."""
+
+    def setUp(self):
+        super().setUp()
+        assistant.USER_COOLDOWNS.clear()
 
     async def test_photo_analysis_stages_sequence(self):
         """При анализе снимка статус проходит: 1. Скачиваю -> 2. Изучаю анатомию -> 3. Формирую протокол -> Удаление."""

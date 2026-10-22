@@ -169,6 +169,18 @@ async def perform_search(query: str, max_results: int = 2) -> str:
                 except asyncio.TimeoutError:
                     logger.warning("DDGS fallback short search timed out (30s)")
                     results = []
+            else:
+                try:
+                    import web_lookup
+                    sci_query = web_lookup.build_scientific_query(clean_query)
+                    if sci_query and sci_query != clean_query:
+                        results = await asyncio.wait_for(
+                            loop.run_in_executor(None, _run_ddg_sync, sci_query, max_results),
+                            timeout=30.0,
+                        )
+                except (asyncio.TimeoutError, Exception) as sci_err:
+                    logger.warning("DDGS fallback scientific search failed: %s", sci_err)
+                    results = []
 
         return "\n\n".join(results) if results else "Информации не найдено (поисковик не вернул данных)."
 

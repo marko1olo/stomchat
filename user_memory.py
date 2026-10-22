@@ -183,12 +183,14 @@ def _extract_json_object(text: str) -> Optional[dict]:
 
 _NEGATIVE_META_RE = re.compile(
     r'(?i)\b('
-    r'не\s+(?:\S+\s+){0,3}(?:упомина[а-яё]*|указа[а-яё]*|сообща[а-яё]*|назва[а-яё]*|определе[а-яё]*|уточне[а-яё]*|приводит[а-яё]*|раскрыт[а-яё]*|найден[а-яё]*|предоставлен[а-яё]*|зафиксирован[а-яё]*|отражен[а-яё]*|обсужда[а-яё]*)|'
+    r'не\s+(?:\S+\s+){0,3}(?:упомина[а-яё]*|указа[а-яё]*|сообща[а-яё]*|назва[а-яё]*|определе[а-яё]*|уточня[а-яё]*|уточне[а-яё]*|привод[а-яё]*|приводи[а-яё]*|раскрыт[а-яё]*|найден[а-яё]*|предоставлен[а-яё]*|зафиксирован[а-яё]*|отражен[а-яё]*|обсужда[а-яё]*)|'
+    r'(?:личных\s+данных|сведений|информаци[а-яё]*|данны[а-яё]*)\s+(?:\S+\s+){0,8}(?:не\s+(?:приводи[а-яё]*|привод[а-яё]*|указа[а-яё]*|сообща[а-яё]*|раскры[а-яё]*)|в\s+(?:беседе|сообщениях|чате)\s+нет)|'
     r'(?:информаци[а-яё]*|данны[а-яё]*|сведени[а-яё]*)\s+(?:\S+\s+){0,4}отсутству[а-яё]*|'
     r'отсутству[а-яё]*\s+(?:\S+\s+){0,4}(?:информаци[а-яё]*|данны[а-яё]*|сведени[а-яё]*|клиническ[а-яё]*|протокол[а-яё]*|релевантн[а-яё]*)|'
-    r'нет\s+данных|'
-    r'нет\s+сведений|'
-    r'нет\s+информаци[а-яё]*|'
+    r'(?:в\s+клинике|в\s+работе|у\s+врача|у\s+доктора|в\s+арсенале)\s+(?:пока\s+)?отсутству[а-яё]*\s+(?:\S+\s+){0,3}(?:инструмент[а-яё]*|оборудовани[а-яё]*|материал[а-яё]*|эндоактиватор[а-яё]*|микроскоп[а-яё]*|аппарат[а-яё]*)|'
+    r'(?:нет\s+данных|данных\s+нет)|'
+    r'(?:нет\s+сведений|сведений\s+нет)|'
+    r'(?:нет\s+информаци[а-яё]*|информаци[а-яё]*\s+нет)|'
     r'пока\s+не\s+известн[а-яё]*|'
     r'пока\s+не\s+установлен[а-яё]*|'
     r'неизвестн[а-яё]+|'
@@ -202,7 +204,7 @@ _NEGATIVE_META_RE = re.compile(
     r')\b'
 )
 
-# Паттерн неклинического / бытового мусора (погода, кулинария, фильмы, крипта, анекдоты, настроение)
+# Паттерн неклинического / бытового мусора (погода, кулинария, фильмы, крипта, анекдоты, настроение, спам/вакансии)
 _OFFTOPIC_FACT_RE = re.compile(
     r'(?i)\b('
     r'погод[аеыу]|прогноз|дожд[ьяе]|снег|температур[аеыу]\s+на\s+улице|'
@@ -210,14 +212,60 @@ _OFFTOPIC_FACT_RE = re.compile(
     r'плов[а-яё]*|'
     r'дн[её]м\s+рождени[яе]|поздравл[а-яё]*\s+(?:коллег|с\s+дн[её]м)|'
     r'фильм[а-яё]*|кино|сериал[а-яё]*|музык[а-яё]*|песн[яиею]|концерт[а-яё]*|'
-    r'криптовалют[а-яё]*|биткоин[а-яё]*|курс\s+доллар[а-яё]*|курс\s+валют|зарплат[а-яё]*|инвестиц[а-яё]*|'
+    r'криптовалют[а-яё]*|биткоин[а-яё]*|курс\s+доллар[а-яё]*|курс\s+валют|'
     r'спорт[а-яё]*|футбол[а-яё]*|матч[а-яё]*|тренировк[а-яё]*|'
     r'анекдот[а-яё]*|шутк[а-яё]*|юмор[а-яё]*|смешн[а-яё]*|'
     r'настроени[еяю]|устал[а-яё]*|отдых[а-яё]*|отпуск[а-яё]*|выходн[а-яё]*|сон|спать|'
     r'тестиру[а-яё]*|провокационн[а-яё]*|проверяет\s+реакцию|'
-    r'скорость\s+ответа|медлительност[а-яё]*|отвечает\s+медленно'
+    r'скорость\s+ответа|медлительност[а-яё]*|отвечает\s+медленно|'
+    r'ваканси[а-яё]*|резюме|оклад[а-яё]*|вахтов[а-яё]*\s+режим|в\s+стоматологию\s+[A-ZА-Яa-zа-яё]+|'
+    r'контакт\s+для\s+связи|поиск\s+помощи|'
+    r'мошенничеств[а-яё]*|госуслуг[а-яё]*|смс-парол[а-яё]*|кредит[а-яё]*'
     r')\b'
 )
+
+
+_BOT_DEV_META_RE = re.compile(
+    r'(?i)\b('
+    r'чат-?бот[а-яё]*|чатбот[а-яё]*|ai-бот[а-яё]*|ии-бот[а-яё]*|ии-ассистент[а-яё]*|'
+    r'бот|бота|боту|ботом|боте|боты|ботов|ботам|ботами|ботах|'
+    r'нейросет[а-яё]*|промпт[а-яё]*|'
+    r'тестер\s+ии|тестирован[а-яё]*\s+ии|'
+    r'мем[а-яё]*|стикер[а-яё]*|кружок|голосовух[а-яё]*|'
+    r'youtube|ютуб|eve\s+online|киберпанк|'
+    r'помощ[ьи]\s+по\s+дому|нетематическ[а-яё]*|'
+    r'мошенничеств[а-яё]*|госуслуг[а-яё]*|смс-парол[а-яё]*|'
+    r'поднят[а-яё]*\s+рук[а-яё]*|'
+    r'ошибся\s+чатом|перепутал\s+чат|'
+    r'требуется\s+больше\s+(?:профессионального\s+)?контента|'
+    r'нехватк[а-яё]*\s+функций\s+обратной\s+связи'
+    r')\b'
+)
+
+
+def is_meta_or_offtopic_sentence(text: str) -> bool:
+    """Проверяет, содержит ли фраза мета-информацию о ботах, ИИ, разработке или флуде."""
+    if not text:
+        return False
+    return bool(_BOT_DEV_META_RE.search(text))
+
+
+def clean_sentence_meta(sentence: str) -> str:
+    """Очищает предложение от хвостовых или вводных мета-клауз про ботов/ИИ/чаты."""
+    if not sentence:
+        return ""
+    if not _BOT_DEV_META_RE.search(sentence):
+        return sentence
+    if ";" in sentence:
+        parts = [p.strip() for p in sentence.split(";") if p.strip()]
+        clean_parts = [p for p in parts if not _BOT_DEV_META_RE.search(p)]
+        if clean_parts:
+            res = "; ".join(clean_parts)
+            if not res.endswith((".", "!", "?")):
+                res += "."
+            return res
+        return ""
+    return ""
 
 
 def is_negative_meta_sentence(text: str) -> bool:
@@ -225,6 +273,19 @@ def is_negative_meta_sentence(text: str) -> bool:
     if not text:
         return False
     return bool(_NEGATIVE_META_RE.search(text))
+
+
+def is_bot_account(user_id: int, username: str = "", first_name: str = "") -> bool:
+    """Определяет, является ли аккаунт ботом (а не реальным врачом-клиницистом)."""
+    if user_id in (7971556097, 8775535374):
+        return True
+    u_low = (username or "").strip().lower()
+    f_low = (first_name or "").strip().lower()
+    if u_low.endswith("bot") or u_low == "bot":
+        return True
+    if f_low.endswith("_bot") or f_low == "bot":
+        return True
+    return False
 
 
 _JUNK_FACT_WORDS = {
@@ -247,24 +308,39 @@ _FORBIDDEN_FACT_SUBSTRINGS = (
     "делится ссылками в чате", "выше ссылка"
 )
 
-# Паттерны мета-коммуникационных фактов без клинического содержания (болталка, опросы, троллинг)
+# Паттерны мета-коммуникационных фактов без клинического содержания (болталка, опросы, троллинг, активность в чате)
+# Вычищены жадные квантификаторы ^.* и .*$ для полного исключения ReDoS рисков.
 _PURE_META_FACT_RE = re.compile(
-    r'(?i)^('
-    r'.*участвует\s+в\s+(?:[а-яё\-]+\s+){0,4}(?:чате|сообществе|опросах|бесед[а-яё]*|жизни\s+сообщества)\b.*|'
-    r'.*участвует\s+в\s+(?:стоматологических\s+)?диагностических\s+обсуждениях\s*\.?$|'
-    r'.*(?:под\s+ником|никнейм|@\w+)\b.*|'
-    r'.*(?:общается|диалогах)\s+в\s+(?:неформальн[а-яё]*|игрив[а-яё]*|шутлив[а-яё]*|непринужденн[а-яё]*)\s+(?:тоне|манере|диалогах)\b.*|'
-    r'.*(?:дружеский\s+троллинг|шутливые\s+метафоры|использует\s+эмодзи|короткие\s+реплики|чувство\s+юмора)\b.*|'
-    r'.*проявляет\s+интерес\s+к\s+результатам\s+голосований\b.*|'
-    r'.*иронично\s+относится\s+к\s+составлению\s+досье\b.*|'
-    r'.*в\s+неформальном\s+чате\s+шутит\b.*|'
-    r'.*следит\s+за\s+чатами\s+с\s+участием\s+конкретного\s+собеседника\b.*|'
-    r'.*поддерживает\s+идею\s+сообщества\s+стоматологов.*переклички\b.*|'
-    r'.*хочет\s+получать\s+ответы\s+живых\s+коллег\s+в\s+чате\b.*|'
-    r'.*недоволен[а-яё]*\s+формальным\s+ответом\s+техподдержки\b.*|'
-    r'.*в\s+шутливой\s+переписке\s+использует\b.*|'
-    r'.*(?:чат-?бот[а-яё]*|оказался\s+ботом|собеседник\s+может\s+быть\s+ботом|это\s+бот|воспринимает.*как.*бот[а-яё]*|научен\s+ответить)\b.*'
-    r')$'
+    r'(?i)\b('
+    r'участвует\s+в\s+(?:[а-яё\-]+\s+){0,4}(?:чате|сообществе|опросах|бесед[а-яё]*|жизни\s+сообщества|диагностических\s+обсуждениях)|'
+    r'в\s+(?:чате|группе|беседе)\s+(?:обсужда[а-яё]*|повторя[а-яё]*|звуч[а-яё]*|прозвучал[а-яё]*|вед[её]тся|появил[а-яё]*сь)|'
+    r'(?:обраща[а-яё]*ся|обратился|обратилась)\s+(?:к\s+сообществу|в\s+чат[а-яё]*|к\s+коллегам\s+в\s+чат[а-яё]*)\s+(?:за\s+советом|с\s+вопросом)|'
+    r'(?:консультиру[а-яё]*ся|активно\s+консультиру[а-яё]*ся)\s+(?:с\s+коллегами\s+в\s+чат[а-яё]*|в\s+профессиональных\s+чатах|в\s+чат[а-яё]*)|'
+    r'(?:ищет|искал[а-яё]*)\s+(?:чат[а-яё]*|чаты|коллег\s+для\s+обмена\s+опытом)|'
+    r'(?:задает|задал[а-яё]*)\s+вопрос[а-яё]*\s+профессиональному\s+сообществу|'
+    r'(?:отписат[а-яё]*ся|напиш[а-яё]*)\s+в\s+чат|'
+    r'(?:отправлял[а-яё]*|делился|скидывал[а-яё]*)\s+(?:в\s+чат[а-яё]*|ссылк[а-яё]*|материал[а-яё]*\s+по\s+ирригации)|'
+    r'по\s+тематике\s+чата|'
+    r'в\s+(?:клиническом\s+)?опросе\s+проголосовал[а-яё]*|'
+    r'проявляет\s+интерес\s+к\s+результатам\s+голосований|'
+    r'(?:вежлив[а-яё]*|благодарит|премного\s+благодарн[а-яё]*|благодарност[а-яё]*)\s+(?:за\s+ответ[а-яё]*|коллег)|'
+    r'(?:женский|мужской)\s+род\s+по\s+формулировк[а-яё]*|'
+    r'имеет\s+стоматологический\s+диплом|'
+    r'маркер\s+в\s+чате|'
+    r'(?:под\s+ником|никнейм|@\w+)|'
+    r'(?:общается|диалогах)\s+в\s+(?:неформальн[а-яё]*|игрив[а-яё]*|шутлив[а-яё]*|непринужденн[а-яё]*)\s+(?:тоне|манере|диалогах)|'
+    r'(?:дружеский\s+троллинг|шутливые\s+метафоры|использует\s+эмодзи|короткие\s+реплики|чувство\s+юмора)|'
+    r'иронично\s+относится\s+к\s+составлению\s+досье|'
+    r'в\s+неформальном\s+чате\s+шутит|'
+    r'следит\s+за\s+чатами\s+с\s+участием\s+конкретного\s+собеседника|'
+    r'поддерживает\s+идею\s+сообщества\s+стоматологов.*переклички|'
+    r'хочет\s+получать\s+ответы\s+живых\s+коллег\s+в\s+чате|'
+    r'недоволен[а-яё]*\s+формальным\s+ответом\s+техподдержки|'
+    r'в\s+шутливой\s+переписке\s+использует|'
+    r'(?:благодарил|благодарит|хвалит|ругает|тестирует)\s+бота|'
+    r'(?:использования|необходимости)\s+(?:протокола\s+или\s+бота|бота)|'
+    r'(?:чат-?бот[а-яё]*|оказался\s+ботом|собеседник\s+может\s+быть\s+ботом|это\s+бот|воспринимает.*как.*бот[а-яё]*|научен\s+ответить)'
+    r')\b'
 )
 
 
@@ -275,7 +351,7 @@ def clean_clinician_facts(facts: list) -> list:
     - Блокирует системные инъекции, промпт-лики и галлюцинации роли ассистента.
     - Отсекает мусорные и односложные реплики ('ок', 'спасибо', 'да', 'нет').
     - Фильтрует псевдо-факты о самом боте вместо врача.
-    - Исключает мета-факты про опросы, переклички, троллинг и неформальные чаты.
+    - Исключает мета-факты про опросы, переклички, троллинг, вакансии и неформальные чаты.
     - Исключает дубликаты и нормализует факты.
     """
     if not facts or not isinstance(facts, list):
@@ -292,7 +368,7 @@ def clean_clinician_facts(facts: list) -> list:
         lower_f = f_str.lower().strip("!.,?:;)'\"«» \t")
         if lower_f in _JUNK_FACT_WORDS:
             continue
-        if is_negative_meta_sentence(f_str):
+        if is_negative_meta_sentence(f_str) or is_meta_or_offtopic_sentence(f_str):
             continue
         if any(bad in lower_f for bad in _FORBIDDEN_FACT_SUBSTRINGS):
             continue
@@ -306,7 +382,7 @@ def clean_clinician_facts(facts: list) -> list:
             continue
         if _OFFTOPIC_FACT_RE.search(lower_f):
             continue
-        if _PURE_META_FACT_RE.match(f_str):
+        if _PURE_META_FACT_RE.search(f_str):
             continue
         norm = _normalize_item(f_str)
         if norm and norm not in seen:
@@ -420,80 +496,91 @@ def deduplicate_clinical_summary(summary: str) -> str:
     внутри разделов, не затирая при этом упоминания ключевых брендов/протоколов
     в разных контекстах (например, в Арсенале и в Кейсах).
     Автоматически вычищает отрицательный мета-мусор («не упоминал», «нет данных»).
+    Гарантирует 100% исключение висячих заголовков (пустые секции опускаются целиком).
     """
     if not summary or not summary.strip():
         return ""
 
     lines = summary.strip().splitlines()
-    seen_items = set()
-    result_lines = []
+    sections = []
+    current_header = None
+    current_lines = []
+    seen_in_section = set()
 
-    pending_header = None
+    def _flush_current():
+        nonlocal current_header, current_lines, seen_in_section
+        if current_header and current_lines:
+            sections.append((current_header, current_lines))
+        elif not current_header and current_lines:
+            sections.append(("", current_lines))
+        current_header = None
+        current_lines = []
+        seen_in_section = set()
 
     for line in lines:
-        stripped_line = line.strip()
-        if not stripped_line:
+        stripped = line.strip()
+        if not stripped:
             continue
 
-        header_match = _SECTION_HEADER_RE.match(stripped_line)
+        header_match = _SECTION_HEADER_RE.match(stripped)
         if header_match:
-            pending_header = None
+            _flush_current()
             header_prefix = header_match.group(0).rstrip()
-            inline_content = stripped_line[header_match.end():].strip()
-
-            seen_items = set()
-
-            if not inline_content:
-                pending_header = header_prefix
-            else:
+            current_header = header_prefix
+            inline_content = stripped[header_match.end():].strip()
+            if inline_content:
                 sentences = _split_into_sentences(inline_content)
                 kept = []
                 for s in sentences:
                     if is_negative_meta_sentence(s):
                         continue
-                    norm = _normalize_item(s)
-                    if norm and norm not in seen_items:
-                        seen_items.add(norm)
-                        kept.append(s)
+                    cleaned_s = clean_sentence_meta(s)
+                    if not cleaned_s:
+                        continue
+                    norm = _normalize_item(cleaned_s)
+                    if norm and norm not in seen_in_section:
+                        seen_in_section.add(norm)
+                        kept.append(cleaned_s)
                 if kept:
-                    if result_lines and result_lines[-1] != "":
-                        result_lines.append("")
-                    result_lines.append(f"{header_prefix} {' '.join(kept)}")
-                else:
-                    pending_header = header_prefix
+                    current_lines.append(" ".join(kept))
             continue
 
-        bullet_match = re.match(r'^([•\-*]|\d+[\.\)])\s*', stripped_line)
+        bullet_match = re.match(r'^([•\-*]|\d+[\.\)])\s*', stripped)
         bullet_prefix = bullet_match.group(0) if bullet_match else ""
-        content_without_bullet = stripped_line[len(bullet_prefix):].strip()
+        content = stripped[len(bullet_prefix):].strip()
 
-        sentences = _split_into_sentences(content_without_bullet)
+        sentences = _split_into_sentences(content)
         kept_sentences = []
         for s in sentences:
             if is_negative_meta_sentence(s):
                 continue
-            norm = _normalize_item(s)
-            if norm and norm not in seen_items:
-                seen_items.add(norm)
-                kept_sentences.append(s)
+            cleaned_s = clean_sentence_meta(s)
+            if not cleaned_s:
+                continue
+            norm = _normalize_item(cleaned_s)
+            if norm and norm not in seen_in_section:
+                seen_in_section.add(norm)
+                kept_sentences.append(cleaned_s)
 
         if kept_sentences:
-            if pending_header:
-                if result_lines and result_lines[-1] != "":
-                    result_lines.append("")
-                result_lines.append(pending_header)
-                pending_header = None
             if bullet_prefix:
-                result_lines.append(f"{bullet_prefix}{' '.join(kept_sentences)}")
+                current_lines.append(f"{bullet_prefix}{' '.join(kept_sentences)}")
             else:
-                result_lines.append(" ".join(kept_sentences))
+                current_lines.append(" ".join(kept_sentences))
 
-    while result_lines and result_lines[-1] == "":
-        result_lines.pop()
-    while result_lines and result_lines[0] == "":
-        result_lines.pop(0)
+    _flush_current()
 
-    return "\n".join(result_lines)
+    result_blocks = []
+    for header, lines_list in sections:
+        if not lines_list:
+            continue
+        if header:
+            block = f"{header}\n" + "\n".join(lines_list)
+        else:
+            block = "\n".join(lines_list)
+        result_blocks.append(block)
+
+    return "\n\n".join(result_blocks).strip()
 
 
 _PORTRAIT_SECTION_STRIP_RE = re.compile(
@@ -501,15 +588,20 @@ _PORTRAIT_SECTION_STRIP_RE = re.compile(
     re.IGNORECASE
 )
 
-_PORTRAIT_HANGING_SPEC_RE = re.compile(
-    r'[\s.,;—\-]+(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$',
+_PORTRAIT_HANGING_TAIL_RE = re.compile(
+    r'^(?:специализация|клинический\s+профиль)[\s:*—\-_#\.]*$',
     re.IGNORECASE
 )
 
-_PORTRAIT_STUTTER_SPEC_RE = re.compile(
-    r'^(.+?)[\s.,;—\-]+(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:\s*(.+)$',
+_PORTRAIT_STUTTER_SEP_RE = re.compile(
+    r'[\s.,;—\-]+(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:\s*(.+)$',
     re.IGNORECASE
 )
+
+_INVALID_PORTRAIT_VALUES = {
+    "не определена", "не указана", "нет данных", "неизвестно", "не установлена",
+    "данных нет", "информация отсутствует", "формируется", "недостаточно сообщений"
+}
 
 
 def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = "") -> str:
@@ -518,23 +610,37 @@ def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = ""
     - Полностью ликвидирует висячие префиксы и суффиксы «. Специализация:».
     - Устраняет заикания ({X}. Специализация: {X}).
     - Удаляет markdown-мусор и заголовки.
+    - Отсекает плейсхолдеры («недостаточно сообщений», «формируется», «не определена»).
     - При пустом результате восстанавливает валидную узкую специализацию или первую строку досье.
     """
     p = (portrait or "").strip()
 
     # 1. Если весь текст — это только заголовок "Специализация:"
-    if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', p, re.IGNORECASE):
+    if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*[:*—\-\s]*$', p, re.IGNORECASE):
         p = ""
 
-    # 2. Отрезаем висячий суффикс на конце: "Терапевт. Специализация:" -> "Терапевт"
-    p = _PORTRAIT_HANGING_SPEC_RE.sub('', p).strip()
+    # 2. Отрезаем ведущий заголовок "Специализация:" в начале ДО анализа заикания
+    p = _PORTRAIT_SECTION_STRIP_RE.sub('', p).strip()
 
-    # 3. Проверяем паттерн заикания: "Part1. Специализация: Part2"
-    m = _PORTRAIT_STUTTER_SPEC_RE.match(p)
-    if m:
-        part1 = m.group(1).strip()
-        part2 = m.group(2).strip()
+    # 3. Отрезаем висячий суффикс на конце: "Терапевт. Специализация: —" -> "Терапевт"
+    p_lower = p.lower()
+    idx = max(p_lower.rfind("специализация"), p_lower.rfind("клинический профиль"))
+    if idx != -1:
+        tail = p[idx:]
+        if _PORTRAIT_HANGING_TAIL_RE.match(tail):
+            p = p[:idx].rstrip(" \t\r\n.,;—-#*•")
+            p_lower = p.lower()
+
+    # 4. Проверяем паттерн заикания: "Part1. Специализация: Part2"
+    stutter_m = _PORTRAIT_STUTTER_SEP_RE.search(p)
+    if stutter_m:
+        part1 = p[:stutter_m.start()].rstrip(" \t\r\n.,;—-#*•")
+        part2 = stutter_m.group(1).strip()
+        part1 = _PORTRAIT_SECTION_STRIP_RE.sub('', part1).strip()
         part2 = _PORTRAIT_SECTION_STRIP_RE.sub('', part2).strip()
+
+        if not re.sub(r'[:;,—\-*#\.\s]+', '', part2):
+            part2 = ""
 
         norm1 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part1))
         norm2 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part2))
@@ -557,33 +663,41 @@ def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = ""
         else:
             p = f"{part1}. {part2}"
 
-    # 4. Снимаем префикс "Специализация:" в начале, если остался
+    # 5. Повторно снимаем префикс "Специализация:" и висячие суффиксы
     p = _PORTRAIT_SECTION_STRIP_RE.sub('', p).strip()
+    idx = max(p.lower().rfind("специализация"), p.lower().rfind("клинический профиль"))
+    if idx != -1:
+        tail = p[idx:]
+        if _PORTRAIT_HANGING_TAIL_RE.match(tail):
+            p = p[:idx].rstrip(" \t\r\n.,;—-#*•")
 
-    # 5. Повторно отрезаем висячий суффикс на конце, если остался
-    p = _PORTRAIT_HANGING_SPEC_RE.sub('', p).strip()
+    # 6. Отсекаем невалидные заглушки ("не определена", "не указана", "нет данных", "неизвестно", "недостаточно сообщений")
+    p_norm = p.strip(".,;:—- 	").lower()
+    if p_norm in _INVALID_PORTRAIT_VALUES or any(inv in p_norm for inv in ("недостаточно сообщений", "формируется", "ошибка при составлении")):
+        p = ""
 
-    # 6. Если строка пустая, пробуем восстановить из specialty или summary
+    # 7. Если строка пустая, пробуем восстановить из specialty или summary
     if not p:
         spec_cleaned = (specialty or "").strip()
-        if spec_cleaned and spec_cleaned.lower() not in _GENERIC_SPECIALTY_PATTERNS and spec_cleaned.lower() not in ("неизвестно", "нет данных", "не определена", "не указана"):
+        if spec_cleaned and spec_cleaned.lower() not in _GENERIC_SPECIALTY_PATTERNS and spec_cleaned.lower() not in _INVALID_PORTRAIT_VALUES:
             p = spec_cleaned
         elif summary:
             lines = [l.strip() for l in summary.splitlines() if l.strip()]
             for l in lines:
-                if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', l, re.IGNORECASE):
+                if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*[:*—\-\s]*$', l, re.IGNORECASE):
                     continue
                 sub_l = _PORTRAIT_SECTION_STRIP_RE.sub('', l).strip()
+                sub_l_norm = sub_l.strip(".,;:—- 	").lower()
                 if (
                     sub_l
-                    and "недостаточно сообщений" not in sub_l.lower()
+                    and "недостаточно сообщений" not in sub_l_norm
                     and not is_negative_meta_sentence(sub_l)
-                    and sub_l.lower() not in ("не определена", "не указана", "нет данных", "неизвестно")
+                    and sub_l_norm not in _INVALID_PORTRAIT_VALUES
                 ):
                     p = sub_l
                     break
 
-    # 7. Финальная подчистка знаков препинания на концах и ограничение длины (до 400 символов)
+    # 8. Финальная подчистка знаков препинания на концах и ограничение длины (до 400 символов)
     p = re.sub(r'^[.,;:\s—\-*#]+', '', p).strip()
     p = re.sub(r'[:;,—\-*#\s]+$', '', p).strip()
     return p[:400]
@@ -806,7 +920,7 @@ async def update_clinician_memory_async(
     Не тупой append: раз в несколько сообщений или при появлении содержательного кейса
     просим нейросеть полностью переписать, уточнить и актуализировать клинический профиль доктора (до 64 КБ).
     """
-    if not user_id or is_trivial_message(user_message):
+    if not user_id or user_id <= 0 or is_bot_account(user_id, username=username, first_name=first_name) or is_trivial_message(user_message):
         return
 
     now = time.time()
@@ -985,8 +1099,8 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             bot_id = getattr(config, "BOT_ID", None) or getattr(config, "STOMCHAT_BOT_ID", None)
             if not bot_id and getattr(config, "BOT_TOKEN", None):
                 bot_id = int(config.BOT_TOKEN.split(":", 1)[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to extract bot_id in daemon_update_group_memory_step: %s", exc)
         if not bot_id:
             env_id = os.getenv("BOT_ID") or os.getenv("STOMCHAT_BOT_ID")
             if env_id and env_id.isdigit():
@@ -1006,7 +1120,9 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 
         for u in users_to_process:
             user_id = u["user_id"]
-            if not user_id or user_id <= 0 or user_id == bot_id:
+            sender_name = u.get("sender_name", "")
+            sender_username = u.get("username", "")
+            if not user_id or user_id <= 0 or user_id == bot_id or is_bot_account(user_id, username=sender_username, first_name=sender_name):
                 continue
             max_id = u.get("max_id") or u.get("max_msg_id") or 0
             sender_name = u.get("sender_name", "")

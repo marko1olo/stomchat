@@ -271,6 +271,82 @@ class TestVoiceMediaInquisitor(unittest.TestCase):
         self.assertTrue(dental_vocab.has_dental_term("эндочак"))
         self.assertTrue(dental_vocab.has_dental_term("раббердам"))
         self.assertTrue(dental_vocab.has_dental_term("холодовая проба"))
+        self.assertTrue(dental_vocab.has_dental_term("к-файл"))
+        self.assertTrue(dental_vocab.has_dental_term("h-файл"))
+        self.assertTrue(dental_vocab.has_dental_term("c-pilot"))
+        self.assertTrue(dental_vocab.has_dental_term("силер"))
+        self.assertTrue(dental_vocab.has_dental_term("байпас"))
+        self.assertTrue(dental_vocab.has_dental_term("пафф"))
+
+    def test_primary_teeth_and_endo_instruments_and_notes(self):
+        """Вектор 1 и 3: Молочные зубы 51-85, эндодонтический жаргон и музыкальные ноты Whisper."""
+        # 1. Временный прикус (детская стоматология)
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("пациент 5 лет, зуб 5.4 глубокий кариес"),
+            "пациент 5 лет, зуб 54 глубокий кариес"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("зуб 6,1 пульпит, зуб 7.5 периодонтит, зуб 8.3 свищ"),
+            "зуб 61 пульпит, зуб 75 периодонтит, зуб 83 свищ"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("зуб пять точка четыре и зуб шестьдесят пять"),
+            "зуб 54 и зуб 65"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("зуб восемьдесят пять и зуб семь один"),
+            "зуб 85 и зуб 71"
+        )
+        # 5.8 во временном прикусе не существует (только 1-5)
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("зуб 5.8 некариозное"),
+            "зуб 5.8 некариозное"
+        )
+
+        # 2. Жаргон и эндодонтические инструменты
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("промыли хлоркой 3% и сделали ирригация хлоркой"),
+            "промыли гипохлоритом натрия 3% и сделали ирригация гипохлоритом натрия"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("прошли к-файл 10, затем k-файлом 15 и h-файл 20"),
+            "прошли К-файл 10, затем К-файлом 15 и H-файл 20"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("использовали c-pilot 08 и си-пилот 10"),
+            "использовали C-Pilot 08 и C-Pilot 10"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("ввели силлер в канал, разогретая гутаперча, паф силлера"),
+            "ввели силер в канал, разогретая гуттаперча, пафф силера"
+        )
+        self.assertEqual(
+            blocking_tools.normalize_dental_transcription("выполнили бай-пас ступеньки"),
+            "выполнили байпас ступеньки"
+        )
+
+        # 3. Музыкальные ноты Whisper при шуме турбины/слюноотсоса
+        hallucinations_notes = [
+            "♪♪♪",
+            "♪ Music ♪",
+            "[Music]",
+            "(Ударные и музыка)",
+            "Subtitles by the Amara.org community",
+            "Приятного просмотра!",
+            "Приятного вам просмотра",
+        ]
+        for hn in hallucinations_notes:
+            self.assertTrue(
+                blocking_tools.is_silence_or_whisper_hallucination(hn),
+                f"Failed to identify note/hallucination: '{hn}'"
+            )
+
+        speech_notes = "Промыли зуб 36 гипохлоритом ♪♪♪"
+        self.assertFalse(blocking_tools.is_silence_or_whisper_hallucination(speech_notes))
+        self.assertEqual(
+            blocking_tools.strip_whisper_hallucinations(speech_notes),
+            "Промыли зуб 36 гипохлоритом"
+        )
 
 
 if __name__ == "__main__":

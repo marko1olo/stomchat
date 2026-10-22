@@ -368,7 +368,7 @@ def normalize_category(code):
             return raw, (f"код {raw} легален, но его нет в savdel.py CAT_MAP — "
                          f"факт сохранится, но ни в один файл экспорта не попадёт")
         return raw, None
-    m = re.search(r"\d{1,2}(?:\.\d+)*", raw)
+    m = re.search(r"\d{1,2}(?:\.\d{1,2}){0,3}", raw)
     if not m:
         return FALLBACK_CODE, f"код {raw!r} нечитаем -> {FALLBACK_CODE}"
     parts = m.group().split(".")

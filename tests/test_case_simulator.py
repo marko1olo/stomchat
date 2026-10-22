@@ -64,7 +64,7 @@ _corpus_result = ("Справка: препарирование под цирк�
 _corpus_error = None
 
 
-async def fake_corpus(keywords):
+async def fake_corpus(keywords, *args, **kwargs):
     EVENTS.append(("corpus", tuple(keywords)))
     if _corpus_error:
         raise _corpus_error

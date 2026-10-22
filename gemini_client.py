@@ -204,8 +204,8 @@ def _save_expiry_map(path, data):
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to remove tmp_path %s: %s", tmp_path, exc)
 
 
 def get_banned_models():
@@ -266,8 +266,8 @@ def _clear_failure_history(model_name):
         if model_name in data:
             data.pop(model_name, None)
             _save_expiry_map(MODEL_FAILURES_FILE, data)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to clear failure history for %s: %s", model_name, exc)
 
 
 def _record_model_server_failure(model_name: str) -> int:
@@ -1591,8 +1591,8 @@ def ffmpeg_binary():
             else:
                 candidates.append(os.path.join(
                     os.path.dirname(module.__file__), "bin", "ffmpeg.exe"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Module %s ffmpeg import failed: %s", module_name, exc)
 
     for candidate in candidates:
         if candidate and _probe_ffmpeg(candidate):
@@ -1634,8 +1634,8 @@ def _ffmpeg_to(file_path, out_path, args):
     if os.path.exists(out_path):
         try:
             os.remove(out_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to remove failed audio conversion file %s: %s", out_path, exc)
     return None
 
 
@@ -1956,8 +1956,8 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
         if actual_file_path != file_path and os.path.exists(actual_file_path):
             try:
                 os.remove(actual_file_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to remove silent temp audio %s: %s", actual_file_path, exc)
         return ""
 
     random.shuffle(keys)
@@ -2014,8 +2014,10 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 logger.info(f"Transcription success chars={len(result_text)}")
 
                 if actual_file_path != file_path and os.path.exists(actual_file_path):
-                    try: os.remove(actual_file_path)
-                    except Exception: pass
+                    try:
+                        os.remove(actual_file_path)
+                    except Exception as exc:
+                        logger.debug("Failed to remove temp audio %s after transcription: %s", actual_file_path, exc)
 
                 return result_text
         except Exception as e:
@@ -2036,8 +2038,10 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             continue
 
     if actual_file_path != file_path and os.path.exists(actual_file_path):
-        try: os.remove(actual_file_path)
-        except Exception: pass
+        try:
+            os.remove(actual_file_path)
+        except Exception as exc:
+            logger.debug("Failed to remove temp audio %s after exhaustion: %s", actual_file_path, exc)
 
     return None
 
@@ -2092,10 +2096,14 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     groq_secondary = "openai/gpt-oss-120b"
     cascade = [
         (groq_primary, "groq"),
+    ]
+    if provider_pool("agentrouter"):
+        cascade.append(("deepseek-v4-flash", "agentrouter"))
+    cascade.extend([
+        ("gemini-3.5-flash-lite", "gemini"),
         (groq_secondary, "groq"),
         ("gemini-3.8-flash", "gemini"),
-        ("gemini-3.7-flash", "gemini"),
-    ]
+    ])
 
     for model_name, provider in cascade:
         keys = config.GROQ_KEYS if provider == "groq" else config.GOOGLE_KEYS
@@ -2107,7 +2115,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         for api_key in candidates[:2]:
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
             try:
-                client = get_provider_client(provider, api_key, timeout=min(100.0, timeout or 100.0))
+                client = get_provider_client(provider, api_key, timeout=min(25.0, timeout or 25.0))
                 supp_kwargs = {
                     "model": model_name,
                     "messages": [
@@ -2117,8 +2125,8 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                     "temperature": 0.5,
                     "max_tokens": 800 if provider == "groq" else 2048,
                 }
-                if provider == "gemini":
-                    supp_kwargs["reasoning_effort"] = "high"
+                if provider == "gemini" and "lite" not in model_name:
+                    supp_kwargs["reasoning_effort"] = "medium"
                 try:
                     response = client.chat.completions.create(**supp_kwargs)
                 except (TypeError, Exception) as err:
@@ -2137,7 +2145,9 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                     return DummyResponse(cleaned)
             except Exception as e:
                 logger.warning(f"PM supplement failed model={model_name} key={key_id}: {e}")
-                note_key_failure(provider, api_key, str(e), model_name=model_name)
+                supp_fail = note_key_failure(provider, api_key, str(e), model_name=model_name)
+                if supp_fail == "key_rate_limited":
+                    time.sleep(2.5)
                 continue
 
     return None
@@ -2172,8 +2182,10 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
         return None, f"sdk_import_error: {imp_err}"
 
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+    community_name = "EndoChat" if is_endo else "StomChat"
     system_instruction = (
-        "Ты — опытный стоматолог-эксперт сообщества StomChat. "
+        f"Ты — опытный стоматолог-эксперт сообщества {community_name}. "
         "Твоя задача — дать четкий, доказательный медицинский ответ на основе актуальных "
         "научных публикаций, исследований (PubMed, Cochrane, ADA) и клинических протоколов.\n\n"
         "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
@@ -2258,7 +2270,9 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
                     "Google Search Grounding failed model=%s key=%s err=%s",
                     model_name, key_id, last_err,
                 )
-                note_key_failure("gemini", api_key, str(exc), model_name=model_name)
+                g_fail = note_key_failure("gemini", api_key, str(exc), model_name=model_name)
+                if g_fail == "key_rate_limited":
+                    time.sleep(2.5)
 
     return None, last_err or "all_grounding_attempts_failed"
 

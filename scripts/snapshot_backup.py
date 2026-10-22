@@ -196,17 +196,15 @@ def verify_snapshot(archive_path: Path) -> bool:
         if db_name and (tmp_dir / db_name).exists():
             db_file = tmp_dir / db_name
             logger.info("Проверка PRAGMA integrity_check для %s...", db_name)
-            conn = sqlite3.connect(str(db_file))
-            try:
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA integrity_check")
-                rows = cursor.fetchall()
-                if rows != [("ok",)]:
-                    logger.error("PRAGMA integrity_check вернул ошибки: %s", rows)
-                    return False
-                logger.info("База данных SQLite прошла проверку целостности (OK).")
-            finally:
-                conn.close()
+            root = _get_project_root()
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            import backup_db
+            is_ok, msg = backup_db.verify_database_integrity(db_file)
+            if not is_ok:
+                logger.error("PRAGMA integrity_check вернул ошибки для %s: %s", db_name, msg)
+                return False
+            logger.info("База данных SQLite прошла проверку целостности: %s", msg)
 
     logger.info("Снапшот %s ПОЛНОСТЬЮ ВАЛИДЕН.", archive_path.name)
     return True
@@ -243,10 +241,36 @@ def restore_snapshot(archive_path: Path, force: bool = False) -> bool:
                 except Exception as e:
                     logger.warning("Не удалось создать .bak для %s: %s", filename, e)
 
+            # Если это база данных SQLite, убираем старые WAL/SHM файлы чтобы они не конфликтовали с новой базой
+            if filename.endswith(".db"):
+                for suffix in ("-wal", "-shm"):
+                    stale_wal = root / f"{filename}{suffix}"
+                    if stale_wal.exists():
+                        try:
+                            shutil.copy2(stale_wal, root / f"{stale_wal.name}.bak_{backup_stamp}")
+                            stale_wal.unlink()
+                            logger.info("Удален устаревший журнал WAL: %s", stale_wal.name)
+                        except Exception as e:
+                            logger.warning("Не удалось удалить устаревший WAL %s: %s", stale_wal, e)
+
             # Копируем файл из снапшота
             src_file = tmp_dir / filename
             shutil.copy2(src_file, target)
             logger.info("Восстановлен файл: %s (%d байт)", filename, target.stat().st_size)
+
+            # Для баз данных SQLite проводим финальную валидацию целостности
+            if filename.endswith(".db"):
+                try:
+                    if str(root) not in sys.path:
+                        sys.path.insert(0, str(root))
+                    import backup_db
+                    is_ok, msg = backup_db.verify_database_integrity(target)
+                    if not is_ok:
+                        logger.error("Восстановленная база данных %s не прошла проверку целостности: %s", filename, msg)
+                        return False
+                    logger.info("Восстановленная БД %s успешно прошла PRAGMA integrity_check", filename)
+                except Exception as e:
+                    logger.warning("Не удалось запустить verify_database_integrity для %s: %s", filename, e)
 
     logger.info("Восстановление успешно завершено.")
     return True

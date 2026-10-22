@@ -6,7 +6,14 @@
 
 import asyncio
 import datetime
+import os
+import sys
 import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from question_lifeline import (
     is_clinical_question_candidate,
@@ -37,6 +44,25 @@ class TestQuestionLifeline(unittest.IsolatedAsyncioTestCase):
 
         # 6. Сообщение от другого бота
         self.assertFalse(is_clinical_question_candidate(q1, sender_is_bot=True))
+
+        # 7. Не-клиническое медиа (скриншот интерфейса бота / приложения)
+        self.assertFalse(is_clinical_question_candidate(
+            "Коллеги, подскажите что делать?",
+            has_media=True,
+            media_description="На снимке интерфейс цифрового комплекса Docendo Discimus, зубы отсутствуют"
+        ))
+        self.assertFalse(is_clinical_question_candidate(
+            "Что думаете по этому поводу?",
+            has_media=True,
+            media_description="Скриншот экрана смартфона с перепиской"
+        ))
+
+        # 8. Слепое медиа без клинических терминов и без описания
+        self.assertFalse(is_clinical_question_candidate(
+            "Что скажете?",
+            has_media=True,
+            media_description=None
+        ))
 
     async def test_lifeline_cancellation_on_reply(self):
         """Проверяет, что таймер отменяется, если коллега ответил на вопрос."""
@@ -254,6 +280,50 @@ class TestQuestionLifeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleaned, 1)
         self.assertNotIn(8003, mgr.pending_questions)
 
+
+
+
+    async def test_non_dental_media_and_escape_hatch(self):
+        """Проверяет отсечение не-клинических изображений и escape hatch."""
+        from question_lifeline import PendingQuestion, generate_lifeline_response
+        from unittest.mock import AsyncMock, MagicMock
+
+        triggered = []
+        async def fake_send(chat_id, reply_to_msg_id, text):
+            triggered.append((chat_id, reply_to_msg_id, text))
+
+        mgr = QuestionLifelineManager(
+            delay_seconds=0,
+            send_message_callback=fake_send
+        )
+
+        # 1. Если описание снимка явно не-стоматологическое, _execute_lifeline отменяется
+        pq_nondental = PendingQuestion(
+            msg_id=9001,
+            chat_id=777,
+            sender_id=200,
+            sender_name="Сергей",
+            text="Подскажите что делать?",
+            created_at=datetime.datetime.now(),
+            has_media=True,
+            media_description="На снимке интерфейс цифрового комплекса Docendo Discimus, зубы отсутствуют"
+        )
+        await mgr._execute_lifeline(pq_nondental)
+        self.assertEqual(len(triggered), 0, "Не-клиническое описание не должно приводить к отправке Lifeline")
+
+        # 2. Escape Hatch: если модель вернула NOT_CLINICAL_CASE
+        async def fake_caller(prompt, status_ctx=None, timeout=30.0):
+            mock_resp = MagicMock()
+            mock_resp.text = "NOT_CLINICAL_CASE"
+            return mock_resp, None
+
+        resp = await generate_lifeline_response(
+            question_text="Что скажете?",
+            doctor_name="Доктор",
+            media_desc="Скриншот интерфейса",
+            llm_caller=fake_caller
+        )
+        self.assertIsNone(resp, "При NOT_CLINICAL_CASE функция должна возвращать None")
 
 
 if __name__ == "__main__":

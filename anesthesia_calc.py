@@ -50,6 +50,9 @@ class AnesthesiaCalculationResult:
     error_message: Optional[str] = None
     is_pediatric: bool = False
     is_cardiac: bool = False
+    is_pregnant: bool = False
+    is_weight_estimated: bool = False
+    estimated_age_years: Optional[float] = None
     contraindicated: bool = False
     contraindication_reason: Optional[str] = None
     weight_kg: float = 0.0
@@ -240,59 +243,135 @@ _RUSSIAN_NUM_WORDS: Dict[str, int] = {
 }
 
 
-def parse_weight_from_text(text: str) -> Optional[float]:
+def parse_clinical_query_params(text: str) -> Dict[str, Any]:
     """
-    Извлекает вес пациента из текста сообщения с поддержкой:
-    - Десятичных дробей с запятой или точкой («18,5», «70.5 кг»).
-    - Текстовых числительных («двадцать килограмм», «семьдесят пять кг»).
-    - Контекстных конструкций («на 80», «вес 65», «весом 18.5»).
-    - Защиты от отрицательных чисел и деления на ноль.
+    Комплексный парсер клинического запроса:
+    1. Санитизирует артериальное давление (140/90, 120/80) -> предотвращает галлюцинацию веса 140 кг.
+    2. Санитизирует номера зубов FDI (46 зуб, зуб 36, #46, 15 зуба) -> предотвращает галлюцинацию веса 46 кг.
+    3. Санитизирует единицы объема и концентрации (2 карпулы, 1.8 мл, 4%, 3 канала).
+    4. Распознает возраст детей (7 лет) -> при отсутствии веса рассчитывает ориентировочный вес по формуле Нельсона (Age*2 + 8).
+    5. Детектирует беременность и лактацию.
+    6. Детектирует сердечно-сосудистую патологию и гипертензию (включая цифры АД).
     """
     if not text:
-        return None
+        return {
+            "weight": None,
+            "age": None,
+            "is_weight_estimated": False,
+            "is_cardiac": False,
+            "is_pregnant": False
+        }
 
     cleaned = text.lower().replace(',', '.')
 
-    # 1. Точное совпадение: вес от 1 до 3 знаков и до 2 знаков дробной части (ReDoS-защита)
-    m = re.search(r'(?<!\w)(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*|кило\b)\b', cleaned)
-    if m:
+    # 1. Беременность и лактация
+    is_pregnant = bool(re.search(r'\b(?:беременн\w*|лактаци\w*|гв\b|кормящ\w*|триместр\w*|плод\w*|роды)\b', cleaned))
+
+    # 2. Сердечно-сосудистый статус
+    is_cardiac = bool(re.search(
+        r'\b(?:кардио\w*|сердечн\w*|гипертон\w*|давлен\w*|ибс\b|аритми\w*|стенокарди\w*|инфаркт\w*|'
+        r'стент\w*|тахикарди\w*|брадикарди\w*|бета-блокатор\w*|кардиопатолог\w*|сердц\w*)\b',
+        cleaned
+    ))
+
+    # Маскирование АД (140/90, 120/80, 180/110)
+    def _mask_bp(m):
+        nonlocal is_cardiac
         try:
-            val = float(m.group(1))
-            return val
+            s, d = int(m.group(1)), int(m.group(2))
+            if 70 <= s <= 260 and 40 <= d <= 150:
+                if s >= 140 or d >= 90:
+                    is_cardiac = True
+                return " [BP] "
+        except Exception:
+            pass
+        return m.group(0)
+
+    sanitized = re.sub(r'\b(\d{2,3})\s*[/\\|\-]\s*(\d{2,3})\b', _mask_bp, cleaned)
+
+    # 3. Маскирование номеров зубов (FDI 11-48, 51-85)
+    sanitized = re.sub(r'\b(?:зуб[а-яё]*|fdi|#)\s*([1-8][1-8])\b', ' [TOOTH] ', sanitized)
+    sanitized = re.sub(r'\b([1-8][1-8])\s*(?:зуб[а-яё]*|fdi)\b', ' [TOOTH] ', sanitized)
+    sanitized = re.sub(r'\bзуб[а-яё]*\s+(\d{1,2})\b', ' [TOOTH] ', sanitized)
+
+    # 4. Маскирование карпул, ампул, миллилитров, процентов, каналов
+    sanitized = re.sub(r'\b\d+(?:\.\d+)?\s*(?:карпул[а-яё]*|карп[а-яё]*|ампул[а-яё]*|мл|ml|процент[а-яё]*|%)\b', ' [UNIT] ', sanitized)
+    sanitized = re.sub(r'\b\d+\s*(?:канал[а-яё]*|корн[яей]*)\b', ' [CANAL] ', sanitized)
+
+    # 5. Возраст в годах
+    age_years = None
+    age_m = re.search(r'\b(\d{1,2})\s*(?:лет|год|года|годика)\b', sanitized)
+    if age_m:
+        try:
+            age_years = float(age_m.group(1))
+            sanitized = re.sub(r'\b(\d{1,2})\s*(?:лет|год|года|годика)\b', ' [AGE] ', sanitized)
+        except Exception:
+            pass
+
+    # 6. Извлечение массы тела
+    weight = None
+    is_estimated = False
+
+    # 6.1. Явный вес с единицами (кг, kg, килограмм)
+    m_kg = re.search(r'(?<!\w)(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*|кило\b)\b', sanitized)
+    if m_kg:
+        try:
+            weight = float(m_kg.group(1))
         except ValueError:
             pass
 
-    # 2. Контекстный предлог/маркер: «на 70», «для 80», «вес 65», «весом 18.5» (с поддержкой буквы «ё»)
-    m_ctx = re.search(r'\b(?:вес[а-яё]*|на|для|масс[а-яё]*)\s+(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\b', cleaned)
-    if m_ctx:
-        try:
-            val = float(m_ctx.group(1))
-            return val
-        except ValueError:
-            pass
+    # 6.2. Контекстный вес («вес 70», «на 80», «масса 65»)
+    if weight is None:
+        m_ctx = re.search(r'\b(?:вес[а-яё]*|на|для|масс[а-яё]*)\s+(-\d{1,3}(?:\.\d{1,2})?|\d{1,3}(?:\.\d{1,2})?)\b', sanitized)
+        if m_ctx:
+            try:
+                weight = float(m_ctx.group(1))
+            except ValueError:
+                pass
 
-    # 3. Числительные словами перед единицами веса (с поддержкой буквы «ё»)
-    tokens = re.findall(r'[а-яёa-z]+', cleaned)
-    for i, tok in enumerate(tokens):
-        if tok in ("кг", "kg", "килограмм", "килограмма", "килограммов", "кило"):
-            acc = 0
-            for j in range(max(0, i - 3), i):
-                w = tokens[j]
-                if w in _RUSSIAN_NUM_WORDS:
-                    acc += _RUSSIAN_NUM_WORDS[w]
-            if 3 <= acc <= 300:
-                return float(acc)
+    # 6.3. Числительные словами перед единицами измерения
+    if weight is None:
+        tokens = re.findall(r'[а-яёa-z]+', sanitized)
+        for i, tok in enumerate(tokens):
+            if tok in ("кг", "kg", "килограмм", "килограмма", "килограммов", "кило"):
+                acc = 0
+                for j in range(max(0, i - 3), i):
+                    w = tokens[j]
+                    if w in _RUSSIAN_NUM_WORDS:
+                        acc += _RUSSIAN_NUM_WORDS[w]
+                if 3 <= acc <= 300:
+                    weight = float(acc)
+                    break
 
-    # 4. Фоллбек: изолированное число в разумных пределах веса [5, 250]
-    for num_str in re.findall(r'\b\d+(?:\.\d+)?\b', cleaned):
-        try:
-            val = float(num_str)
-            if 5.0 <= val <= 250.0:
-                return val
-        except ValueError:
-            pass
+    # 6.4. Изолированное число (только если нет других единиц и контекста)
+    if weight is None:
+        for num_str in re.findall(r'\b\d+(?:\.\d+)?\b', sanitized):
+            try:
+                val = float(num_str)
+                if 5.0 <= val <= 250.0:
+                    weight = val
+                    break
+            except ValueError:
+                pass
 
-    return None
+    # 6.5. Расчет по возрасту формулой Нельсона (Age * 2 + 8), если вес не указан явно
+    if weight is None and age_years is not None:
+        if 1.0 <= age_years <= 14.0:
+            weight = round((age_years * 2.0) + 8.0, 1)
+            is_estimated = True
+
+    return {
+        "weight": weight,
+        "age": age_years,
+        "is_weight_estimated": is_estimated,
+        "is_cardiac": is_cardiac,
+        "is_pregnant": is_pregnant
+    }
+
+
+def parse_weight_from_text(text: str) -> Optional[float]:
+    """Извлекает массу тела пациента с предварительной клинической санитизацией."""
+    return parse_clinical_query_params(text)["weight"]
 
 
 def detect_anesthetic_drug(text: str) -> str:
@@ -317,14 +396,12 @@ def detect_anesthetic_drug(text: str) -> str:
 
 def detect_cardiac_risk(text: str) -> bool:
     """Детектирует указания на сердечно-сосудистую патологию и необходимость кардио-лимита адреналина."""
-    if not text:
-        return False
-    low = text.lower()
-    return bool(re.search(
-        r'\b(?:кардио\w*|сердечн\w*|гипертон\w*|давлен\w*|ибс\b|аритми\w*|стенокарди\w*|инфаркт\w*|'
-        r'стент\w*|тахикарди\w*|брадикарди\w*|бета-блокатор\w*|кардиопатолог\w*|сердц\w*)\b',
-        low
-    ))
+    return parse_clinical_query_params(text)["is_cardiac"]
+
+
+def detect_pregnancy_context(text: str) -> bool:
+    """Детектирует контекст беременности и лактации."""
+    return parse_clinical_query_params(text)["is_pregnant"]
 
 
 def detect_pediatric_context(text: str, weight: Optional[float] = None) -> bool:
@@ -348,7 +425,8 @@ def calculate_anesthesia_dose(
     text_or_weight: Any,
     drug_key: Optional[str] = None,
     is_cardiac: Optional[bool] = None,
-    is_child: Optional[bool] = None
+    is_child: Optional[bool] = None,
+    is_pregnant: Optional[bool] = None
 ) -> AnesthesiaCalculationResult:
     """
     Основная расчетная функция: выполняет клинический расчет безопасных доз местных анестетиков.
@@ -356,12 +434,17 @@ def calculate_anesthesia_dose(
     кардиологических ограничений адреналина и педиатрической безопасности (округление строго ВНИЗ).
     """
     raw_text = str(text_or_weight) if isinstance(text_or_weight, str) else ""
+    parsed_params = parse_clinical_query_params(raw_text)
 
     # Извлечение веса
     if isinstance(text_or_weight, (int, float)):
         weight = float(text_or_weight)
+        is_estimated_weight = False
+        parsed_age = None
     else:
-        weight = parse_weight_from_text(raw_text)
+        weight = parsed_params["weight"]
+        is_estimated_weight = parsed_params["is_weight_estimated"]
+        parsed_age = parsed_params["age"]
 
     if weight is None:
         return AnesthesiaCalculationResult(
@@ -387,8 +470,9 @@ def calculate_anesthesia_dose(
         )
 
     # Определение соматического статуса
-    cardiac = is_cardiac if is_cardiac is not None else detect_cardiac_risk(raw_text)
+    cardiac = is_cardiac if is_cardiac is not None else parsed_params["is_cardiac"]
     pediatric = is_child if is_child is not None else detect_pediatric_context(raw_text, weight)
+    pregnant = is_pregnant if is_pregnant is not None else parsed_params["is_pregnant"]
 
     # Определение препарата
     selected_key = drug_key or detect_anesthetic_drug(raw_text)
@@ -469,6 +553,8 @@ def calculate_anesthesia_dose(
 
     report_lines.append(f"🧮 <b>Клинический расчет анестезии: {drug.generic_name}</b>{cardio_badge}")
     report_lines.append("━━━━━━━━━━━━━━━━━━━━━")
+    if is_estimated_weight and parsed_age:
+        report_lines.append(f"⚠️ <b>ВНИМАНИЕ:</b> Масса тела <b>{weight:g} кг</b> рассчитана ориентировочно по возрасту ({parsed_age:g} лет по формуле Нельсона). При возможности взвесьте ребенка!")
     report_lines.append(f"👤 <b>Пациент:</b> {category_title}, масса тела <b>{weight:g} кг</b>")
     report_lines.append(f"📏 <b>Норма расчета:</b> {mg_per_kg:g} мг/кг (абсолютный потолок: {drug.absolute_max_mg_adult:g} мг)\n")
 
@@ -510,6 +596,15 @@ def calculate_anesthesia_dose(
             report_lines.append(f"• Суммарно в {final_safe_carpules} карп.: <b>{epinephrine_total_mg * 1000:g} мкг</b> (в пределах нормы)")
 
     report_lines.append("")
+    if pregnant:
+        report_lines.append("")
+        report_lines.append("🤰 <b>ОСОБЫЙ СТАТУС: БЕРЕМЕННОСТЬ / ЛАКТАЦИЯ (FDA / ADA EBM):</b>")
+        report_lines.append("• <b>Препарат 1-го выбора:</b> Лидокаин 2% с адреналином 1:100 000 (Категория FDA B — наивысшая доказанная безопасность).")
+        report_lines.append("• <b>Артикаин 4% 1:200 000:</b> Категория FDA C — разрешен со II триместра (T1/2 = 25 мин, 95% связывание с белками). Использовать строго 1:200 000!")
+        report_lines.append("• ⛔ <b>Мепивакаин 3% (Скандонест):</b> НЕ РЕКОМЕНДОВАН (печень плода медленно выводит препарат -> риск кумуляции и брадикардии).")
+        report_lines.append("• ⛔ <b>Прилокаин / Фелипрессин:</b> КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН (тонус миометрия, метгемоглобинемия).")
+        report_lines.append("• <b>Положение в кресле:</b> С легким наклоном на <b>левый бок</b> (профилактика сдавления v. cava inferior).")
+
     if pediatric:
         report_lines.append("⚠️ <i>В педиатрии округление карпул строго ВНИЗ к меньшему целому!</i>")
     elif cardiac:
@@ -523,6 +618,9 @@ def calculate_anesthesia_dose(
         is_valid=True,
         is_pediatric=pediatric,
         is_cardiac=cardiac,
+        is_pregnant=pregnant,
+        is_weight_estimated=is_estimated_weight,
+        estimated_age_years=parsed_age,
         weight_kg=weight,
         drug=drug,
         mg_per_kg_applied=mg_per_kg,
@@ -764,10 +862,216 @@ EMERGENCY_PROTOCOLS: Dict[str, EmergencyProtocol] = {
             "3. <b>Контроль:</b> Измерение АД каждые 10 мин. Плавное снижение (не более чем на 20% за первый час).\n"
             "4. При отсутствии эффекта, загрудинной боли или очаговой неврологии — экстренный вызов СМП (112)."
         )
+    ),
+    "needle_breakage": EmergencyProtocol(
+        key="needle_breakage",
+        title="🚨 SOS-Протокол: Перелом инъекционной иглы в мягких тканях",
+        short_indication="Внезапный щелчок и исчезновение иглы в мягких тканях при торусальной / мандибулярной анестезии.",
+        primary_drugs=[
+            ("Прикусной блок / роторасширитель", "Установка немедленно", "Фиксация открытого рта"),
+            ("Зажим типа «москит» / гемостатический пинцет", "Стерильно", "Для захвата видимого кончика"),
+            ("3D КЛКТ / Скорая помощь", "Экстренно", "Госпитализация в стационар ЧЛХ"),
+        ],
+        immediate_steps=[
+            "1. НЕ ДАВАТЬ ПАЦИЕНТУ ЗАКРЫВАТЬ РОТ! Установить прикусной блок или пальцевой упор. Любое движение челюсти или глотание затягивает иглу глубже в межкрыловидное пространство!",
+            "2. Если кончик иглы виден: немедленно зафиксировать его зажимом «москит» и плавно извлечь по оси введения.",
+            "3. Если кончик иглы полностью скрылся в тканях: КАТЕГОРИЧЕСКИ НЕ ПАЛЬПИРОВАТЬ и не делать разрезов вслепую (это проталкивает иглу к внутренней сонной артерии и глотке!).",
+            "4. Сохранить спокойствие, успокоить пациента, четко зафиксировать факт осложнения в первичной медицинской документации.",
+            "5. Выполнить экстренное 3D КЛКТ челюстно-лицевой области для точной пространственной локализации отломка.",
+            "6. Вызвать скорую помощь / санитарный транспорт для экстренного перевода пациента в отделение челюстно-лицевой хирургии (ЧЛХ)."
+        ],
+        contraindicated_actions=[
+            "⛔ ЗАПРЕЩЕНО разрешать пациенту смыкать челюсти или совершать глотательные движения!",
+            "⛔ ЗАПРЕЩЕНО пальпировать ткани пальцем или пытаться разрезать слизистую вслепую!",
+            "⛔ ЗАПРЕЩЕНО отпускать пациента домой без КЛКТ и направления в стационар ЧЛХ!"
+        ],
+        card_text=(
+            "🚨 <b>SOS: Перелом инъекционной иглы в тканях (ЧЛХ / ESE)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚡ Алгоритм 1-й минуты:</b>\n"
+            "1. <b>НЕ ДАВАТЬ ЗАКРЫВАТЬ РОТ!</b> Немедленно поставить прикусной блок/роторасширитель. "
+            "Любое движение челюсти или глотание смещает иглу глубже к крыловидному сплетению и сонной артерии!\n"
+            "2. <b>Если кончик виден:</b> Зафиксировать зажимом «москит» и осторожно извлечь по оси инъекции.\n"
+            "3. <b>Если кончик скрылся в тканях:</b>\n"
+            "   • ⛔ <b>КАТЕГОРИЧЕСКИ НЕ ПАЛЬПИРОВАТЬ!</b> Пальпация заталкивает фрагмент вглубь.\n"
+            "   • ⛔ <b>Не делать слепых разрезов!</b>\n"
+            "4. <b>3D КЛКТ:</b> Экстренная томография для трехмерной локализации.\n"
+            "5. <b>ЧЛХ-стационар:</b> Немедленная госпитализация скорой помощью в челюстно-лицевое отделение."
+        )
+    ),
+    "adrenaline_reaction": EmergencyProtocol(
+        key="adrenaline_reaction",
+        title="⚡ Дифдиагностика: Адреналиновая реакция vs Анафилактический шок",
+        short_indication="Пациент побледнел, тремор рук, тахикардия, чувство тревоги после инъекции анестетика с адреналином.",
+        primary_drugs=[
+            ("Успокоение, свежий воздух", "Психологический контакт", "Глубокое дыхание через нос"),
+            ("Кислород", "4–6 л/мин", "Лицевая маска"),
+            ("Тонометр / Пульсоксиметр", "Мониторинг каждые 3 мин", "Контроль АД и ЧСС"),
+        ],
+        immediate_steps=[
+            "1. Немедленно прекратить введение анестетика и стоматологические манипуляции.",
+            "2. Оценить артериальное давление и характер дыхания (ключевые дифференциальные признаки!).",
+            "3. При адреналиновой реакции: АД ПОВЫШЕНО, тахикардия, дыхание СВОБОДНОЕ (нет хрипов и стридора), сыпи и отека Квинке НЕТ.",
+            "4. Придать пациенту полусидячее положение, обеспечить приток свежего воздуха, глубокое дыхание через нос.",
+            "5. Категорически НЕ вводить дополнительный адреналин! Реакция купируется самостоятельно в течение 10–15 минут по мере расщепления адреналина КОМТ/МАО.",
+            "6. При анафилаксии (АД падает, удушье, стридор, крапивница) — немедленно адреналин 0.3-0.5 мг в бедро!"
+        ],
+        contraindicated_actions=[
+            "⛔ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вводить адреналин при адреналиновой реакции (риск гипертонического криза, отека легких и фибрилляции желудочков)!",
+            "⛔ ЗАПРЕЩЕНО укладывать пациента горизонтально при высоком АД (увеличивает нагрузку на левый желудочек)!"
+        ],
+        card_text=(
+            "⚡ <b>Дифдиагностика: Адреналиновая реакция vs Анафилаксия</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Ошибочное введение адреналина при вегетативной адреналиновой реакции смертельно опасно!</i>\n\n"
+            "<b>1. Адреналиновая реакция (Гиперсимпатикотония):</b>\n"
+            "• <b>АД:</b> ПОВЫШЕНО (140–180 мм рт. ст.).\n"
+            "• <b>Пульс:</b> Тахикардия (100–140 уд/мин), тремор рук, тревога.\n"
+            "• <b>Дыхание:</b> СВОБОДНОЕ! Бронхоспазма, стридора и хрипов НЕТ.\n"
+            "• <b>Кожа:</b> Бледность, холодный пот. Сыпи и зуда НЕТ.\n"
+            "• <b>Отек Квинке:</b> ОТСУТСТВУЕТ.\n"
+            "• <b>Тактика:</b> СТОП инъекция, полусидя, глубокое дыхание. Проходит само за 10–15 мин. <b>Адреналин НЕ КОЛОТЬ!</b>\n\n"
+            "<b>2. Истинный анафилактический шок:</b>\n"
+            "• <b>АД:</b> РЕЗКО ПАДАЕТ (гипотония < 90/60 или коллапс).\n"
+            "• <b>Дыхание:</b> Стридор, одышка, свист, отек гортани, ларингоспазм!\n"
+            "• <b>Кожа:</b> Крапивница, яркая эритема, генерализованный зуд.\n"
+            "• <b>Отек:</b> Отек губ, языка, век, лица (отек Квинке).\n"
+            "• <b>Тактика:</b> СРОЧНО Адреналин 0.3–0.5 мг в/м в бедро!"
+        )
+    ),
+    "pregnancy_protocol": EmergencyProtocol(
+        key="pregnancy_protocol",
+        title="🤰 Клинический протокол: Местная анестезия и лечение при беременности",
+        short_indication="Выбор безопасного местного анестетика, дозировок и тактики у беременных и кормящих пациенток.",
+        primary_drugs=[
+            ("Лидокаин 2% с адреналином 1:100 000 (FDA B)", "До 4.4 мг/кг (макс 2-3 карпулы)", "Инфильтрационно / проводниково"),
+            ("Артикаин 4% с адреналином 1:200 000 (FDA C)", "До 5 мг/кг (макс 2-3 карпулы)", "Только со II триместра"),
+            ("Парацетамол (FDA B)", "500 мг (макс 2-3 г/сут)", "Анальгетик выбора при беременности"),
+        ],
+        immediate_steps=[
+            "1. Оптимальный период для стоматологического лечения: II триместр (14–28 недель). В I триместре — только неотложная помощь.",
+            "2. Препарат 1-го выбора: Лидокаин 2% с эпинефрином 1:100 000 (Категория FDA B — наивысшая доказанная безопасность для плода).",
+            "3. Артикаин 4% с эпинефрином 1:200 000 (FDA C) разрешен со II триместра (T1/2 = 25 мин, 95% связывание с белками крови минимизирует проникновение к плоду).",
+            "4. Позиционирование в кресле во II и III триместрах: с легким наклоном/валиком под правый бок (поворот на ЛЕВЫЙ бок на 15°). Это предотвращает сдавление нижней полой вены (v. cava inferior) и внезапный аорто-кавальный коллапс!",
+            "5. Аспирационная проба СТРОГО ОБЯЗАТЕЛЬНА перед каждым введением (исключить попадание в сосуд).",
+            "6. Обезболивание после лечения: Парацетамол 500 мг (НПВП / Ибупрофен в III триместре СТРОГО ЗАПРЕЩЕН из-за риска преждевременного закрытия Баталлова протока у плода!)."
+        ],
+        contraindicated_actions=[
+            "⛔ МЕПИВАКАИН 3% (СКАНДОНЕСТ) НЕ РЕКОМЕНДОВАН (медленный печеночный клиренс плода -> кумуляция и брадикардия плода)!",
+            "⛔ ПРИЛОКАИН С ФЕЛИПРЕССИНОМ СТРОГО ЗАПРЕЩЕН (фелипрессин вызывает спазм сосудов плаценты и сокращения матки, прилокаин вызывает метгемоглобинемию)!",
+            "⛔ НПВП (ИБУПРОФЕН, КЕТОРОЛАК, НИМЕСИЛ) В III ТРИМЕСТРЕ СТРОГО ЗАПРЕЩЕНЫ (вызывают легочную гипертензию плода и закрытие артериального протока)!"
+        ],
+        card_text=(
+            "🤰 <b>Клинический протокол: Анестезия при беременности и лактации</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>💊 1. Выбор местного анестетика:</b>\n"
+            "• 🥇 <b>Препарат первого выбора:</b> Лидокаин 2% с адреналином 1:100 000 (Категория <b>FDA B</b> — золотой стандарт безопасности).\n"
+            "• 🥈 <b>Артикаин 1:200 000 (Ультракаин Д-С):</b> Категория <b>FDA C</b> — разрешен во II и III триместрах. Минимальный переход через плаценту (связывание с белками 95%, распад в плазме за 25 мин).\n"
+            "• ⛔ <b>Мепивакаин (Скандонест):</b> НЕ РЕКОМЕНДОВАН! Замедленный клиренс в печени плода вызывает кумуляцию и фетальную брадикардию.\n"
+            "• ⛔ <b>Прилокаин / Фелипрессин:</b> ЗАПРЕЩЕН (тонус матки, метгемоглобинемия).\n\n"
+            "<b>🛡 2. Тактика у кресла:</b>\n"
+            "• <b>Оптимальное окно:</b> II триместр (14–28 недель).\n"
+            "• <b>Положение:</b> Наклон на <b>левый бок на 15°</b> (профилактика сдавления нижней полой вены растущей маткой).\n"
+            "• <b>Анальгезия дома:</b> Только <b>Парацетамол 500 мг</b>. Ибупрофен в III триместре строго противопоказан!"
+        )
     )
 }
 
 
 def get_emergency_protocol(key: str) -> Optional[EmergencyProtocol]:
-    """Возвращает протокол неотложной помощи по ключу."""
-    return EMERGENCY_PROTOCOLS.get(key.lower().strip())
+    """Возвращает протокол неотложной помощи по ключу (с поддержкой коротких клинических алиасов)."""
+    k = key.lower().strip()
+    if k in ("collapse", "syncope"):
+        k = "syncope_collapse"
+    elif k in ("hypertension", "crisis", "hypertensive"):
+        k = "hypertensive_crisis"
+    elif k in ("needle", "needle_break", "needle_breakage", "перелом", "игла"):
+        k = "needle_breakage"
+    elif k in ("adrenaline", "adrenaline_vs_allergy", "adrenaline_reaction", "дифдиагностика"):
+        k = "adrenaline_reaction"
+    elif k in ("pregnancy", "pregnant", "pregnancy_protocol", "беременность"):
+        k = "pregnancy_protocol"
+    return EMERGENCY_PROTOCOLS.get(k)
+
+
+
+def calculate_cumulative_remaining_dose(
+    weight_kg: float,
+    injected_summary: Dict[str, float],
+    target_drug_key: str = "articaine_100",
+    is_cardiac: bool = False
+) -> str:
+    """
+    Расчет остаточной безопасной дозы при комбинации анестетиков (кумулятивная токсичность).
+    Основан на правиле аддитивной токсичности (суммирование долей максимальной дозы каждого анестетика).
+    """
+    target_drug = DRUG_CATALOG.get(target_drug_key, DRUG_CATALOG["articaine_100"])
+    pediatric = weight_kg < 40.0
+
+    # 1. Считаем суммарно израсходованную долю токсического лимита
+    fraction_used = 0.0
+    epinephrine_used_mg = 0.0
+    details = []
+
+    for drug_k, carp_count in injected_summary.items():
+        if carp_count <= 0:
+            continue
+        d = DRUG_CATALOG.get(drug_k)
+        if not d:
+            continue
+        mg_kg_norm = d.max_mg_per_kg_child if pediatric else d.max_mg_per_kg_adult
+        drug_effective_ceiling = min(weight_kg * mg_kg_norm, d.absolute_max_mg_adult)
+        mg_injected = carp_count * d.mg_per_carpule
+        epi_injected = carp_count * d.mg_epinephrine_per_carpule
+
+        part_fraction = mg_injected / drug_effective_ceiling if drug_effective_ceiling > 0 else 1.0
+        fraction_used += part_fraction
+        epinephrine_used_mg += epi_injected
+
+        details.append(f"• Введено <b>{d.generic_name}</b>: {carp_count:g} карп. ({mg_injected:g} мг) = <b>{part_fraction * 100:.1f}%</b> предела")
+
+    # 2. Расчет остатка для целевого препарата
+    target_mg_kg = target_drug.max_mg_per_kg_child if pediatric else target_drug.max_mg_per_kg_adult
+    target_max_mg = min(weight_kg * target_mg_kg, target_drug.absolute_max_mg_adult)
+
+    remaining_fraction = max(0.0, 1.0 - fraction_used)
+    remaining_safe_mg = remaining_fraction * target_max_mg
+    safe_carpules_by_drug = math.floor(remaining_safe_mg / target_drug.mg_per_carpule) if target_drug.mg_per_carpule > 0 else 0
+
+    # 3. Контроль остатка адреналина
+    epi_limit = EPINEPHRINE_MAX_CARDIAC_MG if is_cardiac else EPINEPHRINE_MAX_HEALTHY_MG
+    remaining_epi_mg = max(0.0, epi_limit - epinephrine_used_mg)
+    hit_epi = False
+
+    if target_drug.mg_epinephrine_per_carpule > 0:
+        safe_carpules_by_epi = math.floor(remaining_epi_mg / target_drug.mg_epinephrine_per_carpule)
+        final_safe_carpules = min(safe_carpules_by_drug, safe_carpules_by_epi)
+        if safe_carpules_by_epi < safe_carpules_by_drug:
+            hit_epi = True
+    else:
+        final_safe_carpules = safe_carpules_by_drug
+
+    res_lines = [
+        f"🧮 <b>Кумулятивный расчет безопасной дозы (Вес: {weight_kg:g} кг)</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "<b>Введенные препараты:</b>",
+        *details,
+        f"\n📊 <b>Суммарная токсическая нагрузка:</b> <b>{fraction_used * 100:.1f}%</b> от допустимого лимита."
+    ]
+
+    if fraction_used >= 1.0:
+        res_lines.append(
+            "\n⛔ <b>СТОП! ТОКСИЧЕСКИЙ ПРЕДЕЛ ИСЧЕРПАН НА 100%!</b>\n"
+            "Введение дополнительных доз местных анестетиков КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО из-за риска системной токсичности (LAST)!"
+        )
+    else:
+        res_lines.append(f"• Остаточный запас токсической безопасности: <b>{remaining_fraction * 100:.1f}%</b>")
+        res_lines.append(f"\n💉 <b>Разрешено дополнительно ввести ({target_drug.generic_name}):</b>")
+        res_lines.append(f"• По веществу: до <b>{remaining_safe_mg:.1f} мг</b> (до {safe_carpules_by_drug} карпул)")
+        if target_drug.mg_epinephrine_per_carpule > 0:
+            res_lines.append(f"• По адреналину: остаток <b>{remaining_epi_mg * 1000:.0f} мкг</b> (лимит {epi_limit * 1000:.0f} мкг)")
+            if hit_epi:
+                res_lines.append(f"• ⚠️ Лимит ограничен адреналином: <b>СТРОГО НЕ БОЛЕЕ {final_safe_carpules} КАРПУЛ!</b>")
+        res_lines.append(f"• 🛡 <b>Итоговый безопасный объем:</b> <b>до {final_safe_carpules} карпул</b>")
+
+    return "\n".join(res_lines)

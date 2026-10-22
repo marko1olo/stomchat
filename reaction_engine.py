@@ -93,6 +93,14 @@ _SENDER_REACTION_TIMESTAMPS: Dict[Tuple[int, int], float] = {}
 _FLUSHER_TASK: Optional[asyncio.Task] = None
 
 
+
+def _safe_create_task(coro, name: str):
+    try:
+        import runtime_guard
+        return runtime_guard.create_task(coro, name=name)
+    except Exception:
+        return asyncio.create_task(coro)
+
 def _get_lock(chat_id: int) -> asyncio.Lock:
     if chat_id not in _CHAT_LOCKS:
         _CHAT_LOCKS[chat_id] = asyncio.Lock()
@@ -420,7 +428,7 @@ async def _flusher_loop():
                 buf = _CHAT_BUFFERS.get(cid, [])
                 if len(buf) >= 2 and (now - buf[-1].timestamp) >= IDLE_FLUSH_INTERVAL:
                     logger.info("[BatchReactions] Triggering idle flush for chat %s (buffer size: %d, idle: %.1fs)", cid, len(buf), now - buf[-1].timestamp)
-                    asyncio.create_task(flush_chat_batch(cid))
+                    _safe_create_task(flush_chat_batch(cid), name=f"reaction_idle_flush_{cid}")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -544,6 +552,6 @@ async def process_incoming_event(
 
     if should_flush:
         logger.info("[BatchReactions] Buffer reached threshold %d for chat %s. Flushing...", BATCH_SIZE_THRESHOLD, chat_id)
-        asyncio.create_task(flush_chat_batch(chat_id))
+        _safe_create_task(flush_chat_batch(chat_id), name=f"reaction_batch_flush_{chat_id}")
 
     return True

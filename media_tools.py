@@ -60,8 +60,8 @@ def _prepare_image_sync(file_path):
         if img is not None:
             try:
                 img.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("img.close() exception: %s", exc)
 
 
 def _extract_frame_sync(video_path):
@@ -164,10 +164,8 @@ async def _settle_after_kill(proc, drain, timeout):
     for make_waitable in (lambda: asyncio.shield(drain), proc.wait):
         try:
             await asyncio.wait_for(make_waitable(), timeout=grace)
-        except Exception:
-            # Ни таймаут добора, ни порванная труба не должны мешать записи в
-            # журнал: она идёт следующей строкой и она здесь главная.
-            pass
+        except Exception as exc:
+            logger.debug("reap_wait grace exception on proc %s: %s", getattr(proc, 'pid', None), exc)
     if proc.returncode is None:
         # Ребёнок пережил kill() — это утёкший процесс, а на этой машине
         # утёкшие процессы измеримо съедают ядра часами. Пусть будет в журнале.
@@ -642,8 +640,8 @@ def upload_clinical_image_sync(file_path):
                 if dvach_env.exists():
                     import dotenv
                     catbox_hash = dotenv.dotenv_values(str(dvach_env)).get("CATBOX_USER_HASH")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to read CATBOX_USER_HASH from dvachbot .env: %s", exc)
 
         if catbox_hash:
             try:

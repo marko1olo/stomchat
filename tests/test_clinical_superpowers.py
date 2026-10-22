@@ -461,6 +461,7 @@ class TestClinicalSuperpowers(unittest.TestCase):
         bot = FakeBot()
 
         async def run_pm_tests():
+            await database.init_db()
             # 1. /record
             bot.sent_messages.clear()
             ev_rec = FakePmEvent(FakeMsg("/record"))

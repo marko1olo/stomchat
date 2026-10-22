@@ -90,9 +90,12 @@ def test_lock_retry():
         conn.close()
 
         # Фоновый поток удерживает эксклюзивную блокировку на 0.35 секунды
+        locked_event = threading.Event()
+
         def locker():
             c = sqlite3.connect(tmp, timeout=1)
             c.execute("BEGIN EXCLUSIVE")
+            locked_event.set()
             time.sleep(0.35)
             c.execute("INSERT INTO t VALUES (42)")
             c.commit()
@@ -100,7 +103,7 @@ def test_lock_retry():
 
         t = threading.Thread(target=locker)
         t.start()
-        time.sleep(0.05)  # даем потоку захватить блокировку
+        locked_event.wait(timeout=2.0)  # детерминированно ждем фактического захвата блокировки
 
         # Операция с retry при блокировке
         def write_op():

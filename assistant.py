@@ -63,33 +63,18 @@ BOT_USERNAME = None
 
 
 def get_known_bot_ids():
-    """Возвращает множество известных ID ботов (динамический BOT_ID + окружение + конфиг)."""
-    ids = set()
+    """Возвращает множество известных ID ботов (динамический BOT_ID + tg_safety + окружение + конфиг)."""
+    ids = tg_safety.get_all_known_bot_ids()
     if BOT_ID:
         ids.add(BOT_ID)
-    try:
-        import config
-        cfg_bot_id = getattr(config, "BOT_ID", None) or getattr(config, "STOMCHAT_BOT_ID", None)
-        if cfg_bot_id:
-            ids.add(int(cfg_bot_id))
-        cfg_known = getattr(config, "KNOWN_BOT_IDS", None)
-        if cfg_known:
-            ids.update(int(x) for x in cfg_known if x)
-    except Exception:
-        pass
-    for env_key in ("BOT_ID", "TELEGRAM_BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID"):
-        env_val = os.getenv(env_key)
-        if env_val and env_val.isdigit():
-            ids.add(int(env_val))
-    env_known = os.getenv("KNOWN_BOT_IDS")
-    if env_known:
-        for part in env_known.split(","):
-            part = part.strip()
-            if part.isdigit():
-                ids.add(int(part))
-    # Безопасный набор известных ботов (без людей-администраторов!)
-    ids.update({7886475630, 8140417978, 7971556097, 7475073041, 8775535374})
     return ids
+
+
+def is_bot_sender(sender_id=None, sender=None, event=None) -> bool:
+    """100% надёжная проверка: является ли отправитель ботом (своим или чужим)."""
+    if BOT_ID and sender_id == BOT_ID:
+        return True
+    return tg_safety.is_bot_sender(sender_id=sender_id, sender=sender, event=event)
 
 
 def get_admin_user_ids() -> set:
@@ -150,6 +135,38 @@ def is_author_group_cooldown_active(sender_id: int, cooldown_seconds: float = 60
     if last_reply is None:
         return False
     return (time.time() - last_reply) < cooldown_seconds
+
+# Глобальный реестр сообщений и альбомов, находящихся в процессе генерации ответа (In-Flight Lock).
+# Защищает от параллельных гонок между handle_group_direct_ask, check_and_trigger_assistant_media
+# и check_and_trigger_assistant на одном и том же сообщении или кадрах альбома.
+_IN_FLIGHT_GROUP_REPLIES = set()
+
+
+@contextlib.contextmanager
+def acquire_group_reply_lock(chat_id: int, msg_ids):
+    """Синхронный контекстный менеджер для захвата in-flight замка на набор msg_id."""
+    if isinstance(msg_ids, int):
+        ids = [msg_ids]
+    else:
+        ids = list(msg_ids)
+    keys = [(chat_id, mid) for mid in ids if mid]
+    try:
+        for k in keys:
+            _IN_FLIGHT_GROUP_REPLIES.add(k)
+        yield
+    finally:
+        for k in keys:
+            _IN_FLIGHT_GROUP_REPLIES.discard(k)
+
+
+def is_group_reply_in_flight(chat_id: int, msg_ids) -> bool:
+    """Проверяет, генерируется ли прямо сейчас ответ для любого из указанных msg_id."""
+    if isinstance(msg_ids, int):
+        ids = [msg_ids]
+    else:
+        ids = list(msg_ids)
+    return any((chat_id, mid) in _IN_FLIGHT_GROUP_REPLIES for mid in ids if mid)
+
 
 # ── Реакции (эмодзи на сообщения) ──────────────────────────────────────────
 # Разрешённый список — только уместные в профессиональном медицинском чате.
@@ -378,19 +395,20 @@ async def _safe_typing_action(client, chat_id):
 # ---------------------------------------------------------------------------
 
 PM_MEDIA_CAROUSEL_STAGES = (
-    "📥 <i>Скачиваю и подготавливаю снимки...</i>",
+    "📥 <i>Скачиваю и подготавливаю снимок...</i>",
     "🔍 <i>Изучаю анатомию, каналы и рентген-статус...</i>",
     "📐 <i>Оцениваю кривизну корней и проходимость каналов...</i>",
-    "🔬 <i>Проверяю наличие перфораций, ступенек и обломков...</i>",
-    "📊 <i>Анализирую периапикальный индекс (PAI) и костную ткань...</i>",
-    "🦷 <i>Оцениваю краевое прилегание, биологическую ширину и феррул...</i>",
+    "🔬 <i>Проверяю наличие ступенек, облитераций и перфораций...</i>",
+    "📊 <i>Анализирую состояние периапикальных тканей и периодонта...</i>",
+    "🦷 <i>Оцениваю состояние костной ткани и периодонта...</i>",
+    "🧬 <i>Проверяю риски осложнений и скрытые очаги...</i>",
+    "🛡 <i>Оцениваю феррул-эффект и сохранность коронковой части...</i>",
     "🧪 <i>Формирую доказательный протокол лечения...</i>",
-    "📚 <i>Сопоставляю с клиническими рекомендациями EBM...</i>",
     "💉 <i>Рассчитываю протокол ирригации и ультразвуковой активации...</i>",
     "🧱 <i>Подбираю обтурационную систему и биокерамический силер...</i>",
-    "⚖️ <i>Формулирую дифференциальный диагноз и рентген-заключение...</i>",
-    "🛡 <i>Оцениваю ортопедический прогноз и устойчивость к расколам...</i>",
-    "✍️ <i>Оформляю доказательный вердикт консилиума...</i>",
+    "📚 <i>Сверяю с клиническими рекомендациями...</i>",
+    "⚖️ <i>Формулирую дифференциальный диагноз и риски...</i>",
+    "✍️ <i>Финализирую структурированный ответ...</i>",
 )
 
 PM_TEXT_CAROUSEL_STAGES = (
@@ -459,10 +477,18 @@ class PmStatusTicker:
             return self
         self._started = True
         self._stop_event.clear()
-        self._loop_task = asyncio.create_task(self._run_carousel())
         if self.initial_delay == 0.0:
-            # Даем циклу событий квант времени для отправки первого статуса
-            await asyncio.sleep(0)
+            first_text = self.initial_text or (self.stages[0] if self.stages else "⏳ <i>Обрабатываю запрос...</i>")
+            try:
+                self.status_msg = await self.bot_client.send_message(
+                    entity=self.chat_id,
+                    message=first_text,
+                    parse_mode='html',
+                )
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug("PmStatusTicker: failed to send initial status message: %s", e)
+        self._loop_task = asyncio.create_task(self._run_carousel())
         return self
 
     async def __aenter__(self):
@@ -481,20 +507,20 @@ class PmStatusTicker:
                 except asyncio.TimeoutError:
                     pass
 
-            if self._stop_event.is_set():
-                return
+                if self._stop_event.is_set():
+                    return
 
-            first_text = self.initial_text or (self.stages[0] if self.stages else "⏳ <i>Обрабатываю запрос...</i>")
-            try:
-                self.status_msg = await self.bot_client.send_message(
-                    entity=self.chat_id,
-                    message=first_text,
-                    parse_mode='html',
-                )
-            except Exception as e:
-                if self.logger:
-                    self.logger.debug("PmStatusTicker: failed to send initial status message: %s", e)
-                return
+                first_text = self.initial_text or (self.stages[0] if self.stages else "⏳ <i>Обрабатываю запрос...</i>")
+                try:
+                    self.status_msg = await self.bot_client.send_message(
+                        entity=self.chat_id,
+                        message=first_text,
+                        parse_mode='html',
+                    )
+                except Exception as e:
+                    if self.logger:
+                        self.logger.debug("PmStatusTicker: failed to send initial status message: %s", e)
+                    return
 
             self._stage_idx = 1
             while not self._stop_event.is_set():
@@ -543,7 +569,9 @@ class PmStatusTicker:
         """
         async with self._lock:
             if stage_index is not None:
-                self._stage_idx = stage_index
+                self._stage_idx = (stage_index + 1) % len(self.stages) if self.stages else stage_index + 1
+            elif self.stages and new_text in self.stages:
+                self._stage_idx = (self.stages.index(new_text) + 1) % len(self.stages)
             if self.status_msg:
                 msg_id = getattr(self.status_msg, "id", None)
                 if msg_id:
@@ -580,7 +608,7 @@ class PmStatusTicker:
             self._loop_task.cancel()
             try:
                 await asyncio.wait_for(self._loop_task, timeout=0.5)
-            except Exception:
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._closed = True
         msg_obj = self.status_msg
@@ -1313,45 +1341,57 @@ def detect_user_intent(text: str) -> UserIntent:
         return UserIntent(INTENT_CALCULATOR, clean)
 
     # 7. INTENT_WEB_SEARCH
-    m_goog = re.match(r'^(погугли|загугли|гугли|погуглить)\s*(.*)$', norm, re.IGNORECASE)
+    m_goog = re.match(r'^(?:погугли|загугли|гугли|погуглить)\s*(.*)$', norm, re.IGNORECASE)
     if m_goog:
-        q = clean[len(m_goog.group(1)):].strip()
-        return UserIntent(INTENT_WEB_SEARCH, q)
-
-    m_net = re.match(r'^(поищи|найди|поиск)\s+в\s+(интернете|инете|сети|гугле|google)\s*(.*)$', norm, re.IGNORECASE)
-    if m_net:
-        prefix_len = len(norm) - len(m_net.group(3))
+        prefix_len = len(norm) - len(m_goog.group(1))
         q = clean[prefix_len:].strip()
         return UserIntent(INTENT_WEB_SEARCH, q)
 
-    m_art = re.match(r'^(найди|поищи)\s+статьи\s+(про|о|об|по|для)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_art:
-        raw_q = m_art.group(3).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub_full = re.match(r'^(статьи\s+на\s+pubmed|публикации\s+на\s+pubmed)\s+(про|о|об|по|для)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub_full:
-        raw_q = m_pub_full.group(3).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub = re.match(r'^(что|посмотри\s+что)\s+(говорит|пишет|есть\s+в)\s+pubmed\s*(про|о|об|по)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub:
-        raw_q = m_pub.group(4).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub_short = re.match(r'^(pubmed|пабмед)\s*[:\s]\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub_short:
-        q = m_pub_short.group(2).strip()
+    m_net = re.match(r'^(?:поищи|найди|поиск)\s+в\s+(?:интернете|инете|сети|гугле|google)\s*(.*)$', norm, re.IGNORECASE)
+    if m_net:
+        prefix_len = len(norm) - len(m_net.group(1))
+        q = clean[prefix_len:].strip()
         return UserIntent(INTENT_WEB_SEARCH, q)
 
-    m_res = re.match(r'^(какие|есть\s+ли)\s+(свежие|новые|последние|научные)\s+исследования\s+(по|про|о|об)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_res:
-        raw_q = m_res.group(4).strip()
+    m_art = re.match(r'^(?:найди|поищи)\s+статьи(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_art:
+        prefix_len = len(norm) - len(m_art.group(1))
+        raw_q = clean[prefix_len:].strip()
+        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
         return UserIntent(INTENT_WEB_SEARCH, raw_q)
 
-    m_proto = re.match(r'^(найди|поищи)\s+протокол\s*(.*)$', norm, re.IGNORECASE)
+    m_pub_full = re.match(r'^(?:статьи\s+на\s+pubmed|публикации\s+на\s+pubmed)(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub_full:
+        prefix_len = len(norm) - len(m_pub_full.group(1))
+        raw_q = clean[prefix_len:].strip()
+        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_pub = re.match(r'^(?:что|посмотри\s+что)\s+(?:говорит|пишет|есть\s+в)\s+pubmed(?:\s+(?:про|о|об|по)\b)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub:
+        prefix_len = len(norm) - len(m_pub.group(1))
+        raw_q = clean[prefix_len:].strip()
+        raw_q = re.sub(r'^(?:про|о|об|по)\s+', '', raw_q, flags=re.IGNORECASE).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_pub_short = re.match(r'^(?:pubmed|пабмед)\s*[:\s]\s*(.*)$', norm, re.IGNORECASE)
+    if m_pub_short:
+        prefix_len = len(norm) - len(m_pub_short.group(1))
+        q = clean[prefix_len:].strip()
+        return UserIntent(INTENT_WEB_SEARCH, q)
+
+    m_res = re.match(r'^(?:какие|есть\s+ли)\s+(?:свежие|новые|последние|научные)\s+исследования(?:\s+(?:по|про|о|об)\b)?\s*(.*)$', norm, re.IGNORECASE)
+    if m_res:
+        prefix_len = len(norm) - len(m_res.group(1))
+        raw_q = clean[prefix_len:].strip()
+        raw_q = re.sub(r'^(?:по|про|о|об)\s+', '', raw_q, flags=re.IGNORECASE).strip()
+        return UserIntent(INTENT_WEB_SEARCH, raw_q)
+
+    m_proto = re.match(r'^(?:найди|поищи)\s+протокол(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
     if m_proto:
-        raw_q = m_proto.group(2).strip()
+        prefix_len = len(norm) - len(m_proto.group(1))
+        raw_q = clean[prefix_len:].strip()
+        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
         return UserIntent(INTENT_WEB_SEARCH, raw_q)
 
     return UserIntent(None)
@@ -3780,11 +3820,12 @@ async def fetch_dynamic_web_snippets_async(query_text: str, timeout: float = 4.0
         for r in results[:3]:
             txt = (r.get("text") or "").strip()
             url = (r.get("url") or "").strip()
+            if url:
+                host = web_lookup._host_of(url)
+                if web_lookup._is_ssrf_host(host):
+                    url = ""
+            txt = web_lookup.sanitize_excerpt(txt)
             if txt:
-                # Очистка от HTML/XML-тегов и попыток промпт-инъекций из поисковой выдачи
-                txt = re.sub(r"<[^>]+>", " ", txt)
-                txt = re.sub(r"(?i)(?:system\s*instruction|ignore\s+previous\s+instructions|забудь\s+все\s+инструкции)", "", txt)
-                txt = re.sub(r"\s+", " ", txt).strip()
                 if len(txt) > 280:
                     txt = txt[:280].rsplit(" ", 1)[0] + "..."
                 snippets.append(f"• {txt} ({url})" if url else f"• {txt}")
@@ -4007,10 +4048,18 @@ _SILENCE_PHRASES = (
 
 # Обращение к боту. «бот» и «робот» — как начало слова, чтобы не цепляться за
 # «работа» и «суббота»; упоминания — по любому @…bot.
+# Предотвращаем ложные срабатывания на «координатор лечения» и «душный пациент» / «душно».
 _BOT_REFERENCE_RE = re.compile(
-    r"\bбот\w{0,3}\b|\bробот\w{0,3}\b|\bкоординатор|\bдушн|@\w*bot\b",
+    r"\bбот\w{0,3}\b|\bробот\w{0,3}\b|\bкоординатор\s+бота\b|\bдушнила\b|@\w*bot\b",
     re.IGNORECASE,
 )
+
+_BOT_PERF_CRITIQUE_RE = re.compile(
+    r'(?i)\b(?:тупит|тормозит|завис\w*|глючит|лагает|долго\s+(?:отвечает|думает|грузит|обрабатывает)|'
+    r'(?:бот\s+)?туп(?:ой|ит)|мертв\w*|не\s+отвечает)\b'
+)
+
+_BOT_WORD_RE = re.compile(r'\bбот(?:[ауеы]|ом|ов|ам|ами|ах)?\b', re.IGNORECASE)
 
 _SILENCE_DEMAND_RE = re.compile(
     "|".join(rf"\b{re.escape(word)}\w{{0,3}}\b" for word in _SILENCE_DEMANDS),
@@ -4085,16 +4134,17 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
 
     # Check if reply to bot
     global BOT_ID
-    if reply_to_msg_id and BOT_ID:
+    if reply_to_msg_id:
+        check_bot_ids = get_known_bot_ids() | ({BOT_ID} if BOT_ID else set())
         try:
             parent_msg = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
-            if parent_msg and parent_msg.sender_id == BOT_ID:
+            if parent_msg and parent_msg.sender_id in check_bot_ids:
                 is_about_bot = True
         except Exception:
             pass
         if not is_about_bot:
             try:
-                if await database.is_bot_message_or_sender(reply_to_msg_id, BOT_ID, event.chat_id):
+                if await database.is_bot_message_or_sender(reply_to_msg_id, check_bot_ids, event.chat_id):
                     is_about_bot = True
             except Exception:
                 pass
@@ -5144,6 +5194,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if text and text.strip().startswith("/"):
         return False
 
+    sender_id = getattr(event, "sender_id", None)
+    sender = getattr(event, "_sender", None)
+    if is_bot_sender(sender_id, sender=sender, event=event):
+        logger.info("Bot-to-bot loop prevention: ignoring message from bot sender_id=%s", sender_id)
+        return False
+
     # На это сообщение уже отвечали — второй раз не отвечаем.
     # REPLIED_MSG_IDS был мёртвым кодом ровно на этом пути: медиа-ветка его
     # читает на входе (check_and_trigger_assistant_media) и пишет после
@@ -5480,10 +5536,21 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             last_case_bot_msg = state.get("last_case_bot_msg_id")
             last_case_time = _parse_state_dt(state.get("last_case_time"))
 
+            # В бурной дискуссии бот не должен встревать в каждую реплику автора кейса:
+            # 1. Проверяем авторский кулдаун в группе: если бот уже отвечал автору (< 10 минут назад),
+            #    не встреваем в его реплики без прямого обращения/тега/Reply на бота!
+            # 2. Требуем наличия явного клинического вопроса к боту
+            has_explicit_author_question = bool(
+                text and ("?" in text or "？" in text or any(qw in text.lower().split() for qw in ("как", "какой", "какая", "почему", "чем", "подскажите", "мнения")))
+            )
+            author_group_cd_active = bool(sender_id and is_author_group_cooldown_active(sender_id))
+
             if (
                 last_case_author
                 and sender_id == last_case_author
                 and (datetime.now() - last_case_time) < timedelta(minutes=30)
+                and not author_group_cd_active
+                and has_explicit_author_question
             ):
                 # Проверяем критику / негативный фидбек от автора кейса
                 if is_negative_feedback(text):
@@ -6139,7 +6206,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 """
                 ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 ebm_ctx["kind"] = "dialogue_ebm_fallback"
-                ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=180)
+                ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
                 if ebm_resp and getattr(ebm_resp, "text", None):
                     reply_text = ebm_resp.text.strip()
             if not reply_text:
@@ -6245,7 +6312,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     record_author_group_reply(event.sender_id)
                 try:
                     import clinical_rescue
-                    clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, event.chat_id)
+                    msg_date_val = getattr(getattr(event, "message", None), "date", None) or getattr(event, "date", None)
+                    clinical_rescue.mark_case_rescued(
+                        config.DB_PATH,
+                        msg_id,
+                        event.chat_id,
+                        sender_id=getattr(event, "sender_id", None),
+                        timestamp=msg_date_val
+                    )
                 except Exception as e:
                     logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
                 # Полное окно тишины списывается только здесь — после того, как
@@ -6274,7 +6348,12 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, media_description, image_urls=None, album_msg_ids=None):
     if image_urls is None and media_description:
         image_urls = getattr(media_description, "image_urls", None)
-    if msg_id in REPLIED_MSG_IDS:
+    all_media_ids = [msg_id] + (album_msg_ids or [])
+    if any(mid in REPLIED_MSG_IDS for mid in all_media_ids):
+        return False
+    chat_id = getattr(message, "chat_id", None)
+    if chat_id and is_group_reply_in_flight(chat_id, all_media_ids):
+        logger.info("Media assistant: reply already in flight for msg_id=%s or album peers, skipping duplicate", msg_id)
         return False
     state = load_state()
 
@@ -6372,6 +6451,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         age_minutes = 0.0
 
     author_sender_id = getattr(message, 'sender_id', None)
+    if is_bot_sender(author_sender_id, event=message):
+        logger.info("Media assistant trigger ignored: author_sender_id=%s is bot.", author_sender_id)
+        return False
     ref_msg_id = max(album_msg_ids) if album_msg_ids else msg_id
 
     try:
@@ -6470,6 +6552,28 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             "Media Assistant: image is non-dental/screenshot (%s) and trigger is passive. Skipping unrequested reply.",
             media_description[:80]
         )
+        try:
+            import clinical_rescue
+            author_id = getattr(message, "sender_id", None)
+            msg_timestamp = getattr(message, "date", None)
+            clinical_rescue.mark_case_and_album_rescued(
+                config.DB_PATH,
+                msg_id,
+                event.chat_id,
+                sender_id=author_id,
+                timestamp=msg_timestamp
+            )
+            if album_msg_ids:
+                for amid in album_msg_ids:
+                    clinical_rescue.mark_case_and_album_rescued(
+                        config.DB_PATH,
+                        amid,
+                        event.chat_id,
+                        sender_id=author_id,
+                        timestamp=msg_timestamp
+                    )
+        except Exception as rescue_err:
+            logger.warning("Failed to mark non-dental media as rescued: %s", rescue_err)
         return
 
     # Проверяем, не написал ли автор снимка уточняющие реплики/вопросы, пока снимок обрабатывался
@@ -6794,7 +6898,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 """
             ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
             ebm_ctx["kind"] = "media_ebm_fallback"
-            ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=180)
+            ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
             if ebm_resp and getattr(ebm_resp, "text", None):
                 reply_text = ebm_resp.text.strip()
         if not reply_text:
@@ -6877,17 +6981,30 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             bot_msg_id = getattr(sent_msg, 'id', msg_id)
             logger.info(f"Sent direct media assistant reply to chat {event.chat_id}, message {msg_id}.")
             REPLIED_MSG_IDS[msg_id] = True
+            media_msg_date = getattr(getattr(event, "message", None), "date", None)
             if album_msg_ids:
                 for amid in album_msg_ids:
                     REPLIED_MSG_IDS[amid] = True
                     try:
                         import clinical_rescue
-                        clinical_rescue.mark_case_rescued(config.DB_PATH, amid, event.chat_id)
+                        clinical_rescue.mark_case_rescued(
+                            config.DB_PATH,
+                            amid,
+                            event.chat_id,
+                            sender_id=getattr(event.message, "sender_id", None),
+                            timestamp=media_msg_date
+                        )
                     except Exception:
                         pass
             try:
                 import clinical_rescue
-                clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, event.chat_id)
+                clinical_rescue.mark_case_rescued(
+                    config.DB_PATH,
+                    msg_id,
+                    event.chat_id,
+                    sender_id=getattr(event.message, "sender_id", None),
+                    timestamp=media_msg_date
+                )
             except Exception as e:
                 logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
             author_sender_id = getattr(event.message, "sender_id", None)
@@ -7027,6 +7144,126 @@ CLINICAL_QUIZ_FALLBACKS = [
         ],
         "correct": 2,
         "explanation": "По протоколу IADT зуб бережно промывают физраствором без касания корня, реплантируют, фиксируют гибкой шиной до 2 недель, а эндодонтическое лечение закрытого апекса начинают через 7-10 дней."
+    },
+    {
+        "topic": "Эндодонтия",
+        "question": "При формировании коврового пути в сильно изогнутом мезиальном канале зуба 4.6 произошла сепарация инструмента #15/.04 в средней трети. Канал не инфицирован, пульпит витальный. Какова первичная тактика согласно рекомендациям ESE?",
+        "options": [
+            "Немедленная резекция верхушки корня",
+            "Попытка обхода (Bypass) ручными K-файлами малых размеров #06-#08-#10 с обильной ирригацией NaOCl и EDTA",
+            "Агрессивное ультразвуковое препарирование на максимальной мощности без визуального контроля",
+            "Удаление зуба"
+        ],
+        "correct": 1,
+        "explanation": "Согласно рекомендациям ESE, первичной консервативной тактикой при сепарации является попытка обхода отломка (Bypass) ручными файлами малых размеров под обильной ирригацией."
+    },
+    {
+        "topic": "Ортопедия",
+        "question": "Какова минимально необходимая высота кругового феррул-эффекта (ferrule) твердых тканей зуба над уровнем десны для обеспечения надежного биомеханического прогноза коронки?",
+        "options": [
+            "0.5 мм по щечной поверхности",
+            "1.5 – 2.0 мм по всему периметру при толщине стенки не менее 1.0 мм",
+            "3.5 мм исключительно на апроксимальных поверхностях",
+            "Феррул не имеет значения при использовании адгезивного цемента"
+        ],
+        "correct": 1,
+        "explanation": "Биомеханический стандарт феррула — не менее 1.5–2.0 мм здоровой ткани зуба над уступом по всему периметру при толщине стенок не менее 1 мм для предотвращения перелома корня."
+    },
+    {
+        "topic": "Терапия",
+        "question": "При восстановлении обширной полости II класса по Блэку (MOD) с высоким С-фактором (>3), какая техника внесения композита наиболее эффективно компенсирует полимеризационный стресс?",
+        "options": [
+            "Внесение одной монолитной порции bulk-fill толщиной 6 мм без коффердама",
+            "Послойная методика косыми треугольными порциями до 2 мм с фиксацией к минимальному числу стенок",
+            "Использование быстротвердеющего стеклоиономера поверх эмалевого края",
+            "Полимеризация на максимальной мощности в течение 60 секунд за один прием"
+        ],
+        "correct": 1,
+        "explanation": "Послойное внесение косыми порциями толщиной до 2 мм уменьшает конфигурационный C-фактор полости, предотвращая отрыв адгезивного слоя и краевые микрощели."
+    },
+    {
+        "topic": "Хирургия",
+        "question": "На 3-и сутки после удаления ретинированного зуба 3.8 пациент обратился с интенсивной иррадиирующей ноющей болью, усиливающейся ночью. В лунке кровяной сгусток отсутствует, обнажена серая кость, ихорозный запах. Какова тактика помощи?",
+        "options": [
+            "Агрессивный кюретаж острой ложкой до обильного кровотечения без анестезии",
+            "Бережное промывание лунки теплым антисептиком (хлоргексидин 0.12%/физраствор), аппликация йодоформной или антибактериальной седативной губки/повязки, назначение НПВП",
+            "Немедленное назначение внутримышечных антибиотиков и отказ от местной обработки",
+            "Зашивание лунки наглухо без антисептической обработки"
+        ],
+        "correct": 1,
+        "explanation": "При фибринозном альвеолите показано атравматичное промывание лунки теплым физраствором/хлоргексидином, рыхлая седативная повязка (Alveogyl) и системные анальгетики; агрессивное выскабливание стенок противопоказано."
+    },
+    {
+        "topic": "Фармакология",
+        "question": "Пациент 62 лет с гипертонической болезнью II ст. (АД 140/85 мм рт. ст.) и стабильной стенокардией напряжения (ФК II). Какой выбор местной анестезии наиболее безопасен для препарирования зуба?",
+        "options": [
+            "Артикаин 4% с эпинефрином 1:100 000 до 6 карпул",
+            "Артикаин 4% с эпинефрином 1:200 000 (не более 2 карпул) либо Мепивакаин 3% без вазоконстриктора",
+            "Лидокаин 2% с норадреналином 1:50 000 без ограничения дозы",
+            "Любой анестетик без учета соматического статуса"
+        ],
+        "correct": 1,
+        "explanation": "Кардиологическим пациентам (AHA/ACC) лимит адреналина составляет 0.04 мг (2 карпулы 1:200 000) либо применяется скандонест/мепивакаин 3% без вазоконстриктора во избежание гипертонического криза и аритмии."
+    },
+    {
+        "topic": "Эндодонтия",
+        "question": "В первом постоянном моляре верхней челюсти (1.6) при поиске второго мезиально-щечного канала (MB2), где анатомически чаще всего располагается его устье по отношению к MB1?",
+        "options": [
+            "На 5 мм дистальнее дистально-щечного устья",
+            "На 1–3 мм палатинально (небно) и слегка мезиально по линии соединительного перешейка от MB1",
+            "В центре дна пульпарной камеры прямо под устьем небного канала",
+            "MB2 встречается менее чем в 5% случаев и искать его не рекомендуется"
+        ],
+        "correct": 1,
+        "explanation": "Устье MB2 локализуется на 1–3 мм небно и чуть мезиальнее основного устья MB1 вдоль субпульпарной борозды/перешейка; встречается более чем в 70–90% первых моляров."
+    },
+    {
+        "topic": "Ортопедия",
+        "question": "При адгезивной фиксации цельноциркониевой коронки (3Y-TZP) какой протокол кондиционирования внутренней поверхности реставрации является научно обоснованным стандартом?",
+        "options": [
+            "Травление 9% плавиковой кислотой (HF) в течение 20 секунд и силан",
+            "Пескоструйная обработка частицами оксида алюминия (Al2O3 50 мкм при давлении 1.5–2.0 бар) с последующим нанесением MDP-содержащего праймера",
+            "Полировка резиновыми головками без пескоструйной обработки",
+            "Обработка 37% ортофосфорной кислотой без использования праймеров"
+        ],
+        "correct": 1,
+        "explanation": "Поликристаллическая циркониевая керамика не травrawливается плавиковой кислотой; стандарт фиксации (APC-протокол) — воздухоабразивная обработка Al2O3 (50 мкм, 1.5–2 бар) и MDP-праймер."
+    },
+    {
+        "topic": "Фармакология",
+        "question": "Какова максимальная безопасная доза артикаина 4% с эпинефрином 1:100 000 для взрослого соматически здорового пациента массой 70 кг?",
+        "options": [
+            "4.4 мг/кг (не более 3 карпул)",
+            "7.0 мг/кг (не более 490 мг артикаина, что составляет ~7 карпул по 1.7 мл)",
+            "12 мг/кг (до 15 карпул)",
+            "Не более 1 карпулы независимо от веса"
+        ],
+        "correct": 1,
+        "explanation": "Максимальная доза артикаина составляет 7.0 мг/кг массы тела для здорового взрослого, что для 70 кг равняется 490 мг (около 7 стандартных карпул по 68 мг в 1.7 мл)."
+    },
+    {
+        "topic": "Терапия",
+        "question": "Пациент обратился с некариозным клиновидным дефектом в пришеечной области зуба 2.4 глубиной 1.5 мм. При окклюзионном анализе выявлен травматический суперконтакт на рабочей стороне. Каков первый этап комплексного лечения?",
+        "options": [
+            "Немедленная депульпация зуба 2.4",
+            "Избирательное окклюзионное пришлифовывание преждевременного контакта с последующим пломбированием эластичным микрогибридным или текучим композитом",
+            "Покрытие зуба штампованной коронкой без коррекции окклюзии",
+            "Аппликация фторлака без устранения травмирующего фактора"
+        ],
+        "correct": 1,
+        "explanation": "При абфракционных клиновидных дефектах первичным является устранение окклюзионной перегрузки (избирательное сошлифовывание суперконтактов), иначе реставрация неизбежно сколется из-за изгибающих микронапряжений в шейке."
+    },
+    {
+        "topic": "Детская стоматология",
+        "question": "Ребенок 7 лет получил травму: скол коронки зуба 1.1 в пределах дентина со вскрытием пульпы точкой до 1 мм. Прошло 2 часа, верхушка корня широко открыта (несформированный апекс). Какой метод лечения показан?",
+        "options": [
+            "Полная экстирпация пульпы и пломбирование канала гуттаперчей с силером",
+            "Частичная пульпотомия (по Cvek) с прямым покрытием биокерамикой (MTA / Biodentine) для сохранения витальности зоны роста корня (апексогенез)",
+            "Удаление зуба с установкой съемного протеза",
+            "Ампутация пульпы с резорцин-формалиновой пастой"
+        ],
+        "correct": 1,
+        "explanation": "В зубах с незавершенным формированием корня методом выбора является витальная пульпотомия по Cvek: сохранение корневой пульпы позволяет продолжить физиологический апексогенез и утолщение стенок корня."
     }
 ]
 
@@ -9573,7 +9810,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
     if 'status_msg' in locals() and status_msg:
         try:
@@ -10360,8 +10597,8 @@ async def handle_private_message(bot_client, event):
                 elif 'status_msg' in locals() and status_msg:
                     try:
                         await bot_client.delete_messages(chat_id, status_msg.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to delete voice status_msg in chat %s: %s", chat_id, exc)
                 if temp_path and os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
@@ -10422,22 +10659,33 @@ async def handle_private_message(bot_client, event):
 
         # Check for case expiration (1 hour inactivity)
         if user_state and user_state.get("state_type") == "case":
+            is_case_expired = False
+            inactivity_sec = 0
             try:
-                history_raw = json.loads(user_state.get("history") or "[]")
-                if isinstance(history_raw, dict) and "last_updated" in history_raw:
-                    last_updated = history_raw["last_updated"]
-                    inactivity_sec = time.time() - last_updated
-                    if inactivity_sec > 3600:
-                        await database.clear_user_interactive_state(chat_id)
-                        user_state = None
-                        if inactivity_sec < 86400:
-                            await bot_client.send_message(
-                                entity=chat_id,
-                                message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>",
-                                parse_mode='html'
-                            )
+                history_raw = json.loads(user_state.get("history") or "{}")
+                if isinstance(history_raw, dict):
+                    last_updated = history_raw.get("last_updated")
+                    if last_updated:
+                        inactivity_sec = time.time() - float(last_updated)
+                        if inactivity_sec > 3600:
+                            is_case_expired = True
+                    else:
+                        is_case_expired = True
+                else:
+                    is_case_expired = True
             except Exception as exp_err:
                 logger.error(f"Error checking case expiration: {exp_err}")
+                is_case_expired = True
+
+            if is_case_expired:
+                await database.clear_user_interactive_state(chat_id)
+                user_state = None
+                if inactivity_sec > 0 and inactivity_sec < 86400:
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message="⏳ <i>Предыдущая сессия симулятора была автоматически завершена из-за неактивности более 1 часа.</i>",
+                        parse_mode='html'
+                    )
 
         # FAST-PATH: SOS и экстренная клиническая помощь в ЛС (Правило MED-06)
         sos_category = detect_pm_emergency(text)
@@ -10461,7 +10709,7 @@ async def handle_private_message(bot_client, event):
                 return
 
         # Natural Language Intent Routing (Zero-Slash Routing)
-        if text and not text.startswith("/") and not has_media_intent:
+        if text and not text.startswith("/") and not has_media_intent and not (user_state and user_state.get("state_type") == "case"):
             detected = detect_user_intent(text)
 
             # Если детерминированный fast-path не сработал, запускаем семантический LLM-триаж
@@ -10525,14 +10773,18 @@ async def handle_private_message(bot_client, event):
                         return
                     text = "/calc"
 
-        # Автоматический выход из симулятора при вводе любой другой команды или нажатии кнопки меню
+        # Автоматический выход из симулятора при явной команде отмены или любой другой slash-команде
+        clean_text_lower = (text or "").strip().lower()
+        clean_cmd = clean_text_lower.split("@")[0].strip()
+        abort_cmds = ("/abort", "/exit", "/stop", "/cancel", "выход", "отмена", "стоп", "завершить", "прервать")
+
         is_command = text.startswith("/")
-        if is_command and user_state and user_state.get("state_type") == "case" and text.lower() not in ("/abort", "/exit", "/stop"):
+        if is_command and user_state and user_state.get("state_type") == "case" and clean_cmd not in abort_cmds:
             await database.clear_user_interactive_state(chat_id)
             user_state = None
             await bot_client.send_message(entity=chat_id, message="⏹️ <i>Активный клинический симулятор прерван для выполнения новой команды.</i>", parse_mode='html')
 
-        if text.lower() in ("/abort", "/exit", "/stop", "выход", "отмена", "стоп"):
+        if clean_cmd in abort_cmds:
             if user_state:
                 await database.clear_user_interactive_state(chat_id)
                 from telethon import Button
@@ -10553,7 +10805,6 @@ async def handle_private_message(bot_client, event):
         if user_state and user_state.get("state_type") == "case":
             case_attachment = (
                 getattr(event.message, "photo", None) is not None
-                or getattr(event.message, "video", None) is not None
                 or media_tools.image_document(event.message) is not None
             )
             if case_attachment:
@@ -10582,8 +10833,8 @@ async def handle_private_message(bot_client, event):
                     if status_msg:
                         try:
                             await bot_client.delete_messages(chat_id, status_msg.id)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed to delete case media status_msg in chat %s: %s", chat_id, exc)
                     if temp_case_media and os.path.exists(temp_case_media):
                         try:
                             os.remove(temp_case_media)
@@ -10607,6 +10858,12 @@ async def handle_private_message(bot_client, event):
                             message="⚠️ <i>Снимок не удалось открыть, оцениваю только текст вашего действия.</i>",
                             parse_mode='html',
                         )
+
+            # Сохраняем действие врача (включая описание снимка/голоса) в историю сообщений ЛС
+            try:
+                await database.save_pm_message(chat_id, "User", text)
+            except Exception as e_save:
+                logger.warning("Failed to save PM message for case action: %s", e_save)
 
             await handle_interactive_case_step(bot_client, chat_id, text, user_state)
             return
@@ -11105,11 +11362,11 @@ async def handle_private_message(bot_client, event):
 """
             async with _safe_typing_action(bot_client, chat_id):
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to delete pm status_msg in chat %s: %s", chat_id, exc)
 
                 reply_text = None
                 if not error and response and getattr(response, "text", None):
@@ -11156,8 +11413,8 @@ async def handle_private_message(bot_client, event):
             if status_msg is not None:
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to delete stats status_msg in chat %s: %s", chat_id, exc)
 
             stats_text = render_topic_statistics(counts, scanned)
             if not stats_text:
@@ -11763,7 +12020,7 @@ async def handle_private_message(bot_client, event):
 """
             status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
             async with _safe_typing_action(bot_client, chat_id):
-                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
@@ -12103,7 +12360,7 @@ async def handle_private_message(bot_client, event):
                     p_text = await generate_user_portrait(chat_id)
                     p_text = user_memory.clean_profile_portrait(p_text)
                     last_msg_id = await database.get_last_msg_id()
-                    if p_text and "недостаточно" not in p_text.lower() and "ошибка" not in p_text.lower():
+                    if p_text and "недостаточно" not in p_text.lower() and "ошибка" not in p_text.lower() and "формируется" not in p_text.lower():
                         await database.set_user_portrait(chat_id, p_text, last_msg_id)
                         await database.save_user_memory(chat_id, clinical_summary=p_text, message_count=1)
                     logger.info(f"Generated and saved initial portrait/memory for user {chat_id}: {p_text}")
@@ -12360,7 +12617,7 @@ async def handle_private_message(bot_client, event):
         if ticker and ticker.is_active:
             await ticker.update_stage(
                 "🧪 <i>Формирую доказательный протокол лечения...</i>",
-                stage_index=6,
+                stage_index=4,
             )
         elif status_msg:
             await tg_safety.edit_message(
@@ -12473,7 +12730,7 @@ async def handle_private_message(bot_client, event):
                 )
                 c_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 c_ctx["kind"] = "pm_cautious_ebm"
-                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=180)
+                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=60)
                 if c_resp and getattr(c_resp, "text", None):
                     reply_text = sanitize_clinical_pm_output(c_resp.text.strip())
                 if not reply_text:
@@ -12581,8 +12838,8 @@ async def handle_private_message(bot_client, event):
         if 'status_msg' in locals() and status_msg:
             try:
                 await bot_client.delete_messages(chat_id, status_msg.id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to delete pm final status_msg in chat %s: %s", chat_id, exc)
 
 
 async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_first_name=None):
@@ -12594,6 +12851,12 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     Этап 1: отправляет контекст в LLM с вопросом — стоит ли отвечать?
     Этап 2: если YES — генерирует живой ответ и отправляет (shadow mode пока не промотировано).
     """
+    sender_id = getattr(event, "sender_id", None)
+    sender = getattr(event, "_sender", None)
+    if is_bot_sender(sender_id, sender=sender, event=event):
+        logger.info("Bot mention ignored: sender_id=%s is bot.", sender_id)
+        return False
+
     # 1. Проверяем глобальную критику / требование выключить бота
     if await check_and_apply_silence(event, text, getattr(event.message, 'reply_to_msg_id', None)):
         return True
@@ -12601,10 +12864,6 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     # 1.1. Перехват критики скорости/работы бота («тупит», «тормозит», «завис», «глючит», «долго отвечает», «бот тупой»)
     # Врач констатирует задержку или высказывает технический отзыв коллегам в чате.
     # Бот НЕ должен считать это приглашением поспорить, оправдываться или встревать!
-    _BOT_PERF_CRITIQUE_RE = re.compile(
-        r'(?i)\b(?:тупит|тормозит|завис\w*|глючит|лагает|долго\s+(?:отвечает|думает|грузит|обрабатывает)|'
-        r'(?:бот\s+)?туп(?:ой|ит)|мертв\w*|не\s+отвечает)\b'
-    )
     if _BOT_PERF_CRITIQUE_RE.search((text or "").lower()):
         if not has_dental_term(text or "") and "?" not in (text or ""):
             logger.info("Bot mention triage: suppressed technical critique/speed complaint without clinical question: %r", text)
@@ -12614,13 +12873,22 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     # проверки, и вызывается он ровно тогда, когда основной ассистент промолчал,
     # — а при активной тишине тот молчит именно из-за неё. То есть флаг тишины
     # сам передавал управление пути, который его не смотрел.
-    #
-    # Замер по живому архиву, последовательность 2025-06-05: врач написал «Бот
-    # очень назойливый мне не нравится», бот извинился и умолк на 4 часа, а через
-    # 4 минуты 38 секунд реплика про ЧУЖОГО бота прошла регулярку упоминания. В
-    # окне тишины 138 сообщений, 14 задевают регулярку — тринадцать попыток
-    # нарушить только что данное обещание.
     if is_silenced(load_state(), "bot mention trigger"):
+        return False
+
+    chat_id = event.chat_id
+    # Rate limit: защита от флуда упоминаниями "бот"
+    if sender_id:
+        user_mention_cd = check_user_cooldown(chat_id, sender_id, "bot_mention_user", seconds=15)
+        if user_mention_cd > 0:
+            logger.info("Bot mention trigger suppressed: user %s triggered too quickly (%ds left)", sender_id, user_mention_cd)
+            return False
+
+    topic_id = tg_safety.extract_topic_id(event)
+    topic_key = topic_id if topic_id is not None else 0
+    topic_mention_cd = check_user_cooldown(chat_id, topic_key, "bot_mention_topic", seconds=10)
+    if topic_mention_cd > 0:
+        logger.info("Bot mention trigger suppressed: topic %s:%s rate limit active (%ds left)", chat_id, topic_key, topic_mention_cd)
         return False
 
     BOT_MENTION_SHADOW_MODE = False  # Выкачено в боевой
@@ -12641,13 +12909,10 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
         (f"@{name}" in text_lower or name in text_lower)
         for name in mention_names
     )
-    # Триггер: упомянули "бот" во всех возможных падежах и числах (бот, бота, боту, ботом, боте, боты, ботов, ботам, ботами, ботах)
+    # Триггер: упомянули "бот" во всех возможных падежах и числах через быстрый regex
     # или тегнули юзернейм бота
-    bot_words = ["бот", "бота", "боту", "ботом", "боте", "боты", "ботов", "ботам", "ботами", "ботах"]
-    if not is_uname_mention and not any(w in text_lower.split() or text_lower == w for w in bot_words):
-        # Ищем substring с границами слов и возможными окончаниями
-        if not re.search(r'\bбот(а|у|ом|е|ы|ов|ам|ами|ах)?\b', text_lower):
-            return False
+    if not is_uname_mention and not _BOT_WORD_RE.search(text_lower):
+        return False
 
     # Pre-LLM adversarial filter against jailbreaks & controlled substances
     is_adv, adv_refusal = check_adversarial_input(text)
@@ -12704,7 +12969,7 @@ NO — если это:
 - случайное упоминание, обсуждение другого бота, ругательство, или контекст не требует ответа бота.
 """
             triage_ctx = {"kind": "bot_mention_triage", "chat_id": chat_id, "thinking_level": "LOW"}
-            triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=180)
+            triage_resp, triage_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=30)
 
             if triage_err or not triage_resp:
                 logger.warning(f"Bot mention triage failed: {triage_err}")
@@ -12790,9 +13055,9 @@ NO — если это:
 Предыдущий вариант ответа отклонён рецензентом: "{last_mention_reason}".
 НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти критику рецензента, ответь строго по существу сообщения #{msg_id}, исключи сомнительные утверждения.
 """
-            reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
+            reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "MEDIUM"}
             async with _safe_typing_action(bot_client, chat_id):
-                reply_resp, reply_err = await generate_gemini_text_async(current_reply_prompt, reply_ctx, timeout=360)
+                reply_resp, reply_err = await generate_gemini_text_async(current_reply_prompt, reply_ctx, timeout=120)
 
             if reply_err or not reply_resp:
                 logger.warning(f"Bot mention reply generation failed on attempt {attempt}: {reply_err}")
@@ -13017,9 +13282,9 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - Будь краток: вся сводка должна занимать не более 800 символов.
 - КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
-        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
+        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "MEDIUM"}
         async with _safe_typing_action(bot_client, chat_id):
-            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
@@ -13047,7 +13312,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 [ЗАМЕЧАНИЕ КЛИНИЧЕСКОГО РЕЦЕНЗЕНТА]:
 Предыдущий вариант сводки отклонён: "{_sum_reason}".
 Перепиши сводку: исключи спорные категоричные утверждения, опирайся строго на реплики врачей из чата выше, представь объективный нейтральный конспект позиций коллег."""
-            cons_resp, _ = await generate_gemini_text_async(cons_prompt, status_ctx, timeout=180)
+            cons_resp, _ = await generate_gemini_text_async(cons_prompt, status_ctx, timeout=60)
             if cons_resp and getattr(cons_resp, "text", None):
                 summary_text = clean_html_formatting(cons_resp.text.strip())
 
@@ -13098,8 +13363,26 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 
 async def handle_group_direct_ask(bot_client, event, question):
     """Ответ на прямой клинический вопрос пользователя в группе."""
+    sender_id = getattr(event, "sender_id", None)
+    sender = getattr(event, "_sender", None)
+    if is_bot_sender(sender_id, sender=sender, event=event):
+        logger.info("handle_group_direct_ask ignored: sender_id=%s is bot", sender_id)
+        return
+
     chat_id = event.chat_id
     msg_id = event.message.id
+
+    reply_to_msg_id_check = (
+        getattr(event, 'reply_to_msg_id', None)
+        or getattr(getattr(event, 'message', None), 'reply_to_msg_id', None)
+        or getattr(getattr(getattr(event, 'message', None), 'reply_to', None), 'reply_to_msg_id', None)
+    )
+    all_check_ids = [msg_id]
+    if reply_to_msg_id_check:
+        all_check_ids.append(reply_to_msg_id_check)
+    if is_group_reply_in_flight(chat_id, all_check_ids):
+        logger.info("Direct ask already in flight for msg_id=%s or reply_to=%s, skipping duplicate invocation", msg_id, reply_to_msg_id_check)
+        return
 
     if await check_and_apply_silence(event, question or getattr(getattr(event, "message", None), "message", ""), getattr(event, "reply_to_msg_id", None)):
         return
@@ -13152,8 +13435,8 @@ async def handle_group_direct_ask(bot_client, event, question):
                         try:
                             s = await parent_msg.get_sender()
                             p_name = getattr(s, "first_name", "") or "Коллега"
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed to get parent_msg sender in dialogue: %s", exc)
                         p_media = getattr(parent_msg, "media", None)
                         p_media_desc = "[Клинический снимок/медиафайл]" if p_media else None
                         p_reply_to = getattr(getattr(parent_msg, 'reply_to', None), 'reply_to_msg_id', None)
@@ -13207,8 +13490,8 @@ async def handle_group_direct_ask(bot_client, event, question):
                             try:
                                 ms = await m.get_sender()
                                 m_name = getattr(ms, "first_name", "") or "Коллега"
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Failed to get recent_msg sender in dialogue: %s", exc)
                             m_media = getattr(m, "media", None)
                             m_mdesc = "[Клинический снимок/медиа]" if m_media else None
                             m_reply_to = getattr(getattr(m, 'reply_to', None), 'reply_to_msg_id', None)
@@ -13225,6 +13508,15 @@ async def handle_group_direct_ask(bot_client, event, question):
         requester_name = "Коллега"
 
         # 1. Собираем медиа-файлы (снимки/рентген) ДО сборки текста контекста,
+        # Если само сообщение команды содержит медиа (фото/видео прикреплено прямо к /ask или обращению)
+        event_media = bool(
+            getattr(event, "photo", None)
+            or getattr(event, "video", None)
+            or getattr(event, "media", None)
+            or (hasattr(event, "message") and (getattr(event.message, "photo", None) or getattr(event.message, "video", None) or getattr(event.message, "media", None)))
+        )
+        if event_media and msg_id not in target_media_ids:
+            target_media_ids.insert(0, msg_id)
         # чтобы статус наличия изображений был на 100% точен в разметке
         multimodal_image_urls = []
         target_media_ids = []
@@ -13253,6 +13545,23 @@ async def handle_group_direct_ask(bot_client, event, question):
                 elif r_has_media and len(target_media_ids) < 6:
                     target_media_ids.append(r_mid)
             target_media_ids.reverse()
+
+        if target_media_ids:
+            try:
+                min_m = min(target_media_ids)
+                max_m = max(target_media_ids)
+                peer_media_rows = await query_db_async(
+                    "SELECT msg_id FROM messages WHERE sender_id = ? AND has_media = 1 "
+                    "AND msg_id >= ? - 10 AND msg_id <= ? + 10",
+                    (target_sender_id or sender_id, min_m, max_m)
+                )
+                if peer_media_rows:
+                    for pr in peer_media_rows:
+                        if pr[0] not in target_media_ids:
+                            target_media_ids.append(pr[0])
+                    target_media_ids.sort()
+            except Exception as peer_err:
+                logger.debug("Failed to fetch peer album media IDs in ask: %s", peer_err)
 
         effective_client = getattr(event, "client", None) or bot_client
         if target_media_ids and effective_client:
@@ -13550,7 +13859,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 """
             ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
             ebm_ctx["kind"] = "group_ask_ebm_fallback"
-            ebm_resp, ebm_err = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=180)
+            ebm_resp, ebm_err = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
             if ebm_resp and getattr(ebm_resp, "text", None):
                 reply_text = ebm_resp.text.strip()
             if not reply_text:
@@ -13633,9 +13942,22 @@ async def handle_group_direct_ask(bot_client, event, question):
 
             try:
                 import clinical_rescue
-                clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, chat_id)
+                ask_msg_date = getattr(getattr(event, "message", None), "date", None) or getattr(event, "date", None)
+                clinical_rescue.mark_case_rescued(
+                    config.DB_PATH,
+                    msg_id,
+                    chat_id,
+                    sender_id=chosen_author,
+                    timestamp=ask_msg_date
+                )
                 if reply_to_msg_id:
-                    clinical_rescue.mark_case_rescued(config.DB_PATH, reply_to_msg_id, chat_id)
+                    clinical_rescue.mark_case_rescued(
+                        config.DB_PATH,
+                        reply_to_msg_id,
+                        chat_id,
+                        sender_id=chosen_author,
+                        timestamp=ask_msg_date
+                    )
             except Exception as e:
                 logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
 
@@ -13699,13 +14021,13 @@ async def handle_group_quiz(bot_client, event):
 }
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
-    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
+    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=480)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     try:
         await bot_client.delete_messages(chat_id, status_msg.id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to delete quiz status_msg in chat %s: %s", chat_id, exc)
 
     question = None
     options = None
@@ -13753,13 +14075,20 @@ async def handle_group_quiz(bot_client, event):
     # Само значение теперь строго возрастает по времени (_next_quiz_state_id), а
     # не выпадает из random.randint(100000, 999999).
     quiz_id = str(_next_quiz_state_id())
-    init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
+    init_votes = {
+        "votes": [0, 0, 0, 0],
+        "voters": {},
+        "last_updated": time.time(),
+        "created_at": time.time(),
+        "question": question,
+        "topic": "Стоматология"
+    }
     await database.set_user_interactive_state(
         user_id=int(quiz_id),
         state_type="quiz_config",
         current_step=correct,
         case_id=explanation,
-        history=json.dumps(init_votes)
+        history=json.dumps(init_votes, ensure_ascii=False)
     )
 
     from telethon import Button
@@ -13854,8 +14183,8 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
             recent_rows = await database.get_last_messages(chat_id, limit=25)
             if recent_rows:
                 recent_msgs = [f"{r.get('sender_name', '')}: {r.get('text', '')}" for r in recent_rows if r.get('text')]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to fetch recent messages for quiz generation in chat %s: %s", chat_id, exc)
 
         enum_type = None
         if force_type == "quiz":
@@ -14445,10 +14774,10 @@ async def edit_callback_message(bot_client, event, text, op, **kwargs):
         except TypeError:
             try:
                 return await asyncio.wait_for(event.edit(text), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.debug("event.edit fallback without kwargs failed: %s", exc)
+        except Exception as exc:
+            logger.debug("event.edit with kwargs failed: %s", exc)
     return None
 
 
@@ -14470,9 +14799,11 @@ async def handle_onboarding_callback(bot_client, event, data_str):
     try:
         await database.save_user_memory(
             user_id=chat_id,
+            specialty=chosen_spec,
             clinical_summary=summary_text,
             pm_message_count=1,
         )
+        await database.set_user_portrait(chat_id, chosen_spec, 0)
     except Exception as save_err:
         logger.error("Failed to save onboard memory: %s", save_err)
 
@@ -14860,7 +15191,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     if generate_gemini_text_async:
         try:
             async with _safe_typing_action(bot_client, chat_id):
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
         except Exception as e:
             error = str(e)
 
@@ -15906,7 +16237,21 @@ async def handle_quiz_callback(bot_client, event):
             return
 
         elif quiz_sub in ("generate", "start", "next", "new"):
-            fb = random.choice(CLINICAL_QUIZ_FALLBACKS)
+            # Защита от повторения вопросов для врача:
+            # Исключаем недавние темы и вопросы из выборки
+            import poll_storage
+            seen_questions = set()
+            try:
+                recent_polls = await poll_storage.get_recent_poll_topics(limit=12)
+                seen_questions = {p.get("question") for p in recent_polls if p.get("question")}
+            except Exception as e_poll:
+                logger.debug("Could not fetch recent poll topics for anti-repetition: %s", e_poll)
+
+            available_pool = [fb for fb in CLINICAL_QUIZ_FALLBACKS if fb["question"] not in seen_questions]
+            if not available_pool:
+                available_pool = CLINICAL_QUIZ_FALLBACKS
+
+            fb = random.choice(available_pool)
             question = fb["question"]
             options = list(fb["options"])
             correct = fb["correct"]
@@ -15914,13 +16259,20 @@ async def handle_quiz_callback(bot_client, event):
             topic = fb.get("topic", "Стоматология")
 
             quiz_id = str(_next_quiz_state_id())
-            init_votes = {"votes": [0, 0, 0, 0], "voters": {}}
+            init_votes = {
+                "votes": [0, 0, 0, 0],
+                "voters": {},
+                "last_updated": time.time(),
+                "created_at": time.time(),
+                "question": question,
+                "topic": topic
+            }
             await database.set_user_interactive_state(
                 user_id=int(quiz_id),
                 state_type="quiz_config",
                 current_step=correct,
                 case_id=explanation,
-                history=json.dumps(init_votes)
+                history=json.dumps(init_votes, ensure_ascii=False)
             )
 
             buttons = [
@@ -15962,6 +16314,35 @@ async def handle_quiz_callback(bot_client, event):
             explanation = (state_row.get("case_id") if state_row else None) or "Клинический разбор."
             is_correct = (correct_idx == clicked_idx)
 
+            # Персистентная фиксация ответа врача в poll_storage для сохранения стрика и профиля
+            streak_str = ""
+            stats_str = ""
+            try:
+                import poll_storage
+                sender = await event.get_sender()
+                user_name = getattr(sender, "first_name", "Врач") or "Врач"
+                await poll_storage.record_vote(
+                    poll_id=quiz_id,
+                    user_id=event.sender_id,
+                    user_name=user_name,
+                    selected_option=clicked_idx,
+                    is_correct=is_correct,
+                    allow_update=True
+                )
+                user_stats = await poll_storage.get_user_quiz_stats(event.sender_id)
+                cur_str = user_stats.get("current_streak", 0)
+                max_str = user_stats.get("max_streak", 0)
+                total_corr = user_stats.get("correct_answers", 0)
+                total_ans = user_stats.get("total_answers", 0)
+                acc = user_stats.get("accuracy_percent", 0.0)
+
+                if max_str > 0:
+                    streak_str = f"\n\n🔥 <b>Клинический стрик:</b> {cur_str} дн. (рекорд: {max_str} дн.)"
+                if total_ans > 0:
+                    stats_str = f"\n📊 <b>Ваш результат:</b> {total_corr}/{total_ans} ({acc}%)"
+            except Exception as e_vote:
+                logger.warning("Failed to record interactive quiz vote in poll_storage: %s", e_vote)
+
             letters = ["A", "B", "C", "D"]
             your_letter = letters[clicked_idx] if 0 <= clicked_idx < 4 else str(clicked_idx)
             corr_letter = letters[correct_idx] if 0 <= correct_idx < 4 else str(correct_idx)
@@ -15971,15 +16352,17 @@ async def handle_quiz_callback(bot_client, event):
                 f"{res_header}\n\n"
                 f"Ваш выбор: <b>{your_letter}</b> | Правильный ответ: <b>{corr_letter}</b>\n\n"
                 f"💡 <b>Клиническое обоснование:</b>\n{explanation}"
+                f"{streak_str}"
+                f"{stats_str}"
             )
             buttons = [
                 [Button.inline("🎲 Следующий вопрос", data="quiz:generate")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
+                [Button.inline("👤 Профиль", data="nav:profile"), Button.inline("⬅️ Меню", data="nav:main")]
             ]
             await edit_callback_message(bot_client, event, ans_text,
                                        "edit_message:quiz_result", buttons=buttons,
                                        parse_mode='html')
-            await event.answer()
+            await event.answer("Ответ зафиксирован в профиле!" if is_correct else "Разбор открыт!")
             return
 
     # 5. КЛИНИЧЕСКИЙ СИМУЛЯТОР case:*
@@ -16006,8 +16389,8 @@ async def handle_quiz_callback(bot_client, event):
         elif case_sub == "start":
             try:
                 await event.answer()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Interactive case start event.answer failed: %s", exc)
             await edit_callback_message(bot_client, event,
                                        "🎮 <i>Подготавливаю интерактивный клинический случай... Подождите.</i>",
                                        "edit_message:case_loading", parse_mode='html')
@@ -16042,7 +16425,7 @@ async def handle_quiz_callback(bot_client, event):
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
             async with _safe_typing_action(bot_client, event.sender_id):
-                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=480)
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
 
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
@@ -16088,8 +16471,8 @@ async def handle_quiz_callback(bot_client, event):
                                        parse_mode='html')
             try:
                 await event.answer()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Interactive case ready event.answer failed: %s", exc)
             return
 
         elif case_sub.startswith("opt:") or case_sub == "opt":
@@ -16099,6 +16482,25 @@ async def handle_quiz_callback(bot_client, event):
             if not user_state or user_state.get("state_type") != "case":
                 await event.answer("Кейс уже завершен или устарел. Нажмите «🚀 Начать клинический кейс».", alert=True)
                 return
+
+            # Проверка таймаута неактивности (> 1 часа) при клике на вариант
+            is_case_expired = False
+            try:
+                hist_obj = json.loads(user_state.get("history") or "{}")
+                if isinstance(hist_obj, dict):
+                    l_up = hist_obj.get("last_updated")
+                    if not l_up or (time.time() - float(l_up) > 3600):
+                        is_case_expired = True
+                else:
+                    is_case_expired = True
+            except Exception:
+                is_case_expired = True
+
+            if is_case_expired:
+                await database.clear_user_interactive_state(event.sender_id)
+                await event.answer("⏳ Сессия симулятора устарела (> 1 часа неактивности). Нажмите «🚀 Начать клинический кейс».", alert=True)
+                return
+
             await event.answer(f"Выбран вариант {opt_letter}")
             try:
                 await database.save_pm_message(event.sender_id, "User", f"Выбираю вариант {opt_letter}")
@@ -16107,7 +16509,7 @@ async def handle_quiz_callback(bot_client, event):
             await handle_interactive_case_step(bot_client, event.sender_id, f"Выбираю вариант {opt_letter}", user_state)
             return
 
-        elif case_sub in ("abort", "exit"):
+        elif case_sub in ("abort", "exit", "stop", "cancel"):
             await database.clear_user_interactive_state(event.sender_id)
             abort_text = (
                 "⏹️ <b>Интерактивная сессия симулятора успешно завершена.</b>\n\n"
@@ -16463,8 +16865,8 @@ async def handle_quiz_callback(bot_client, event):
     if not data_str.startswith("qa:"):
         try:
             await event.answer()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("QA non-matching callback event.answer failed: %s", exc)
         return
 
     parts = data_str.split(":")
@@ -16498,6 +16900,7 @@ async def handle_quiz_callback(bot_client, event):
     # Record vote
     voters[voter_id] = clicked_idx
     votes[clicked_idx] += 1
+    history_data["last_updated"] = time.time()
 
     # Update DB
     await database.set_user_interactive_state(
@@ -16505,10 +16908,27 @@ async def handle_quiz_callback(bot_client, event):
         state_type="quiz_config",
         current_step=correct_idx,
         case_id=explanation,
-        history=json.dumps(history_data)
+        history=json.dumps(history_data, ensure_ascii=False)
     )
 
     is_correct = (correct_idx == clicked_idx)
+
+    # Персистентная фиксация ответа в poll_storage для статистики и стрика врача
+    try:
+        import poll_storage
+        sender = await event.get_sender()
+        user_name = getattr(sender, "first_name", "Врач") or "Врач"
+        await poll_storage.record_vote(
+            poll_id=quiz_id,
+            user_id=event.sender_id,
+            user_name=user_name,
+            selected_option=clicked_idx,
+            is_correct=is_correct,
+            allow_update=False
+        )
+    except Exception as e_grp_vote:
+        logger.warning("Failed to record group quiz vote in poll_storage: %s", e_grp_vote)
+
     prefix = "✅ Верно! " if is_correct else "❌ Неверно! "
     alert_text = f"{prefix}\n\n{explanation}"
     if len(alert_text) > 200:
@@ -16524,7 +16944,7 @@ async def handle_quiz_callback(bot_client, event):
             pct = [int((v / total_votes) * 100) if total_votes > 0 else 0 for v in votes]
 
             new_lines = []
-            opt_regex = re.compile(r'^(?:<b>|\*\*)?([A-D])[:.](?:</b>|\*\*)?\s*(.*)', re.IGNORECASE)
+            opt_regex = re.compile(r'^(?:<b>|\*\*)?([A-D])[:.]?(?:</b>|\*\*)?[:.]?\s*(.*)', re.IGNORECASE)
             suffix_regex = re.compile(r'(?:\s+|^)\(\d+\s*гол\S*\s*\|\s*\d+%\)\s*$', re.IGNORECASE)
 
             for line in lines:
@@ -16533,7 +16953,7 @@ async def handle_quiz_callback(bot_client, event):
                 if opt_match:
                     letter = opt_match.group(1).upper()
                     idx = ord(letter) - ord('A')
-                    raw_choice = opt_match.group(2)
+                    raw_choice = opt_match.group(2).lstrip(":-. ").strip()
                     clean_choice = suffix_regex.sub('', raw_choice).strip()
                     if 0 <= idx < len(votes):
                         new_lines.append(f"<b>{letter}:</b> {clean_choice} ({votes[idx]} гол. | {pct[idx]}%)")
@@ -16581,7 +17001,7 @@ async def analyze_dispute_need(context_msgs):
 Выведи СТРОГО одно слово: YES или NO.
 """
     status_ctx = {"kind": "referee_analyser", "thinking_level": "LOW"}
-    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=180)
+    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=30)
     if response and getattr(response, "text", None):
         res = response.text.strip().upper()
         if res.startswith("YES"):
@@ -16620,7 +17040,7 @@ async def check_referee_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=180)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=30)
 
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")
@@ -16787,9 +17207,9 @@ async def check_and_trigger_referee(bot_client, event, text) -> bool:
 4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
 
-    status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
+    status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
     if error or not response or not getattr(response, "text", None):
         return
@@ -16895,7 +17315,7 @@ async def handle_term_explainer(bot_client, event, term):
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.
@@ -17140,8 +17560,8 @@ async def check_and_send_pm_pings(bot_client):
 4. Тон: сдержанный, уважительный, профессиональный. Без панибратства, без фамильярности («ты куда пропал»), без спама.
 5. Разметка: только HTML (<b>жирный</b>, <i>курсив</i>).
 """
-                    status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
-                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=360)
+                    status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                    response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
 
                     if not error and response and getattr(response, "text", None):
                         reply_text = response.text.strip()
@@ -17251,7 +17671,7 @@ async def check_and_send_group_activity_pings(bot_client):
             "верни JSON строго в формате: {\"is_hot\": true, \"topic\": \"коротко тема обсуждения\", \"teaser\": \"интригующая краткая фраза для коллег\"}.\n"
             "Если обсуждения нет, обычный бытовой флуд или мало активности — верни: {\"is_hot\": false}."
         )
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=240)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
         if error or not response or not getattr(response, "text", None):
             logger.warning("Group ping: LLM error, skipping cycle. error=%s", error)
             return

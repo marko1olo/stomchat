@@ -146,6 +146,43 @@ check("в assistant нет своей реализации обрезки",
       "def _safe_truncate_html(" not in SOURCE and "def safe_truncate_html(" not in SOURCE)
 check("assistant подключил html_safe", "import html_safe" in SOURCE)
 
+
+print("\n[8] Клиническая валидация эталонных EBM-протоколов сообщества")
+all_seeded = protocol_extractor._DEFAULT_COMMUNITY_PROTOCOLS
+titles = [p["title"] for p in all_seeded]
+
+# 1. Протокол антибиотикопрофилактики эндокардита AHA 2021
+check("протокол антибиотикопрофилактики AHA присутствует в базе", any("Антибиотикопрофилактика инфекционного эндокардита" in t for t in titles))
+proph_p = next((p for p in all_seeded if "Антибиотикопрофилактика инфекционного эндокардита" in p["title"]), None)
+if proph_p:
+    p_text = json.dumps(proph_p, ensure_ascii=False)
+    check("AHA: Амоксициллин 2.0 г за 30-60 минут", "2.0 г" in p_text and "30–60 минут" in p_text)
+    check("AHA: Дети 50 мг/кг", "50 мг/кг" in p_text)
+    check("AHA: Строгий запрет клиндамицина (C. difficile)", "КЛИНДАМИЦИН ПОЛНОСТЬЮ ИСКЛЮЧЕН" in p_text and "Clostridioides difficile" in p_text)
+
+# 2. Протокол дезинфекции каналов и нейтрализации ирригантов ESE/AAE
+check("протокол дезинфекции каналов ESE/AAE присутствует в базе", any("Хемомеханическая дезинфекция каналов" in t for t in titles))
+irr_p = next((p for p in all_seeded if "Хемомеханическая дезинфекция каналов" in p["title"]), None)
+if irr_p:
+    i_text = json.dumps(irr_p, ensure_ascii=False)
+    check("дезинфекция каналов: NaOCl 3-5.25% + PUI", "NaOCl" in i_text and "PUI" in i_text)
+    check("дезинфекция каналов: 17% ЭДТА", "17% ЭДТА" in i_text)
+    check("дезинфекция каналов: обязательный промежуточный смыв физраствором", "0.9% физраствора" in i_text and "ПРОМЕЖУТОЧНЫЙ СМЫВ" in i_text)
+    check("дезинфекция каналов: запрет парахлоранилина PCA", "парахлоранилина (PCA)" in i_text and "СТРОЖАЙШИЙ ЗАПРЕТ" in i_text)
+
+print("\n[9] Защита от ReDoS и устойчивость к большим клиническим выпискам")
+import time
+large_clinical_text = ("Клинический случай эндодонтического лечения зуба 46. Этап 1: изоляция коффердам. " * 300) + "\n"
+t0 = time.perf_counter()
+cand_res = protocol_extractor.is_protocol_candidate(large_clinical_text)
+t_candidate = time.perf_counter() - t0
+check("is_protocol_candidate быстро обрабатывает большие тексты (< 50 мс)", t_candidate < 0.05, f"{t_candidate*1000:.2f} ms")
+check("is_protocol_candidate детектирует наличие протокола", cand_res is True)
+
+# Тест безопасного экранирования и парсинга markdown
+safe_md = protocol_extractor._safe_html_text("Пациент принимал ***Амоксициллин*** и **Ибупрофен** 2 * 2 мл.")
+check("_safe_html_text корректно форматирует теги без ReDoS", "<b><i>Амоксициллин</i></b>" in safe_md and "<b>Ибупрофен</b>" in safe_md)
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))

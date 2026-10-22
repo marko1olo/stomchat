@@ -202,6 +202,36 @@ class TestInputParsingRobustness(unittest.TestCase):
         self.assertFalse(r_huge.is_valid)
         self.assertIn("нереалистичный вес", r_huge.error_message)
 
+    def test_blood_pressure_not_mistaken_for_weight(self):
+        """АД (140/90) не должно извлекаться как вес 140 кг, но должно включать кардиостатус."""
+        p = ac.parse_clinical_query_params("пациентка с давлением 140/90 ультракаин")
+        self.assertIsNone(p["weight"])
+        self.assertTrue(p["is_cardiac"])
+
+    def test_tooth_number_not_mistaken_for_weight(self):
+        """Номер зуба (36 зуба, 46 зуб) не должен извлекаться как масса тела."""
+        p1 = ac.parse_clinical_query_params("эндодонтия 36 зуба 3 канала ультракаин")
+        self.assertIsNone(p1["weight"])
+        p2 = ac.parse_clinical_query_params("удаление 46 зуба артикаин")
+        self.assertIsNone(p2["weight"])
+
+    def test_pediatric_age_nelson_formula(self):
+        """При указании возраста (7 лет) без веса применяется формула Нельсона (7*2+8 = 22 кг)."""
+        res = ac.calculate_anesthesia_dose("девочка 7 лет ультракаин")
+        self.assertTrue(res.is_valid)
+        self.assertEqual(res.weight_kg, 22.0)
+        self.assertTrue(res.is_weight_estimated)
+        self.assertEqual(res.estimated_age_years, 7.0)
+        self.assertIn("формуле Нельсона", res.html_report)
+
+    def test_pregnancy_guidance_alert(self):
+        """Беременность детектируется и выводит протокол безопасности FDA B/C."""
+        res = ac.calculate_anesthesia_dose("беременная 2 триместр вес 65 кг артикаин")
+        self.assertTrue(res.is_valid)
+        self.assertTrue(res.is_pregnant)
+        self.assertIn("БЕРЕМЕННОСТЬ", res.html_report)
+        self.assertIn("FDA B", res.html_report)
+
 
 class TestChairsideEmergencyProtocols(unittest.TestCase):
     """4. Протоколы неотложной помощи и реанимации (SOS Resuscitation)."""
@@ -245,6 +275,30 @@ class TestChairsideEmergencyProtocols(unittest.TestCase):
         self.assertIsNotNone(proto)
         self.assertIn("Полусидячее положение", proto.card_text)
         self.assertIn("Моксонидин 0.2 мг", proto.card_text)
+
+    def test_needle_breakage_protocol(self):
+        """Перелом иглы: фиксация открытого рта, запрет слепых разрезов, 3D КЛКТ и ЧЛХ."""
+        proto = ac.get_emergency_protocol("needle")
+        self.assertIsNotNone(proto)
+        self.assertIn("НЕ ДАВАТЬ ЗАКРЫВАТЬ РОТ", proto.card_text)
+        self.assertIn("3D КЛКТ", proto.card_text)
+        self.assertIn("ЧЛХ", proto.card_text)
+
+    def test_adrenaline_vs_allergy_differential(self):
+        """Дифдиагностика адреналиновой реакции: АД повышено, дыхание свободное, адреналин НЕ колоть."""
+        proto = ac.get_emergency_protocol("adrenaline")
+        self.assertIsNotNone(proto)
+        self.assertIn("Адреналиновая реакция vs Анафилаксия", proto.card_text)
+        self.assertIn("Адреналин НЕ КОЛОТЬ", proto.card_text)
+
+    def test_pregnancy_emergency_protocol(self):
+        """Протокол при беременности: Лидокаин FDA B, поворот на левый бок, запрет НПВП в III триместре."""
+        proto = ac.get_emergency_protocol("pregnancy")
+        self.assertIsNotNone(proto)
+        self.assertIn("FDA B", proto.card_text)
+        self.assertIn("левый бок", proto.card_text)
+        self.assertIn("Мепивакаин (Скандонест)", proto.card_text)
+        self.assertIn("НЕ РЕКОМЕНДОВАН", proto.card_text)
 
 
 class TestChairsideToolsIntegration(unittest.TestCase):
@@ -295,7 +349,31 @@ class TestChairsideToolsIntegration(unittest.TestCase):
             self.assertTrue(ok_menu)
             self.assertTrue(event.edit.called)
 
+            # sos:needle
+            event.edit.reset_mock()
+            ok_needle = await ct.dispatch_chairside_callback(bot, event, "sos:needle")
+            self.assertTrue(ok_needle)
+            self.assertTrue(event.edit.called)
+
+            # sos:adrenaline
+            event.edit.reset_mock()
+            ok_adr = await ct.dispatch_chairside_callback(bot, event, "sos:adrenaline")
+            self.assertTrue(ok_adr)
+            self.assertTrue(event.edit.called)
+
+            # sos:pregnancy
+            event.edit.reset_mock()
+            ok_preg = await ct.dispatch_chairside_callback(bot, event, "sos:pregnancy")
+            self.assertTrue(ok_preg)
+            self.assertTrue(event.edit.called)
+
         asyncio.run(_test())
+
+    def test_cumulative_remaining_dose_calculation(self):
+        """Кумулятивный расчет при комбинировании: 2 карпулы артикаина оставляют ~222 мг мепивакаина (4 карп)."""
+        res = ac.calculate_cumulative_remaining_dose(70.0, {"articaine_100": 2.0}, "mepivacaine_3")
+        self.assertIn("Кумулятивный расчет", res)
+        self.assertIn("до 4 карпул", res)
 
 
 if __name__ == "__main__":

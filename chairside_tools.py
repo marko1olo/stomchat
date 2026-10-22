@@ -446,7 +446,74 @@ class PrescriptionResult:
 
 
 def calculate_antibiotic(weight_kg: float, is_child: bool = False, allergy_penicillin: bool = False,
-                         severe_infection: bool = False) -> PrescriptionResult:
+                         severe_infection: bool = False, is_prophylaxis: bool = False) -> PrescriptionResult:
+    """Расчет антибиотика с генерацией текста для пациента (включая протокол профилактики эндокардита AHA/ESE)."""
+    w = max(5.0, min(150.0, float(weight_kg)))
+
+    # ── ПРОТОКОЛ АНТИБИОТИКОПРОФИЛАКТИКИ ИНФЕКЦИОННОГО ЭНДОКАРДИТА (AHA / ESE / ADA 2021) ──
+    if is_prophylaxis:
+        if allergy_penicillin:
+            if is_child or w < 40:
+                child_mg = min(500.0, round(w * 15))
+                ml_dose = round(child_mg * 5 / 200, 1)
+                p_msg = (
+                    f"🛡 <b>Профилактика инфекционного эндокардита у ребенка ({w:g} кг):</b>\n"
+                    f"⚠️ <b>Аллергия на пенициллины!</b>\n"
+                    f"• Препарат выбора: <b>Азитромицин (Сумамед) суспензия 200 мг / 5 мл</b>\n"
+                    f"• Дозировка: <b>{ml_dose} мл</b> ({int(child_mg)} мг = 15 мг/кг)\n"
+                    f"• Как принимать: <b>ОДНОКРАТНО строго за 30–60 минут до начала процедуры</b>.\n\n"
+                    f"⛔ <b>КАТЕГОРИЧЕСКИЙ КЛИНИЧЕСКИЙ ЗАПРЕТ (AHA 2021 Update):</b>\n"
+                    f"<i>Клиндамицин (Далацин) строго исключен из рекомендаций из-за смертельного риска "
+                    f"псевдомембранозного колита (Clostridioides difficile)!</i>"
+                )
+                return PrescriptionResult("Азитромицин (суспензия 200/5)", f"{ml_dose} мл ({int(child_mg)} мг)",
+                                          "За 30-60 мин до процедуры", "1 день (разово)",
+                                          "КЛИНДАМИЦИН КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН!", p_msg)
+            else:
+                p_msg = (
+                    "🛡 <b>Профилактика инфекционного эндокардита (AHA / ADA Update 2021):</b>\n"
+                    "⚠️ <b>Пациент с АЛЛЕРГИЕЙ на пенициллин:</b>\n\n"
+                    "1. <b>Препарат первого выбора (при тяжелой аллергии/анафилаксии):</b>\n"
+                    "   • <b>Азитромицин 500 мг</b> ИЛИ <b>Кларитромицин 500 мг</b>\n"
+                    "   • Доза: <b>1 таблетка (500 мг) ОДНОКРАТНО за 30–60 минут до процедуры</b>.\n"
+                    "2. <b>Альтернатива (при отсутствии анафилаксии/ангиоотека):</b>\n"
+                    "   • <b>Цефалексин 2.0 г</b> (4 капсулы по 500 мг) за 30–60 минут.\n\n"
+                    "⛔ <b>КАТЕГОРИЧЕСКИЙ КЛИНИЧЕСКИЙ ЗАПРЕТ:</b>\n"
+                    "<i>Клиндамицин (Далацин) ПОЛНОСТЬЮ ИСКЛЮЧЕН из всех международных протоколов профилактики "
+                    "из-за доказанного риска летального колита Clostridioides difficile даже после однократной дозы!</i>"
+                )
+                return PrescriptionResult("Азитромицин 500 мг / Кларитромицин 500 мг (разово)", "500 мг однократно",
+                                          "За 30–60 мин до процедуры", "1 день (однократно)",
+                                          "КЛИНДАМИЦИН СТРОГО ИСКЛЮЧЕН (риск C. difficile)!", p_msg)
+        else:
+            if is_child or w < 40:
+                child_mg = min(2000.0, round(w * 50))
+                ml_dose = round(child_mg * 5 / 250, 1)
+                p_msg = (
+                    f"🛡 <b>Профилактика инфекционного эндокардита у ребенка ({w:g} кг):</b>\n"
+                    f"• Препарат: <b>Амоксициллин (суспензия 250 мг / 5 мл)</b>\n"
+                    f"• Дозировка: <b>{ml_dose} мл</b> ({int(child_mg)} мг = 50 мг/кг, макс 2 г)\n"
+                    f"• Принять: <b>ОДНОКРАТНО строго за 30–60 минут до начала процедуры</b>.\n"
+                    f"• Запить водой. Курсовой прием после процедуры НЕ требуется!"
+                )
+                return PrescriptionResult("Амоксициллин (суспензия 250/5)", f"{ml_dose} мл ({int(child_mg)} мг)",
+                                          "Однократно за 30-60 мин до процедуры", "1 день (однократно)",
+                                          "Повторный прием после процедуры не требуется", p_msg)
+            else:
+                p_msg = (
+                    "🛡 <b>Профилактика инфекционного эндокардита (AHA / ESE / ADA):</b>\n"
+                    "• Препарат: <b>Амоксициллин 2.0 г (2000 мг)</b>\n"
+                    "• Форма: <b>2 таблетки по 1000 мг</b> (или 4 таблетки по 500 мг)\n"
+                    "• Как принимать: <b>ОДНОКРАТНО строго за 30–60 минут до начала процедуры</b>.\n"
+                    "• Запить полным стаканом воды.\n"
+                    "💡 <i>Продолжать прием антибиотика после процедуры НЕ требуется! "
+                    "При пропуске премедикации дозу можно принять не позднее чем через 2 часа после вмешательства.</i>"
+                )
+                return PrescriptionResult("Амоксициллин 2.0 г (разово)", "2000 мг однократно",
+                                          "За 30–60 мин до процедуры", "1 день (однократно)",
+                                          "Курсовой прием после процедуры не требуется", p_msg)
+
+    # ── КУРСОВАЯ ЛЕЧЕБНАЯ АНТИБИОТИКОТЕРАПИЯ ПРИ ОСТРОМ ВОСПАЛЕНИИ ──
     """Расчет антибиотика с генерацией текста для пациента."""
     w = max(5.0, min(150.0, float(weight_kg)))
 
@@ -905,6 +972,10 @@ def build_chairside_hub_markup():
             Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu")
         ],
         [
+            Button.inline("🧪 Дезинфекция каналов (NaOCl/PCA)", data="chairside:irrigation"),
+            Button.inline("🛡 Профилактика эндокардита", data="pharma:prophylaxis:70")
+        ],
+        [
             Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
             Button.inline("⬅️ В главное меню", data="nav:main")
         ]
@@ -1070,7 +1141,12 @@ def build_resuscitation_sos_markup():
             Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl"),
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("🪡 Перелом иглы", data="sos:needle"),
+            Button.inline("⚖️ Адреналин vs Аллергия", data="sos:adrenaline"),
+        ],
+        [
+            Button.inline("🤰 Беременность и анестезия", data="sos:pregnancy"),
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
         ]
     ]
 
@@ -1120,6 +1196,10 @@ def build_pharma_quick_markup():
     """Сетка мгновенного назначения препаратов."""
     return [
         [
+            Button.inline("🛡 Профилактика эндокардита (AHA)", data="pharma:prophylaxis:70"),
+            Button.inline("⚠️ Профилактика при аллергии", data="pharma:prophylaxis_all:70"),
+        ],
+        [
             Button.inline("👶 Ребенок 15–25 кг (Суспензия)", data="pharma:kid:20"),
             Button.inline("🧑 Ребенок 30–45 кг", data="pharma:teen:35"),
         ],
@@ -1133,6 +1213,7 @@ def build_pharma_quick_markup():
         ],
         [
             Button.inline("💉 Дексаметазон (flare-up)", data="pharma:dexa"),
+            Button.inline("🧪 Дезинфекция каналов (PCA)", data="chairside:irrigation"),
         ],
         [
             Button.inline("⬅️ В Chairside меню", data="chairside:hub")
@@ -1481,6 +1562,16 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             await event.answer()
             return True
 
+    if data_str in ("chairside:irrigation", "sos:irrigation"):
+        card = format_irrigation_protocol_card()
+        buttons = [
+            [Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl")],
+            [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+        ]
+        await event.edit(card, buttons=buttons, parse_mode="html")
+        await event.answer()
+        return True
+
     if data_str == "sos:naocl":
         card = format_naocl_accident_card()
         buttons = [
@@ -1518,6 +1609,42 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"• Разовая доза: <b>{res.dosage}</b>\n"
                 f"• Режим: {res.regimen}\n\n"
                 f"📋 <b>ГОТОВЫЙ ТЕКСТ ДЛЯ ОТПРАВКИ РОДИТЕЛЯМ:</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{res.patient_message_text}"
+            )
+            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
+            await event.edit(msg, buttons=buttons, parse_mode="html")
+            await event.answer()
+            return True
+
+        elif sub == "prophylaxis":
+            w = float(parts[2]) if len(parts) > 2 else 70.0
+            res = calculate_antibiotic(w, is_child=False, is_prophylaxis=True)
+            msg = (
+                f"🛡 <b>Антибиотикопрофилактика инфекционного эндокардита (AHA / ESE / ADA)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Разовая доза: <b>{res.dosage}</b>\n"
+                f"• Прием: {res.regimen}\n\n"
+                f"📋 <b>ГОТОВЫЙ ТЕКСТ ДЛЯ ПАЦИЕНТА:</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{res.patient_message_text}"
+            )
+            buttons = [
+                [Button.inline("⚠️ При аллергии на пенициллин", data=f"pharma:prophylaxis_all:{int(w)}")],
+                [Button.inline("🔄 Другой расчет", data="pharma:menu")]
+            ]
+            await event.edit(msg, buttons=buttons, parse_mode="html")
+            await event.answer()
+            return True
+
+        elif sub == "prophylaxis_all":
+            w = float(parts[2]) if len(parts) > 2 else 70.0
+            res = calculate_antibiotic(w, is_child=False, allergy_penicillin=True, is_prophylaxis=True)
+            msg = (
+                f"🛡 <b>Профилактика эндокардита при АЛЛЕРГИИ на пенициллин</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Разовая доза: <b>{res.dosage}</b>\n\n"
+                f"📋 <b>ГОТОВЫЙ ТЕКСТ ДЛЯ ПАЦИЕНТА:</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
@@ -1669,6 +1796,29 @@ def calculate_anesthesia_carpules(weight_kg: float) -> str:
     return ac.calculate_anesthesia_quick_card(weight_kg)
 
 
+def format_irrigation_protocol_card() -> str:
+    """Клинический протокол хемомеханической дезинфекции корневых каналов и профилактика парахлоранилина (PCA)."""
+    return (
+        "🧪 <b>Протокол хемомеханической дезинфекции каналов (ESE / AAE Guidelines)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>1. Основная ирригация (NaOCl 3% – 5.25%):</b>\n"
+        "• Постоянная подача подогретого (50–60°C) NaOCl эндодонтической иглой с боковым срезом (30G Side-vented) "
+        "на 2–3 мм короче рабочей длины (WL). Подача строго БЕЗ давления!\n"
+        "• Ультразвуковая активация (PUI) неагрессивной гладкой насадкой (IrriSafe, Ultra X) 3 цикла по 20 секунд.\n\n"
+        "<b>2. Удаление смазанного слоя (17% ЭДТА):</b>\n"
+        "• Внесение 17% раствора ЭДТА на 1–2 минуты для растворения неорганической матрицы смазанного слоя и раскрытия дентинных канальцев.\n\n"
+        "<b>3. ОБЯЗАТЕЛЬНЫЙ ПРОМЕЖУТОЧНЫЙ СМЫВ (Инактивация):</b>\n"
+        "• ⚠️ Обильное промывание канала <b>10–15 мл стерильного 0.9% физраствора или дистиллированной воды</b>!\n"
+        "• <b>Полное высушивание бумажными штифтами</b> перед сменой антисептика!\n\n"
+        "<b>4. Финишная антисептика (2% Хлоргексидин — CHX) [при показаниях]:</b>\n"
+        "• Применяется при ревизиях каналов и упорном периодонтите против Enterococcus faecalis и Candida albicans (1–2 минуты).\n\n"
+        "⛔ <b>СТРОЖАЙШИЕ КЛИНИЧЕСКИЕ ЗАПРЕТЫ:</b>\n"
+        "• 🛑 <b>Смешивание NaOCl и Хлоргексидина КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО!</b>\n"
+        "  Прямой контакт приводит к выпадению оранжево-коричневого токсичного осадка <b>парахлоранилина (PCA)</b>: "
+        "доказанный канцероген, вызывает метгемоглобинемию, необратимое окрашивание коронки и глухую закупорку дентинных канальцев!\n"
+        "• 🛑 <b>Смешивание ЭДТА и Хлоргексидина ЗАПРЕЩЕНО!</b> Образуется белый хлопьевидный осадок (соль хлоргексидина)."
+    )
+
 def format_naocl_accident_card() -> str:
     """Экстренный протокол действий при выведении гипохлорита за апекс."""
     return (
@@ -1813,6 +1963,16 @@ async def handle_anes_command(bot_client, event, arg: str = ""):
             await _safe_send_chairside(bot_client, event, msg, buttons=buttons)
             return
 
+        if any(k in clean_arg for k in ["беременн", "лактац", "триместр", "гв"]):
+            proto = ac.get_emergency_protocol("pregnancy_protocol")
+            if proto:
+                buttons = [
+                    [Button.inline("⚡ Буферизация 8.4% содой", data="anes_sos:buffering")],
+                    [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                ]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
         # Парсинг веса через универсальный клинический парсер
         weight = ac.parse_weight_from_text(clean_arg)
         if weight is not None:
@@ -1903,6 +2063,27 @@ async def handle_sos_command(bot_client, event, arg: str = ""):
                 await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
                 return
 
+        if any(k in clean_arg for k in ["игл", "перелом", "needle"]):
+            proto = ac.get_emergency_protocol("needle_breakage")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["адреналин", "дифдиагност", "паник", "тахикарди"]):
+            proto = ac.get_emergency_protocol("adrenaline_reaction")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["беременн", "лактац", "триместр", "гв"]):
+            proto = ac.get_emergency_protocol("pregnancy_protocol")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
         if any(k in clean_arg for k in ["гипогликеми", "сахар", "диабет"]):
             proto = ac.get_emergency_protocol("hypoglycemia")
             if proto:
@@ -1940,10 +2121,23 @@ async def handle_sos_command(bot_client, event, arg: str = ""):
 
 
 async def handle_pharma_command(bot_client, event, arg: str = ""):
-    """Команда /pharma [вес/аллергия/боль/декса]: расчет дозировок и рецепты."""
+    """Команда /pharma [вес/профилактика/аллергия/боль/декса]: расчет дозировок и рецепты."""
     clean_arg = arg.strip().lower()
     import re
     if clean_arg:
+        if any(k in clean_arg for k in ["профилактик", "эндокардит", "aha", "клапан"]):
+            allergy = any(k in clean_arg for k in ["аллерги", "пенициллин"])
+            clean_norm = clean_arg.replace(',', '.')
+            num_match = re.search(r"\b\d{1,3}(?:\.\d{1,2})?\b", clean_norm)
+            w = float(num_match.group(0)) if num_match else 70.0
+            is_child = w < 40.0 or any(k in clean_arg for k in ["ребен", "дет"])
+            res = calculate_antibiotic(w, is_child=is_child, allergy_penicillin=allergy, is_prophylaxis=True)
+            buttons = [
+                [Button.inline("💊 Все препараты", data="pharma:menu")],
+                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            ]
+            await _safe_send_chairside(bot_client, event, res.patient_message_text, buttons=buttons)
+            return
         clean_norm = clean_arg.replace(',', '.')
         num_match = re.search(r"\b\d{1,3}(?:\.\d{1,2})?\b", clean_norm)
         if num_match and not any(k in clean_arg for k in ["декса", "отек", "боль"]):
@@ -2081,17 +2275,28 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
     elif cmd_name == "/aae":
         await handle_aae_command(bot_client, event, arg)
         return True
-    elif cmd_name in ("/sos", "/обломок"):
-        clean_lower = arg.strip().lower()
-        fast_sos_keywords = ("file", "обломок", "сепарац", "поломк", "hypo", "гипохлорит", "авари", "anes", "анестези", "пульпит", "боль")
-        if clean_lower and not any(k in clean_lower for k in fast_sos_keywords):
-            return False
+    elif cmd_name == "/обломок":
         await handle_sos_command(bot_client, event, arg)
         return True
+    elif cmd_name == "/sos":
+        clean_lower = arg.strip().lower()
+        fast_sos_keywords = ("file", "обломок", "сепарац", "поломк", "hypo", "гипохлорит", "авари", "anes", "анестези", "пульпит", "боль")
+        if clean_lower and any(k in clean_lower for k in fast_sos_keywords):
+            await handle_sos_command(bot_client, event, arg)
+            return True
+        return False
     elif cmd_name in ("/pharma", "/антибиотики", "/нпвп"):
         await handle_pharma_command(bot_client, event, arg)
         return True
-    elif cmd_name in ("/preserve", "/феррул", "/сохранение"):
+    elif cmd_name in ("/irrigation", "/ирригация", "/дезинфекция"):
+        card = format_irrigation_protocol_card()
+        buttons = [
+            [Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl")],
+            [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+        ]
+        await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+        return True
+    elif cmd_name in ("/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция"):
         await handle_preserve_command(bot_client, event, arg)
         return True
     return False
@@ -2099,4 +2304,4 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
-is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение")))
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция")))

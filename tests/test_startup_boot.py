@@ -27,6 +27,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_boot_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "boot.log")
 

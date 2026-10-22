@@ -26,7 +26,19 @@ LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "d
 
 # Семафор строгого взаимного исключения: не более 1 процесса Chromium одновременно,
 # чтобы гарантированно укладываться в потолок 750M cgroup на 1GB micro-VPS.
-_PDF_SEMAPHORE = asyncio.Semaphore(1)
+_PDF_SEMAPHORE = None
+
+
+def _get_pdf_semaphore():
+    global _PDF_SEMAPHORE
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _PDF_SEMAPHORE is None or (current_loop and getattr(_PDF_SEMAPHORE, "_loop", None) not in (None, current_loop)):
+        _PDF_SEMAPHORE = asyncio.Semaphore(1)
+    return _PDF_SEMAPHORE
 
 def _get_bot_username() -> str:
     """Возвращает актуальный username бота для колонтитулов и промо-блоков PDF."""
@@ -133,7 +145,7 @@ def _build_journal_html(
     html_body = re.sub(r'<p>\s*(?:<br[^>]*>)?\s*</p>', '', html_body, flags=re.IGNORECASE)
     html_body = re.sub(r'<p>\s*[.,;:!?—\-]\s*(?:<br[^>]*>)?\s*</p>', '', html_body, flags=re.IGNORECASE)
     html_body = re.sub(r'(<p[^>]*>)\s*[.,;:!?—\-]\s*(?:<br[^>]*>)?\s*', r'\1', html_body, flags=re.IGNORECASE)
-    html_body = re.sub(r'(<p[^>]*>)\s*(?:<br[^>]*>\s*)+', r'\1', html_body, flags=re.IGNORECASE)
+    html_body = re.sub(r'(<p[^>]*>)(?:\s*<br[^>]*>)+\s*', r'\1', html_body, flags=re.IGNORECASE)
 
     # 1.2 Нормализуем абзацы: если передан текст с \n\n (как из summarizer),
     # оборачиваем абзацы в <p>...</p>, аналогично пайплайну Telegraph.
@@ -174,7 +186,7 @@ def _build_journal_html(
         header_text = match.group(1).strip()
         header_text = re.sub(r'^##\s*', '', header_text).strip()
         rest = (match.group(2) if len(match.groups()) > 1 and match.group(2) else "").strip()
-        rest = re.sub(r'^(?:[.,;:!?—\-]|<br[^>]*>|\s)+', '', rest).strip()
+        rest = re.sub(r'^(?:[.,;:!?—\-\s]|<br[^>]*>)+', '', rest).strip()
         rest_html = f"\n<p>{rest}</p>" if rest else ""
         return (
             f'<div class="section-banner">'
@@ -242,7 +254,7 @@ def _build_journal_html(
         case_title = match.group(2).strip()
         case_title = re.sub(r'^###\s*', '', case_title).strip()
         rest = (match.group(3) or "").strip()
-        rest = re.sub(r'^(?:<br\s*/?>|\s)+', '', rest).strip()
+        rest = re.sub(r'^(?:<br\s*/?>|\s+)+', '', rest).strip()
         rest_html = f"\n<p>{rest}</p>" if rest else ""
         case_body = (match.group(4) or "").strip()
         fig_html = f"  {preceding_fig}\n" if preceding_fig else ""
@@ -885,7 +897,7 @@ async def generate_digest_pdf(
         date_str=date_str,
     )
 
-    async with _PDF_SEMAPHORE:
+    async with _get_pdf_semaphore():
         start_time = time.time()
         browser = None
         try:

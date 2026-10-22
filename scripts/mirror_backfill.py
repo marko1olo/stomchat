@@ -9,14 +9,16 @@ import os
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Ensure we can load config if needed
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 import config
 
 TOKEN = config.BOT_TOKEN
 SOURCE_CHAT_ID = config.SOURCE_CHAT_ID or -1001820467444
 TARGET_CHAT_ID = int(os.getenv("MIRROR_CHAT_ID", "-1004326633527"))
 STATE_FILE = "mirror_backfill_state.json"
-DB_PATH = config.DB_PATH or "stomat_bot.db"
+DB_PATH = getattr(config, "DB_PATH", "stomat_bot.db") or "stomat_bot.db"
 
 ctx = ssl.create_default_context()
 

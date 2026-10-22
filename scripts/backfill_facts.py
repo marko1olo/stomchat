@@ -387,8 +387,19 @@ def run_backfill(db_path: str, dry_run: bool = False) -> Tuple[int, int, int]:
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"База данных не найдена: {db_path}")
 
+    p_db = Path(db_path)
+    if not dry_run:
+        backup_db.checkpoint_wal_safe(p_db)
+        try:
+            bak_res = backup_db.backup_database(src_path=p_db)
+            logger.info("Создана резервная копия перед backfill_facts: %s", bak_res.get("dest"))
+        except Exception as e:
+            logger.warning("Не удалось создать резервную копию перед backfill: %s", e)
+
     logger.info(f"Подключение к базе данных: {db_path} (dry_run={dry_run})")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     cur = conn.cursor()
 
     cur.execute("SELECT count(*) FROM user_memories")
@@ -462,7 +473,8 @@ def run_backfill(db_path: str, dry_run: bool = False) -> Tuple[int, int, int]:
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill facts_json in user_memories")
-    parser.add_argument("--db", default="stomat_bot.db", help="Путь к SQLite БД (по умолчанию stomat_bot.db)")
+    default_db = str(backup_db.get_default_db_path())
+    parser.add_argument("--db", default=default_db, help=f"Путь к SQLite БД (по умолчанию {default_db})")
     parser.add_argument("--dry-run", action="store_true", help="Режим симуляции без записи в БД")
     args = parser.parse_args()
 

@@ -862,15 +862,6 @@ def clean_query(question):
     return re.sub(r"\s+", " ", _QUERY_JUNK_RE.sub(" ", question or "")).strip()
 
 
-def query_variants(query):
-    """Полный запрос, затем укороченный. Дубль не возвращается."""
-    variants = []
-    for candidate in (query, " ".join(query.split()[:SEARCH_SHORT_WORDS])):
-        if candidate and candidate not in variants:
-            variants.append(candidate)
-    return variants[:SEARCH_ATTEMPTS]
-
-
 # ---------------------------------------------------------------------------
 # Клиническая трансляция терминов и оптимизация для PubMed / Google Scholar
 # ---------------------------------------------------------------------------
@@ -1005,6 +996,26 @@ def build_scientific_query(query: str) -> str:
         result = " ".join(translated_tokens)
         return re.sub(r"\s+", " ", result).strip()
     return cleaned
+
+
+def query_variants(query):
+    """
+    Варианты запроса:
+    1. Исходный чистый запрос.
+    2. Укороченный запрос (первые 4 слова).
+    3. Международный англо-латинский эквивалент для клинических терминов и зубов FDI.
+    """
+    variants = []
+    candidates = [
+        query,
+        " ".join(query.split()[:SEARCH_SHORT_WORDS]),
+        build_scientific_query(query),
+    ]
+    for candidate in candidates:
+        cand_clean = clean_query(candidate)
+        if cand_clean and cand_clean not in variants:
+            variants.append(cand_clean)
+    return variants[:SEARCH_ATTEMPTS]
 
 
 

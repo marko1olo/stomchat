@@ -1,13 +1,16 @@
 """
-Ручная публикация ежедневного опроса в оба чата (прод + тест).
+Ручная публикация ежедневного опроса в целевые чаты (прод + тест).
 Запускать: python post_poll_now.py
 """
 import asyncio
 import json
 import logging
+import os
 import sys
 
-sys.path.insert(0, r'c:\Users\danat\Desktop\stomchat')
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger('post_poll_now')
@@ -17,10 +20,16 @@ import poll_engine
 import poll_storage
 from telethon import TelegramClient
 
-TARGETS = [
-    {'chat_id': -1001820467444, 'topic_id': None},   # прод
-    {'chat_id': -1003735006121, 'topic_id': 26},      # тест
-]
+
+def get_target_chats():
+    """Формирует список чатов для отправки опроса из config/env."""
+    targets = []
+    prod_id = getattr(config, "SOURCE_CHAT_ID", None) or (config.PROD_CHAT_IDS[0] if getattr(config, "PROD_CHAT_IDS", None) else -1001820467444)
+    test_id = getattr(config, "TEST_CHAT_ID", None) or (config.TEST_CHAT_IDS[0] if getattr(config, "TEST_CHAT_IDS", None) else -1003735006121)
+    test_topic = int(os.getenv("TEST_TOPIC_ID", "26"))
+    targets.append({'chat_id': int(prod_id), 'topic_id': None})
+    targets.append({'chat_id': int(test_id), 'topic_id': test_topic})
+    return targets
 
 
 async def main():
@@ -32,7 +41,6 @@ async def main():
     await client.start(bot_token=bot_token)
     logger.info("Bot client started")
 
-    # generate_poll() сам подтягивает blocking_tools.generate_gemini_text_async
     logger.info("Generating poll (max 3 LLM attempts)...")
     payload, _ = await poll_engine.generate_poll(
         chat_context=None,
@@ -45,7 +53,8 @@ async def main():
     for i, o in enumerate(payload.options):
         logger.info("  [%d] %s", i, o)
 
-    for target in TARGETS:
+    targets = get_target_chats()
+    for target in targets:
         tgt_chat  = target['chat_id']
         tgt_topic = target.get('topic_id')
 
@@ -53,7 +62,6 @@ async def main():
             logger.warning("Poll already exists today in chat %s — skipping", tgt_chat)
             continue
 
-        # Пересобираем медиа-объект (InputMediaPoll нельзя переиспользовать между чатами)
         media_to_send = poll_engine.build_poll_media(
             question=payload.question,
             options=payload.options,

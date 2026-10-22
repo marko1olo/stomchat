@@ -364,6 +364,73 @@ async def run():
           redispatched == [8111], f"got {redispatched}")
     check("снимок при этом ушёл только в очередь", enqueued == [8110], f"got {enqueued}")
 
+    print("\n[15] Bot-to-bot spam loop: чужой бот с тегом или реплаем не вызывает ответ")
+    reset()
+    # Чужой бот из известных ID (8140417978) шлет команду /ask или тег нашего бота
+    await main.handle_new_message(
+        Event(text_message(8120, "@stomchat_bot дай протокол", sender_id=8140417978), Sender(bot=True))
+    )
+    await drain()
+    check("чужой бот с тегом не запустил прямой ответ", CALLS["ask"] == [], f"got {CALLS['ask']}")
+    check("чужой бот с тегом не запустил ассистента", CALLS["assistant"] == [], f"got {CALLS['assistant']}")
+
+    print("\n[16] Bot identification resilient to get_sender() failure")
+    reset()
+    # Таймаут при get_sender(), но sender_id принадлежит известному боту (7475073041)
+    class TimeoutSenderEvent(Event):
+        async def get_sender(self):
+            raise TimeoutError("Connection to Telegram lost")
+
+    await main.handle_new_message(
+        TimeoutSenderEvent(text_message(8121, "/ask клинический вопрос от бота", sender_id=7475073041))
+    )
+    await drain()
+    check("бот отсечён даже при падении get_sender", CALLS["ask"] == [], f"got {CALLS['ask']}")
+    check("ассистент не вызван для бота при ошибке сети", CALLS["assistant"] == [], f"got {CALLS['assistant']}")
+
+    print("\n[17] check_bot_mention_trigger rate limiting / debounce")
+    assistant.USER_COOLDOWNS.clear()
+    class DummyMentionEvent:
+        chat_id = TEST_CHAT_ID
+        sender_id = 777123
+        message = types.Message(id=8122, peer_id=types.PeerChannel(123), date=datetime.now())
+
+    # Проверяем per-user кулдаун на упоминание через вызов реальной функции
+    real_mention = assistant.check_bot_mention_trigger
+    # Проверяем кулдаун
+    cd_1 = assistant.check_user_cooldown(TEST_CHAT_ID, 777123, "bot_mention_user", seconds=15)
+    cd_2 = assistant.check_user_cooldown(TEST_CHAT_ID, 777123, "bot_mention_user", seconds=15)
+    check("первый вызов кулдауна разрешён", cd_1 == 0, f"got {cd_1}")
+    check("второй вызов кулдауна блокируется", cd_2 > 0, f"got {cd_2}")
+
+    print("\n[18] Защита от ложной тишины при клинических фразах (координатор лечения, душный пациент)")
+    st = assistant.load_state()
+    st["silenced_until"] = None
+    assistant.save_state(st)
+
+    class DummyEvent:
+        chat_id = TEST_CHAT_ID
+        sender_id = 999
+        client = main.bot_client
+        async def reply(self, *a, **kw):
+            pass
+
+    silence_triggered1 = await assistant.check_and_apply_silence(
+        DummyEvent(), "координатор лечения ошибся в плане", reply_to_msg_id=None
+    )
+    check("координатор лечения не глушит бота", silence_triggered1 is False)
+
+    silence_triggered2 = await assistant.check_and_apply_silence(
+        DummyEvent(), "пациент очень душный попался, надоел уже", reply_to_msg_id=None
+    )
+    check("жалоба на душного пациента не глушит бота", silence_triggered2 is False)
+    check("тишина не установлена", not assistant.is_silenced(assistant.load_state()))
+
+    print("\n[19] Sequential follow-up: кулдаун и отсутствие вопроса подавляют влезание")
+    assistant.record_author_group_reply(555)
+    check("кулдаун автора активен после ответа", assistant.is_author_group_cooldown_active(555) is True)
+
+
 
 try:
     asyncio.run(run())

@@ -102,6 +102,100 @@ def is_prod_chat(chat_id) -> bool:
             pass
     return False
 
+
+DEFAULT_KNOWN_BOT_IDS = frozenset({
+    7886475630,  # StomChat bot
+    8140417978,  # DocEndo bot / EndoChat
+    7971556097,  # StomChat Test bot
+    7475073041,  # Additional utility bot
+    8775535374,  # Additional utility bot
+})
+
+
+def get_all_known_bot_ids() -> set:
+    """Возвращает актуальный набор известных ID ботов (конфиг, окружение, fallback)."""
+    ids = set(DEFAULT_KNOWN_BOT_IDS)
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        for attr in ("BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID", "FALLBACK_BOT_ID"):
+            val = getattr(cfg, attr, None)
+            if val:
+                try:
+                    ids.add(int(val))
+                except (ValueError, TypeError):
+                    pass
+        cfg_known = getattr(cfg, "KNOWN_BOT_IDS", None)
+        if cfg_known:
+            for x in cfg_known:
+                try:
+                    ids.add(int(x))
+                except (ValueError, TypeError):
+                    pass
+    for env_key in ("BOT_ID", "TELEGRAM_BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID", "FALLBACK_BOT_ID"):
+        val = os.getenv(env_key)
+        if val and val.isdigit():
+            ids.add(int(val))
+    env_known = os.getenv("KNOWN_BOT_IDS")
+    if env_known:
+        for part in env_known.split(","):
+            part = part.strip()
+            if part.isdigit():
+                ids.add(int(part))
+    return ids
+
+
+def is_bot_sender(sender_id=None, sender=None, event=None) -> bool:
+    """
+    100% надёжная проверка: является ли отправитель ботом (своим или чужим).
+    Исключает спам-петли между ботами даже при сбоях event.get_sender().
+    """
+    if sender_id is not None:
+        try:
+            sid = int(sender_id)
+            if sid in get_all_known_bot_ids():
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    if sender is not None:
+        if getattr(sender, "bot", None) is True or getattr(sender, "is_self", None) is True:
+            return True
+
+    if event is not None:
+        # Проверка via_bot_id (отправка через инлайн-бота)
+        msg = getattr(event, "message", event)
+        via = getattr(msg, "via_bot_id", None)
+        if via and isinstance(via, int) and via > 0:
+            return True
+        ev_sender_id = getattr(event, "sender_id", None)
+        if ev_sender_id is not None and sender_id is None:
+            try:
+                if int(ev_sender_id) in get_all_known_bot_ids():
+                    return True
+            except (ValueError, TypeError):
+                pass
+        ev_sender = getattr(event, "_sender", None)
+        if ev_sender and getattr(ev_sender, "bot", None) is True:
+            return True
+
+    return False
+
+
+def extract_topic_id(event) -> int | None:
+    """Извлекает ID топика супергруппы (форума) Telegram, если сообщение в топике."""
+    if event is None:
+        return None
+    msg = getattr(event, "message", event)
+    reply_to = getattr(msg, "reply_to", None) or getattr(event, "reply_to", None)
+    if reply_to:
+        top_id = getattr(reply_to, "reply_to_top_id", None)
+        if top_id is not None and isinstance(top_id, int):
+            return int(top_id)
+    thread_id = getattr(msg, "message_thread_id", None) or getattr(event, "message_thread_id", None)
+    if thread_id is not None and isinstance(thread_id, int):
+        return int(thread_id)
+    return None
+
 def _env_float(name: str, default: float) -> float:
     cfg = sys.modules.get("config")
     if cfg is not None:
@@ -353,8 +447,23 @@ class FloodCooldown:
     def _normalize_key(chat_id):
         if chat_id is None:
             return None
+        try:
+            from telethon import utils as tl_utils
+            return tl_utils.get_peer_id(chat_id)
+        except Exception:
+            pass
         if hasattr(chat_id, "id"):
-            return chat_id.id
+            try:
+                return int(chat_id.id)
+            except (ValueError, TypeError):
+                pass
+        for attr in ("channel_id", "user_id", "chat_id"):
+            val = getattr(chat_id, attr, None)
+            if val is not None:
+                try:
+                    return int(val)
+                except (ValueError, TypeError):
+                    pass
         try:
             return int(chat_id)
         except (ValueError, TypeError):

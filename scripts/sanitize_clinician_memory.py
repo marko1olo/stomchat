@@ -172,6 +172,7 @@ def run_sanitization(db_path: Path, apply_changes: bool = False, verbose: bool =
 
     conn = sqlite3.connect(str(db_path), timeout=60)
     conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     cur = conn.cursor()
 
     stats = {
@@ -185,11 +186,22 @@ def run_sanitization(db_path: Path, apply_changes: bool = False, verbose: bool =
         "profiles_updated": 0,
         "portraits_hanging_fixed": 0,
         "portraits_stutter_fixed": 0,
+        "bot_records_purged": 0,
     }
+
+    # ==================== ПРОВЕРКА ЗАПИСЕЙ БОТОВ ====================
+    bot_uids = (7971556097, 8775535374)
+    cur.execute("SELECT user_id FROM user_memories WHERE user_id IN (?, ?)", bot_uids)
+    bot_mems = [r[0] for r in cur.fetchall()]
+    cur.execute("SELECT user_id FROM user_profiles WHERE user_id IN (?, ?)", bot_uids)
+    bot_profs = [r[0] for r in cur.fetchall()]
+    stats["bot_records_purged"] = len(bot_mems) + len(bot_profs)
+    if stats["bot_records_purged"] > 0:
+        logger.info("[Pass 2.5] Обнаружены записи бота: %d memories, %d profiles (подлежат удалению)", len(bot_mems), len(bot_profs))
 
     # ==================== ОЧИСТКА USER_MEMORIES ====================
     logger.info("\n[Pass 3] Анализ и санитария таблицы user_memories...")
-    cur.execute("SELECT user_id, specialty, clinical_summary, group_summary, facts_json FROM user_memories")
+    cur.execute("SELECT user_id, specialty, clinical_summary, group_summary, facts_json FROM user_memories WHERE user_id NOT IN (?, ?)", bot_uids)
     memory_rows = cur.fetchall()
     stats["total_memories"] = len(memory_rows)
 
@@ -283,6 +295,12 @@ def run_sanitization(db_path: Path, apply_changes: bool = False, verbose: bool =
     if apply_changes:
         logger.info("\n[Pass 5] Применение транзакции обновления в БД...")
         with conn:
+            if bot_mems:
+                conn.execute("DELETE FROM user_memories WHERE user_id IN (?, ?)", bot_uids)
+                logger.info("  • Удалена запись бота из user_memories: %s", bot_mems)
+            if bot_profs:
+                conn.execute("DELETE FROM user_profiles WHERE user_id IN (?, ?)", bot_uids)
+                logger.info("  • Удалена запись бота из user_profiles: %s", bot_profs)
             if memories_to_update:
                 conn.executemany(
                     """
@@ -303,20 +321,20 @@ def run_sanitization(db_path: Path, apply_changes: bool = False, verbose: bool =
                 )
         logger.info("[Pass 5] Успешно зафиксировано: %d memories, %d profiles", len(memories_to_update), len(profiles_to_update))
 
+        conn.commit()
+        conn.close()
+
         # Финальный сброс WAL и валидация целостности
         logger.info("[Pass 6] Финальный WAL checkpoint и PRAGMA integrity_check...")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        cur.execute("PRAGMA integrity_check")
-        integrity = cur.fetchone()[0]
-        if integrity != "ok":
-            logger.error("FATAL: PRAGMA integrity_check failed after sanitization: %s", integrity)
-            conn.close()
+        backup_db.checkpoint_wal_safe(db_path, max_retries=5)
+        is_ok, msg = backup_db.verify_database_integrity(db_path)
+        if not is_ok:
+            logger.error("FATAL: PRAGMA integrity_check failed after sanitization: %s", msg)
             sys.exit(1)
         logger.info("[Pass 6] PRAGMA integrity_check: OK (БД абсолютно целостна)")
     else:
+        conn.close()
         logger.info("\n[Pass 5] DRY-RUN завершен. Изменения НЕ записаны в БД (используйте --apply).")
-
-    conn.close()
 
     # Сводный отчет
     logger.info("\n" + "=" * 70)
@@ -329,6 +347,7 @@ def run_sanitization(db_path: Path, apply_changes: bool = False, verbose: bool =
     logger.info("    - Шаблонных текстов очищено:           %d", stats["summaries_cleaned"])
     logger.info("  • Всего профилей (user_profiles):        %d", stats["total_profiles"])
     logger.info("  • Портретов обновлено:                   %d", stats["profiles_updated"])
+    logger.info("  • Записей ботов удалено:                 %d", stats["bot_records_purged"])
     logger.info("    - Висячих «. Специализация:» исправлено:%d", stats["portraits_hanging_fixed"])
     logger.info("    - Заиканий специализации исправлено:   %d", stats["portraits_stutter_fixed"])
     logger.info("=" * 70)

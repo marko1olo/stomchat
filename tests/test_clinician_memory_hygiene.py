@@ -1,11 +1,13 @@
 """
 Strict Automated Test Suite: Clinician Memory Hygiene & DB Invariants.
 Red Team verification across StomChat and EndoChat:
-1. Portrait Sanitization: Clean profile portraits (zero hanging colons/suffixes, zero stuttering, zero markdown artifacts).
+1. Portrait Sanitization: Clean profile portraits (zero hanging colons/suffixes, zero stuttering, zero placeholder artifacts).
 2. Fact Hygiene & Medical Safety: Strict filtration of chat-bot meta facts, off-topic chatter, negative meta sentences;
    100% preservation of clinical endodontic/surgical/restorative facts (BioRoot, ProRoot, root canals, FDI notation).
 3. Specialty Integrity & Hierarchy: Rejection of generic/invalid specialties, resolution hierarchy protection.
-4. Live DB Invariant Auditing: Zero residual anomalies in live sqlite database (stomat_bot.db / endo_bot.db).
+4. Summary Deduplication: Zero hanging empty headers, full exclusion of empty or negative-only sections.
+5. Bot Account Detection: Exclusion of automated accounts from physician memories.
+6. Live DB Invariant Auditing: Zero residual anomalies in live sqlite database (stomat_bot.db / endo_bot.db).
 
 Execution: python tests/test_clinician_memory_hygiene.py
 """
@@ -47,6 +49,13 @@ class TestClinicianPortraitHygiene(unittest.TestCase):
             ("**Специализация:** Стоматолог-терапевт", "Стоматолог-терапевт"),
             ("### Клинический профиль:\nОртодонт", "Ортодонт"),
             ("Терапевт. Специализация: *", "Терапевт"),
+            ("Терапевт. Специализация: **", "Терапевт"),
+            ("Терапевт. Специализация: ***", "Терапевт"),
+            ("Терапевт. Специализация: -", "Терапевт"),
+            ("Терапевт. Специализация: —", "Терапевт"),
+            ("Терапевт. Специализация: .", "Терапевт"),
+            ("Терапевт. Специализация: :", "Терапевт"),
+            ("Специализация: Терапевт. Специализация:", "Терапевт"),
         ]
         for raw, expected in cases:
             cleaned = user_memory.clean_profile_portrait(raw)
@@ -64,6 +73,11 @@ class TestClinicianPortraitHygiene(unittest.TestCase):
             (
                 "Стоматология: ортопедия и терапевтическая стоматология. Специализация: Стоматология: ортопедия и терапевтическая стоматология",
                 "Стоматология: ортопедия и терапевтическая стоматология"
+            ),
+            # Заикание с ведущим заголовком
+            (
+                "Специализация: Терапевт. Специализация: Терапевт",
+                "Терапевт"
             ),
             # Generic слева, конкретная специальность справа
             (
@@ -85,8 +99,8 @@ class TestClinicianPortraitHygiene(unittest.TestCase):
             cleaned = user_memory.clean_profile_portrait(raw)
             self.assertEqual(cleaned, expected, f"Stutter elimination failed on: {raw!r}")
 
-    def test_pure_header_fallback(self):
-        """Если портрет содержит только заголовок, он восстанавливается из specialty/summary."""
+    def test_pure_header_and_placeholder_fallback(self):
+        """Если портрет содержит только заголовок или плейсхолдер, он восстанавливается или обнуляется."""
         cleaned = user_memory.clean_profile_portrait(
             "Специализация:",
             specialty="Стоматолог-ортопед",
@@ -101,6 +115,17 @@ class TestClinicianPortraitHygiene(unittest.TestCase):
             summary="Работает под микроскопом с увеличением 16x."
         )
         self.assertEqual(cleaned_gen, "Работает под микроскопом с увеличением 16x.")
+
+        # Плейсхолдеры обнуляются
+        for placeholder in (
+            "Специализация: не определена",
+            "Специализация: неизвестно",
+            "Специализация: нет данных",
+            "Специализация: не указана",
+            "Недостаточно сообщений в общей группе для анализа клинического профиля.",
+            "Клинический профиль доктора формируется."
+        ):
+            self.assertEqual(user_memory.clean_profile_portrait(placeholder), "")
 
 
 class TestClinicianFactHygiene(unittest.TestCase):
@@ -119,12 +144,25 @@ class TestClinicianFactHygiene(unittest.TestCase):
             "Участвует в стоматологических диагностических обсуждениях.",
             "Данила Гончаренко активно участвует в жизни сообщества, проявляет дружелюбие и чувство юмора в общении с коллегами",
             "Общается в непринужденной манере, участвует в шутливых диалогах с коллегами по чату",
+            "Удивился, что ранее благодарил бота: «Я его еще благодарил».",
+            "Обсуждает вариабельность необходимости использования протокола или бота: 'иногда надо, иногда нет'.",
+            "В чате обсуждается выбор бинокулярной лупы (бюджет до 1 100 000 тг).",
+            "В группе звучит вопрос о диагностике ('Что это может быть?') и суждение о необходимости удаления зуба.",
+            "Ищет чаты и коллег для обмена опытом по стоматологической ортопедии",
+            "Обращается к сообществу за советом при возникновении осложнений (перфорации, уступы, боли после эндо).",
+            "Указывает, что в клиническом опросе проголосовал за правильный ответ, но сам в практике так не делает.",
+            "Обещал уточнить правильный ответ у преподавателя и отписаться в чат",
+            "Интересуется ирригацией в стоматологии и ранее отправлял в чат материал/ссылку по ирригации.",
+            "В общении с коллегами вежлива, благодарит за ответы.",
+            "Благодарит коллег за предоставленную информацию.",
+            "Женский род по формулировке «Премного благодарна».",
+            "Имеет стоматологический диплом (в контексте стоматологического чата).",
         ]
         cleaned = user_memory.clean_clinician_facts(meta_facts)
         self.assertEqual(cleaned, [], f"Expected 0 meta facts, got: {cleaned}")
 
     def test_offtopic_and_negative_meta_filtered(self):
-        """Бытовой оффтоп и отрицательные псевдо-факты должны блокироваться."""
+        """Бытовой оффтоп, спам, вакансии и отрицательные псевдо-факты должны блокироваться."""
         junk_facts = [
             "Упоминает тему утреннего плова: «Утренний плов тема».",
             "Считает, что «утренний плов везде хорош».",
@@ -133,8 +171,16 @@ class TestClinicianFactHygiene(unittest.TestCase):
             "Запрашивает мнение коллег по клиническому случаю; данных о микроскопе, стаже, городе, конкретных брендах и протоколах в беседе нет.",
             "В беседе отсутствуют клинические взгляды, протоколы, бренды, материалы и оборудование.",
             "Клинический профиль по данной беседе не обновляется из-за отсутствия релевантных данных.",
+            "Личных данных о городе, стаже, микроскопе или другом оборудовании в сообщениях не приводил.",
             "Не упоминает используемый силер.",
             "Информация о стаже отсутствует.",
+            "В работе отсутствуют специализированные инструменты: GentleBrush и XP Finisher.",
+            "В клинике пока отсутствует эндоактиватор",
+            "В чате повторяется нетематическое сообщение о поиске помощи по дому за 5400 ₽.",
+            "Из СПБ, рассматривает работу в вахтовом режиме в отдалённых регионах с окладом около 200 тыс.",
+            "Публикует/предлагает вакансию врача-универсала в стоматологию URBANSTOM.",
+            "Контакт для связи по вакансии: 89661776666.",
+            "В чате также обсуждал немедицинскую тему мошенничества с кредитами через Госуслуги и СМС-паролями.",
             "Ок",
             "Спасибо",
         ]
@@ -153,11 +199,44 @@ class TestClinicianFactHygiene(unittest.TestCase):
             "Сталкивается с крайне плохой гигиеной у пациента (остатки еды, кириешки, семечки); проводила беседы и чистила зубы, затем отправила домой без лечения.",
             "Ориентируется на апекслокатор как на рутинный инструмент; критикует ситуацию, когда 10 лет назад на собеседовании не все врачи с ним работали.",
             "Ведёт детей: пациент 2012 года рождения, зуб 4.6, ранее зуб был открыт из-за отека; доктор полечила в одно посещение и поставила пломбу.",
+            "Занимается прямыми композитными реставрациями (включая работу с тремами и фронтальной группой зубов).",
+            "Использует роторную группу и интересуется правильным протоколом очистки наконечников после работы с ойл-системами.",
+            "Сталкивается с трудностями в подборе цвета при реставрации сильно разрушенных депульпированных зубов фронтальной группы (2.1)",
+            "Зуб оставлен живым; термореакции отсутствуют/не отмечены.",
         ]
         cleaned = user_memory.clean_clinician_facts(clinical_facts)
         self.assertEqual(len(cleaned), len(clinical_facts), f"Some clinical facts were wrongly dropped: {len(cleaned)} vs {len(clinical_facts)}")
         for fact in clinical_facts:
             self.assertIn(fact, cleaned)
+
+
+class TestSummaryDeduplication(unittest.TestCase):
+    """Тестирование дедупликации и ликвидации висячих заголовков в досье."""
+
+    def test_hanging_empty_sections_omitted(self):
+        """Секции без контента или только с отрицательными фактами опускаются целиком."""
+        raw_summary = """
+Специализация:
+Стоматолог-терапевт.
+
+Арсенал и оснащение:
+Информация отсутствует. Данных нет.
+
+Клинические протоколы:
+• Проводит механическую обработку каналов.
+• Проводит механическую обработку каналов.
+• Использует коффердам.
+
+Кейсы:
+Не упоминал кейсы.
+"""
+        cleaned = user_memory.deduplicate_clinical_summary(raw_summary)
+        self.assertNotIn("Арсенал", cleaned)
+        self.assertNotIn("Кейсы", cleaned)
+        self.assertIn("Специализация:", cleaned)
+        self.assertIn("Стоматолог-терапевт.", cleaned)
+        self.assertIn("Клинические протоколы:", cleaned)
+        self.assertEqual(cleaned.count("Проводит механическую обработку"), 1)
 
 
 class TestSpecialtyValidationAndResolution(unittest.TestCase):
@@ -184,17 +263,24 @@ class TestSpecialtyValidationAndResolution(unittest.TestCase):
 
     def test_narrow_specialty_protection(self):
         """Подтвержденная узкая специализация не затирается generic-названием."""
-        # Ортопед не должен даунгрейдиться до общего стоматолога
         res1 = user_memory.resolve_clinician_specialty("Стоматолог-ортопед", "Стоматолог")
         self.assertEqual(res1, "Стоматолог-ортопед")
 
-        # Эндодонтист в фоновом демоне не даунгрейдится до терапевта
         res2 = user_memory.resolve_clinician_specialty("Стоматолог-эндодонтист", "Стоматолог-терапевт", is_group_daemon=True)
         self.assertEqual(res2, "Стоматолог-эндодонтист")
 
-        # Обогащение разрешено
         res3 = user_memory.resolve_clinician_specialty("Терапевт", "Стоматолог-терапевт, эндодонтист")
         self.assertEqual(res3, "Стоматолог-терапевт, эндодонтист")
+
+    def test_bot_account_detection(self):
+        """Боты и служебные аккаунты должны безошибочно определяться."""
+        self.assertTrue(user_memory.is_bot_account(7971556097))
+        self.assertTrue(user_memory.is_bot_account(8775535374))
+        self.assertTrue(user_memory.is_bot_account(12345, username="iris_cm_bot"))
+        self.assertTrue(user_memory.is_bot_account(12345, username="endohelp_bot"))
+        self.assertTrue(user_memory.is_bot_account(12345, first_name="helper_bot"))
+        # Живой доктор Владислав Чеботаев НЕ бот
+        self.assertFalse(user_memory.is_bot_account(1001513244, username="vladislav_chebotaev", first_name="Владислав Чеботаев"))
 
 
 class TestLiveDatabaseHygiene(unittest.TestCase):
@@ -225,7 +311,6 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
             for candidate in ("stomat_bot.db", "endo_bot.db"):
                 p = _REPO_ROOT / candidate
                 if p.exists():
-                    # Проверяем, что в базе есть таблицы, а не пустой файл
                     try:
                         c = sqlite3.connect(str(p))
                         tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
@@ -237,7 +322,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
                         continue
 
     def test_live_db_profile_portraits_hygiene(self):
-        """В таблице user_profiles не должно быть висячих префиксов/суффиксов и заиканий специализации."""
+        """В таблице user_profiles не должно быть висячих префиксов/суффиксов, заиканий и плейсхолдеров."""
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
@@ -250,7 +335,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         defects = []
         for uid, port in rows:
             port_lower = port.lower()
-            if any(h in port_lower for h in (". специализация:", "специализация:", "клинический профиль:")):
+            if any(h in port_lower for h in (". специализация:", "специализация:", "клинический профиль:", "недостаточно сообщений")):
                 defects.append((uid, port))
 
         self.assertEqual(
@@ -302,6 +387,23 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         self.assertEqual(
             bot_fact_defects, [],
             f"Found {len(bot_fact_defects)} bot meta facts in {self.db_path.name}: {bot_fact_defects}"
+        )
+
+    def test_live_db_no_bots_in_memories(self):
+        """В таблице user_memories не должно быть ботов и служебных аккаунтов."""
+        if not self.db_path:
+            self.skipTest("Live database not found in repo root")
+
+        conn = sqlite3.connect(str(self.db_path))
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username, first_name FROM user_memories")
+        rows = cur.fetchall()
+        conn.close()
+
+        bot_users = [(uid, uname, fname) for uid, uname, fname in rows if user_memory.is_bot_account(uid, uname, fname)]
+        self.assertEqual(
+            bot_users, [],
+            f"Found {len(bot_users)} bot accounts in user_memories in {self.db_path.name}: {bot_users}"
         )
 
     def test_live_db_sqlite_integrity(self):
