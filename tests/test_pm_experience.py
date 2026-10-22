@@ -30,6 +30,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import config
 
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_pm_")
