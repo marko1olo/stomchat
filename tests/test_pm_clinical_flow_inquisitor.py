@@ -219,6 +219,127 @@ class TestZeroDeadScreenLiveStatus(unittest.IsolatedAsyncioTestCase):
                     pass
 
 
+    async def test_pm_fast_text_query_uses_pure_typing(self):
+        """Быстрый клинический вопрос (< 2.8с) не создает статусных сообщений (работает только typing)."""
+        mock_client = AsyncMock()
+        mock_event = MagicMock()
+        mock_event.chat_id = 999777
+        mock_event.sender_id = 999777
+        mock_sender = MagicMock(username="doc_fast", first_name="Fast", last_name="Doc")
+        mock_event.sender = mock_sender
+        mock_event.get_sender = AsyncMock(return_value=mock_sender)
+
+        mock_event.message.message = "какой протокол ирригации при пульпите 3.6?"
+        mock_event.message.photo = None
+        mock_event.message.video = None
+        mock_event.message.voice = None
+        mock_event.message.audio = None
+        mock_event.message.video_note = None
+        mock_event.message.document = None
+        mock_event.message.id = 666
+        mock_event._album_events = None
+
+        with patch("assistant.check_user_cooldown", return_value=0), \
+             patch("assistant.database.save_pm_message", AsyncMock()), \
+             patch("assistant.database.get_user_interactive_state", AsyncMock(return_value=None)), \
+             patch("assistant.database.get_last_pm_messages", AsyncMock(return_value=[])), \
+             patch("assistant.database.get_user_profile", AsyncMock(return_value={})), \
+             patch("assistant.database.get_user_recent_group_messages", AsyncMock(return_value=[])), \
+             patch("assistant.user_memory.get_clinician_memory", AsyncMock(return_value={})), \
+             patch("assistant.user_memory.update_clinician_memory_async", AsyncMock()), \
+             patch("assistant.generate_gemini_text_async") as mock_gemini, \
+             patch("assistant.check_response_quality", AsyncMock(return_value=(True, "ok"))), \
+             patch("assistant.send_message_chunks_async", AsyncMock()) as mock_send_chunks:
+
+            resp_mock = MagicMock()
+            resp_mock.text = "<b>Протокол ирригации 3.6:</b> 3% NaOCl с подогревом до 50°C и ультразвуковой активацией."
+            mock_gemini.return_value = (resp_mock, None)
+
+            await assistant.handle_private_message(mock_client, mock_event)
+
+            # При быстром ответе bot_client.send_message не должен вызываться для статусов
+            mock_client.send_message.assert_not_called()
+            # Ответ ушел через send_message_chunks_async
+            mock_send_chunks.assert_called_once()
+
+    async def test_pm_long_generation_carousel_rotation(self):
+        """Длительная генерация (> initial_delay) запускает карусель с ротацией этапов и очисткой."""
+        mock_client = AsyncMock()
+        mock_event = MagicMock()
+        mock_event.chat_id = 999666
+        mock_event.sender_id = 999666
+        mock_sender = MagicMock(username="doc_long", first_name="Long", last_name="Doc")
+        mock_event.sender = mock_sender
+        mock_event.get_sender = AsyncMock(return_value=mock_sender)
+
+        mock_event.message.message = "распиши глубокий протокол эндодонтического лечения периодонтита 4.6"
+        mock_event.message.photo = None
+        mock_event.message.video = None
+        mock_event.message.voice = None
+        mock_event.message.audio = None
+        mock_event.message.video_note = None
+        mock_event.message.document = None
+        mock_event.message.id = 777
+        mock_event._album_events = None
+
+        mock_status_msg = MagicMock(id=888001)
+        mock_client.send_message = AsyncMock(return_value=mock_status_msg)
+
+        edits = []
+        async def fake_edit(client, cid, mid, text, **kwargs):
+            edits.append((mid, text))
+            return tg_safety.TgOutcome(ok=True)
+
+        deletions = []
+        async def fake_delete(client, cid, mids, **kwargs):
+            if isinstance(mids, (int, str)):
+                deletions.append(int(mids))
+            elif isinstance(mids, (list, tuple, set)):
+                deletions.extend([int(x) for x in mids])
+            return tg_safety.TgOutcome(ok=True)
+
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(0.20)
+            resp = MagicMock()
+            resp.text = "<b>Протокол 4.6:</b> Инструментация до #30.04, NaOCl 3%, ЭДТА 17%, биокерамика BioRoot."
+            return (resp, None)
+
+        orig_init = assistant.PmStatusTicker.__init__
+        def patched_init(self, *args, **kwargs):
+            kwargs["initial_delay"] = 0.02
+            kwargs["edit_interval"] = 0.03
+            orig_init(self, *args, **kwargs)
+
+        with patch("assistant.check_user_cooldown", return_value=0), \
+             patch("assistant.database.save_pm_message", AsyncMock()), \
+             patch("assistant.database.get_user_interactive_state", AsyncMock(return_value=None)), \
+             patch("assistant.database.get_last_pm_messages", AsyncMock(return_value=[])), \
+             patch("assistant.database.get_user_profile", AsyncMock(return_value={})), \
+             patch("assistant.database.get_user_recent_group_messages", AsyncMock(return_value=[])), \
+             patch("assistant.user_memory.get_clinician_memory", AsyncMock(return_value={})), \
+             patch("assistant.user_memory.update_clinician_memory_async", AsyncMock()), \
+             patch("assistant.generate_gemini_text_async", side_effect=slow_gemini), \
+             patch("assistant.check_response_quality", AsyncMock(return_value=(True, "ok"))), \
+             patch("assistant.send_message_chunks_async", AsyncMock()) as mock_send_chunks, \
+             patch("assistant.tg_safety.edit_message", side_effect=fake_edit), \
+             patch("assistant.tg_safety.delete_messages", side_effect=fake_delete), \
+             patch.object(assistant.PmStatusTicker, "__init__", patched_init):
+
+            await assistant.handle_private_message(mock_client, mock_event)
+
+            # Статусное сообщение было создано
+            mock_client.send_message.assert_called_with(
+                entity=999666,
+                message="🧪 <i>Формирую доказательный протокол лечения...</i>",
+                parse_mode='html',
+            )
+            # Карусель сделала хотя бы 2 ротации
+            self.assertGreaterEqual(len(edits), 1, f"Expected at least 1 carousel edit, got {len(edits)}")
+            # Статусное сообщение было удалено перед выдачей ответа
+            self.assertIn(888001, deletions)
+            mock_send_chunks.assert_called_once()
+
+
 class TestZeroPatientDisclaimers(unittest.TestCase):
     """3. Полная ликвидация пациентских дисклеймеров в ЛС."""
 

@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Sequence
 from cachetools import TTLCache
 
 import blocking_tools
@@ -371,6 +371,271 @@ async def _safe_typing_action(client, chat_id):
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
 
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Chairside Progress Ticker & Loading Carousel (Zero Dead Screen)
+# ---------------------------------------------------------------------------
+
+PM_MEDIA_CAROUSEL_STAGES = (
+    "📥 <i>Скачиваю и подготавливаю снимки...</i>",
+    "🔍 <i>Изучаю анатомию, каналы и рентген-статус...</i>",
+    "📐 <i>Оцениваю кривизну корней и проходимость каналов...</i>",
+    "🔬 <i>Проверяю наличие перфораций, ступенек и обломков...</i>",
+    "📊 <i>Анализирую периапикальный индекс (PAI) и костную ткань...</i>",
+    "🦷 <i>Оцениваю краевое прилегание, биологическую ширину и феррул...</i>",
+    "🧪 <i>Формирую доказательный протокол лечения...</i>",
+    "📚 <i>Сопоставляю с клиническими рекомендациями EBM...</i>",
+    "💉 <i>Рассчитываю протокол ирригации и ультразвуковой активации...</i>",
+    "🧱 <i>Подбираю обтурационную систему и биокерамический силер...</i>",
+    "⚖️ <i>Формулирую дифференциальный диагноз и рентген-заключение...</i>",
+    "🛡 <i>Оцениваю ортопедический прогноз и устойчивость к расколам...</i>",
+    "✍️ <i>Оформляю доказательный вердикт консилиума...</i>",
+)
+
+PM_TEXT_CAROUSEL_STAGES = (
+    "🧪 <i>Формирую доказательный протокол лечения...</i>",
+    "🔍 <i>Анализирую клиническую картину и анамнез случая...</i>",
+    "📚 <i>Сверяю с клиническими протоколами и базой знаний...</i>",
+    "💉 <i>Рассчитываю пошаговый протокол препарирования и ирригации...</i>",
+    "💊 <i>Проверяю соматические риски и совместимость препаратов...</i>",
+    "📐 <i>Оцениваю биомеханические риски и феррул-эффект...</i>",
+    "⚖️ <i>Формирую дифференциально-диагностический ряд...</i>",
+    "✍️ <i>Синтезирую chairside-рекомендации консилиума...</i>",
+)
+
+PM_VOICE_CAROUSEL_STAGES = (
+    "🎤 <i>Распознаю аудиозапись и медицинскую терминологию...</i>",
+    "🎧 <i>Фильтрую фоновый шум стоматологической установки...</i>",
+    "🦷 <i>Сопоставляю зубную формулу FDI и клинические термины...</i>",
+    "📚 <i>Подготавливаю расшифровку клинического случая...</i>",
+)
+
+
+class PmStatusTicker:
+    """
+    Интерактивный контроллер динамического прогресса в ЛС (Zero Dead Screen Carousel).
+
+    Принципы:
+    1. Если операция быстрая (< initial_delay, по умолчанию 2.8с для текста) — сообщение не отправляется,
+       врач видит только Telegram typing ('печатает...').
+    2. Для тяжелых задач (фото/видео/снимки initial_delay=0.0) — статус отправляется мгновенно.
+    3. Во время длительного анализа (зрение, RAG, thinking: HIGH) циклически переключает
+       клинически достоверные этапы карусели каждые edit_interval (3.8с), предотвращая ощущение зависания.
+    4. Предотвращает FloodWait через tg_safety и гарантирует безопасное удаление по завершении.
+    """
+
+    def __init__(
+        self,
+        bot_client,
+        chat_id: int,
+        initial_text: Optional[str] = None,
+        stages: Optional[Sequence[str]] = None,
+        initial_delay: float = 0.0,
+        edit_interval: float = 3.8,
+        logger=None,
+    ):
+        self.bot_client = bot_client
+        self.chat_id = chat_id
+        self.initial_text = initial_text
+        self.stages = list(stages) if stages else list(PM_MEDIA_CAROUSEL_STAGES)
+        self.initial_delay = max(0.0, float(initial_delay))
+        self.edit_interval = max(0.05, float(edit_interval))
+        self.logger = logger
+        self.status_msg = None
+        self._loop_task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
+        self._stage_idx = 0
+        self._lock = asyncio.Lock()
+        self._started = False
+        self._closed = False
+
+    @property
+    def is_active(self) -> bool:
+        return self._started and not self._closed
+
+    async def start(self):
+        if self._started:
+            return self
+        self._started = True
+        self._stop_event.clear()
+        self._loop_task = asyncio.create_task(self._run_carousel())
+        if self.initial_delay == 0.0:
+            # Даем циклу событий квант времени для отправки первого статуса
+            await asyncio.sleep(0)
+        return self
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.finish()
+
+    async def _run_carousel(self):
+        try:
+            if self.initial_delay > 0:
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.initial_delay)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+
+            if self._stop_event.is_set():
+                return
+
+            first_text = self.initial_text or (self.stages[0] if self.stages else "⏳ <i>Обрабатываю запрос...</i>")
+            try:
+                self.status_msg = await self.bot_client.send_message(
+                    entity=self.chat_id,
+                    message=first_text,
+                    parse_mode='html',
+                )
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug("PmStatusTicker: failed to send initial status message: %s", e)
+                return
+
+            self._stage_idx = 1
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.edit_interval)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+                if self._stop_event.is_set() or not self.status_msg:
+                    break
+
+                if not self.stages:
+                    continue
+
+                async with self._lock:
+                    next_text = self.stages[self._stage_idx % len(self.stages)]
+                    self._stage_idx += 1
+
+                try:
+                    msg_id = getattr(self.status_msg, "id", None)
+                    if msg_id:
+                        await tg_safety.edit_message(
+                            self.bot_client,
+                            self.chat_id,
+                            msg_id,
+                            next_text,
+                            timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                            op="edit_message:pm_ticker_carousel",
+                            logger=self.logger,
+                            parse_mode='html',
+                        )
+                except Exception as edit_err:
+                    if self.logger:
+                        self.logger.debug("PmStatusTicker carousel edit error: %s", edit_err)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            if self.logger:
+                self.logger.debug("PmStatusTicker unexpected error in loop: %s", e)
+
+    async def update_stage(self, new_text: str, stage_index: Optional[int] = None):
+        """
+        Мгновенно переключает статус на целевой этап и синхронизирует карусель.
+        """
+        async with self._lock:
+            if stage_index is not None:
+                self._stage_idx = stage_index
+            if self.status_msg:
+                msg_id = getattr(self.status_msg, "id", None)
+                if msg_id:
+                    try:
+                        await tg_safety.edit_message(
+                            self.bot_client,
+                            self.chat_id,
+                            msg_id,
+                            new_text,
+                            timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                            op="edit_message:pm_ticker_explicit",
+                            logger=self.logger,
+                            parse_mode='html',
+                        )
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.debug("PmStatusTicker: update_stage edit failed: %s", e)
+            else:
+                self.initial_text = new_text
+                try:
+                    self.status_msg = await self.bot_client.send_message(
+                        entity=self.chat_id,
+                        message=new_text,
+                        parse_mode='html',
+                    )
+                except Exception as e:
+                    if self.logger:
+                        self.logger.debug("PmStatusTicker: update_stage send failed: %s", e)
+
+    async def show_error(self, error_text: str):
+        """Останавливает карусель и редактирует статусное сообщение в сообщение об ошибке."""
+        self._stop_event.set()
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
+            try:
+                await asyncio.wait_for(self._loop_task, timeout=0.5)
+            except Exception:
+                pass
+        self._closed = True
+        msg_obj = self.status_msg
+        self.status_msg = None
+        if msg_obj and getattr(msg_obj, "id", None):
+            return await tg_safety.edit_message(
+                self.bot_client,
+                self.chat_id,
+                msg_obj.id,
+                error_text,
+                timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                op="edit_message:pm_ticker_error",
+                logger=self.logger,
+                parse_mode='html',
+            )
+        else:
+            return await tg_safety.send_message(
+                self.bot_client,
+                self.chat_id,
+                error_text,
+                timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                op="send_message:pm_ticker_error",
+                logger=self.logger,
+                parse_mode='html',
+            )
+
+    async def finish(self):
+        """Останавливает карусель и удаляет статусное сообщение перед выводом ответа."""
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_event.set()
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
+            try:
+                await asyncio.wait_for(self._loop_task, timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+
+        if self.status_msg:
+            msg_id = getattr(self.status_msg, "id", None)
+            self.status_msg = None
+            if msg_id:
+                try:
+                    await tg_safety.delete_messages(
+                        self.bot_client,
+                        self.chat_id,
+                        [msg_id],
+                        timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                        op="delete_message:pm_status_ticker",
+                        logger=self.logger,
+                    )
+                except Exception as del_err:
+                    if self.logger:
+                        self.logger.debug("PmStatusTicker: failed to delete status message %s: %s", msg_id, del_err)
 
 
 async def _try_send_reaction(event, msg_id: int, emoji: str, prefetched_msg=None) -> bool:
@@ -10015,7 +10280,17 @@ async def handle_private_message(bot_client, event):
 
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             status_text = "📹 <i>Распознаю видеосообщение... Подождите.</i>" if is_video_note else "🎤 <i>Распознаю аудиосообщение... Подождите.</i>"
-            status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
+            voice_ticker = PmStatusTicker(
+                bot_client,
+                chat_id,
+                initial_text=status_text,
+                stages=PM_VOICE_CAROUSEL_STAGES,
+                initial_delay=0.0,
+                edit_interval=3.5,
+                logger=logger,
+            )
+            await voice_ticker.start()
+            status_msg = voice_ticker.status_msg
             temp_path = None
             try:
                 temp_path = await asyncio.wait_for(
@@ -10080,7 +10355,9 @@ async def handle_private_message(bot_client, event):
             except Exception as audio_err:
                 logger.error(f"Error handling voice note: {audio_err}")
             finally:
-                if 'status_msg' in locals() and status_msg:
+                if 'voice_ticker' in locals() and voice_ticker:
+                    await voice_ticker.finish()
+                elif 'status_msg' in locals() and status_msg:
                     try:
                         await bot_client.delete_messages(chat_id, status_msg.id)
                     except Exception:
@@ -11619,6 +11896,8 @@ async def handle_private_message(bot_client, event):
             )
             return
 
+        status_msg = None
+        ticker = None
         if has_media:
             album_events = getattr(event, "_album_events", None) or [event]
             total_size = 0
@@ -11643,7 +11922,6 @@ async def handle_private_message(bot_client, event):
             os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
             files_to_analyze = []
             temp_paths_to_clean = set()
-            status_msg = None
             try:
                 # Отправляем статус ожидания (Этап 1: Скачиваю и подготавливаю снимок)
                 status_text = (
@@ -11651,7 +11929,17 @@ async def handle_private_message(bot_client, event):
                     if len(album_events) > 1
                     else "📥 <i>Скачиваю и подготавливаю снимок...</i>"
                 )
-                status_msg = await bot_client.send_message(entity=chat_id, message=status_text, parse_mode='html')
+                ticker = PmStatusTicker(
+                    bot_client,
+                    chat_id,
+                    initial_text=status_text,
+                    stages=PM_MEDIA_CAROUSEL_STAGES,
+                    initial_delay=0.0,
+                    edit_interval=3.8,
+                    logger=logger,
+                )
+                await ticker.start()
+                status_msg = ticker.status_msg
 
                 for a_ev in album_events:
                     msg_obj = a_ev.message
@@ -11673,13 +11961,10 @@ async def handle_private_message(bot_client, event):
 
                 if files_to_analyze:
                     # Этап 2: Динамический статус зрения и анализа анатомии (ZERO DEAD SCREEN)
-                    if status_msg:
-                        await tg_safety.edit_message(
-                            bot_client, chat_id, status_msg.id,
+                    if ticker and ticker.is_active:
+                        await ticker.update_stage(
                             "🔍 <i>Изучаю анатомию, каналы и рентген-статус...</i>",
-                            timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
-                            op="edit_message:pm_vision_status", logger=logger,
-                            parse_mode='html',
+                            stage_index=1,
                         )
                     # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
                     vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
@@ -11687,7 +11972,11 @@ async def handle_private_message(bot_client, event):
             except Exception as e:
                 logger.error(f"Error analyzing media in PM: {e}")
                 media_error_shown = True
-                if status_msg:
+                if ticker:
+                    notified = await ticker.show_error("❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>")
+                    ticker = None
+                    status_msg = None
+                elif status_msg:
                     notified = await tg_safety.edit_message(
                         bot_client, chat_id, status_msg.id,
                         "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>",
@@ -11696,13 +11985,21 @@ async def handle_private_message(bot_client, event):
                         parse_mode='html',
                     )
                     status_msg = None
-                    if not notified.ok:
-                        media_error_shown = False
-                        logger.warning(
-                            "Отказ разбора файла не доставлен chat_id=%s: %s — "
-                            "врач не знает, что снимок не открылся",
-                            chat_id, notified.reason,
-                        )
+                else:
+                    notified = await tg_safety.send_message(
+                        bot_client, chat_id,
+                        "❌ <i>Не удалось обработать файл. Попробуйте еще раз.</i>",
+                        timeout=PM_STATUS_EDIT_TIMEOUT_SECONDS,
+                        op="send_message:pm_media_failed", logger=logger,
+                        parse_mode='html',
+                    )
+                if not notified.ok:
+                    media_error_shown = False
+                    logger.warning(
+                        "Отказ разбора файла не доставлен chat_id=%s: %s — "
+                        "врач не знает, что снимок не открылся",
+                        chat_id, notified.reason,
+                    )
             finally:
                 for path in temp_paths_to_clean:
                     if not path:
@@ -11722,6 +12019,10 @@ async def handle_private_message(bot_client, event):
         # догадкой по тексту недопустимо.
         media_failed = has_media and not media_description
         if media_failed:
+            if ticker:
+                await ticker.finish()
+                ticker = None
+                status_msg = None
             logger.warning(
                 f"Media analysis produced nothing for chat_id={chat_id}. "
                 f"has_text={bool((text or '').strip())}"
@@ -12055,8 +12356,13 @@ async def handle_private_message(bot_client, event):
             "клиндамицин", "флегмон", "асфикс", "госпитализ", "летальн", "смерт", "отравлен"
         )
 
-        # Этап 3: Формирую доказательный протокол лечения (ZERO DEAD SCREEN)
-        if status_msg:
+        # Этап 3: Формирую доказательный протокол лечения (ZERO DEAD SCREEN CAROUSEL)
+        if ticker and ticker.is_active:
+            await ticker.update_stage(
+                "🧪 <i>Формирую доказательный протокол лечения...</i>",
+                stage_index=6,
+            )
+        elif status_msg:
             await tg_safety.edit_message(
                 bot_client, chat_id, status_msg.id,
                 "🧪 <i>Формирую доказательный протокол лечения...</i>",
@@ -12065,14 +12371,20 @@ async def handle_private_message(bot_client, event):
                 parse_mode='html',
             )
         elif has_clinical_topic and not is_conversational_turn and not (text or "").startswith("/"):
-            try:
-                status_msg = await bot_client.send_message(
-                    entity=chat_id,
-                    message="🧪 <i>Формирую доказательный протокол лечения...</i>",
-                    parse_mode='html',
-                )
-            except Exception as st_err:
-                logger.debug("Failed to send PM text clinical status: %s", st_err)
+            # Для текстовых клинических запросов: если генерация занимает > 2.8с,
+            # запускаем карусель со статусом формирования протокола. Если ответ быстрый (< 2.8с) —
+            # врач видит только typing, экран не мерцает лишними сообщениями.
+            ticker = PmStatusTicker(
+                bot_client,
+                chat_id,
+                initial_text="🧪 <i>Формирую доказательный протокол лечения...</i>",
+                stages=PM_TEXT_CAROUSEL_STAGES,
+                initial_delay=2.8,
+                edit_interval=3.8,
+                logger=logger,
+            )
+            await ticker.start()
+            status_msg = ticker.status_msg
 
         async with _safe_typing_action(bot_client, chat_id):
             for attempt in range(max_retries + 1):
@@ -12193,7 +12505,14 @@ async def handle_private_message(bot_client, event):
             nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth)
 
             # Удаляем статусное сообщение прямо перед доставкой итогового ответа
-            if status_msg:
+            if ticker:
+                try:
+                    await ticker.finish()
+                    ticker = None
+                    status_msg = None
+                except Exception as del_err:
+                    logger.debug("Failed to delete completed PM ticker: %s", del_err)
+            elif status_msg:
                 try:
                     await tg_safety.delete_messages(
                         bot_client, chat_id, [status_msg.id],
@@ -12254,6 +12573,11 @@ async def handle_private_message(bot_client, event):
     except Exception as e:
         logger.exception(f"Unexpected error in handle_private_message: {e}")
     finally:
+        if 'ticker' in locals() and ticker:
+            try:
+                await ticker.finish()
+            except Exception:
+                pass
         if 'status_msg' in locals() and status_msg:
             try:
                 await bot_client.delete_messages(chat_id, status_msg.id)
