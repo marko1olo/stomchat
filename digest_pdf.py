@@ -9,6 +9,7 @@ digest_pdf.py — Генератор полиграфического PDF-вес
 - Изоляция ошибок: сбой рендера PDF не ломает публикацию в Telegraph.
 """
 
+import asyncio
 import base64
 import html
 import logging
@@ -22,6 +23,45 @@ logger = logging.getLogger(__name__)
 
 PDF_OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "pdf_digests"))
 LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "docendo_logo.png"))
+
+# Семафор строгого взаимного исключения: не более 1 процесса Chromium одновременно,
+# чтобы гарантированно укладываться в потолок 750M cgroup на 1GB micro-VPS.
+_PDF_SEMAPHORE = asyncio.Semaphore(1)
+
+
+def cleanup_old_digests(output_dir: str = PDF_OUTPUT_DIR, max_age_days: int = 3, max_files: int = 15) -> int:
+    """
+    Удаляет устаревшие PDF-документы и превью для предотвращения переполнения диска
+    на серверах с ограниченными ресурсами (1GB micro-VPS).
+    Сохраняет не более max_files самых свежих файлов.
+    """
+    if not os.path.exists(output_dir):
+        return 0
+    now = time.time()
+    cutoff_time = now - (max_age_days * 86400)
+    removed_count = 0
+    try:
+        entries = []
+        for fname in os.listdir(output_dir):
+            if fname.endswith((".pdf", ".png")):
+                fpath = os.path.join(output_dir, fname)
+                if os.path.isfile(fpath):
+                    entries.append((fpath, os.path.getmtime(fpath)))
+
+        # Сортируем по времени изменения (от старых к новым)
+        entries.sort(key=lambda x: x[1])
+
+        # 1. Удаляем файлы старше max_age_days или сверх квоты max_files
+        for fpath, mtime in entries:
+            if (len(entries) - removed_count > max_files) or (mtime < cutoff_time):
+                try:
+                    os.remove(fpath)
+                    removed_count += 1
+                except Exception as del_err:
+                    logger.debug("Could not remove old digest file %s: %s", fpath, del_err)
+    except Exception as e:
+        logger.warning("Error during digest cleanup: %s", e)
+    return removed_count
 
 
 def _get_logo_base64() -> str:
@@ -82,12 +122,19 @@ def _build_journal_html(
         if not p:
             continue
         # Очищаем внутренний текст от тегов для проверки на повисшую пунктуацию
-        inner_plain = re.sub(r'<[^>]+>', '', p).strip()
-        if not inner_plain or re.match(r'^[.,;:!?—\-\s]+$', inner_plain):
-            continue
-        # Срезаем повисшие знаки препинания в самом начале абзаца
-        p = re.sub(r'^(<p[^>]*>)?\s*[.,;:!?—\-]\s*', r'\1', p)
-        if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img", "<div", "<table")):
+        is_block_media = (
+            p.startswith(("<figure", "<table", "<thead", "<tbody", "<tr", "<th", "<td", "<div", "<hr", "<img"))
+            or "<table" in p.lower()
+            or "<img" in p.lower()
+        )
+        if not is_block_media:
+            inner_plain = re.sub(r'<[^>]+>', '', p).strip()
+            if not inner_plain or re.match(r'^[.,;:!?—\-\s]+$', inner_plain):
+                continue
+            # Срезаем повисшие знаки препинания в самом начале абзаца
+            p = re.sub(r'^(<p[^>]*>)?\s*[.,;:!?—\-]\s*', r'\1', p)
+
+        if p.startswith(("<h", "<p", "<figure", "<blockquote", "<ul", "<ol", "<hr", "<img", "<div", "<table", "<thead", "<tbody", "<tr", "<th", "<td", "<section", "<article")):
             formatted_body.append(p)
         else:
             formatted_body.append(f"<p>{p.replace('\n', '<br>')}</p>")
@@ -256,13 +303,13 @@ def _build_journal_html(
             margin: 16mm 14mm 18mm 14mm;
             @bottom-left {{
                 content: "Docendo Discimus • Клинический вестник «Учимся вместе»";
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "DejaVu Sans", "Liberation Sans", "Noto Sans", Arial, sans-serif;
                 font-size: 8pt;
                 color: #64748b;
             }}
             @bottom-right {{
                 content: "Стр. " counter(page);
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "DejaVu Sans", "Liberation Sans", "Noto Sans", Arial, sans-serif;
                 font-size: 8pt;
                 font-weight: 600;
                 color: #334155;
@@ -276,7 +323,7 @@ def _build_journal_html(
         }}
 
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "DejaVu Sans", "Liberation Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
             font-size: 9.5pt;
             line-height: 1.52;
             color: #1e293b;
@@ -801,6 +848,8 @@ async def generate_digest_pdf(
         return None
 
     os.makedirs(output_dir, exist_ok=True)
+    cleanup_old_digests(output_dir, max_age_days=3, max_files=15)
+
     timestamp = int(time.time())
     safe_date = re.sub(r'[^0-9a-zA-Z_\-]+', '_', date_str) if date_str else str(timestamp)
     filename = f"StomChat_Digest_{safe_date}_{timestamp}.pdf"
@@ -814,48 +863,60 @@ async def generate_digest_pdf(
         date_str=date_str,
     )
 
-    start_time = time.time()
-    try:
-        from playwright.async_api import async_playwright
+    async with _PDF_SEMAPHORE:
+        start_time = time.time()
+        browser = None
+        try:
+            from playwright.async_api import async_playwright
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            try:
-                page = await browser.new_page()
-
-                # Устанавливаем контент и ждем подгрузки изображений
-                try:
-                    await page.set_content(full_html, wait_until="networkidle", timeout=12000)
-                except Exception:
-                    # Фоллбэк: если CDN-картинки грузятся медленно, рендерим по событию load
-                    logger.warning("networkidle timed out during PDF generation, falling back to load")
-                    await page.set_content(full_html, wait_until="load", timeout=15000)
-
-                # Рендерим в PDF с точными настройками печати
-                await page.pdf(
-                    path=output_path,
-                    format="A4",
-                    print_background=True,
-                    prefer_css_page_size=True,
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--js-flags=--max-old-space-size=256",
+                    ]
                 )
-            finally:
-                await browser.close()
+                try:
+                    page = await browser.new_page()
 
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            size_kb = os.path.getsize(output_path) / 1024
-            elapsed = time.time() - start_time
-            logger.info("✅ PDF digest generated successfully: %s (%.1f KB, %.2f s)", output_path, size_kb, elapsed)
-            return output_path
-        else:
-            logger.error("PDF generation produced empty or missing file: %s", output_path)
+                    # Устанавливаем контент и ждем подгрузки изображений
+                    try:
+                        await page.set_content(full_html, wait_until="networkidle", timeout=12000)
+                    except Exception:
+                        # Фоллбэк: если CDN-картинки грузятся медленно, рендерим по событию load
+                        logger.warning("networkidle timed out during PDF generation, falling back to load")
+                        await page.set_content(full_html, wait_until="load", timeout=15000)
+
+                    # Рендерим в PDF с точными настройками печати
+                    await page.pdf(
+                        path=output_path,
+                        format="A4",
+                        print_background=True,
+                        prefer_css_page_size=True,
+                    )
+                finally:
+                    if browser:
+                        await browser.close()
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                size_kb = os.path.getsize(output_path) / 1024
+                elapsed = time.time() - start_time
+                logger.info("✅ PDF digest generated successfully: %s (%.1f KB, %.2f s)", output_path, size_kb, elapsed)
+                return output_path
+            else:
+                logger.error("PDF generation produced empty or missing file: %s", output_path)
+                return None
+
+        except Exception as e:
+            logger.exception("Failed to generate PDF digest: %s", e)
             return None
-
-    except Exception as e:
-        logger.exception("Failed to generate PDF digest: %s", e)
-        return None
 
 
 def render_pdf_first_page_preview(pdf_path: str, preview_png_path: str) -> bool:
@@ -863,6 +924,7 @@ def render_pdf_first_page_preview(pdf_path: str, preview_png_path: str) -> bool:
     Рендерит первую страницу PDF в изображение PNG через PyMuPDF (fitz)
     для визуального контроля и аналитики качества верстки.
     """
+    doc = None
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(pdf_path)
@@ -872,8 +934,13 @@ def render_pdf_first_page_preview(pdf_path: str, preview_png_path: str) -> bool:
         # Рендер с разрешением 150 DPI для четкости текста
         pix = page.get_pixmap(dpi=150)
         pix.save(preview_png_path)
-        doc.close()
         return os.path.exists(preview_png_path)
     except Exception as e:
         logger.warning("Failed to render PDF preview: %s", e)
         return False
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass

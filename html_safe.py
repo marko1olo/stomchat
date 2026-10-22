@@ -402,7 +402,8 @@ def parse_markdown_tables(text: str) -> str:
 
             th_cells = []
             for h, al in zip(headers, aligns):
-                h_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', h)
+                h_esc = html.escape(h)
+                h_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', h_esc)
                 al_style = f' style="text-align: {al};"' if al != "left" else ""
                 th_cells.append(f"<th{al_style}>{h_fmt}</th>")
             th_html = "".join(th_cells)
@@ -411,7 +412,8 @@ def parse_markdown_tables(text: str) -> str:
             for r in table_rows:
                 tds = []
                 for col_idx, (c, al) in enumerate(zip(r, aligns)):
-                    c_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', c)
+                    c_esc = html.escape(c)
+                    c_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', c_esc)
                     if col_idx == 0 and not (c_fmt.startswith("<b>") and c_fmt.endswith("</b>")):
                         c_fmt = f"<b>{c_fmt}</b>"
                     al_style = f' style="text-align: {al};"' if al != "left" else ""

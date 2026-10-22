@@ -167,6 +167,74 @@ def reset_throttle():
         _throttle_state.clear()
 
 
+# Потолки расхода памяти для Micro-VPS (1 vCPU, 1 GB RAM):
+# Systemd лимиты: MemoryHigh=750M, MemoryMax=850M
+MEMORY_WARN_MB = 600.0
+MEMORY_HIGH_MB = 750.0
+MEMORY_MAX_MB = 850.0
+
+
+def get_memory_usage_mb():
+    """Возвращает текущий RSS процесса в мегабайтах или None, если недоступно."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    # Запасной вариант для Linux без psutil
+    try:
+        with open("/proc/self/statm", "r") as f:
+            pages = int(f.read().split()[1])
+            import resource
+            page_size = resource.getpagesize()
+            return (pages * page_size) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    return None
+
+
+def check_and_enforce_memory_limits():
+    """
+    Проверяет расход памяти текущего процесса на соответствие потолкам 1GB Micro-VPS.
+    При превышении MEMORY_HIGH_MB (750 MB) запускает graceful gc.collect().
+    Если память превышает критический порог (>= 820 MB), пишет дамп состояния.
+    Возвращает dict с метриками и предпринятыми действиями.
+    """
+    rss_mb = get_memory_usage_mb()
+    if rss_mb is None:
+        return {"status": "unavailable", "rss": None, "action": "none"}
+
+    if rss_mb >= MEMORY_HIGH_MB:
+        import gc
+        collected = gc.collect()
+        after_rss_mb = get_memory_usage_mb() or rss_mb
+        throttled_log(
+            logging.WARNING,
+            "memory_high_threshold",
+            "Превышен порог MemoryHigh (750MB): rss=%.1f MB -> gc.collect() освободил %d объектов, rss после=%.1f MB",
+            rss_mb, collected, after_rss_mb,
+        )
+        if after_rss_mb >= (MEMORY_MAX_MB - 30.0):
+            dump_runtime_state(f"critical_memory_pressure_rss_{after_rss_mb:.1f}mb")
+            throttled_log(
+                logging.CRITICAL,
+                "memory_max_near_oom",
+                "КРИТИЧЕСКИЙ РАСХОД ПАМЯТИ: rss=%.1f MB приближается к MemoryMax (850MB). Риск OOM!",
+                after_rss_mb,
+            )
+        return {"status": "high", "rss_before": rss_mb, "rss_after": after_rss_mb, "action": "gc_collected"}
+    elif rss_mb >= MEMORY_WARN_MB:
+        throttled_log(
+            logging.WARNING,
+            "memory_warn_threshold",
+            "Повышенный расход памяти: rss=%.1f MB (порог предупреждения %.0f MB)",
+            rss_mb, MEMORY_WARN_MB,
+        )
+        return {"status": "warn", "rss": rss_mb, "action": "warn"}
+
+    return {"status": "ok", "rss": rss_mb, "action": "none"}
+
+
 def configure_logging():
     root = logging.getLogger()
     for handler in list(root.handlers):
@@ -227,7 +295,7 @@ def write_heartbeat(reason):
         except OSError:
             if attempt == 4:
                 raise
-            time.sleep(0.1)
+            time.sleep(0.02)
 
 
 def write_summary_status(status):
@@ -244,7 +312,7 @@ def write_summary_status(status):
         except OSError:
             if attempt == 4:
                 raise
-            time.sleep(0.1)
+            time.sleep(0.02)
 
 
 def read_startup_state() -> dict:
@@ -271,7 +339,7 @@ def write_startup_state(state: dict):
         except OSError:
             if attempt == 4:
                 break
-            time.sleep(0.1)
+            time.sleep(0.02)
 
 
 def get_connect_backoff_delay(consecutive_failures: int) -> int:
@@ -496,6 +564,15 @@ def _log_watchdog_exit(age, dump_error=None):
 
 def _watchdog_loop():
     while not _watchdog_stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+        try:
+            check_and_enforce_memory_limits()
+        except Exception as mem_exc:
+            throttled_log(
+                logging.WARNING,
+                "watchdog_memory_check_failed",
+                "ошибка проверки лимитов памяти: %s",
+                f"{type(mem_exc).__name__}: {mem_exc}",
+            )
         age = time.monotonic() - _last_heartbeat_monotonic
         if age > WATCHDOG_STALE_SECONDS:
             _arm_hard_exit(78, WATCHDOG_LOG_GRACE_SECONDS)

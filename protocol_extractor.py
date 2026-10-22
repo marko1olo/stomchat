@@ -8,6 +8,7 @@ protocol_extractor.py — Автоматический экстрактор и �
 4. Интерактивную визуализацию и каталог для команды /protocols и RAG-поиска.
 """
 
+import html
 import json
 import logging
 import re
@@ -342,6 +343,17 @@ async def seed_default_protocols_async(force: bool = False):
         logger.error(f"Failed to seed default protocols: {e}")
 
 
+
+def _safe_html_text(val) -> str:
+    """Безопасно экранирует спецсимволы HTML для вывода в Telegram и PDF."""
+    if not val:
+        return ""
+    s = html.escape(str(val))
+    # Преобразуем безопасную markdown-разметку в валидный HTML
+    s = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', s)
+    s = re.sub(r'\*(.*?)\*', r'<i>\1</i>', s)
+    return s
+
 def format_protocol_view(proto: dict) -> Tuple[str, list]:
     """
     Форматирует один протокол в структурированную медицинскую карточку с кнопками навигации.
@@ -370,26 +382,30 @@ def format_protocol_view(proto: dict) -> Tuple[str, list]:
         except Exception:
             steps = []
 
+    safe_title = _safe_html_text(title)
+    safe_cat = _safe_html_text(category)
+    safe_author = _safe_html_text(author)
+
     out = [
-        f"📋 <b>ПРОТОКОЛ: {title.upper()}</b>",
-        f"🏷 <i>Раздел: {category}</i>" + (f" | 👨‍⚕️ <i>Эксперт: {author}</i>" if author else ""),
+        f"📋 <b>ПРОТОКОЛ: {safe_title.upper()}</b>",
+        f"🏷 <i>Раздел: {safe_cat}</i>" + (f" | 👨‍⚕️ <i>Эксперт: {safe_author}</i>" if safe_author else ""),
         ""
     ]
 
     if indication:
-        out.append(f"🎯 <b>Показания:</b>\n{indication}\n")
+        out.append(f"🎯 <b>Показания:</b>\n{_safe_html_text(indication)}\n")
     if contra:
-        out.append(f"🚫 <b>Противопоказания и ограничения:</b>\n{contra}\n")
+        out.append(f"🚫 <b>Противопоказания и ограничения:</b>\n{_safe_html_text(contra)}\n")
 
     if steps:
         out.append("🔢 <b>Пошаговый алгоритм действий:</b>")
         for idx, st in enumerate(steps, 1):
             if isinstance(st, str):
-                out.append(f"<b>{idx}.</b> {st}")
+                out.append(f"<b>{idx}.</b> {_safe_html_text(st)}")
             elif isinstance(st, dict):
                 s_num = st.get("step", idx)
-                s_name = st.get("name", "")
-                s_desc = st.get("description", "")
+                s_name = _safe_html_text(st.get("name", ""))
+                s_desc = _safe_html_text(st.get("description", ""))
                 if s_name and s_desc:
                     out.append(f"<b>{s_num}. {s_name}</b>\n{s_desc}\n")
                 elif s_desc:
@@ -397,12 +413,12 @@ def format_protocol_view(proto: dict) -> Tuple[str, list]:
                 elif s_name:
                     out.append(f"<b>{s_num}. {s_name}</b>\n")
             else:
-                out.append(f"<b>{idx}.</b> {str(st)}")
+                out.append(f"<b>{idx}.</b> {_safe_html_text(str(st))}")
 
     if materials:
-        out.append(f"\n🛠 <b>Необходимые материалы и оборудование:</b>\n{materials}\n")
+        out.append(f"\n🛠 <b>Необходимые материалы и оборудование:</b>\n{_safe_html_text(materials)}\n")
     if nuances:
-        out.append(f"⚠️ <b>Клинические нюансы и подводные камни:</b>\n{nuances}\n")
+        out.append(f"⚠️ <b>Клинические нюансы и подводные камни:</b>\n{_safe_html_text(nuances)}\n")
 
     out.append("🏛 <i>Сообщество доказательной стоматологии «Docendo Discimus»</i>")
 
@@ -458,7 +474,7 @@ def format_protocol_catalog(
         p_cat = p.get("category", "")
         author = p.get("author_doctor", "")
         author_hint = f" • <i>{author.split('/')[0].strip()[:18]}</i>" if author else ""
-        out.append(f"<b>{idx}.</b> {p_title} <i>({p_cat})</i>{author_hint}")
+        out.append(f"<b>{idx}.</b> {_safe_html_text(p_title)} <i>({_safe_html_text(p_cat)})</i>{author_hint}")
         btn = Button.inline(f"📖 #{idx} {p_title[:17]}...", data=f"proto:view:{p_id}")
         row.append(btn)
         if len(row) == 2:

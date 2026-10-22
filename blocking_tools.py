@@ -413,7 +413,7 @@ def _web_search_sync(query, max_results):
 # который выдан ребёнку в payload["timeout"], и начало бюджета съедал запуск:
 # ребёнок не доживал до последней модели каскада, вызывающий получал "timeout"
 # вместо ответа, а вся уже проделанная работа выбрасывалась.
-_SUBPROCESS_STARTUP_SLACK_SECONDS = 40.0
+_SUBPROCESS_STARTUP_SLACK_SECONDS = 30.0
 
 # Уровень строки журнала ребёнка, чтобы grep ERROR по bot.log продолжал находить
 # его отказы: без разбора всё легло бы в родительский INFO.
@@ -1247,7 +1247,10 @@ async def transcribe_audio_async(file_path, timeout):
         timeout=timeout,
     )
     if error:
-        _remove_converted_wav(file_path)
+        try:
+            await asyncio.to_thread(_remove_converted_wav, file_path)
+        except Exception:
+            _remove_converted_wav(file_path)
         return None, error
     return payload.get("text"), None
 

@@ -118,13 +118,16 @@ _FLOOD_NAMES = frozenset({
 # Терминальное: повтор не поможет никогда, а дедлайн сожжёт.
 _TERMINAL_NAMES = frozenset({
     "ChatWriteForbiddenError", "ChatAdminRequiredError", "ChannelPrivateError",
+    "ChatGuestSendForbiddenError", "ChatSendMediaForbiddenError",
+    "ChatSendGifsForbiddenError", "ChatSendStickersForbiddenError",
     "MsgIdInvalidError", "MessageIdInvalidError", "MessageNotModifiedError",
     "MessageDeleteForbiddenError", "MessageEmptyError", "MessageTooLongError",
     "AuthKeyError", "AuthKeyUnregisteredError", "AuthKeyDuplicatedError",
     "SessionRevokedError", "SessionExpiredError", "UnauthorizedError",
     "BotMethodInvalidError", "PeerIdInvalidError", "UserIsBlockedError",
     "UserIsBotError", "InputUserDeactivatedError", "UserPrivacyRestrictedError",
-    "UserDeactivatedError", "UserDeactivatedBanError", "EntityTypeError",
+    "UserDeactivatedError", "UserDeactivatedBanError", "UserBannedInChannelError",
+    "UserKickedError", "EntityTypeError",
 })
 
 # Подмножество терминального, где отказ на стороне ВРАЧА: заблокировал бота,
@@ -133,7 +136,8 @@ _TERMINAL_NAMES = frozenset({
 _USER_FAULT_NAMES = frozenset({
     "UserIsBlockedError", "UserIsBotError", "InputUserDeactivatedError",
     "UserPrivacyRestrictedError", "UserDeactivatedError",
-    "UserDeactivatedBanError", "PeerIdInvalidError",
+    "UserDeactivatedBanError", "UserBannedInChannelError", "UserKickedError",
+    "PeerIdInvalidError",
 })
 
 # Повторяемое: сеть моргнула или у Telegram внутренние проблемы.
@@ -613,8 +617,22 @@ async def edit_message(client, chat_id, message_id, text,
 async def delete_messages(client, chat_id, message_ids,
                           timeout=DEFAULT_TIMEOUT_SECONDS, op="delete_messages",
                           logger=None, **kwargs):
+    if not message_ids:
+        return TgOutcome(ok=True, chat_id=chat_id, op=op, value=[])
     return await guard(
         lambda: client.delete_messages(chat_id, message_ids, **kwargs),
+        op=op, chat_id=chat_id, timeout=timeout, logger=logger,
+    )
+
+
+async def send_file(client, chat_id, file, timeout=DEFAULT_TIMEOUT_SECONDS,
+                    op="send_file", logger=None, **kwargs):
+    if not file:
+        log = logger or _LOG
+        log.warning("tg_safety.send_file: aborted sending empty/None file to chat_id=%s op=%s", chat_id, op)
+        return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty or None file"))
+    return await guard(
+        lambda: client.send_file(chat_id, file, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,
     )
 
