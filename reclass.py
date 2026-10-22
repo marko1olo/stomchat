@@ -128,8 +128,8 @@ async def classify_fact(client, content, f_id):
         raw_codes = extract_codes(response.text)
         clean_codes = []
         for c in raw_codes:
-            # Регулярка вырезает только паттерны типа 1.1 или 1.1.1
-            match = re.search(r'(\d+\.\d+(?:\.\d+)?)', str(c))
+            # Детерминированный атомарный поиск кода категории без риска квадратичного ReDoS
+            match = re.search(r'\b(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)\b', str(c))
             if match:
                 clean_codes.append(match.group(1))
         if not clean_codes:

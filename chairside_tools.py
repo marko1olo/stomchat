@@ -1140,6 +1140,13 @@ def build_pharma_quick_markup():
     ]
 
 
+def build_aae_step_markup(step: int, prev_scores: tuple = (), tooth_num: str = "Зуб"):
+    """Кнопки интерактивного мастера AAE (паритет с EndoChat)."""
+    s1 = prev_scores[0] if len(prev_scores) > 0 else 0
+    s2 = prev_scores[1] if len(prev_scores) > 1 else 0
+    return build_aae_markup(step=step, s1=s1, s2=s2, tooth_str=tooth_num)
+
+
 def build_aae_markup(step: int, s1: int = 0, s2: int = 0, tooth_str: str = "Зуб"):
     """Строит инлайн-кнопки для 3-шагового калькулятора сложности AAE."""
     if step == 1:
@@ -1189,8 +1196,8 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
     # Немедленное подтверждение получения Telegram-колбэка для мгновенного снятия спиннера
     try:
         await event.answer()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to answer chairside callback query: %s", e)
 
     # 0. Меню Chairside Hub
     if data_str in ("chairside:hub", "chairside:menu"):
@@ -2091,3 +2098,4 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение")))

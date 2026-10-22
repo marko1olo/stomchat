@@ -157,42 +157,64 @@ def is_protocol_candidate(text: str) -> bool:
 
 
 def _clean_json_str(text: str) -> Optional[dict]:
-
-    """Извлекает и парсит JSON из ответа нейросети."""
-
+    """
+    Извлекает и парсит JSON из ответа нейросети.
+    
+    Защищен от ReDoS, комментариев модели с фигурными скобками и обрезанных блоков.
+    """
     if not text:
-
         return None
+    raw = str(text).strip()
 
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    # 1. Пробуем прямой парсинг или снятие крайних markdown-тегов
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
 
-    if fence:
-
+    # 2. Поиск блоков в ```json ... ``` без ReDoS
+    fence_matches = re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw)
+    for m in fence_matches:
         try:
-
-            return json.loads(fence.group(1))
-
+            data = json.loads(m.group(1))
+            if isinstance(data, dict):
+                return data
         except Exception:
-
             pass
 
-    start = text.find("{")
-
-    end = text.rfind("}")
-
-    if start != -1 and end != -1 and end > start:
-
-        try:
-
-            return json.loads(text[start : end + 1])
-
-        except Exception:
-
-            pass
+    # 3. Сканер сбалансированных объектов без ReDoS (уважает строки и экранирование)
+    # Гарантирует извлечение даже при мусоре/комментариях модели после JSON
+    stack = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(raw):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start_idx = stack.pop()
+            candidate = raw[start_idx : i + 1]
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict) and ("is_protocol" in obj or "steps" in obj or "title" in obj):
+                    return obj
+            except Exception:
+                continue
 
     return None
-
-
 
 
 
@@ -743,21 +765,23 @@ async def seed_default_protocols_async(force: bool = False):
 
 
 def _safe_html_text(val) -> str:
-
-    """Безопасно экранирует спецсимволы HTML для вывода в Telegram и PDF."""
-
+    """
+    Безопасно экранирует спецсимволы HTML для вывода в Telegram и PDF.
+    
+    Детерминированно преобразует markdown-разметку без ReDoS, сохраняя
+    клинические дозировки (2 * 2 мл), списки (* пункт), формулы зубов
+    и исключая пересекающиеся невалидные теги Telegram HTML.
+    """
     if not val:
-
         return ""
-
     s = html.escape(str(val))
-
-    # Преобразуем безопасную markdown-разметку в валидный HTML
-
-    s = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', s)
-
-    s = re.sub(r'\*(.*?)\*', r'<i>\1</i>', s)
-
+    # 1. Тройные звездочки: жирный курсив с корректной вложенностью тегов
+    s = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s)
+    # 2. Двойные звездочки: жирный (внутри одной строки)
+    s = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s)
+    # 3. Одинарные звездочки: курсив строго по границам слова без пробелов по краям
+    # Исключает маркеры списков (* пункт) и знак умножения в дозировках (2 * 2 мл)
+    s = re.sub(r'(?<!\w)\*([^\s*\n](?:[^*\n]*?[^\s*\n])?)\*(?!\w)', r'<i>\1</i>', s)
     return s
 
 

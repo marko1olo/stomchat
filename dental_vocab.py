@@ -119,6 +119,8 @@ DENTAL_KEYWORDS = {
     "дигидрофосфат", "гута", "активатор", "скейлинг", "scaling", "скейлер", "тризм",
     "exocad", "экзокад", "tibase", "тибаз", "тибаза", "scanbody", "сканбоди", "3shape", "тришейп",
     "миорелаксант",
+    # Клинические материалы и детская стоматология (Red-Team Cyrillic & Materials Audit)
+    "птфэ", "птфе", "бисакрил", "бис-акрил", "стеклоиономер", "сиц", "прорут", "proroot", "приемдетей",
     # Клинические ятрогении, неотложные состояния и острая хирургия/эндодонтия
     "анафилакс", "адреналин", "эпинефрин", "аспирац", "эмфизем", "парестез",
     "перелом", "кровотечен", "геморраг", "перелечив", "перелечиван", "перелеч",
@@ -167,11 +169,16 @@ COMPOUND_NORM = [
     (re.compile(r'\bxp[\s-]endo\b', re.IGNORECASE), 'xpendo'),
     (re.compile(r'\bc[\s-]shape\b', re.IGNORECASE), 'cshape'),
     (re.compile(r'\bmulti[\s-]unit\b', re.IGNORECASE), 'multiunit'),
-    (re.compile(r'\bptfe[\s-]лент[а-яё]*\b', re.IGNORECASE), 'ptfe'),
+    (re.compile(r'\b(?:ptfe|птфэ|птфе)[\s-]лент[а-яё]*\b', re.IGNORECASE), 'ptfe'),
     (re.compile(r'\bбайт[\s-]рекорд[а-яё]*\b', re.IGNORECASE), 'байтрекорд'),
     (re.compile(r'\bтитанов[а-яё]*\s+основан[а-яё]*\b', re.IGNORECASE), 'тиоснован'),
     (re.compile(r'\bлабораторн[а-яё]*\s+аналог[а-яё]*\b', re.IGNORECASE), 'лабаналог'),
     (re.compile(r'\b10[\s-]mdp\b', re.IGNORECASE), 'дигидрофосфат'),
+    (re.compile(r'\bбис[\s-]акрил[а-яё]*\b', re.IGNORECASE), 'бисакрил'),
+    (re.compile(r'\bпри[её]м[а-яё]*\s+детей\b', re.IGNORECASE), 'приемдетей'),
+    (re.compile(r'\bдетск[а-яё]*\s+при[её]м[а-яё]*\b', re.IGNORECASE), 'приемдетей'),
+    (re.compile(r'\bстекло[\s-]иономер[а-яё]*\b', re.IGNORECASE), 'стеклоиономер'),
+    (re.compile(r'\bpro[\s-]root\b', re.IGNORECASE), 'прорут'),
 ]
 
 def normalize_dental_compounds(text: str) -> str:
@@ -258,6 +265,15 @@ DENTAL_SYNONYMS: dict[str, list[str]] = {
     "перелечивание": ["перелечив", "ретрит", "перелечивание"],
     "анафилаксия": ["анафилакс", "шок"],
     "авария": ["гипохлорит", "авария", "наокль"],
+    "птфэ": ["ptfe", "тефлон", "птфэ", "птфе"],
+    "птфе": ["ptfe", "тефлон", "птфэ", "птфе"],
+    "бисакрил": ["бисакрил", "бис-акрил", "pmma", "пмма"],
+    "бис-акрил": ["бисакрил", "бис-акрил", "pmma", "пмма"],
+    "стеклоиономер": ["стеклоиономер", "сиц", "цемент"],
+    "сиц": ["стеклоиономер", "сиц", "цемент"],
+    "прорут": ["proroot", "прорут", "мта", "mta"],
+    "proroot": ["proroot", "прорут", "мта", "mta"],
+    "приемдетей": ["приемдетей", "детская", "педодонтия"],
 }
 
 
@@ -360,11 +376,15 @@ RU_SUFFIXES = [
 
 
 def stem_word(word):
-    """Отрезает окончание, если от слова остаётся не меньше четырёх символов."""
+    """Отрезает окончание, если от слова остаётся не меньше четырёх символов.
+    
+    Нормализует букву ё -> е для детерминированного сопоставления с русскими суффиксами.
+    """
+    w = (word or "").replace('ё', 'е').replace('Ё', 'Е')
     for suffix in RU_SUFFIXES:
-        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
-            return word[:-len(suffix)]
-    return word
+        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+            return w[:-len(suffix)]
+    return w
 
 
 _WORD_RE = re.compile(r"[\w-]+", re.UNICODE)

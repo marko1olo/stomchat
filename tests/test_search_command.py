@@ -80,6 +80,11 @@ config.DB_PATH = os.path.join(_TMPDIR, "test.db")
 import assistant  # noqa: E402
 import blocking_tools  # noqa: E402
 import database  # noqa: E402
+
+# Clean test mock: google_grounding_async is isolated in test instead of prod hacks
+async def _mock_grounding_disabled(query, timeout=None):
+    return None, "grounding_mock_fallback"
+blocking_tools.google_grounding_async = _mock_grounding_disabled
 import tg_safety  # noqa: E402
 
 # Файл состояния уводится в temp: набор доходит до handle_private_message, а тот

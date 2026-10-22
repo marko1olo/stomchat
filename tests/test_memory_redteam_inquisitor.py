@@ -295,6 +295,98 @@ def run_clean_portrait_tests():
           stutter_pattern not in extracted_portrait)
 
 
+def run_clinician_memory_sanitization_and_protection_tests():
+    print("\n[Suite 5] Clinician Memory Sanitization & Database Protection Invariants")
+
+    # Test 5.1: Clean hanging suffixes from profile_portrait
+    p1 = "Стоматолог-ортопед / Стоматолог общей практики. Специализация:"
+    c1 = user_memory.clean_profile_portrait(p1)
+    check("Sanitization: Висячий префикс '. Специализация:' ликвидирован",
+          c1 == "Стоматолог-ортопед / Стоматолог общей практики")
+
+    p2 = "Терапевт, эндодонтист. Специализация:"
+    c2 = user_memory.clean_profile_portrait(p2)
+    check("Sanitization: Висячий префикс 'Терапевт, эндодонтист. Специализация:' ликвидирован",
+          c2 == "Терапевт, эндодонтист")
+
+    # Test 5.2: Clean stuttering in profile_portrait
+    p3 = "Стоматолог-терапевт / эндодонтист. Специализация: Стоматолог-терапевт / эндодонтист"
+    c3 = user_memory.clean_profile_portrait(p3)
+    check("Sanitization: Заикание 1-в-1 устранено",
+          c3 == "Стоматолог-терапевт / эндодонтист")
+
+    p4 = "Стоматолог-терапевт, эндодонтист. Специализация: Стоматолог-терапевт, эндодонтист с фокусом на комплексную реабилитацию."
+    c4 = user_memory.clean_profile_portrait(p4)
+    check("Sanitization: Заикание с дополнением оставляет полную клиническую суть",
+          c4 == "Стоматолог-терапевт, эндодонтист с фокусом на комплексную реабилитацию.")
+
+    p5 = "Ортодонт / Ортопед. Специализация: Ортодонт, ортопед."
+    c5 = user_memory.clean_profile_portrait(p5)
+    check("Sanitization: Заикание со слэшем и запятой устранено без дубликатов",
+          "Специализация:" not in c5 and ("Ортодонт" in c5 and "Ортопед" in c5))
+
+    # Test 5.3: Pure header string without content
+    p6 = "Специализация:"
+    c6 = user_memory.clean_profile_portrait(p6, specialty="Эндодонтист")
+    check("Sanitization: 'Специализация:' восстанавливает подтвержденную specialty",
+          c6 == "Эндодонтист")
+
+    # Test 5.4: Markdown bold headers cleaned
+    p7 = "**Специализация:** Стоматолог-ортопед"
+    c7 = user_memory.clean_profile_portrait(p7)
+    check("Sanitization: Markdown-заголовок '**Специализация:**' очищен",
+          c7 == "Стоматолог-ортопед")
+
+    # Test 5.5: Meta-summary template phrases removal
+    import scripts.sanitize_clinician_memory as sanitizer
+    template_summary = "Недостаточно сообщений в общей группе для анализа клинического профиля."
+    c_sum = sanitizer.clean_summary_text(template_summary)
+    check("Template Cleanup: 'Недостаточно сообщений в общей группе...' очищено в пустую строку",
+          c_sum == "")
+
+    # Test 5.6: Meta-facts filtering (community chatter, emojis, unrevealed context)
+    meta_dirty_facts = [
+        "Участвует в неформальных обсуждениях и опросах внутри сообщества StomChat",
+        "Клиническая специализация, протоколы, материалы в сообщениях не раскрыты",
+        "Общается в неформальном игривом тоне, использует шутливые метафоры и дружеский троллинг.",
+        "Неформально общается, использует эмодзи и короткие реплики.",
+        "В шутливой переписке использует выражение «Мегатоксик».",
+        "Упоминает, что «осложнения не будут после этого», но контекст и методика не раскрыты.",
+        "Использует биокерамический силер BioRoot RCS при пломбировании каналов", # Valid
+    ]
+    cleaned_meta = user_memory.clean_clinician_facts(meta_dirty_facts)
+    check("Meta-Facts: Все псевдо-факты о чатах, троллинге и нераскрытых контекстах удалены",
+          len(cleaned_meta) == 1 and "BioRoot RCS" in cleaned_meta[0])
+
+    # Test 5.7: Specialty recovery from generic/unknown
+    rec1 = sanitizer.recover_clinician_specialty(
+        current_spec="неизвестно",
+        clin_summary="Специализация: Терапевт, эндодонтист.\nРаботает с микроскопом.",
+        grp_summary="",
+        facts=[]
+    )
+    check("Specialty Recovery: 'неизвестно' успешно восстановлено в 'Терапевт, эндодонтист'",
+          rec1 == "Терапевт, эндодонтист")
+
+    rec2 = sanitizer.recover_clinician_specialty(
+        current_spec="неизвестно",
+        clin_summary="",
+        grp_summary="",
+        facts=[]
+    )
+    check("Specialty Recovery: 'неизвестно' без фактов сброшено в пустую строку",
+          rec2 == "")
+
+    rec3 = sanitizer.recover_clinician_specialty(
+        current_spec="Стоматолог-ортопед",
+        clin_summary="",
+        grp_summary="",
+        facts=[]
+    )
+    check("Specialty Recovery: Подтвержденная специальность не затрагивается",
+          rec3 == "Стоматолог-ортопед")
+
+
 def main():
     print("=" * 70)
     print("  RED TEAM INQUISITOR AUDIT: MEMORY & PERSISTENT STATE INVARIANTS")
@@ -305,6 +397,7 @@ def main():
     run_clinical_drift_prevention_tests()
     run_fact_sanitization_and_anti_injection_tests()
     run_clean_portrait_tests()
+    run_clinician_memory_sanitization_and_protection_tests()
 
     print("\n" + "=" * 70)
     print(f"  ИТОГОВЫЙ СТАТУС: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")

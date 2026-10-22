@@ -54,12 +54,29 @@ retry_delay=5` (main.py), а `flood_sleep_threshold` не задан, значи
 import asyncio
 import logging
 import math
+import os
+import sys
 import time
 
 _LOG = logging.getLogger(__name__)
 
-PROD_CHAT_IDS = {-1001617420995, -1001820467444}
-TEST_CHAT_IDS = {-1004363715130, -1002302318047, -1003735006121}
+def _load_chat_ids(env_key: str, default_set: set) -> set:
+    ids = set()
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        val = getattr(cfg, env_key, None)
+        if val:
+            ids.update(int(x) for x in val if x)
+    raw = os.getenv(env_key)
+    if raw:
+        for x in raw.split(","):
+            x = x.strip()
+            if x.isdigit() or (x.startswith("-") and x[1:].isdigit()):
+                ids.add(int(x))
+    return ids or set(default_set)
+
+PROD_CHAT_IDS = _load_chat_ids("PROD_CHAT_IDS", {-1001617420995, -1001820467444})
+TEST_CHAT_IDS = _load_chat_ids("TEST_CHAT_IDS", {-1004363715130, -1002302318047, -1003735006121})
 
 def is_prod_chat(chat_id) -> bool:
     """Определяет, является ли chat_id реальным продакшн-чатом."""
@@ -69,30 +86,82 @@ def is_prod_chat(chat_id) -> bool:
         cid = int(chat_id)
     except (ValueError, TypeError):
         return False
-    if cid in TEST_CHAT_IDS:
+    test_ids = _load_chat_ids("TEST_CHAT_IDS", TEST_CHAT_IDS)
+    if cid in test_ids:
         return False
-    if cid in PROD_CHAT_IDS:
+    prod_ids = _load_chat_ids("PROD_CHAT_IDS", PROD_CHAT_IDS)
+    if cid in prod_ids:
         return True
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        try:
+            src = getattr(cfg, "SOURCE_CHAT_ID", None)
+            if src and cid == int(src):
+                return True
+        except Exception:
+            pass
     return False
+
+def _env_float(name: str, default: float) -> float:
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        val = getattr(cfg, name, None)
+        if val is not None:
+            try:
+                v = float(val)
+                if v > 0:
+                    return v
+            except (ValueError, TypeError):
+                pass
+    raw = os.getenv(name)
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return default
+
+def _env_int(name: str, default: int) -> int:
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        val = getattr(cfg, name, None)
+        if val is not None:
+            try:
+                v = int(val)
+                if v > 0:
+                    return v
+            except (ValueError, TypeError):
+                pass
+    raw = os.getenv(name)
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return default
 
 # Бюджет по умолчанию согласован с summarizer.TELEGRAM_SEND_TIMEOUT_SECONDS = 90:
 # в проекте уже есть отработавший срок на отправку, второе число рядом разъедется.
-DEFAULT_TIMEOUT_SECONDS = 90.0
+DEFAULT_TIMEOUT_SECONDS = _env_float("TG_SAFETY_TIMEOUT", 90.0)
 
 # Сколько времени должно остаться ПОСЛЕ сна, чтобы сон вообще имел смысл. Уснуть
 # и проснуться ровно на дедлайне — то же, что не спать, только бюджет потрачен.
-MIN_RETRY_SLICE_SECONDS = 1.0
+MIN_RETRY_SLICE_SECONDS = _env_float("TG_SAFETY_MIN_SLICE", 1.0)
 
 # Откат на транспортном сбое. Совпадает с тем, что делает сам telethon на
 # ServerError (`await asyncio.sleep(2)` в client/users.py).
-TRANSIENT_BACKOFF_SECONDS = 2.0
+TRANSIENT_BACKOFF_SECONDS = _env_float("TG_SAFETY_BACKOFF", 2.0)
 
 # Сколько раз повторять транспортный сбой. Обрывы здесь идут пачками (51542 за
 # один журнал), и бесконечный повтор внутри бюджета врача пользы не добавляет.
-MAX_TRANSIENT_ATTEMPTS = 3
+MAX_TRANSIENT_ATTEMPTS = _env_int("TG_SAFETY_MAX_RETRIES", 3)
 
 # Потолок памяти кулдауна. 749 практикующих врачей — верхняя оценка числа ключей.
-FLOOD_COOLDOWN_MAX_ENTRIES = 1024
+FLOOD_COOLDOWN_MAX_ENTRIES = _env_int("TG_SAFETY_MAX_COOLDOWNS", 1024)
 
 KIND_FLOOD = "flood"
 KIND_TRANSIENT = "transient"

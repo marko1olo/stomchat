@@ -566,10 +566,10 @@ async def _kill_process_tree(proc):
     finally:
         try:
             proc.kill()
-        except (ProcessLookupError, OSError):
+        except (ProcessLookupError, OSError) as exc:
             # Процесс уже мёртв — штатный исход, а не отказ: сюда приходят и после
-            # успешного taskkill выше. Записи не заслуживает.
-            pass
+            # успешного taskkill выше.
+            logger.debug("Subprocess already exited on kill pid=%s: %s", proc.pid, exc)
 
 
 _MAX_CONCURRENT_SUBPROCESSES = max(1, int(os.getenv("MAX_CONCURRENT_SUBPROCESSES", "2")))
@@ -639,10 +639,10 @@ async def _run_json_tool_guarded(action, payload, timeout=None):
             )
         try:
             proc.stdin.close()
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             # Закрытие пайпа у мёртвого ребёнка — штатный исход и ничего не
             # говорит о причине; отказ записи уже сделан выше.
-            pass
+            logger.debug("Subprocess stdin already closed pid=%s: %s", proc.pid, exc)
 
     async def _read_chunks(stream, sink):
         while True:

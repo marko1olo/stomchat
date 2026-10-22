@@ -50,8 +50,8 @@ logger = logging.getLogger("assistant")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(SCRIPT_DIR, "assistant_state.json")
 LOG_PATH = os.path.join(SCRIPT_DIR, "shadow_assistant.log")
-TEST_CHAT_ID = -1003735006121
-TEST_TOPIC_ID = 26
+TEST_CHAT_ID = int(os.getenv("SHADOW_TEST_CHAT_ID", os.getenv("TEST_CHAT_ID", "-1003735006121")))
+TEST_TOPIC_ID = int(os.getenv("SHADOW_TEST_TOPIC_ID", os.getenv("TEST_TOPIC_ID", "26")))
 
 SHADOW_TESTING = os.getenv("SHADOW_TESTING", "False").lower() in ("true", "1", "yes")
 BOT_ID = None
@@ -67,22 +67,72 @@ def get_known_bot_ids():
     if BOT_ID:
         ids.add(BOT_ID)
     try:
-        from config import BOT_ID as CFG_BOT_ID
-        if CFG_BOT_ID:
-            ids.add(int(CFG_BOT_ID))
+        import config
+        cfg_bot_id = getattr(config, "BOT_ID", None) or getattr(config, "STOMCHAT_BOT_ID", None)
+        if cfg_bot_id:
+            ids.add(int(cfg_bot_id))
+        cfg_known = getattr(config, "KNOWN_BOT_IDS", None)
+        if cfg_known:
+            ids.update(int(x) for x in cfg_known if x)
     except Exception:
         pass
     for env_key in ("BOT_ID", "TELEGRAM_BOT_ID", "STOMCHAT_BOT_ID", "ENDOCHAT_BOT_ID"):
         env_val = os.getenv(env_key)
         if env_val and env_val.isdigit():
             ids.add(int(env_val))
-    ids.update({7716348189, 7886475630, 8140417978, 7971556097, 7475073041, 8775535374})
+    env_known = os.getenv("KNOWN_BOT_IDS")
+    if env_known:
+        for part in env_known.split(","):
+            part = part.strip()
+            if part.isdigit():
+                ids.add(int(part))
+    # Безопасный набор известных ботов (без людей-администраторов!)
+    ids.update({7886475630, 8140417978, 7971556097, 7475073041, 8775535374})
     return ids
+
+
+def get_admin_user_ids() -> set:
+    """Возвращает актуальное множество ID администраторов из config/env."""
+    admins = set()
+    try:
+        import config
+        cfg_admins = getattr(config, "ADMIN_USER_IDS", None)
+        if cfg_admins:
+            admins.update(int(x) for x in cfg_admins if x)
+    except Exception:
+        pass
+    env_admins = os.getenv("ADMIN_USER_IDS")
+    if env_admins:
+        for part in env_admins.split(","):
+            part = part.strip()
+            if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+                admins.add(int(part))
+    if not admins:
+        admins.update({7716348189, 1890028643})
+    return admins
+
+
+def get_bot_username() -> str:
+    """Возвращает актуальный username бота (динамический BOT_USERNAME -> config -> env -> fallback)."""
+    if BOT_USERNAME:
+        return BOT_USERNAME.lstrip("@")
+    try:
+        import config
+        cfg_u = getattr(config, "BOT_USERNAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", None)
+        if cfg_u:
+            return str(cfg_u).lstrip("@")
+    except Exception:
+        pass
+    env_u = os.getenv("BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME")
+    if env_u:
+        return env_u.lstrip("@")
+    return "stomchat_bot"
 LAST_REFEREE_RUN = datetime(2000, 1, 1)
 ENABLE_REFEREE = False  # По умолчанию выключено: не влезать в разговоры врачей без вызова
 USER_COOLDOWNS = TTLCache(maxsize=10000, ttl=86400) # 24 часа
 REPLIED_MSG_IDS = TTLCache(maxsize=50000, ttl=604800) # 7 дней
-AUTHOR_GROUP_REPLY_COOLDOWNS = TTLCache(maxsize=5000, ttl=600)  # 10 минут кулдаун на одного автора в группах
+AUTHOR_GROUP_COOLDOWN_SECONDS = int(os.getenv("AUTHOR_GROUP_COOLDOWN_SECONDS", "600"))
+AUTHOR_GROUP_REPLY_COOLDOWNS = TTLCache(maxsize=5000, ttl=AUTHOR_GROUP_COOLDOWN_SECONDS)  # кулдаун на одного автора в группах
 
 
 def record_author_group_reply(sender_id: int) -> None:
@@ -3141,8 +3191,8 @@ async def search_knowledge_corpus(keywords, query_text="", context_type="default
                                     parts.append(f"Ключевые нюансы: {p_nuan_val}")
                                 proto_text = " ".join(" ".join(parts).split())
                                 protocol_facts.append(_corpus_entry(f"[ПРОТОКОЛ EBM: {p_tit} ({p_cat})]", proto_text))
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as e:
+                    logger.debug("clinical_protocols query operational error in %s: %s", bot_db_path, e)
                 except Exception as e:
                     logger.error(f"Error searching clinical_protocols in {bot_db_path}: {e}")
 
@@ -3400,8 +3450,8 @@ async def _safe_search_knowledge_corpus(keywords, query_text="", context_type="d
             kwargs["context_type"] = context_type
         if kwargs or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             return await fn(keywords, **kwargs)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Knowledge corpus search with kwargs failed, falling back to positional: %s", e)
     return await fn(keywords)
 
 
@@ -4863,6 +4913,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         # 0. Check Direct Bot Mention / Tag / Explicit Call (always bypasses passive cooldown)
         known_bot_handles = {
+            get_bot_username().lower(),
             (BOT_USERNAME or "").lower().lstrip("@"),
             (getattr(config, "STOMCHAT_BOT_USERNAME", "") or "").lower().lstrip("@"),
             (getattr(config, "ENDOCHAT_BOT_USERNAME", "") or "").lower().lstrip("@"),
@@ -5851,7 +5902,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             )
             if tooth_match_grp:
                 t_num = tooth_match_grp.group(1) or tooth_match_grp.group(2)
-                bot_u = (BOT_USERNAME or "docendobot").lstrip("@")
+                bot_u = get_bot_username()
                 from telethon import Button
                 group_buttons = [[Button.url(f"🦷 Анатомия и зоны риска {t_num}", f"https://t.me/{bot_u}?start=fdi_{t_num}")]]
 
@@ -5905,8 +5956,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 try:
                     import clinical_rescue
                     clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, event.chat_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
                 # Полное окно тишины списывается только здесь — после того, как
                 # сообщение реально ушло. Тред помечается обработанным тоже здесь.
                 if not is_dialogue:
@@ -6493,7 +6544,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         )
         if tooth_match_grp:
             t_num = tooth_match_grp.group(1) or tooth_match_grp.group(2)
-            bot_u = (BOT_USERNAME or "docendobot").lstrip("@")
+            bot_u = get_bot_username()
             from telethon import Button
             group_buttons = [[Button.url(f"🦷 Анатомия и зоны риска {t_num}", f"https://t.me/{bot_u}?start=fdi_{t_num}")]]
 
@@ -6547,8 +6598,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             try:
                 import clinical_rescue
                 clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, event.chat_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
             author_sender_id = getattr(event.message, "sender_id", None)
             if author_sender_id:
                 record_author_group_reply(author_sender_id)
@@ -10033,7 +10084,7 @@ async def handle_private_message(bot_client, event):
         # Admin Wipe command to delete recent bot messages
         if text.lower().startswith(("/wipe", "/del", "/delete")):
             is_authorized = False
-            if chat_id in (7716348189, 1890028643):
+            if chat_id in get_admin_user_ids():
                 is_authorized = True
             else:
                 try:
@@ -10382,8 +10433,8 @@ async def handle_private_message(bot_client, event):
             try:
                 import poll_storage
                 quiz_stats = await poll_storage.get_user_quiz_stats(chat_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to fetch user quiz stats for %s: %s", chat_id, e)
             profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
 
             from telethon import Button
@@ -11059,8 +11110,6 @@ async def handle_private_message(bot_client, event):
 
             async def _web_grounding_call(query, timeout):
                 """Google Search Grounding: gemini-2.0-flash с Google Search tool."""
-                if os.environ.get("STOMCHAT_LOG_PATH") and "websearch" in os.environ.get("STOMCHAT_LOG_PATH", ""):
-                    return None, "test_mock_fallback"
                 return await blocking_tools.google_grounding_async(query, timeout=timeout)
 
             import inspect
@@ -11487,6 +11536,7 @@ async def handle_private_message(bot_client, event):
             async def _bg_portrait():
                 try:
                     p_text = await generate_user_portrait(chat_id)
+                    p_text = user_memory.clean_profile_portrait(p_text)
                     last_msg_id = await database.get_last_msg_id()
                     if p_text and "недостаточно" not in p_text.lower() and "ошибка" not in p_text.lower():
                         await database.set_user_portrait(chat_id, p_text, last_msg_id)
@@ -12163,7 +12213,7 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
         return False
 
     from telethon import Button
-    username = (BOT_USERNAME or os.getenv("STOMCHAT_BOT_USERNAME", "stomchat_bot")).lstrip("@")
+    username = get_bot_username()
     reply_to = getattr(event, "id", None) or getattr(getattr(event, "message", None), "id", None)
 
     if is_profile:
@@ -12203,8 +12253,8 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
                 try:
                     import poll_storage
                     quiz_stats = await poll_storage.get_user_quiz_stats(sender_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to fetch user quiz stats for sender %s: %s", sender_id, e)
                 profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
                 profile_buttons = [
                     [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("⭐ Закладки", data="nav:bookmarks")],
@@ -12920,8 +12970,8 @@ async def handle_group_direct_ask(bot_client, event, question):
                 clinical_rescue.mark_case_rescued(config.DB_PATH, msg_id, chat_id)
                 if reply_to_msg_id:
                     clinical_rescue.mark_case_rescued(config.DB_PATH, reply_to_msg_id, chat_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to mark case rescued msg_id=%s: %s", msg_id, e)
 
 
 # Последний выданный ключ состояния викторины (по модулю, без знака).
@@ -13118,8 +13168,8 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
                     reply_to=msg_id
                 )
                 return
-        except Exception:
-            pass  # при сбое БД не блокируем ручную команду
+        except Exception as e:
+            logger.warning("Database check failed in manual command trigger (allowing command): %s", e)
 
     status_msg = await bot_client.send_message(
         entity=chat_id,
@@ -13884,8 +13934,8 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     # 1. Снимаем спиннер с кнопки в клиенте Telegram
     try:
         await event.answer("⚡ Запускаю клинический ИИ...", alert=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to answer launch callback event: %s", e)
 
     # 2. Формируем статус ожидания
     status_titles = {
@@ -14378,8 +14428,8 @@ async def handle_quiz_callback(bot_client, event):
             try:
                 import poll_storage
                 quiz_stats = await poll_storage.get_user_quiz_stats(event.sender_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to fetch user quiz stats for sender %s: %s", getattr(event, 'sender_id', None), e)
             import user_memory
             profile_card = user_memory.format_user_profile_card(memory, display_name, quiz_stats=quiz_stats)
 
@@ -15380,8 +15430,8 @@ async def handle_quiz_callback(bot_client, event):
             await event.answer(f"Выбран вариант {opt_letter}")
             try:
                 await database.save_pm_message(event.sender_id, "User", f"Выбираю вариант {opt_letter}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to save PM message for interactive case: %s", e)
             await handle_interactive_case_step(bot_client, event.sender_id, f"Выбираю вариант {opt_letter}", user_state)
             return
 
@@ -16222,7 +16272,7 @@ async def handle_group_calc(bot_client, event, calc_arg: str = ""):
             return
 
     # Если аргумент не подошел или пустой /calc — выводим шпаргалку с инлайн-кнопкой для ЛС
-    username = (BOT_USERNAME or os.getenv("STOMCHAT_BOT_USERNAME") or "docendobot").lstrip("@")
+    username = get_bot_username()
     from telethon import Button
     calc_text = (
         "🧮 <b>Клинические калькуляторы StomChat</b>\n\n"

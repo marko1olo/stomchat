@@ -1445,6 +1445,13 @@ async def set_user_style(user_id, style):
 
 
 async def set_user_portrait(user_id, portrait, last_msg_id):
+    try:
+        from user_memory import clean_profile_portrait
+        portrait = clean_profile_portrait(portrait)
+    except Exception:
+        pass
+    if not portrait:
+        return
     def operation():
         with _connection() as db:
             db.execute(

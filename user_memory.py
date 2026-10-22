@@ -204,7 +204,11 @@ _NEGATIVE_META_RE = re.compile(
     r'пока\s+не\s+известн[а-яё]*|'
     r'пока\s+не\s+установлен[а-яё]*|'
     r'неизвестн[а-яё]+|'
-    r'неустановлен[а-яё]+'
+    r'неустановлен[а-яё]+|'
+    r'контекст\s+не\s+раскрыт|'
+    r'методика\s+не\s+раскрыта|'
+    r'объект\s+не\s+раскрыт|'
+    r'в\s+сообщениях\s+не\s+раскрыт[а-яё]*'
     r')\b'
 )
 
@@ -223,14 +227,34 @@ _JUNK_FACT_WORDS = {
 }
 
 _FORBIDDEN_FACT_SUBSTRINGS = (
-    "admin", "админ", "root", "jailbreak", "override", "bypass",
+    "admin", "админ", "root access", "root user", "root privilege", "sudo root", "jailbreak", "override", "bypass",
     "<user", "<assistant", "<doctor", "</user", "</assistant", "</doctor",
     "<script", "</script", "javascript:", "eval(",
     "system prompt", "системный промпт", "system:", "системное сообщение",
     "ignore previous", "ignore all", "игнорируй инструкц", "игнорируй предыдущ",
     "you are now", "теперь ты", "ты теперь", "ты — клинический", "ты клинический",
     "клинический секретарь", "клинический аналитик", "консилиум stomchat", "консилиум endochat",
-    "reset database", "drop table", "truncate table"
+    "reset database", "drop table", "truncate table",
+    "составление досье", "составлению досье", "составления досье",
+    "профиль на себя", "профиля на себя", "досье на себя",
+    "делится ссылками в чате", "выше ссылка"
+)
+
+# Паттерны мета-коммуникационных фактов без клинического содержания (болталка, опросы, троллинг)
+_PURE_META_FACT_RE = re.compile(
+    r'(?i)^('
+    r'.*участвует\s+в\s+(?:неформальн[а-яё]*\s+|стоматологическ[а-яё]*\s+|профессиональн[а-яё]*\s+|эндодонтическ[а-яё]*\s+)?(?:чате|сообществе|дискуссиях|обсуждениях|опросах)\b.*|'
+    r'.*общается\s+в\s+(?:неформальн[а-яё]*|игрив[а-яё]*|шутлив[а-яё]*)\s+тоне\b.*|'
+    r'.*(?:дружеский\s+троллинг|шутливые\s+метафоры|использует\s+эмодзи|короткие\s+реплики)\b.*|'
+    r'.*проявляет\s+интерес\s+к\s+результатам\s+голосований\b.*|'
+    r'.*иронично\s+относится\s+к\s+составлению\s+досье\b.*|'
+    r'.*в\s+неформальном\s+чате\s+шутит\b.*|'
+    r'.*следит\s+за\s+чатами\s+с\s+участием\s+конкретного\s+собеседника\b.*|'
+    r'.*поддерживает\s+идею\s+сообщества\s+стоматологов.*переклички\b.*|'
+    r'.*хочет\s+получать\s+ответы\s+живых\s+коллег\s+в\s+чате\b.*|'
+    r'.*недоволен[а-яё]*\s+формальным\s+ответом\s+техподдержки\b.*|'
+    r'.*в\s+шутливой\s+переписке\s+использует\b.*'
+    r')$'
 )
 
 
@@ -241,6 +265,7 @@ def clean_clinician_facts(facts: list) -> list:
     - Блокирует системные инъекции, промпт-лики и галлюцинации роли ассистента.
     - Отсекает мусорные и односложные реплики ('ок', 'спасибо', 'да', 'нет').
     - Фильтрует псевдо-факты о самом боте вместо врача.
+    - Исключает мета-факты про опросы, переклички, троллинг и неформальные чаты.
     - Исключает дубликаты и нормализует факты.
     """
     if not facts or not isinstance(facts, list):
@@ -251,8 +276,8 @@ def clean_clinician_facts(facts: list) -> list:
         f_str = str(f).strip()
         if not f_str:
             continue
-        # Содержательная длина факта
-        if len(f_str) < 4 or len(f_str) > 250:
+        # Содержательная длина факта (до 400 символов для развернутых протоколов)
+        if len(f_str) < 4 or len(f_str) > 400:
             continue
         lower_f = f_str.lower().strip("!.,?:;)'\"«» \t")
         if lower_f in _JUNK_FACT_WORDS:
@@ -263,7 +288,12 @@ def clean_clinician_facts(facts: list) -> list:
             continue
         if lower_f.startswith(("бот ", "ассистент ", "ии ", "система ", "консилиум ответил", "чат-бот")):
             continue
-        if any(bot_tok in lower_f for bot_tok in ("stomchat", "endochat", "бот отвечает", "ассистент дал", "полезен бот", "бот полезен", "бот помогает", "ты бот", "ты — бот", "pirate bot")):
+        if any(bot_tok in lower_f for bot_tok in (
+            "stomchat", "endochat", "endohelper", "бот отвечает", "ассистент дал",
+            "полезен бот", "бот полезен", "бот помогает", "ты бот", "ты — бот", "pirate bot", "техподдержк"
+        )):
+            continue
+        if _PURE_META_FACT_RE.match(f_str):
             continue
         norm = _normalize_item(f_str)
         if norm and norm not in seen:
@@ -451,6 +481,88 @@ def deduplicate_clinical_summary(summary: str) -> str:
         result_lines.pop(0)
 
     return "\n".join(result_lines)
+
+
+_PORTRAIT_SECTION_STRIP_RE = re.compile(
+    r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*[:*]+\s*',
+    re.IGNORECASE
+)
+
+_PORTRAIT_HANGING_SPEC_RE = re.compile(
+    r'[\s.,;—\-]+(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$',
+    re.IGNORECASE
+)
+
+_PORTRAIT_STUTTER_SPEC_RE = re.compile(
+    r'^(.+?)[\s.,;—\-]+(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:\s*(.+)$',
+    re.IGNORECASE
+)
+
+
+def clean_profile_portrait(portrait: str, specialty: str = "", summary: str = "") -> str:
+    """
+    Санирует клинический портрет врача (profile_portrait):
+    - Полностью ликвидирует висячие префиксы и суффиксы «. Специализация:».
+    - Устраняет заикания ({X}. Специализация: {X}).
+    - Удаляет markdown-мусор и заголовки.
+    - При пустом результате восстанавливает валидную узкую специализацию или первую строку досье.
+    """
+    p = (portrait or "").strip()
+
+    # 1. Если весь текст — это только заголовок "Специализация:"
+    if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', p, re.IGNORECASE):
+        p = ""
+
+    # 2. Отрезаем висячий суффикс на конце: "Терапевт. Специализация:" -> "Терапевт"
+    p = _PORTRAIT_HANGING_SPEC_RE.sub('', p).strip()
+
+    # 3. Проверяем паттерн заикания: "Part1. Специализация: Part2"
+    m = _PORTRAIT_STUTTER_SPEC_RE.match(p)
+    if m:
+        part1 = m.group(1).strip()
+        part2 = m.group(2).strip()
+        part2 = _PORTRAIT_SECTION_STRIP_RE.sub('', part2).strip()
+
+        norm1 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part1))
+        norm2 = re.sub(r'[/,;\s\-]+', ' ', _normalize_item(part2))
+
+        if not part2:
+            p = part1
+        elif norm1 == norm2:
+            p = part1
+        elif norm2.startswith(norm1):
+            p = part2
+        elif norm1.startswith(norm2):
+            p = part1
+        else:
+            p = f"{part1}. {part2}"
+
+    # 4. Снимаем префикс "Специализация:" в начале, если остался
+    p = _PORTRAIT_SECTION_STRIP_RE.sub('', p).strip()
+
+    # 5. Повторно отрезаем висячий суффикс на конце, если остался
+    p = _PORTRAIT_HANGING_SPEC_RE.sub('', p).strip()
+
+    # 6. Если строка пустая, пробуем восстановить из specialty или summary
+    if not p:
+        spec_cleaned = (specialty or "").strip()
+        if spec_cleaned and spec_cleaned.lower() not in _GENERIC_SPECIALTY_PATTERNS and spec_cleaned.lower() not in ("неизвестно", "нет данных", "не определена", "не указана"):
+            p = spec_cleaned
+        elif summary:
+            lines = [l.strip() for l in summary.splitlines() if l.strip()]
+            for l in lines:
+                if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', l, re.IGNORECASE):
+                    continue
+                sub_l = _PORTRAIT_SECTION_STRIP_RE.sub('', l).strip()
+                if sub_l and "недостаточно сообщений" not in sub_l.lower():
+                    p = sub_l
+                    break
+
+    # 7. Финальная подчистка знаков препинания на концах и ограничение длины (до 400 символов)
+    p = re.sub(r'^[.,;:\s—\-*#]+', '', p).strip()
+    p = re.sub(r'[:;,—\-*#\s]+$', '', p).strip()
+    return p[:400]
+
 
 # Паттерны тривиальных сообщений (приветствия, благодарности, команды)
 _TRIVIAL_USER_PATTERNS = {
@@ -800,9 +912,9 @@ async def update_clinician_memory_async(
         if final_summary:
             lines = [l.strip() for l in final_summary.splitlines() if l.strip()]
             for l in lines:
-                if re.match(r'^(?:#+\s*)?(?:специализация|клинический\s+профиль)\s*:?\s*$', l, re.IGNORECASE):
+                if re.match(r'^(?:#+\s*|\*+\s*|[•\-*]\s*|\d+[\.\)]\s*)?(?:специализация|клинический\s+профиль)\s*:?\*?\s*$', l, re.IGNORECASE):
                     continue
-                sub_l = re.sub(r'^(?:#+\s*)?(?:специализация|клинический\s+профиль)\s*:\s*', '', l, flags=re.IGNORECASE).strip()
+                sub_l = _PORTRAIT_SECTION_STRIP_RE.sub('', l).strip()
                 if sub_l:
                     clean_first = sub_l
                     break
@@ -815,9 +927,11 @@ async def update_clinician_memory_async(
         else:
             portrait_text = clean_first
 
+        portrait_text = clean_profile_portrait(portrait_text, specialty=final_spec, summary=final_summary)
+
         if portrait_text:
             last_msg_id = await database.get_last_msg_id()
-            await database.set_user_portrait(user_id, portrait_text[:400], last_msg_id)
+            await database.set_user_portrait(user_id, portrait_text, last_msg_id)
 
         logger.info(
             f"Successfully updated & rewritten clinician PM memory for user {user_id} "

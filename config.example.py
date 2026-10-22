@@ -118,6 +118,21 @@ if SEARCH_PROVIDER == "tavily" and not TAVILY_API_KEY:
 # версионном файле — та же утечка, что и имя сессии.
 DB_PATH = get_env("DB_PATH", "stomat_bot.db")
 
+# Настройки администрирования и идентичности бота
+ADMIN_USER_IDS = []
+ADMIN_ID = 0
+PROD_CHAT_IDS = []
+TEST_CHAT_IDS = []
+BOT_USERNAME = ""
+BOT_ID = 0
+STOMCHAT_BOT_USERNAME = ""
+STOMCHAT_BOT_ID = 0
+BOT_DISPLAY_NAME = ""
+TG_SAFETY_TIMEOUT = 0.0
+TG_SAFETY_MAX_RETRIES = 0
+TG_SAFETY_BACKOFF = 0.0
+TG_SAFETY_MIN_SLICE = 0.0
+TG_SAFETY_MAX_COOLDOWNS = 0
 SUMMARY_INTERVAL = 0
 MAX_MSGS = 0
 # Час отправки дайджеста. НЕ независим от main.DIGEST_WINDOW_START_HOUR: при
