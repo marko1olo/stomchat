@@ -5938,7 +5938,24 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         user_memory_context = ""
         try:
-            user_memory_context = await user_memory.format_users_chunk_context([event.sender_id], max_chars=1200)
+            chunk_uids = [event.sender_id]
+            priority_uids = [event.sender_id]
+            if reply_to_msg_id:
+                try:
+                    p_row = await query_db_async("SELECT sender_id FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
+                    if p_row and p_row[0][0]:
+                        parent_sid = p_row[0][0]
+                        if parent_sid != event.sender_id:
+                            chunk_uids.append(parent_sid)
+                            priority_uids.append(parent_sid)
+                except Exception:
+                    pass
+            user_memory_context = await user_memory.format_users_chunk_context(
+                chunk_uids,
+                max_chars=1200,
+                priority_user_ids=priority_uids,
+                max_users=4,
+            )
         except Exception as mem_err:
             logger.warning(f"Failed to fetch user_memory for sender {event.sender_id}: {mem_err}")
 
@@ -13087,9 +13104,15 @@ NO — если это:
         recent_texts = [r[2] for r in context_rows if r[2]]
         length_guideline = calculate_context_length_guidelines(recent_texts)
 
-        # Подгружаем накопленную память беседы об участниках диалога
+        # Подгружаем накопленную память беседы об участниках диалога с Priority Ranking
         sender_ids = [r[0] for r in context_rows if r[0]]
-        users_chunk_context = await user_memory.format_users_chunk_context(sender_ids)
+        priority_uids = [event.sender_id] if getattr(event, "sender_id", None) else []
+        users_chunk_context = await user_memory.format_users_chunk_context(
+            sender_ids,
+            max_chars=1200,
+            priority_user_ids=priority_uids,
+            max_users=4,
+        )
 
         # RAG lookup for bot mention (so bot has knowledge when answering clinical questions)
         mention_wiki = None

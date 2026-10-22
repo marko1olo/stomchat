@@ -1665,6 +1665,15 @@ async def save_user_memory(
     if group_summary and len(group_summary) > 8000:
         import html_safe
         group_summary = html_safe.clip_at_sentence_text(group_summary, 8000)
+    if specialty and len(specialty) > 80:
+        specialty = specialty[:80].strip()
+    if facts_json:
+        try:
+            f_list = json.loads(facts_json) if isinstance(facts_json, str) else facts_json
+            if isinstance(f_list, list) and len(f_list) > 30:
+                facts_json = json.dumps(f_list[-30:], ensure_ascii=False)
+        except Exception:
+            pass
     def operation():
         with _connection() as db:
             existing = db.execute(
