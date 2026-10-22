@@ -144,8 +144,27 @@ def validate_fact_payload(text):
 
     bad = []
     for pos, fact in enumerate(facts, 1):
-        if not str(fact.get("f") or fact.get("content") or "").strip():
+        content_text = str(fact.get("f") or fact.get("content") or "").strip()
+        if not content_text:
             bad.append(f"факт #{pos}: пустой текст статьи")
+        else:
+            # Клинический EBM-фильтр (Rule 16: Zero Iatrogenesis):
+            toxic_match = re.search(
+                r'(?:\b(?:мышьяк(?:овист\w*|ом|а|у|е)?|депулпин\w*|форедент\w*|резорцин\w*|депофорез\w*|трикрезол\w*|крезофен\w*|формокрезол\w*)\b'
+                r'|содов\w+[\s\S]{0,25}полоскан\w*|полоскан\w+[\s\S]{0,25}сод\w*'
+                r'|(?:висфат\w*|фосфат[- ]цемент\w*|серебрян\w+\s+штифт\w*)[\s\S]{0,50}(?:обтурац\w*|пломбирован\w+.*канал\w*|в\s+канал\w*|эндодонти\w*)'
+                r'|(?:обтурац\w*|пломбирован\w+.*канал\w*|в\s+канал\w*|эндодонти\w*)[\s\S]{0,50}(?:висфат\w*|фосфат[- ]цемент\w*|серебрян\w+\s+штифт\w*))',
+                content_text,
+                re.IGNORECASE
+            )
+            if toxic_match:
+                is_critical_context = re.search(
+                    r'\b(?:устаревш\w*|ошибочн\w*|не\s+соответств\w*|запрещен\w*|осложнен\w*|распломбир\w*|перелечив\w*|токсичн\w*|яд\b|ятроген\w*)\b',
+                    content_text,
+                    re.IGNORECASE
+                )
+                if not is_critical_context:
+                    bad.append(f"факт #{pos}: токсичный/дискредитированный метод лечения (Rule 16): {toxic_match.group(0)!r}")
 
         code = fact.get("c")
         if isinstance(code, (list, tuple, set)):

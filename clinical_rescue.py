@@ -14,6 +14,9 @@ clinical_rescue.py — Демон спасения «повисших» клин
 3. Строгий кулдаун: не более 1 спасения в 30 минут, не более 4 в сутки на чат.
 4. Защита от удаленных сообщений: автоматический фоллбек на отправку без reply_to.
 5. Персистентность: таблица clinical_rescues сохраняет обработанные msg_id навсегда.
+6. Album / Turn Deduplication: если бот или врачи ответили на любое сообщение автора в пределах 10 минут — серия считается отвеченной.
+7. Ликвидация слепого спасения: неклинические изображения (скриншоты, мемы, интерфейсы) жестко фильтруются.
+8. Escape Hatch: модель обязана вернуть NOT_CLINICAL_CASE при отсутствии стоматологического объекта.
 """
 
 from __future__ import annotations
@@ -47,10 +50,57 @@ CLINICAL_KEYWORDS = [
     "гутаперч", "гуттаперч", "феррул", "дентин", "эмаль", "анестези"
 ]
 
+NON_CLINICAL_STOPWORDS = [
+    "скриншот", "интерфейс", "мем", "приложение", "меню", "текст",
+    "нет зубов", "зубы отсутствуют", "отсутствуют зубы", "зубов нет",
+    "не является рентгеном", "не содержит зубов", "не относится к стоматологии",
+    "не медицинск", "не клиническ"
+]
+
 # Кулдауны и лимиты
 RESCUE_COOLDOWN_SECONDS = 1800  # 30 минут между спасениями
 MAX_RESCUES_PER_DAY = 4
 CHECK_INTERVAL_SECONDS = 180    # проверка раз в 3 минуты
+
+
+def resolve_bot_id(bot_client=None) -> int:
+    """Динамически извлекает numeric bot_id из bot_client, окружения или config."""
+    # 1. Из bot_client (свойства me или id) — самый точный источник живого сеанса
+    if bot_client:
+        try:
+            me = getattr(bot_client, "me", None)
+            if me and getattr(me, "id", None):
+                return int(me.id)
+            cid = getattr(bot_client, "id", None)
+            if cid and isinstance(cid, int) and cid > 0:
+                return cid
+        except Exception:
+            pass
+
+    # 2. Из переменных окружения (приоритет над кэшированным config)
+    for env_var in ("TG_BOT_TOKEN", "BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):
+        token = os.getenv(env_var, "")
+        if token and ":" in str(token):
+            prefix = str(token).split(":")[0].strip()
+            if prefix.isdigit() and int(prefix) > 0:
+                return int(prefix)
+
+    # 3. Из config.BOT_ID или config токенов
+    try:
+        import config
+        cfg_bot_id = getattr(config, "BOT_ID", 0)
+        if cfg_bot_id and int(cfg_bot_id) > 0:
+            return int(cfg_bot_id)
+        for attr in ("BOT_TOKEN", "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):
+            token = getattr(config, attr, None)
+            if token and ":" in str(token):
+                prefix = str(token).split(":")[0].strip()
+                if prefix.isdigit() and int(prefix) > 0:
+                    return int(prefix)
+    except Exception:
+        pass
+
+    return 0
 
 
 def ensure_rescue_table(db_path: str):
@@ -72,18 +122,42 @@ def ensure_rescue_table(db_path: str):
         logger.warning("Failed to ensure clinical_rescues table: %s", e)
 
 
-def is_clinical_rescue_candidate(text: str, has_media: bool = False) -> bool:
+def is_clinical_rescue_candidate(
+    text: str,
+    has_media: bool = False,
+    media_description: Optional[str] = None
+) -> bool:
     """Определяет, является ли сообщение клиническим кейсом / вопросом."""
     clean = (text or "").strip().lower()
     if clean.startswith("/") or clean.startswith("!"):
         return False
+
+    desc_clean = (media_description or "").strip().lower()
+
+    # Если есть media_description и там слова неклинического содержимого — КАТЕГОРИЧЕСКИЙ ЗАПРЕТ спасения!
+    if desc_clean:
+        if any(sw in desc_clean for sw in NON_CLINICAL_STOPWORDS):
+            return False
+
+    has_clin_text = any(k in clean for k in CLINICAL_KEYWORDS) or ("🦷" in (text or ""))
+    has_clin_desc = any(k in desc_clean for k in CLINICAL_KEYWORDS) or ("зуб" in desc_clean)
+
     if has_media:
-        return True
+        # Ликвидация слепого спасения:
+        # 1. Если есть клинический текст (или эмодзи зуба 🦷) — допускается
+        if has_clin_text:
+            return True
+        # 2. Если текста нет, но vision подтвердил снимок зубов/каналов — допускается
+        if has_clin_desc:
+            return True
+        # 3. Фото без клинического текста и без клинического описания НЕЛЬЗЯ спасать вслепую!
+        return False
+
+    # Текстовое сообщение без медиа
     if len(clean) < 15:
         return False
     has_q = ("?" in clean) or any(m in clean for m in QUESTION_MARKERS)
-    has_clin = any(k in clean for k in CLINICAL_KEYWORDS)
-    return has_q and has_clin
+    return has_q and has_clin_text
 
 
 def _get_table_columns(conn, table_name: str) -> set:
@@ -143,6 +217,7 @@ def find_unanswered_clinical_candidates(
             id_col = "msg_id" if "msg_id" in cols else "id"
             date_col = "date" if "date" in cols else "timestamp"
             text_col = "text" if "text" in cols else "message"
+            media_desc_col = "m.media_description" if "media_description" in cols else "NULL as media_description"
 
             where_clauses = [
                 f"m.{date_col} >= datetime('now', ?)",
@@ -162,11 +237,36 @@ def find_unanswered_clinical_candidates(
                 where_clauses.insert(0, "m.chat_id = ?")
                 params.insert(0, chat_id)
 
+            chat_match = "AND m_other.chat_id = m.chat_id" if "chat_id" in cols else ""
+            bot_sent_match = f"OR r_other.{id_col} IN (SELECT msg_id FROM bot_sent_messages)" if "msg_id" in bot_cols else ""
+
+            # Дедупликация альбомов и серий (Turn/Album Deduplication):
+            # Если бот или врачи ответили на ДРУГОЕ сообщение того же автора в пределах 10 минут — кейс отвечен!
+            where_clauses.append(f"""NOT EXISTS (
+                SELECT 1 FROM messages m_other
+                JOIN messages r_other ON r_other.reply_to_msg_id = m_other.{id_col}
+                WHERE m_other.sender_id = m.sender_id
+                  {chat_match}
+                  AND (r_other.sender_id != m.sender_id OR (r_other.sender_id = ? AND r_other.sender_id > 0) {bot_sent_match})
+                  AND m_other.{date_col} >= datetime(m.{date_col}, '-10 minutes')
+                  AND m_other.{date_col} <= datetime(m.{date_col}, '+10 minutes')
+            )""")
+            params.append(bot_id)
+
+            # Если в bot_sent_messages есть reply_to_msg_id (старая схема / тесты)
             if "reply_to_msg_id" in bot_cols:
                 where_clauses.append(f"m.{id_col} NOT IN (SELECT reply_to_msg_id FROM bot_sent_messages WHERE reply_to_msg_id IS NOT NULL)")
+                where_clauses.append(f"""NOT EXISTS (
+                    SELECT 1 FROM messages m_other
+                    JOIN bot_sent_messages b_other ON b_other.reply_to_msg_id = m_other.{id_col}
+                    WHERE m_other.sender_id = m.sender_id
+                      {chat_match}
+                      AND m_other.{date_col} >= datetime(m.{date_col}, '-10 minutes')
+                      AND m_other.{date_col} <= datetime(m.{date_col}, '+10 minutes')
+                )""")
 
             query = f"""
-                SELECT m.{id_col} as target_msg_id, m.sender_id, m.sender_name, m.{text_col} as msg_text, m.{date_col} as msg_date, m.has_media
+                SELECT m.{id_col} as target_msg_id, m.sender_id, m.sender_name, m.{text_col} as msg_text, m.{date_col} as msg_date, m.has_media, {media_desc_col}
                 FROM messages m
                 WHERE {' AND '.join(where_clauses)}
                 ORDER BY m.{id_col} ASC
@@ -174,12 +274,14 @@ def find_unanswered_clinical_candidates(
             cursor = conn.cursor()
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
+            raw_candidates = []
             for r in rows:
                 raw_text = r["msg_text"] or ""
                 has_media = bool(r["has_media"])
-                if is_clinical_rescue_candidate(raw_text, has_media):
+                cand_desc = r["media_description"] if "media_description" in r.keys() else None
+                if is_clinical_rescue_candidate(raw_text, has_media, media_description=cand_desc):
                     target_id = r["target_msg_id"]
-                    candidates.append({
+                    raw_candidates.append({
                         "id": target_id,
                         "msg_id": target_id,
                         "chat_id": chat_id,
@@ -189,15 +291,46 @@ def find_unanswered_clinical_candidates(
                         "text": raw_text,
                         "timestamp": r["msg_date"],
                         "date": r["msg_date"],
-                        "has_media": has_media
+                        "has_media": has_media,
+                        "media_description": cand_desc
                     })
+
+            # Внутрицикловая дедупликация серии/альбома от одного автора в интервале 10 минут
+            seen_author_turns = []
+            for c in raw_candidates:
+                s_id = c["sender_id"]
+                raw_dt = c["timestamp"]
+                c_dt = None
+                try:
+                    c_dt = datetime.datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+                is_duplicate = False
+                if c_dt:
+                    for prev_s, prev_t in seen_author_turns:
+                        if prev_s == s_id and abs((c_dt - prev_t).total_seconds()) <= 600:
+                            is_duplicate = True
+                            break
+                if not is_duplicate:
+                    candidates.append(c)
+                    if c_dt:
+                        seen_author_turns.append((s_id, c_dt))
     except Exception as e:
         logger.error("Error querying unanswered clinical candidates: %s", e)
     return candidates
 
 
-def mark_case_rescued(db_path: str, msg_id: int, chat_id: int):
-    """Помечает сообщение как спасенное в БД."""
+def mark_case_and_album_rescued(
+    db_path: str,
+    msg_id: int,
+    chat_id: int,
+    sender_id: Optional[int] = None,
+    timestamp: Optional[str] = None
+):
+    """
+    Помечает кейс и все сообщения того же автора в пределах 10 минут (альбом/серию)
+    в таблице clinical_rescues, исключая повторные спасения других кадров.
+    """
     try:
         with sqlite3.connect(db_path, timeout=30.0) as conn:
             conn.execute("PRAGMA busy_timeout = 30000")
@@ -207,9 +340,45 @@ def mark_case_rescued(db_path: str, msg_id: int, chat_id: int):
                 INSERT OR REPLACE INTO clinical_rescues (msg_id, chat_id, rescued_at)
                 VALUES (?, ?, ?)
             """, (msg_id, chat_id, now_iso))
+
+            if sender_id and timestamp:
+                cols = _get_table_columns(conn, "messages")
+                id_col = "msg_id" if "msg_id" in cols else "id"
+                date_col = "date" if "date" in cols else "timestamp"
+                chat_filter = "AND chat_id = ?" if "chat_id" in cols else ""
+                params: List[Any] = [sender_id, str(timestamp), str(timestamp)]
+                if "chat_id" in cols:
+                    params.append(chat_id)
+
+                query = f"""
+                    SELECT {id_col} FROM messages
+                    WHERE sender_id = ?
+                      AND {date_col} >= datetime(?, '-10 minutes')
+                      AND {date_col} <= datetime(?, '+10 minutes')
+                      {chat_filter}
+                """
+                cur = conn.cursor()
+                cur.execute(query, tuple(params))
+                for (a_id,) in cur.fetchall():
+                    if a_id and a_id != msg_id:
+                        conn.execute("""
+                            INSERT OR REPLACE INTO clinical_rescues (msg_id, chat_id, rescued_at)
+                            VALUES (?, ?, ?)
+                        """, (a_id, chat_id, now_iso))
             conn.commit()
     except Exception as e:
-        logger.warning("Failed to mark case %s as rescued: %s", msg_id, e)
+        logger.warning("Failed to mark case %s (and album) as rescued: %s", msg_id, e)
+
+
+def mark_case_rescued(
+    db_path: str,
+    msg_id: int,
+    chat_id: int,
+    sender_id: Optional[int] = None,
+    timestamp: Optional[str] = None
+):
+    """Помечает сообщение как спасенное в БД."""
+    mark_case_and_album_rescued(db_path, msg_id, chat_id, sender_id=sender_id, timestamp=timestamp)
 
 
 def get_rescues_count_24h(db_path: str, chat_id: int) -> int:
@@ -243,22 +412,23 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
     msg_id = candidate.get("id")
 
     # Подтягиваем описание снимка из базы, если было медиа
-    clean_d = ""
+    clean_d = candidate.get("media_description") or ""
     multimodal_image_urls = []
     if has_media:
-        try:
-            import database
-            rows = await database.query_db_async("SELECT media_description FROM messages WHERE msg_id = ?", (msg_id,))
-            if rows and rows[0] and rows[0][0]:
-                cand_desc = str(rows[0][0]).strip()
-                if cand_desc and cand_desc not in (
-                    "-", "None", "MEDIA_UNAVAILABLE", "[медиа — ошибка анализа]",
-                    "[Клинический снимок/рентген]", "[Клинический снимок/медиафайл]",
-                    "[Ожидается разбор изображения]"
+        if not clean_d:
+            try:
+                import database
+                rows = await database.query_db_async("SELECT media_description FROM messages WHERE msg_id = ?", (msg_id,))
+                if rows and rows[0] and rows[0][0]:
+                    cand_desc = str(rows[0][0]).strip()
+                    if cand_desc and cand_desc not in (
+                        "-", "None", "MEDIA_UNAVAILABLE", "[медиа — ошибка анализа]",
+                        "[Клинический снимок/рентген]", "[Клинический снимок/медиафайл]",
+                        "[Ожидается разбор изображения]"
                     ):
-                    clean_d = cand_desc
-        except Exception as e:
-            logger.debug("Failed to fetch media_description in clinical_rescue: %s", e)
+                        clean_d = cand_desc
+            except Exception as e:
+                logger.debug("Failed to fetch media_description in clinical_rescue: %s", e)
 
         try:
             import media_tools
@@ -282,6 +452,20 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
         logger.warning("Clinical rescue aborted for msg_id=%s: no text, no vision description, and no images.", msg_id)
         return None
 
+    # Дополнительная проверка: если в описании есть не-клинические стоп-слова — сразу отбой и персистентная блокировка
+    if clean_d and any(sw in clean_d.lower() for sw in NON_CLINICAL_STOPWORDS):
+        logger.info("🛑 Media description contains non-clinical markers for msg_id=%s ('%s'). Suppressing rescue forever.",
+                    msg_id, clean_d[:100])
+        await asyncio.to_thread(
+            mark_case_and_album_rescued,
+            db_path,
+            msg_id,
+            candidate.get("chat_id"),
+            candidate.get("sender_id"),
+            candidate.get("timestamp") or candidate.get("date")
+        )
+        return None
+
     is_endo = "endo" in db_path.lower()
     specialty = "врач стоматолог-эндодонтист у кресла" if is_endo else "врач-стоматолог у кресла"
     chat_title = "EndoChat" if is_endo else "StomChat"
@@ -303,9 +487,16 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
     prompt = (
         f"Ты — практикующий {specialty} в закрытом профессиональном чате врачей {chat_title}.\n"
         f"{case_block}\n\n"
+        "ОБЯЗАТЕЛЬНЫЙ ФИЛЬТР БЕЗОПАСНОСТИ (ESCAPE HATCH):\n"
+        "Если на переданном снимке или в тексте НЕТ клинической стоматологической картины "
+        "(отсутствуют зубы, зубные ряды, корневые каналы, челюсти, костная ткань, стоматологические рентгенограммы КЛКТ/ОПТГ/прицельные снимки), "
+        "а изображен скриншот интерфейса, экрана смартфона, приложения, сайта, бота, программы, меню, текст переписки, мем, документ, лицо человека или бытовая фотография — "
+        "ты ОБЯЗАН ответить РОВНО ОДНИМ МАРКЕРОМ:\n"
+        "NOT_CLINICAL_CASE\n"
+        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать клинические диагнозы, зубы по FDI, писать «Зуб по FDI: отсутствует» или предлагать протоколы лечения для не-стоматологических изображений!\n\n"
         f"Дай конкретный, краткий, высокоточный доказательный разбор по {standards}.\n\n"
         "СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:\n"
-        f"1. Начни ответ сразу по существу с клинического вердикта: анатомия, зуб FDI, патология (никаких шаблонных преамбул «Доктор, по вашему снимку», никаких эмодзи вроде 👨‍⚕️).\n"
+        "1. Начни ответ сразу по существу с клинического вердикта: анатомия, зуб FDI, патология (никаких шаблонных преамбул «Доктор, по вашему снимку», никаких эмодзи вроде 👨‍⚕️).\n"
         "2. Дай четкую тактику по пунктам (диагностика, протоколы, размеры файлов/инструментов, ирриганты, материалы, риски).\n"
         "3. Форматирование СТРОГО в чистом HTML (<b>, <i>, <code>). НИКАКОГО сырого Markdown (никаких ** или ##)!\n"
         "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать эмодзи и задавать дежурные псевдо-вовлекающие вопросы в конце ответа.\n"
@@ -325,8 +516,35 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
         resp, err = await blocking_tools.generate_gemini_text_async(prompt, status_ctx, timeout=90.0)
         raw_text = getattr(resp, "text", "") or ""
         if raw_text and raw_text.strip():
-            # Очистка от случайных Markdown-тегов
             clean_resp = raw_text.strip()
+            # Проверка escape hatch маркера от модели
+            if "NOT_CLINICAL_CASE" in clean_resp.upper():
+                logger.info("🛑 Model identified non-clinical case (NOT_CLINICAL_CASE) for msg_id=%s. Suppressing rescue forever.", msg_id)
+                await asyncio.to_thread(
+                    mark_case_and_album_rescued,
+                    db_path,
+                    msg_id,
+                    candidate.get("chat_id"),
+                    candidate.get("sender_id"),
+                    candidate.get("timestamp") or candidate.get("date")
+                )
+                return None
+
+            # Дополнительный валидатор от галлюцинаций: если модель вернула "зуб по fdi: отсутствует" или аналогичное
+            lower_resp = clean_resp.lower()
+            if ("зуб по fdi: отсутствует" in lower_resp or "зуб по fdi: не визуализируется" in lower_resp or "зуб отсутствует" in lower_resp) and not has_text:
+                logger.warning("🛑 Model generated absent-tooth hallucination on non-text media for msg_id=%s. Suppressing rescue forever.", msg_id)
+                await asyncio.to_thread(
+                    mark_case_and_album_rescued,
+                    db_path,
+                    msg_id,
+                    candidate.get("chat_id"),
+                    candidate.get("sender_id"),
+                    candidate.get("timestamp") or candidate.get("date")
+                )
+                return None
+
+            # Очистка от случайных Markdown-тегов
             if clean_resp.startswith("```html"):
                 clean_resp = clean_resp[7:]
             if clean_resp.startswith("```"):
@@ -354,7 +572,7 @@ async def execute_rescue_for_candidate(
 
     rescue_text = await generate_clinical_rescue_text(candidate, db_path, bot_client=bot_client)
     if not rescue_text:
-        logger.warning("Empty rescue text generated for msg_id=%s", msg_id)
+        logger.warning("Empty rescue text generated for msg_id=%s (rejected or suppressed)", msg_id)
         return False
 
     # Безопасная отправка с защитой от удаленного сообщения (Ghost Reply)
@@ -379,9 +597,16 @@ async def execute_rescue_for_candidate(
             logger.error("Failed direct rescue send for msg_id=%s: %s", msg_id, send_err)
             return False
 
-    # Записываем в базу
+    # Записываем в базу спасение сообщения и всей связанной серии автора
     sent_id = getattr(sent_msg, "id", None)
-    await asyncio.to_thread(mark_case_rescued, db_path, msg_id, chat_id)
+    await asyncio.to_thread(
+        mark_case_and_album_rescued,
+        db_path,
+        msg_id,
+        chat_id,
+        candidate.get("sender_id"),
+        candidate.get("timestamp") or candidate.get("date")
+    )
     _LAST_RESCUE_TIME[chat_id] = datetime.datetime.now(datetime.timezone.utc)
 
     # Сохраняем в bot_sent_messages
@@ -431,7 +656,8 @@ async def run_clinical_rescue_cycle(bot_client, db_path: str, chat_id: int, bot_
                     recent_activity)
         return 0
 
-    candidates = await asyncio.to_thread(find_unanswered_clinical_candidates, db_path, chat_id, bot_id=bot_id)
+    effective_bot_id = bot_id or resolve_bot_id(bot_client)
+    candidates = await asyncio.to_thread(find_unanswered_clinical_candidates, db_path, chat_id, bot_id=effective_bot_id)
     if not candidates:
         return 0
 
@@ -454,16 +680,25 @@ async def clinical_rescue_daemon(
     import config
     active_db = db_path or getattr(config, "DB_PATH", "stomat_bot.db")
     active_chat = chat_id or getattr(config, "SOURCE_CHAT_ID", None)
-    bot_id = getattr(config, "BOT_ID", 0)
+    bot_id = resolve_bot_id(bot_client)
 
     if not active_chat:
         logger.warning("Clinical Rescue Daemon: SOURCE_CHAT_ID is not configured. Exiting daemon.")
         return
 
-    logger.info("🚑 Clinical Rescue Daemon запущен (chat=%s, interval=%ds)", active_chat, check_interval_sec)
+    logger.info("🚑 Clinical Rescue Daemon запущен (chat=%s, bot_id=%s, interval=%ds)", active_chat, bot_id, check_interval_sec)
 
     while True:
         try:
+            if bot_id == 0:
+                bot_id = resolve_bot_id(bot_client)
+                if bot_id == 0 and bot_client:
+                    try:
+                        me = await bot_client.get_me()
+                        if me and getattr(me, "id", None):
+                            bot_id = int(me.id)
+                    except Exception:
+                        pass
             await run_clinical_rescue_cycle(bot_client, active_db, active_chat, bot_id=bot_id)
         except asyncio.CancelledError:
             logger.info("Clinical Rescue Daemon stopped.")

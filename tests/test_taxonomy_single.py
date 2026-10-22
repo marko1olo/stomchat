@@ -65,6 +65,7 @@ import taxonomy as T   # noqa: E402
 import savdel          # noqa: E402
 import checker         # noqa: E402
 import distiller       # noqa: E402
+import reclass         # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -110,6 +111,9 @@ check("checker.CAT_NAMES — тот же объект, что taxonomy.DISPLAY_N
 check("distiller.KNOWLEDGE_TREE — тот же объект, что taxonomy.KNOWLEDGE_TREE",
       distiller.KNOWLEDGE_TREE is T.KNOWLEDGE_TREE,
       "дерево промпта снова отдельное — модель разметит базу кодами, которых сито не знает")
+check("reclass.KNOWLEDGE_TREE — тот же объект, что taxonomy.KNOWLEDGE_TREE",
+      reclass.KNOWLEDGE_TREE is T.KNOWLEDGE_TREE,
+      "дерево промпта в reclass снова отдельное — модель не видит разделы 8-10")
 for _name in ("LEGAL_CODES", "LEGAL_SECTIONS", "LEAF_CODES", "LEAF_CHILDREN",
               "NON_EXPORTABLE_LEAVES"):
     check(f"distiller.{_name} — тот же объект, что в taxonomy",

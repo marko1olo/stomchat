@@ -179,6 +179,82 @@ class TestQuestionLifeline(unittest.IsolatedAsyncioTestCase):
         # Должен отмениться
         self.assertNotIn(7002, mgr.pending_questions)
 
+    def test_emergency_iatrogenic_detection(self):
+        """Red Team: экстренные ятрогении, острая хирургия, буква ё и морфология."""
+        scenarios = [
+            "Анафилаксия на артикаин, давление падает, дозировка адреналина срочно!",
+            "Аспирация инструмента пациентом, обломок ушел в дыхательные пути! Помогите",
+            "Сломал челюсть при удалении восьмерки, патологическая подвижность! Что делать?",
+            "Гипохлоритовая авария, отек растет на глазах! Что колоть?",
+            "Подкожная эмфизема щеки после ирригации, крепитация при пальпации. Какой протокол?",
+            "Биоплёнка в канале не поддается ирригации, что думаете?",
+            "Сломал файл в апикальной трети, как пройти?",
+            "Идет сложное перелечивание корня, подскажите тактику?",
+        ]
+        for s in scenarios:
+            self.assertTrue(is_clinical_question_candidate(s), f"Клинический вопрос не распознан: {s}")
+
+    async def test_stale_question_rejected_on_track(self):
+        """Red Team: старые сообщения из бэклога/оффлайна не должны спамить запоздалыми ответами."""
+        mgr = QuestionLifelineManager(delay_seconds=1200)
+        old_time = datetime.datetime.now() - datetime.timedelta(minutes=25)
+        pq = mgr.track_question(
+            msg_id=8001,
+            chat_id=555,
+            sender_id=10,
+            sender_name= "Иван",
+            text="Сломал файл в апикальной трети, как пройти?",
+            msg_date=old_time
+        )
+        self.assertIsNone(pq, "Старый вопрос (25 мин) не должен был встать на Lifeline")
+        self.assertNotIn(8001, mgr.pending_questions)
+
+    async def test_stale_question_cancelled_on_execute(self):
+        """Red Team: если между вопросом и срабатыванием прошло > max_age (пациент ушел), отменяем."""
+        triggered = []
+
+        async def fake_send(chat_id, reply_to_msg_id, text):
+            triggered.append((chat_id, reply_to_msg_id, text))
+
+        mgr = QuestionLifelineManager(
+            delay_seconds=1,
+            send_message_callback=fake_send
+        )
+        mgr.max_age_seconds = 2  # для быстрого теста ставим 2 секунды
+
+        pq = mgr.track_question(
+            msg_id=8002,
+            chat_id=555,
+            sender_id=10,
+            sender_name="Иван",
+            text="Сломал файл в канале, как обойти?"
+        )
+        self.assertIsNotNone(pq)
+        # Симулируем, что вопрос создан 5 секунд назад (устарел)
+        pq.created_at = datetime.datetime.now() - datetime.timedelta(seconds=5)
+
+        await asyncio.sleep(1.5)
+        self.assertEqual(len(triggered), 0, "Устаревший вопрос не должен был отправить Lifeline")
+
+    async def test_cleanup_stale_questions(self):
+        """Red Team: периодическая очистка зависших кандидатов из памяти."""
+        mgr = QuestionLifelineManager(delay_seconds=1200)
+        pq = mgr.track_question(
+            msg_id=8003,
+            chat_id=555,
+            sender_id=10,
+            sender_name="Иван",
+            text="Сломал файл в канале, как обойти?"
+        )
+        self.assertIn(8003, mgr.pending_questions)
+        # Искусственно состариваем на 2 часа
+        pq.created_at = datetime.datetime.now() - datetime.timedelta(hours=2)
+
+        cleaned = mgr.cleanup_stale_questions(max_age_seconds=3600)
+        self.assertEqual(cleaned, 1)
+        self.assertNotIn(8003, mgr.pending_questions)
+
+
 
 if __name__ == "__main__":
     unittest.main()

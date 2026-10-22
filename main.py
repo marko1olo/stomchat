@@ -2920,7 +2920,8 @@ async def handle_new_message(event):
                         sender_name=sender_name,
                         text=text,
                         has_media=has_media,
-                        media_description=media_description
+                        media_description=media_description,
+                        msg_date=getattr(event.message, 'date', None)
                     )
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"

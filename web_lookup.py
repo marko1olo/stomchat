@@ -50,6 +50,7 @@
 ни сети, ни чтения конфига, ни настройки логирования.
 """
 import asyncio
+import ipaddress
 import logging
 import re
 import time
@@ -132,6 +133,77 @@ def _host_of(url):
     return host[4:] if host.startswith("www.") else host
 
 
+_PROMPT_INJECTION_RE = re.compile(
+    r"(?i)\b(?:"
+    r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions|"
+    r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions|"
+    r"system\s*instruction\s*:|"
+    r"system\s*prompt\s*:|"
+    r"you\s+are\s+now\s+(?:an?\s+)?(?:unrestricted|evil|dan|new)|"
+    r"override\s+(?:all\s+)?(?:system|previous)\s+rules|"
+    r"забудь\s+(?:все\s+)?(?:предыдущие\s+)?инструкции|"
+    r"отмени\s+(?:все\s+)?(?:предыдущие\s+)?правила|"
+    r"ты\s+больше\s+не\s+(?:бот|стоматолог|ассистент)|"
+    r"ты\s+теперь\s+(?:нерегулируемый|свободный)"
+    r")\b",
+    re.UNICODE,
+)
+
+_SPECIAL_TOKENS_RE = re.compile(
+    r"(?:<\|im_start\|>|<\|im_end\|>|<\|system\|>|\[INST\]|\[/INST\]|<<SYS>>|<</SYS>>|\[SYSTEM\]|\[/SYSTEM\]|<\/?system>|<\/?instructions?>)",
+    re.IGNORECASE,
+)
+
+_HTML_BLOCKS_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>", re.UNICODE)
+_HTML_TAGS_RE = re.compile(r"<[a-zA-Z/][^>]*>", re.UNICODE)
+
+
+def sanitize_excerpt(text: str) -> str:
+    """
+    Очистка выдержки стороннего сайта от инъекций промптов, управляющих токенов
+    LLM и сырого HTML/скриптов с сохранением клинических знаков сравнения (< 2 мм, > 5 мг).
+    """
+    if not text:
+        return ""
+    text = _HTML_BLOCKS_RE.sub(" ", text)
+    text = _SPECIAL_TOKENS_RE.sub(" ", text)
+    text = _HTML_TAGS_RE.sub(" ", text)
+    text = _PROMPT_INJECTION_RE.sub(" ", text)
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _is_ssrf_host(host: str) -> bool:
+    """
+    True, если хост ведёт на localhost, loopback, приватные сети или облачные метаданные.
+    Защита от SSRF при разборе ссылок внешних провайдеров.
+    """
+    if not host:
+        return False
+    host_clean = host.strip().lower()
+    if host_clean.startswith("[") and host_clean.endswith("]"):
+        host_clean = host_clean[1:-1]
+    elif ":" in host_clean:
+        parts = host_clean.split(":")
+        if len(parts) == 2 and parts[1].isdigit():
+            host_clean = parts[0]
+    if host_clean in ("localhost", "0.0.0.0", "127.0.0.1", "::1", "::"):
+        return True
+    if any(host_clean.endswith("." + bad) for bad in ("local", "internal", "lan", "corp", "home.arpa", "localdomain")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host_clean)
+        return (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
 def parse_result(raw):
     """
     Результат провайдера -> {"text", "url", "host"}. None, если разбирать нечего.
@@ -152,6 +224,10 @@ def parse_result(raw):
         if not text:
             return None
         if url:
+            host = _host_of(url)
+            if _is_ssrf_host(host):
+                logger.warning("web lookup SSRF dropped host=%s url=%s", host, url[:60])
+                return None
             # Поле со ссылкой — истина. Искать ссылку в тексте при заполненном
             # поле нельзя: на странице бывает свой блок «источник», и хост из него
             # уводит и уровень доверия, и отсев рекламы на чужой домен. Измерено:
@@ -161,13 +237,14 @@ def parse_result(raw):
             # Из самой выдержки ссылки убираем: они не источник и в подпись не
             # попадают, а в промпте модель цитирует их наравне с фактами.
             excerpt = _strip_urls(text)
+            excerpt = sanitize_excerpt(excerpt)
             if not excerpt:
                 # От выдержки осталась одна ссылка. Показать её как источник с
                 # номером — значит дать модели пустое место, на которое можно
                 # сослаться: [1] будет стоять под утверждением, которого в
                 # источнике нет.
                 return None
-            return {"text": excerpt, "url": url, "host": _host_of(url)}
+            return {"text": excerpt, "url": url, "host": host}
         # Поля со ссылкой нет — полуструктурная нагрузка старой версии, ссылка
         # может лежать внутри текста. Не поискать её значит показать врачу
         # утверждение без источника, то есть ровно тот отказ, ради которого этот
@@ -200,14 +277,20 @@ def parse_result(raw):
                 # принадлежит тексту, и забрать её значит испортить выдержку.
                 text = (text[:found.start()] + text[found.start() + len(url):]).strip()
 
+    host = _host_of(url)
+    if url and _is_ssrf_host(host):
+        logger.warning("web lookup SSRF dropped host=%s url=%s", host, url[:60])
+        return None
     # Извлечённую ссылку убрали выше, но в тексте могут остаться ДРУГИЕ: страница
     # ссылается на партнёров и на себя. Обе формы обязаны давать одну выдержку,
     # иначе расхождение путей вернётся тем же классом отказа.
     text = _strip_urls(text)
+    text = sanitize_excerpt(text)
     text = text.strip().strip("•▪\U0001f539-– \n\t")
     if not text:
         return None
-    return {"text": text, "url": url, "host": _host_of(url)}
+    return {"text": text, "url": url, "host": host}
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,20 +303,26 @@ def parse_result(raw):
 # в этом проекте ловилось уже восемь раз, так что здесь только суффиксное
 # сравнение с точкой.
 SOURCE_TIERS = (
-    # 1. Исследования и систематические обзоры.
+    # 1. Исследования, систематические обзоры и клинические регистры.
     (1, (
         "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "cochrane.org",
         "cochranelibrary.com", "jada.ada.org", "nature.com", "thelancet.com",
-        "sciencedirect.com", "link.springer.com", "onlinelibrary.wiley.com",
-        "bmj.com", "jclinmed.com", "frontiersin.org", "mdpi.com",
+        "sciencedirect.com", "link.springer.com", "springer.com",
+        "onlinelibrary.wiley.com", "wiley.com", "bmj.com", "jclinmed.com",
+        "frontiersin.org", "mdpi.com", "clinicaltrials.gov",
+        "clinicaltrialsregister.eu", "nejm.org", "jamanetwork.com",
+        "scholar.google.com", "karger.com", "tandfonline.com",
+        "academic.oup.com", "oup.com", "annals.org", "cell.com",
     )),
-    # 2. Профессиональные организации и регуляторы: клинические рекомендации,
-    # инструкции к препаратам, официальные позиции.
+    # 2. Профессиональные организации, регуляторы, инструкции к препаратам и ведущие академические центры.
     (2, (
-        "ada.org", "efp.org", "aae.org", "aaoms.org", "who.int", "fdiworlddental.org",
+        "ada.org", "efp.org", "aae.org", "aaoms.org", "aaid-implant.org",
+        "who.int", "fdiworlddental.org", "fda.gov", "cdc.gov", "ema.europa.eu",
+        "mayoclinic.org", "clevelandclinic.org", "clinicalkey.com",
         "grls.rosminzdrav.ru", "rlsnet.ru", "drugs.com", "dailymed.nlm.nih.gov",
         "e-lactancia.org", "medscape.com", "minzdrav.gov.ru", "cr.minzdrav.gov.ru",
         "e-stomatology.ru", "straumann.com", "dentsplysirona.com",
+        "endocrine.org", "thyroid.org", "diabetes.org", "easd.org", "aace.com",
     )),
     # 3. Русскоязычная профессиональная периодика и научные архивы.
     (3, (
@@ -249,23 +338,20 @@ SOURCE_TIERS = (
 # такой источник берём, но последним и с пометкой.
 UNKNOWN_TIER = 5
 
+# Неклинические потребительские ресурсы, форумы и жёлтая пресса, выдача которых
+# для врача является мусором и подрывает доказательную медицину.
+JUNK_CONSUMER_DOMAINS = (
+    "woman.ru", "dzen.ru", "zen.yandex.ru", "zen.yandex.com", "babyblog.ru",
+    "pikabu.ru", "otvet.mail.ru", "mail.ru", "tiensmed.ru", "ayzdorov.ru",
+    "fb.ru", "syl.ru", "kakprosto.ru", "bolshoyvopros.ru", "forum.cosmo.ru",
+    "health.mail.ru", "kp.ru", "aif.ru", "lifehacker.ru", "adme.media",
+    "irecommend.ru", "otzovik.com", "otzovik.ru", "avito.ru", "zoon.ru",
+    "prodoctorov.ru", "napopravku.ru", "docdoc.ru", "sberhealth.ru",
+)
+
 # Признаки рекламы клиники в ХОСТЕ. Здесь допустима проверка вхождением: это
 # именно поиск слова внутри имени домена ("implant-moscow.ru"), а не сравнение
 # доменов между собой.
-#
-# ДОЛГ P1 врач: маркер ищется подстрокой ВНУТРИ метки домена, и единственная
-#   защита авторитетного источника — попасть в SOURCE_TIERS руками -> замер
-#   29 июля 2026 на 15 настоящих источниках: 7 выброшено как реклама клиники —
-#   clinicaltrials.gov, clinicaltrialsregister.eu, mayoclinic.org,
-#   my.clevelandclinic.org, clinicalkey.com (все по подстроке "clinic") и
-#   aaid-implant.org (по "implant"); на выдаче из clinicaltrials.gov плюс
-#   mayoclinic.org врач получает НЕ ссылки, а текст «нашлась только реклама
-#   клиник — профессиональных материалов нет», то есть регистр клинических
-#   исследований выдаётся за рекламу. Отсев самой рекламы при этом не страдает:
-#   4 рекламных домена из 4 отсеяны и без этих маркеров по тексту. Тот же класс
-#   «совпадение подстрокой», что в проекте ловился восемь раз; правило рядом
-#   (_host_matches) уже сравнивает по границе метки — маркеры хоста на него не
-#   перевели.
 JUNK_HOST_MARKERS = (
     "stomatolog-", "-stomatolog", "implant", "implanty", "zubi", "zuby", "clinic",
     "klinika", "dental-clinic", "prices", "price", "zapis", "vsevrachi", "doctor-",
@@ -301,7 +387,8 @@ def tier_of(host):
 
 def is_advertising(entry):
     """
-    True, если выдержка похожа на рекламу клиники. Причина — вторым значением.
+    True, если выдержка похожа на рекламу клиники или неклинический потребительский ресурс.
+    Причина — вторым значением.
 
     Известный профессиональный источник рекламой не объявляется никогда: у
     журнала может быть в тексте слово «акция» (акция препарата, акционный потенциал),
@@ -310,6 +397,9 @@ def is_advertising(entry):
     host = entry.get("host") or ""
     if tier_of(host) < UNKNOWN_TIER:
         return False, ""
+    for junk_domain in JUNK_CONSUMER_DOMAINS:
+        if _host_matches(host, junk_domain):
+            return True, f"домен неклинический/потребительский ({junk_domain})"
     for marker in JUNK_HOST_MARKERS:
         if marker in host:
             return True, f"домен рекламный ({marker})"
@@ -319,6 +409,7 @@ def is_advertising(entry):
         # Один маркер — совпадение; два и больше в одной выдержке это уже реклама.
         return True, "текст рекламный (" + ", ".join(hits[:3]) + ")"
     return False, ""
+
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +869,143 @@ def query_variants(query):
         if candidate and candidate not in variants:
             variants.append(candidate)
     return variants[:SEARCH_ATTEMPTS]
+
+
+# ---------------------------------------------------------------------------
+# Клиническая трансляция терминов и оптимизация для PubMed / Google Scholar
+# ---------------------------------------------------------------------------
+
+CLINICAL_EN_TRANSLATIONS = {
+    # Заболевания и патологии
+    "пульпит": "pulpitis",
+    "пульпита": "pulpitis",
+    "периодонтит": "periodontitis",
+    "периодонтита": "periodontitis",
+    "кариес": "dental caries",
+    "кариеса": "dental caries",
+    "гингивит": "gingivitis",
+    "пародонтит": "periodontitis",
+    "пародонтита": "periodontitis",
+    "периимплантит": "peri-implantitis",
+    "мукозит": "peri-implant mucositis",
+    "бруксизм": "bruxism",
+    "альвеолит": "dry socket alveolar osteitis",
+    "перфорация": "root canal perforation repair",
+    "перфорации": "root canal perforation repair",
+    "резорбция": "root resorption",
+    "гипоплазия": "enamel hypoplasia",
+    "флюороз": "dental fluorosis",
+
+    # Материалы и медикаменты
+    "биодентин": "Biodentine",
+    "мта": "MTA mineral trioxide aggregate",
+    "артикаин": "articaine",
+    "артикаина": "articaine",
+    "мепивакаин": "mepivacaine",
+    "лидокаин": "lidocaine",
+    "хлоргексидин": "chlorhexidine",
+    "гипохлорит": "sodium hypochlorite",
+    "эдта": "EDTA",
+    "гидроксид кальция": "calcium hydroxide",
+    "дисиликат лития": "lithium disilicate",
+    "оксид циркония": "zirconia",
+    "цирконий": "zirconia",
+    "композит": "composite resin",
+
+    # Процедуры и анатомические зоны
+    "синус-лифтинг": "sinus floor elevation",
+    "синуслифтинг": "sinus floor elevation",
+    "имплантация": "dental implant placement",
+    "имплантат": "dental implant",
+    "имплант": "dental implant",
+    "депульпирование": "pulpectomy root canal treatment",
+    "резекция верхушки": "apicoectomy root-end surgery",
+    "апексификация": "apexification",
+    "апекслокатор": "apex locator",
+    "обтурация": "root canal obturation",
+    "коронка": "dental crown",
+    "элайнеры": "clear aligners",
+    "дентин": "dentin",
+    "эмаль": "enamel",
+    "пульпа": "dental pulp",
+    "костная пластика": "bone graft",
+    "мембрана": "barrier membrane",
+    "верхняя челюсть": "maxilla",
+    "нижняя челюсть": "mandible",
+
+    # Возрастные группы и особые группы
+    "детям": "pediatric children",
+    "дети": "pediatric children",
+    "ребенку": "pediatric children",
+    "беременность": "pregnancy pregnant",
+    "беременным": "pregnancy pregnant",
+    "лактация": "lactation breastfeeding",
+    "пожилым": "elderly geriatric",
+
+    # Эндокринология (паритет для сестринского бота EndoChat)
+    "диабет": "diabetes mellitus",
+    "инсулин": "insulin",
+    "тиреотоксикоз": "thyrotoxicosis",
+    "гипотиреоз": "hypothyroidism",
+    "тиреоидит": "thyroiditis",
+    "кортизол": "cortisol",
+}
+
+# Расшифровка номеров зубов по международной двухцифровой системе FDI (ISO 3950)
+_FDI_TOOTH_MAP = {
+    # 1-й квадрант (верхний правый)
+    "11": "central incisor tooth 11", "12": "lateral incisor tooth 12",
+    "13": "canine tooth 13", "14": "first premolar tooth 14", "15": "second premolar tooth 15",
+    "16": "maxillary first molar tooth 16", "17": "maxillary second molar tooth 17", "18": "wisdom tooth 18",
+    # 2-й квадрант (верхний левый)
+    "21": "central incisor tooth 21", "22": "lateral incisor tooth 22",
+    "23": "canine tooth 23", "24": "first premolar tooth 24", "25": "second premolar tooth 25",
+    "26": "maxillary first molar tooth 26", "27": "maxillary second molar tooth 27", "28": "wisdom tooth 28",
+    # 3-й квадрант (нижний левый)
+    "31": "mandibular central incisor tooth 31", "32": "mandibular lateral incisor tooth 32",
+    "33": "canine tooth 33", "34": "first premolar tooth 34", "35": "second premolar tooth 35",
+    "36": "mandibular first molar tooth 36", "37": "mandibular second molar tooth 37", "38": "wisdom tooth 38",
+    # 4-й квадрант (нижний правый)
+    "41": "mandibular central incisor tooth 41", "42": "mandibular lateral incisor tooth 42",
+    "43": "canine tooth 43", "44": "first premolar tooth 44", "45": "second premolar tooth 45",
+    "46": "mandibular first molar tooth 46", "47": "mandibular second molar tooth 47", "48": "wisdom tooth 48",
+}
+
+
+def build_scientific_query(query: str) -> str:
+    """
+    Преобразует русскоязычный клинический запрос в оптимизированный поисковый
+    запрос для PubMed / Cochrane / Google Scholar с переводом ключевых терминов
+    на международный медицинский английский и латынь, а также расшифровкой зубов FDI.
+    """
+    if not query:
+        return ""
+    cleaned = clean_query(query).lower()
+    tokens = cleaned.split()
+    translated_tokens = []
+    i = 0
+    while i < len(tokens):
+        if i + 1 < len(tokens):
+            pair = f"{tokens[i]} {tokens[i+1]}"
+            if pair in CLINICAL_EN_TRANSLATIONS:
+                translated_tokens.append(CLINICAL_EN_TRANSLATIONS[pair])
+                i += 2
+                continue
+        w = tokens[i]
+        if w in _FDI_TOOTH_MAP:
+            translated_tokens.append(_FDI_TOOTH_MAP[w])
+        elif w in CLINICAL_EN_TRANSLATIONS:
+            translated_tokens.append(CLINICAL_EN_TRANSLATIONS[w])
+        else:
+            if re.search(r"[a-zA-Z0-9]", w):
+                translated_tokens.append(w)
+        i += 1
+
+    if translated_tokens:
+        result = " ".join(translated_tokens)
+        return re.sub(r"\s+", " ", result).strip()
+    return cleaned
+
 
 
 def compose_answer(answer, footer, max_chars=MESSAGE_MAX_CHARS):

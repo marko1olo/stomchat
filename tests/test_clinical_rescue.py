@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 tests/test_clinical_rescue.py — Комплексные тесты для clinical_rescue.py.
+Включает тесты на:
+- Эвристический фильтр кандидатов и ликвидацию слепого спасения (has_media, stop-words)
+- Дедупликацию альбомов и серий (Turn / Album Deduplication)
+- Escape Hatch для не-стоматологических изображений (NOT_CLINICAL_CASE)
+- Динамический BOT_ID
+- Персистентность и Activity Guard
 """
 
 import asyncio
@@ -9,7 +15,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -130,7 +136,6 @@ def run_tests():
 
     print("\n[5] Безопасная отправка и фоллбек Ghost Reply")
     fake_bot = MagicMock()
-    # Симулируем исключение на reply_to (сообщение удалено)
     fake_bot.send_message = AsyncMock(side_effect=[
         Exception("Message to reply not found (deleted)"),
         MagicMock(id=999)
@@ -139,9 +144,8 @@ def run_tests():
     cand = {"id": 100, "chat_id": chat_id, "sender_name": "ТестВрач", "message": "Снимок 47 зуба", "has_media": True}
 
     async def test_exec():
-        # Подменяем генерацию текста
         orig_gen = cr.generate_clinical_rescue_text
-        cr.generate_clinical_rescue_text = AsyncMock(return_value="👨‍⚕️ Коллеги сейчас на приёме у кресла... Совет: ...")
+        cr.generate_clinical_rescue_text = AsyncMock(return_value="Совет: ...")
         res = await cr.execute_rescue_for_candidate(fake_bot, cand, db_path)
         cr.generate_clinical_rescue_text = orig_gen
         return res
@@ -166,7 +170,8 @@ def run_tests():
                 text TEXT,
                 date TIMESTAMP,
                 has_media BOOLEAN,
-                media_type TEXT
+                media_type TEXT,
+                media_description TEXT
             )
         """)
         conn.execute("""
@@ -195,14 +200,13 @@ def run_tests():
     prod_act = cr.check_recent_chat_activity(prod_db_path, chat_id, minutes=10)
     check("production-схема: activity guard видит свежие сообщения", prod_act >= 1)
 
-    # Тест записи спасения на production-схеме
     fake_bot2 = MagicMock()
     fake_bot2.send_message = AsyncMock(return_value=MagicMock(id=9999))
     cand_prod = prod_candidates[0] if prod_candidates else {"id": 201, "chat_id": chat_id, "sender_name": "Доктор", "message": "вопрос", "has_media": False}
 
     async def test_prod_exec():
         orig_gen = cr.generate_clinical_rescue_text
-        cr.generate_clinical_rescue_text = AsyncMock(return_value="👨‍⚕️ EBM совет...")
+        cr.generate_clinical_rescue_text = AsyncMock(return_value="EBM совет...")
         res = await cr.execute_rescue_for_candidate(fake_bot2, cand_prod, prod_db_path)
         cr.generate_clinical_rescue_text = orig_gen
         return res
@@ -215,16 +219,175 @@ def run_tests():
         cur.execute("SELECT msg_id FROM bot_sent_messages WHERE msg_id = 9999")
         check("production-схема: bot_sent_messages записан", cur.fetchone() is not None)
 
-    try:
-        os.remove(prod_db_path)
-        os.rmdir(prod_tmp_dir)
-    except Exception:
-        pass
+    print("\n[7] Ликвидация слепого спасения и фильтрация не-клинических изображений")
+    # Реальный инцидент: скриншот интерфейса бота с текстом рекламы
+    check("инцидент: скриншот интерфейса бота отклонен",
+          not cr.is_clinical_rescue_candidate("Коллеги! Переходите в бесплатного чат бота...", True,
+                                              media_description="На снимке интерфейс цифрового комплекса Docendo Discimus, зубы отсутствуют"))
+    check("инцидент: фото 2 из альбома без текста с интерфейсом отклонено",
+          not cr.is_clinical_rescue_candidate("", True,
+                                              media_description="На снимке интерфейс цифрового комплекса Docendo Discimus, зубы отсутствуют"))
+    check("мем со снимком отклонен",
+          not cr.is_clinical_rescue_candidate("ахаха", True, media_description="Мем с текстом"))
+    check("скриншот приложения отклонен",
+          not cr.is_clinical_rescue_candidate("гляньте", True, media_description="Скриншот экрана приложения"))
+    check("описание без зубов отклонено",
+          not cr.is_clinical_rescue_candidate("", True, media_description="На фотографии зубы отсутствуют"))
+    check("описание не является рентгеном отклонено",
+          not cr.is_clinical_rescue_candidate("что скажете", True, media_description="Изображение не является рентгеном"))
+    check("слепое фото без текста и без описания отклонено",
+          not cr.is_clinical_rescue_candidate("", True, media_description=None))
+    check("слепое фото с неклиническим текстом отклонено",
+          not cr.is_clinical_rescue_candidate("доброе утро коллеги", True, media_description=None))
+    check("фото без текста с подтвержденным клиническим описанием разрешено",
+          cr.is_clinical_rescue_candidate("", True, media_description="Прицельный рентгеновский снимок зуба 36, очаг в области верхушки корня"))
+    check("клинический текст при неклиническом описании отклонен",
+          not cr.is_clinical_rescue_candidate("Снимок 46 зуба", True, media_description="Скриншот экрана меню"))
+
+    print("\n[8] Дедупликация альбомов и серий (Turn / Album Deduplication)")
+    album_tmp_dir = tempfile.mkdtemp()
+    album_db_path = os.path.join(album_tmp_dir, "test_album_dedup.db")
+    t_24m = (now - datetime.timedelta(minutes=24)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(album_db_path) as conn:
+        conn.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_id INTEGER,
+                reply_to_msg_id INTEGER,
+                sender_id INTEGER,
+                sender_name TEXT,
+                text TEXT,
+                date TIMESTAMP,
+                has_media BOOLEAN,
+                media_description TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE bot_sent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_id INTEGER,
+                chat_id INTEGER
+            )
+        """)
+        # Инцидент: Доктор 100 присылает msg 301 и msg 302 (альбом) в 12:00 (25 мин назад)
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media) VALUES (301, NULL, 100, 'Сергей', 'Коллеги! Переходите...', ?, 1)", (t_25m,))
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media, media_description) VALUES (302, NULL, 100, 'Сергей', '', ?, 1, 'Снимок зуба 46')", (t_25m,))
+        # В 12:01 (24 мин назад) бот ответил на msg 301 сообщением msg 303 (reply_to=301)
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media) VALUES (303, 301, ?, 'Бот', 'Приветствую...', ?, 0)", (bot_id, t_24m,))
+        conn.execute("INSERT INTO bot_sent_messages (msg_id, chat_id) VALUES (303, ?)", (chat_id,))
+
+        # Доктор 200 присылает сообщение 401 (одиночный повисший клинический кейс 25 мин назад)
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media) VALUES (401, NULL, 200, 'Dr Real', 'Снимок 36 зуба, периодонтит, протокол?', ?, 1)", (t_25m,))
+        conn.commit()
+
+    album_candidates = cr.find_unanswered_clinical_candidates(album_db_path, chat_id, bot_id=bot_id)
+    check("альбом/серия: найдено ровно 1 неотвеченное сообщение", len(album_candidates) == 1)
+    if album_candidates:
+        check("альбом/серия: выбран реальный кейс 401", album_candidates[0]["id"] == 401)
+        check("альбом/серия: второе фото альбома 302 отброшено из-за ответа бота на 301",
+              all(c["id"] != 302 for c in album_candidates))
+
+    # Проверка дедупликации внутри выборки, если автор прислал 2 снимка без ответа
+    with sqlite3.connect(album_db_path) as conn:
+        # Доктор 300 присылает 2 фото без текста с клиническим описанием (один альбом)
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media, media_description) VALUES (501, NULL, 300, 'Dr Album', '', ?, 1, 'Снимок 14 зуба, апекс')", (t_25m,))
+        conn.execute("INSERT INTO messages (msg_id, reply_to_msg_id, sender_id, sender_name, text, date, has_media, media_description) VALUES (502, NULL, 300, 'Dr Album', '', ?, 1, 'Снимок 14 зуба, апекс')", (t_25m,))
+        conn.commit()
+
+    album_multi_cands = cr.find_unanswered_clinical_candidates(album_db_path, chat_id, bot_id=bot_id)
+    author_300_cands = [c for c in album_multi_cands if c["sender_id"] == 300]
+    check("внутрицикловая дедупликация: из альбома автора взят ровно 1 кандидат", len(author_300_cands) == 1)
+
+    # Проверка mark_case_and_album_rescued
+    cr.mark_case_and_album_rescued(album_db_path, 501, chat_id, sender_id=300, timestamp=t_25m)
+    with sqlite3.connect(album_db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT msg_id FROM clinical_rescues WHERE chat_id = ?", (chat_id,))
+        rescued_ids = {r[0] for r in cur.fetchall()}
+        check("mark_case_and_album_rescued пометил оба кадра альбома (501 и 502)",
+              501 in rescued_ids and 502 in rescued_ids)
+
+    print("\n[9] Escape Hatch для не-стоматологических изображений (NOT_CLINICAL_CASE)")
+    # 1. Ответ модели с маркером NOT_CLINICAL_CASE
+    fake_esc_cand = {
+        "id": 601,
+        "chat_id": chat_id,
+        "sender_id": 9999,
+        "sender_name": "ТестВрач",
+        "message": "Что скажете?",
+        "has_media": True,
+        "timestamp": t_25m
+    }
+
+    async def test_escape_hatch():
+        with patch("blocking_tools.generate_gemini_text_async") as mock_gemini:
+            mock_resp = MagicMock()
+            mock_resp.text = "NOT_CLINICAL_CASE"
+            mock_gemini.return_value = (mock_resp, None)
+            res = await cr.generate_clinical_rescue_text(fake_esc_cand, album_db_path)
+            return res
+
+    esc_res = asyncio.run(test_escape_hatch())
+    check("escape hatch: generate_clinical_rescue_text возвращает None", esc_res is None)
+    with sqlite3.connect(album_db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = 601")
+        check("escape hatch: msg_id 601 помечен в clinical_rescues навсегда", cur.fetchone() is not None)
+
+    # 2. Не-клиническое описание снимка подавляет генерацию без обращения к Gemini
+    fake_desc_cand = {
+        "id": 602,
+        "chat_id": chat_id,
+        "sender_id": 9998,
+        "sender_name": "ТестВрач2",
+        "message": "Гляньте",
+        "has_media": True,
+        "media_description": "На снимке интерфейс цифрового комплекса Docendo Discimus, зубы отсутствуют",
+        "timestamp": t_25m
+    }
+
+    async def test_desc_suppress():
+        with patch("blocking_tools.generate_gemini_text_async") as mock_gemini:
+            res = await cr.generate_clinical_rescue_text(fake_desc_cand, album_db_path)
+            # mock_gemini не должен быть вызван
+            return res, mock_gemini.call_count
+
+    desc_res, gemini_calls = asyncio.run(test_desc_suppress())
+    check("неклиническое описание: генерация возвращает None", desc_res is None)
+    check("неклиническое описание: Gemini Vision не вызывался впустую", gemini_calls == 0)
+
+    # 3. execute_rescue_for_candidate не отправляет ничего в чат
+    fake_bot_esc = MagicMock()
+    fake_bot_esc.send_message = AsyncMock()
+
+    async def test_no_send():
+        return await cr.execute_rescue_for_candidate(fake_bot_esc, fake_desc_cand, album_db_path)
+
+    exec_success = asyncio.run(test_no_send())
+    check("execute_rescue_for_candidate возвращает False для неклинического кейса", exec_success is False)
+    check("execute_rescue_for_candidate не вызвал send_message в чат", fake_bot_esc.send_message.call_count == 0)
+
+    print("\n[10] Динамический BOT_ID")
+    # Тест извлечения из токена бота
+    with patch.dict(os.environ, {"TG_BOT_TOKEN": "7123456789:AAHxyz_sample_token"}):
+        bid1 = cr.resolve_bot_id()
+        check("bot_id извлечен из BOT_TOKEN", bid1 == 7123456789)
+
+    # Тест извлечения из bot_client.me
+    fake_client = MagicMock()
+    fake_client.me = MagicMock(id=555666777)
+    with patch.dict(os.environ, {"TG_BOT_TOKEN": ""}):
+        bid2 = cr.resolve_bot_id(bot_client=fake_client)
+        check("bot_id извлечен из bot_client.me", bid2 == 555666777)
 
     # Очистка
     try:
+        os.remove(prod_db_path)
+        os.rmdir(prod_tmp_dir)
         os.remove(db_path)
         os.rmdir(tmp_dir)
+        os.remove(album_db_path)
+        os.rmdir(album_tmp_dir)
     except Exception:
         pass
 

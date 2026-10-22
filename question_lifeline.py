@@ -24,9 +24,12 @@ from typing import Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # По умолчанию задержка 20 минут (1200 сек). В тестах можно переопределять.
+from dental_vocab import has_dental_term
+
 DEFAULT_LIFELINE_DELAY_SECONDS = 1200
 DEFAULT_MAX_LIFELINES_PER_DAY = 5
 DEFAULT_COOLDOWN_SECONDS = 3600  # 1 час между срабатываниями (было 4 часа)
+DEFAULT_MAX_LIFELINE_AGE_SECONDS = 2400  # 40 минут (предел актуальности у кресла)
 
 # Маркеры клинического вопроса
 QUESTION_INQUIRY_MARKERS = [
@@ -34,7 +37,8 @@ QUESTION_INQUIRY_MARKERS = [
     "кто сталкивался", "посоветуйте", "какой силер", "как пройти",
     "чем обработать", "как лучше", "поделитесь опытом", "что думаете",
     "мнения?", "ваше мнение", "как лечить", "что выбрать", "посоветуете",
-    "какая тактика", "кто как делает", "в чем причина"
+    "какая тактика", "кто как делает", "в чем причина",
+    "срочно", "sos", "помогите", "алгоритм", "дозировк", "протокол при", "неотложн", "что колоть"
 ]
 
 CLINICAL_KEYWORDS = [
@@ -66,7 +70,7 @@ def is_clinical_question_candidate(
     if len(clean_text) < 15 and not (has_media and len(clean_text) >= 5):
         return False
 
-    lower = clean_text.lower()
+    lower = clean_text.lower().replace('ё', 'е')
 
     # Игнорируем команды и прямые обращения к боту (их сразу обрабатывает ассистент)
     if lower.startswith("/") or lower.startswith("!"):
@@ -81,8 +85,8 @@ def is_clinical_question_candidate(
     if not (has_question_mark or has_inquiry_marker):
         return False
 
-    # Проверка клинической специфики (или снимок)
-    has_clinical_term = any(kw in lower for kw in CLINICAL_KEYWORDS)
+    # Проверка клинической специфики (по списку ключевых слов или единому словарю триажа)
+    has_clinical_term = any(kw in lower for kw in CLINICAL_KEYWORDS) or has_dental_term(clean_text)
     if not (has_clinical_term or has_media):
         return False
 
@@ -120,6 +124,7 @@ class QuestionLifelineManager:
         self.delay_seconds = delay_seconds
         self.max_per_day = max_per_day
         self.cooldown_seconds = cooldown_seconds
+        self.max_age_seconds = DEFAULT_MAX_LIFELINE_AGE_SECONDS
         self.llm_caller = llm_caller
         self.send_message_callback = send_message_callback
         self.typing_context_factory = typing_context_factory
@@ -129,7 +134,19 @@ class QuestionLifelineManager:
         # chat_id -> List[datetime.datetime] (время отправленных lifelines)
         self.sent_lifelines: Dict[int, List[datetime.datetime]] = {}
 
+    def cleanup_stale_questions(self, max_age_seconds: int = 3600) -> int:
+        """Удаляет из памяти зависшие, отмененные или протухшие вопросы старше 1 часа."""
+        now = datetime.datetime.now()
+        stale_ids = []
+        for mid, pq in list(self.pending_questions.items()):
+            if (now - pq.created_at).total_seconds() > max_age_seconds or pq.is_cancelled:
+                stale_ids.append(mid)
+        for mid in stale_ids:
+            self.cancel_question(mid, reason="stale_cleanup")
+        return len(stale_ids)
+
     def is_rate_limited(self, chat_id: int, now: Optional[datetime.datetime] = None) -> bool:
+        self.cleanup_stale_questions()
         """Проверяет суточный лимит и кулдаун отправки lifeline в чат."""
         current_time = now or datetime.datetime.now()
         history = self.sent_lifelines.get(chat_id, [])
@@ -157,21 +174,33 @@ class QuestionLifelineManager:
         sender_name: str,
         text: str,
         has_media: bool = False,
-        media_description: Optional[str] = None
+        media_description: Optional[str] = None,
+        msg_date: Optional[datetime.datetime] = None
     ) -> Optional[PendingQuestion]:
         """
         Регистрирует новый кандидатный вопрос и запускает таймер на delay_seconds.
+        Проверяет свежесть сообщения (msg_date) во избежание спама старыми вопросами.
         """
         if self.is_rate_limited(chat_id):
             logger.info("Lifeline rate limited for chat=%s, skipping tracking msg_id=%s", chat_id, msg_id)
             return None
 
+        now = datetime.datetime.now()
+
+        # Защита от спама на старые вопросы из оффлайн-очереди/бэклога (когда пациент уже ушел)
+        if msg_date:
+            age = (datetime.datetime.now(datetime.timezone.utc) - msg_date).total_seconds() if msg_date.tzinfo else (now - msg_date).total_seconds()
+            if age > self.delay_seconds:
+                logger.info(
+                    "Lifeline skipping stale msg_id=%s (msg_date=%s is %.1fs old > delay %ds)",
+                    msg_id, msg_date, age, self.delay_seconds
+                )
+                return None
+
         # Отменяем любые предыдущие висящие вопросы от этого же автора в этом чате
         for p in list(self.pending_questions.values()):
             if p.chat_id == chat_id and p.sender_id == sender_id:
                 self.cancel_question(p.msg_id, reason="new_question_from_same_author")
-
-        now = datetime.datetime.now()
         pq = PendingQuestion(
             msg_id=msg_id,
             chat_id=chat_id,
@@ -262,6 +291,17 @@ class QuestionLifelineManager:
 
     async def _execute_lifeline(self, pq: PendingQuestion) -> None:
         """Генерирует и отправляет поддерживающий коллегиальный ответ."""
+        # Stale Question Guard: если вопрос старше max_age_seconds (40 мин),
+        # пациент уже встал с кресла и ушел. Запоздалый совет бота нелеп и дискредитирует сервис.
+        now = datetime.datetime.now()
+        elapsed = (now - pq.created_at).total_seconds()
+        if elapsed > self.max_age_seconds:
+            logger.info(
+                "⏳ Lifeline Expired: вопрос msg_id=%s устарел (прошло %.0fs > max %ds). Пациент уже ушел от кресла. Lifeline отменен.",
+                pq.msg_id, elapsed, self.max_age_seconds
+            )
+            return
+
         # Activity Guard: проверяем активность чата за последние 5 минут
         try:
             import database
