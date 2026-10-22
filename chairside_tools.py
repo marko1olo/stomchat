@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from telethon import Button
 
+import anesthesia_calc as ac
+
 logger = logging.getLogger("chairside_tools")
 
 
@@ -899,10 +901,11 @@ def build_chairside_hub_markup():
             Button.inline("💔 Сломался инструмент", data="sos:file_matrix")
         ],
         [
-            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu"),
-            Button.inline("📊 Калькулятор сложности AAE", data="aae:start")
+            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu"),
+            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu")
         ],
         [
+            Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
             Button.inline("⬅️ В главное меню", data="nav:main")
         ]
     ]
@@ -1051,6 +1054,27 @@ def build_preservation_calc_markup(state: Dict[str, Any]):
     ]
 
 
+def build_resuscitation_sos_markup():
+    """Инлайн-кнопки экстренной реанимации и неотложной помощи у кресла."""
+    return [
+        [
+            Button.inline("🚨 Анафилактический шок", data="sos:anaphylaxis"),
+            Button.inline("🧪 LAST (Интралипид 20%)", data="sos:last"),
+        ],
+        [
+            Button.inline("🫀 Обморок / коллапс", data="sos:collapse"),
+            Button.inline("🍬 Гипогликемический криз", data="sos:hypoglycemia"),
+        ],
+        [
+            Button.inline("📈 Гипертонический криз", data="sos:hypertension"),
+            Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl"),
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+        ]
+    ]
+
+
 def build_anesthesia_sos_markup():
     """Кнопки экстренного выбора протокола анестезии у кресла."""
     return [
@@ -1156,8 +1180,8 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
 
     chairside_prefixes = (
         "chairside:", "fdi:", "files:", "file_sys:", "pres_st:",
-        "pres_eval:", "preserve:", "anes_sos:", "sos:anesthesia_buffering",
-        "file_frag:", "sos:file_matrix", "pharma:", "aae:"
+        "pres_eval:", "preserve:", "anes_sos:", "sos:",
+        "file_frag:", "pharma:", "aae:"
     )
     if not any(data_str.startswith(p) or data_str == p for p in chairside_prefixes):
         return False
@@ -1347,6 +1371,31 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             await event.edit(report, buttons=buttons, parse_mode="html")
             await event.answer()
             return True
+
+    # 4.0 ЭКСТРЕННАЯ РЕАНИМАЦИЯ И ШОК (sos:anaphylaxis, sos:last, etc.)
+    if data_str.startswith("sos:"):
+        sos_key = data_str.split(":")[1] if ":" in data_str else ""
+        if sos_key in ("resuscitation_menu", "resuscitation", "menu"):
+            text = (
+                "🚨 <b>Экстренная реанимация и неотложные состояния у кресла</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите клинический протокол неотложной помощи:"
+            )
+            buttons = build_resuscitation_sos_markup()
+            await event.edit(text, buttons=buttons, parse_mode="html")
+            await event.answer()
+            return True
+
+        if sos_key != "file_matrix":
+            proto = ac.get_emergency_protocol(sos_key)
+            if proto:
+                buttons = [
+                    [Button.inline("🔄 Другой протокол реанимации", data="sos:resuscitation_menu")],
+                    [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                ]
+                await event.edit(proto.card_text, buttons=buttons, parse_mode="html")
+                await event.answer()
+                return True
 
     # 4. ЭКСТРЕННЫЕ ПРОТОКОЛЫ АНЕСТЕЗИИ (anes_sos:*)
     if data_str.startswith("anes_sos:") or data_str == "sos:anesthesia_buffering":
@@ -1610,60 +1659,7 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
 
 def calculate_anesthesia_carpules(weight_kg: float) -> str:
     """Расчет предельных доз местных анестетиков в карпулах по весу пациента."""
-    import math
-    raw_w = float(weight_kg)
-    if raw_w < 3.0 or raw_w > 300.0:
-        return f"⚠️ <i>Некорректный вес ({raw_w} кг). Укажите реальную массу тела.</i>"
-
-    # Педиатрический стоп-фактор: артикаин строго противопоказан до 4 лет (< 15 кг)
-    if raw_w < 15.0:
-        return (
-            f"⛔ <b>ПЕДИАТРИЧЕСКАЯ БЕЗОПАСНОСТЬ (Вес {raw_w:.1f} кг / возраст < 4 лет):</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "• <b>4% Артикаин КАТЕГОРИЧЕСКИ ПРОТИВОПОКАЗАН</b> детям до 4 лет (масса тела < 15 кг) согласно инструкции МЗ РФ!\n"
-            "• <b>Препарат выбора у детей раннего возраста:</b> Мепивакаин 3% без вазоконстриктора или Лидокаин 2% строго по расчету мг/кг.\n"
-            f"• <b>Мепивакаин 3%:</b> максимум {math.floor((raw_w * 4.4) / 54.0)} карпулы ({raw_w * 4.4:.1f} мг).\n"
-            "⚠️ <i>Округление доз у детей — строго ВНИЗ к меньшему целому!</i>"
-        )
-
-    w = min(140.0, raw_w)
-    is_child = (raw_w < 40.0)
-    art_mg_kg = 5.0 if is_child else 7.0
-    
-    max_articaine_mg = min(w * art_mg_kg, 500.0)
-    carpules_art_17 = math.floor(max_articaine_mg / 68.0) if is_child else round(max_articaine_mg / 68.0, 1)
-    carpules_art_18 = math.floor(max_articaine_mg / 72.0) if is_child else round(max_articaine_mg / 72.0, 1)
-
-    max_lido_mg = min(w * 4.4, 300.0)
-    carpules_lido_18 = round(max_lido_mg / 36.0, 1)
-
-    max_mepi_mg = min(w * 4.4, 300.0)
-    carpules_mepi_18 = round(max_mepi_mg / 54.0, 1)
-    
-    lines = [
-        f"💉 <b>Расчет максимальных доз местной анестезии (Вес: {w:.1f} кг)</b>",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"• <b>4% Артикаин (Ультракаин / Убистезин / Септанест):</b>",
-        f"  — Потолок дозы: <b>{int(max_articaine_mg)} мг</b> (7.0 мг/кг, макс 500 мг)",
-        f"  — Максимум карпул 1.7 мл: <b>{carpules_art_17} карп.</b>",
-        f"  — Максимум карпул 1.8 мл: <b>{carpules_art_18} карп.</b>",
-        "",
-        f"• <b>2% Лидокаин с адреналином:</b>",
-        f"  — Потолок дозы: <b>{int(max_lido_mg)} мг</b> (4.4 мг/кг, макс 300 мг)",
-        f"  — Максимум карпул 1.8 мл: <b>{carpules_lido_18} карп.</b>",
-        "",
-        f"• <b>3% Мепивакаин без адреналина (Скандонест):</b>",
-        f"  — Потолок дозы: <b>{int(max_mepi_mg)} мг</b> (4.4 мг/кг, макс 300 мг)",
-        f"  — Максимум карпул 1.8 мл: <b>{carpules_mepi_18} карп.</b>",
-        "",
-        "⚠️ <b>Лимит адреналина при кардиопатологии (ИБС, аритмия, гипертония):</b>",
-        "• Кардио-лимит эпинефрина: строго <b>0.04 мг</b>!",
-        "  — Адреналин 1:100 000 (0.018 мг/карп) -> <b>максимум 2 карпулы</b>",
-        "  — Адреналин 1:200 000 (0.009 мг/карп) -> <b>максимум 4 карпулы</b>",
-        "",
-        "💡 <i>Если анестезия не берет при горячем пульпите — сделайте буферизацию 8.4% NaHCO3 (/anes сода) или блокаду Гоу-Гейтса (/anes гоу-гейтс).</i>"
-    ]
-    return "\n".join(lines)
+    return ac.calculate_anesthesia_quick_card(weight_kg)
 
 
 def format_naocl_accident_card() -> str:
@@ -1769,20 +1765,7 @@ async def handle_torque_command(bot_client, event, query: str = ""):
 async def handle_anes_command(bot_client, event, arg: str = ""):
     """Команда /anes [вес/сода/гоу-гейтс]: экстренная анестезия и расчет доз."""
     clean_arg = arg.strip().lower()
-    import re
     if clean_arg:
-        num_match = re.search(r"\d+(\.\d+)?", clean_arg)
-        if num_match and not any(k in clean_arg for k in ["сода", "буфер", "гоу", "gow", "акинози", "тризм"]):
-            weight = float(num_match.group(0))
-            text = calculate_anesthesia_carpules(weight)
-            buttons = [
-                [Button.inline("⚡ Буферизация 8.4% содой", data="anes_sos:buffering")],
-                [Button.inline("🎯 Блокада Gow-Gates", data="anes_sos:gow_gates")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
-            ]
-            await _safe_send_chairside(bot_client, event, text, buttons=buttons)
-            return
-
         if any(k in clean_arg for k in ["сода", "буфер", "онсет", "пульпит"]):
             card_info = CHAIRSIDE_ANESTHESIA_RESCUE["buffering"]
             msg = f"{card_info['title']}\n━━━━━━━━━━━━━━━━━━━━━\n\n{card_info['recipe']}"
@@ -1823,10 +1806,29 @@ async def handle_anes_command(bot_client, event, arg: str = ""):
             await _safe_send_chairside(bot_client, event, msg, buttons=buttons)
             return
 
+        # Парсинг веса через универсальный клинический парсер
+        weight = ac.parse_weight_from_text(clean_arg)
+        if weight is not None:
+            is_cardiac = ac.detect_cardiac_risk(clean_arg)
+            has_drug_name = any(d in clean_arg for d in ["артикаин", "ультракаин", "мепивакаин", "скандонест", "лидокаин", "бупивакаин"])
+            if has_drug_name:
+                calc_res = ac.calculate_anesthesia_dose(clean_arg)
+                text = calc_res.html_report
+            else:
+                text = ac.calculate_anesthesia_quick_card(weight, is_cardiac=is_cardiac)
+
+            buttons = [
+                [Button.inline("⚡ Буферизация 8.4% содой", data="anes_sos:buffering")],
+                [Button.inline("🎯 Блокада Gow-Gates", data="anes_sos:gow_gates")],
+                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            ]
+            await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+            return
+
     text = (
         "⚡ <b>Экстренная анестезия у кресла: Не берет мандибулярка / горячий пульпит</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Выберите протокол или укажите вес пациента (например, <code>/anes 70</code>):\n\n"
+        "Выберите протокол или укажите вес пациента (например, <code>/anes 70</code> или <code>/anes артикаин 20 кг</code>):\n\n"
         "• 🧪 <b>Буферизация 8.4% содой:</b> онсет 60 сек, устранение кислого воспаления\n"
         "• 🎯 <b>Блокада Гоу-Гейтса:</b> 100% ствол V3 при срыве обычной мандибулярки\n"
         "• 🔒 <b>Вазирани-Акинози:</b> анестезия при тризме и сомкнутых зубах\n"
@@ -1837,7 +1839,7 @@ async def handle_anes_command(bot_client, event, arg: str = ""):
 
 
 async def handle_sos_command(bot_client, event, arg: str = ""):
-    """Команда /sos [обломок/гипохлорит/анестезия]: экстренные EBM-протоколы ЧП."""
+    """Команда /sos [обломок/гипохлорит/анестезия/шок/last/коллапс]: экстренные EBM-протоколы ЧП."""
     clean_arg = arg.strip().lower()
     if clean_arg:
         if any(k in clean_arg for k in ["file", "обломок", "сепарац", "поломк"]):
@@ -1867,6 +1869,47 @@ async def handle_sos_command(bot_client, event, arg: str = ""):
             await _safe_send_chairside(bot_client, event, text, buttons=buttons)
             return
 
+        if any(k in clean_arg for k in ["анафилак", "шок", "anaphylaxis"]):
+            proto = ac.get_emergency_protocol("anaphylaxis")
+            if proto:
+                buttons = [
+                    [Button.inline("🧪 LAST / Интралипид", data="sos:last")],
+                    [Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]
+                ]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["last", "ласт", "интралипид", "токсич"]):
+            proto = ac.get_emergency_protocol("last")
+            if proto:
+                buttons = [
+                    [Button.inline("🚨 Анафилактический шок", data="sos:anaphylaxis")],
+                    [Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]
+                ]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["коллапс", "обморок", "синкопе", "syncope"]):
+            proto = ac.get_emergency_protocol("syncope_collapse")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["гипогликеми", "сахар", "диабет"]):
+            proto = ac.get_emergency_protocol("hypoglycemia")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
+        if any(k in clean_arg for k in ["криз", "гипертон", "давлен"]):
+            proto = ac.get_emergency_protocol("hypertensive_crisis")
+            if proto:
+                buttons = [[Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu")]]
+                await _safe_send_chairside(bot_client, event, proto.card_text, buttons=buttons)
+                return
+
     text = (
         "🚨 <b>SOS-Спасение при осложнениях у кресла врача</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1874,14 +1917,15 @@ async def handle_sos_command(bot_client, event, arg: str = ""):
     )
     buttons = [
         [
-            Button.inline("💔 Обломок инструмента", data="sos:file_matrix"),
-            Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl")
+            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu"),
+            Button.inline("💔 Обломок инструмента", data="sos:file_matrix")
         ],
         [
-            Button.inline("⚡ Не берет анестезия", data="anes_sos:menu"),
-            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu")
+            Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl"),
+            Button.inline("⚡ Не берет анестезия", data="anes_sos:menu")
         ],
         [
+            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu"),
             Button.inline("⬅️ В Chairside меню", data="chairside:hub")
         ]
     ]

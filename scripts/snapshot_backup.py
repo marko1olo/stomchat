@@ -68,25 +68,32 @@ def create_snapshot(output_dir: Path = None, tag: str = "") -> Path:
         payload_dir = tmp_dir / "data"
         payload_dir.mkdir()
 
-        # 1. Горячий бекап SQLite через backup API
+        # 1. Горячий бекап SQLite через backup_db (backup API + WAL checkpoint)
         if db_path.exists():
             temp_db_path = payload_dir / db_name
             logger.info("Сброс WAL и горячее резервное копирование SQLite %s...", db_name)
-            src_conn = sqlite3.connect(str(db_path), timeout=60)
             try:
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                import backup_db
+                backup_db.backup_database(src_path=db_path, dest_path=temp_db_path, timeout=60.0)
+                logger.info("БД %s успешно скопирована и верифицирована (%d байт)", db_name, temp_db_path.stat().st_size)
+            except Exception as e:
+                logger.warning("Ошибка при использовании backup_db: %s, выполняем резервный backup...", e)
+                src_conn = sqlite3.connect(str(db_path), timeout=60)
+                src_conn.execute("PRAGMA busy_timeout = 30000")
                 try:
-                    src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                except Exception as e:
-                    logger.warning("Не удалось выполнить TRUNCATE WAL: %s (продолжаем backup)", e)
-
-                dst_conn = sqlite3.connect(str(temp_db_path))
-                try:
-                    src_conn.backup(dst_conn)
-                    logger.info("БД %s успешно скопирована через sqlite3 backup API (%d байт)", db_name, temp_db_path.stat().st_size)
+                    try:
+                        src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except Exception:
+                        pass
+                    dst_conn = sqlite3.connect(str(temp_db_path))
+                    try:
+                        src_conn.backup(dst_conn)
+                    finally:
+                        dst_conn.close()
                 finally:
-                    dst_conn.close()
-            finally:
-                src_conn.close()
+                    src_conn.close()
         else:
             logger.warning("Файл БД %s не найден в %s", db_name, root)
 

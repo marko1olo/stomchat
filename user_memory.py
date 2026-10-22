@@ -188,10 +188,23 @@ _NEGATIVE_META_RE = re.compile(
     r'не\s+сообща[а-яё]*|'
     r'не\s+назва[а-яё]*|'
     r'не\s+определе[а-яё]*|'
+    r'не\s+уточне[а-яё]*|'
+    r'не\s+приводит[а-яё]*|'
+    r'не\s+раскрыт[а-яё]*|'
+    r'не\s+найден[а-яё]*|'
     r'нет\s+данных|'
     r'нет\s+сведений|'
+    r'нет\s+информаци[а-яё]*|'
+    r'информаци[а-яё]+\s+отсутству[а-яё]*|'
+    r'данны[а-яё]+\s+отсутству[а-яё]*|'
+    r'сведени[а-яё]+\s+отсутству[а-яё]*|'
     r'отсутству[а-яё]+\s+информаци[а-яё]*|'
-    r'пока\s+не\s+известн[а-яё]*'
+    r'отсутству[а-яё]+\s+данны[а-яё]*|'
+    r'отсутству[а-яё]+\s+сведени[а-яё]*|'
+    r'пока\s+не\s+известн[а-яё]*|'
+    r'пока\s+не\s+установлен[а-яё]*|'
+    r'неизвестн[а-яё]+|'
+    r'неустановлен[а-яё]+'
     r')\b'
 )
 
@@ -203,16 +216,157 @@ def is_negative_meta_sentence(text: str) -> bool:
     return bool(_NEGATIVE_META_RE.search(text))
 
 
+_JUNK_FACT_WORDS = {
+    "привет", "здравствуйте", "добрый день", "доброе утро", "добрый вечер",
+    "спасибо", "благодарю", "понял", "ясно", "ок", "хорошо", "ладно", "до встречи",
+    "пока", "да", "нет", "не знаю", "ага", "угу", "...", "—", "-"
+}
+
+_FORBIDDEN_FACT_SUBSTRINGS = (
+    "admin", "админ", "root", "jailbreak", "override", "bypass",
+    "<user", "<assistant", "<doctor", "</user", "</assistant", "</doctor",
+    "<script", "</script", "javascript:", "eval(",
+    "system prompt", "системный промпт", "system:", "системное сообщение",
+    "ignore previous", "ignore all", "игнорируй инструкц", "игнорируй предыдущ",
+    "you are now", "теперь ты", "ты теперь", "ты — клинический", "ты клинический",
+    "клинический секретарь", "клинический аналитик", "консилиум stomchat", "консилиум endochat",
+    "reset database", "drop table", "truncate table"
+)
+
+
 def clean_clinician_facts(facts: list) -> list:
-    """Удаляет отрицательные псевдо-факты ('не упоминал...', 'нет данных...') из списка фактов врача."""
+    """
+    Очищает и валидирует входящие факты о враче:
+    - Отсекает отрицательные псевдо-факты ('не упоминал...', 'нет данных...').
+    - Блокирует системные инъекции, промпт-лики и галлюцинации роли ассистента.
+    - Отсекает мусорные и односложные реплики ('ок', 'спасибо', 'да', 'нет').
+    - Фильтрует псевдо-факты о самом боте вместо врача.
+    - Исключает дубликаты и нормализует факты.
+    """
     if not facts or not isinstance(facts, list):
         return []
     res = []
+    seen = set()
     for f in facts:
         f_str = str(f).strip()
-        if f_str and not is_negative_meta_sentence(f_str):
+        if not f_str:
+            continue
+        # Содержательная длина факта
+        if len(f_str) < 4 or len(f_str) > 250:
+            continue
+        lower_f = f_str.lower().strip("!.,?:;)'\"«» \t")
+        if lower_f in _JUNK_FACT_WORDS:
+            continue
+        if is_negative_meta_sentence(f_str):
+            continue
+        if any(bad in lower_f for bad in _FORBIDDEN_FACT_SUBSTRINGS):
+            continue
+        if lower_f.startswith(("бот ", "ассистент ", "ии ", "система ", "консилиум ответил", "чат-бот")):
+            continue
+        if any(bot_tok in lower_f for bot_tok in ("stomchat", "endochat", "бот отвечает", "ассистент дал", "полезен бот", "бот полезен", "бот помогает", "ты бот", "ты — бот", "pirate bot")):
+            continue
+        norm = _normalize_item(f_str)
+        if norm and norm not in seen:
+            seen.add(norm)
             res.append(f_str)
     return res
+
+
+_DENTAL_SPECIALTY_ROOTS = (
+    "терап", "эндодонт", "ортопед", "гнатолог", "протезист",
+    "хирург", "имплантолог", "члх", "челюстно", "ортодонт",
+    "пародонт", "детск", "стоматолог", "гигиенист", "рентгенолог"
+)
+
+_SPECIFIC_CLINICAL_ROOTS = (
+    "эндодонт", "ортопед", "гнатолог", "хирург", "имплантолог",
+    "члх", "челюстно", "ортодонт", "пародонт", "детск"
+)
+
+_GENERIC_SPECIALTY_PATTERNS = {
+    "стоматолог", "врач-стоматолог", "врач", "стоматолог общей практики",
+    "доктор", "клиницист", "практикующий стоматолог", "стоматология"
+}
+
+_FORBIDDEN_SPEC_WORDS = (
+    "admin", "админ", "root", "jailbreak", "override", "bypass",
+    "секретарь", "ассистент", "пользователь", "клиент", "пациент",
+    "собеседник", "участник", "студент", "консультант", "<", ">", "{", "}"
+)
+
+
+def is_valid_specialty_candidate(spec: str) -> bool:
+    """Проверяет валидность строки со специализацией стоматолога."""
+    if not spec:
+        return False
+    cleaned = spec.strip()
+    if len(cleaned) < 3 or len(cleaned) > 80:
+        return False
+    lower_s = cleaned.lower()
+    if any(bad in lower_s for bad in _FORBIDDEN_SPEC_WORDS):
+        return False
+    if is_negative_meta_sentence(cleaned):
+        return False
+    return any(root in lower_s for root in _DENTAL_SPECIALTY_ROOTS)
+
+
+def resolve_clinician_specialty(current_spec: str, new_spec: str, is_group_daemon: bool = False) -> str:
+    """
+    Разрешает специализацию врача между текущей и новой, предотвращая клинический дрифт:
+    1. Отсекает немедицинские галлюцинации, инъекции и мусорные ярлыки.
+    2. Защищает подтвержденную узкую специализацию (хирург, ортопед, эндодонтист, ортодонт)
+       от затирания общими понятиями ('стоматолог', 'врач-стоматолог', 'стоматолог общей практики').
+    3. В групповом чате (демон) запрещает даунгрейд специфического профиля на основе поверхностных реплик.
+    4. Позволяет обогащать специализацию (например, 'Терапевт' -> 'Терапевт, ортопед').
+    """
+    cur = (current_spec or "").strip()
+    new_s = (new_spec or "").strip()
+
+    if not is_valid_specialty_candidate(new_s):
+        return cur
+
+    if not cur:
+        return new_s
+
+    cur_lower = cur.lower()
+    new_lower = new_s.lower()
+
+    if cur_lower == new_lower:
+        return cur
+
+    cur_has_specific = any(r in cur_lower for r in _SPECIFIC_CLINICAL_ROOTS)
+    new_has_specific = any(r in new_lower for r in _SPECIFIC_CLINICAL_ROOTS)
+    new_is_generic = new_lower in _GENERIC_SPECIALTY_PATTERNS or new_lower.replace(" ", "") in _GENERIC_SPECIALTY_PATTERNS
+
+    # Защита 1: подтвержденная специфическая специальность НЕ затирается дженериком или неспецифической специальностью
+    if cur_has_specific and (new_is_generic or not new_has_specific):
+        logger.info(f"Preserving specific specialty '{cur}' against generic/non-specific overwrite '{new_s}'")
+        return cur
+
+    # Защита 2: в фоновом демоне группы не меняем подтвержденную узкую специализацию на общую терапию
+    if is_group_daemon and cur_has_specific and not new_has_specific:
+        logger.info(f"Group daemon: preserving specific specialty '{cur}' against chatter drift '{new_s}'")
+        return cur
+
+    # Обогащение: если текущая содержится в новой (например, 'Ортопед' -> 'Ортопед-гнатолог')
+    if cur_lower in new_lower:
+        return new_s
+
+    # Если новая содержится в текущей (например, 'Хирург-имплантолог' -> 'Хирург')
+    if new_lower in cur_lower:
+        return cur
+
+    # Если обе специфические в ЛС (например, 'Хирург-имплантолог' и пришло 'Ортопед'):
+    # врач совмещает приемы -> объединяем
+    if not is_group_daemon and cur_has_specific and new_has_specific:
+        cur_roots = {r for r in _SPECIFIC_CLINICAL_ROOTS if r in cur_lower}
+        new_roots = {r for r in _SPECIFIC_CLINICAL_ROOTS if r in new_lower}
+        if not new_roots.issubset(cur_roots):
+            combined = f"{cur}, {new_s}"
+            if len(combined) <= 80:
+                return combined
+
+    return new_s
 
 
 def deduplicate_clinical_summary(summary: str) -> str:
@@ -611,16 +765,8 @@ async def update_clinician_memory_async(
         rewritten_summary = parsed.get("rewritten_summary", "").strip()
         new_facts = parsed.get("new_facts", [])
 
-        # Валидация специализации против инъекций
-        is_spec_valid = (
-            new_spec
-            and len(new_spec) > 2
-            and len(new_spec) <= 80
-            and not any(f in new_spec.lower() for f in ("admin", "админ", "root", "jailbreak", "override", "bypass", "<", ">", "{", "}"))
-        )
-        if is_spec_valid and is_negative_meta_sentence(new_spec):
-            new_spec = ""
-        final_spec = new_spec if is_spec_valid else current_spec
+        # Разрешение специализации с защитой от клинического дрифта и инъекций
+        final_spec = resolve_clinician_specialty(current_spec, new_spec, is_group_daemon=False)
 
         current_facts = clean_clinician_facts(current_facts)
         if isinstance(new_facts, list):
@@ -649,9 +795,26 @@ async def update_clinician_memory_async(
             first_name=first_name
         )
 
-        # Синхронизируем profile_portrait в user_profiles для обратной совместимости
-        first_line = final_summary.split("\n")[0].strip() if final_summary else ""
-        portrait_text = f"{final_spec}. {first_line}".strip() if final_spec else first_line
+        # Синхронизируем profile_portrait в user_profiles без заикания заголовков
+        clean_first = ""
+        if final_summary:
+            lines = [l.strip() for l in final_summary.splitlines() if l.strip()]
+            for l in lines:
+                if re.match(r'^(?:#+\s*)?(?:специализация|клинический\s+профиль)\s*:?\s*$', l, re.IGNORECASE):
+                    continue
+                sub_l = re.sub(r'^(?:#+\s*)?(?:специализация|клинический\s+профиль)\s*:\s*', '', l, flags=re.IGNORECASE).strip()
+                if sub_l:
+                    clean_first = sub_l
+                    break
+        if final_spec and clean_first and final_spec.lower() in clean_first.lower():
+            portrait_text = clean_first
+        elif final_spec and clean_first:
+            portrait_text = f"{final_spec}. {clean_first}"
+        elif final_spec:
+            portrait_text = final_spec
+        else:
+            portrait_text = clean_first
+
         if portrait_text:
             last_msg_id = await database.get_last_msg_id()
             await database.set_user_portrait(user_id, portrait_text[:400], last_msg_id)
@@ -767,15 +930,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             new_grp_summary = parsed.get("group_summary", "").strip()
             new_facts = parsed.get("new_facts", [])
 
-            is_spec_valid = (
-                new_spec
-                and len(new_spec) > 2
-                and len(new_spec) <= 80
-                and not any(f in new_spec.lower() for f in ("admin", "админ", "root", "jailbreak", "override", "bypass", "<", ">", "{", "}"))
-            )
-            if is_spec_valid and is_negative_meta_sentence(new_spec):
-                new_spec = ""
-            final_spec = new_spec if is_spec_valid else current_spec
+            final_spec = resolve_clinician_specialty(current_spec, new_spec, is_group_daemon=True)
             final_grp_summary = new_grp_summary if new_grp_summary else current_group_summary
             final_grp_summary = deduplicate_clinical_summary(final_grp_summary)
 

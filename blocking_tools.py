@@ -252,10 +252,15 @@ def _create_telegraph_page_sync(title, html_content):
     from html_telegraph_poster import TelegraphPoster
     from html_telegraph_poster.converter import convert_html_to_telegraph_format, OutputFormat
 
+    # Динамический автор и шортнейм: EndoChat AI для EndoChat, StomChat AI для StomChat
+    is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+    bot_author = "EndoChat AI" if is_endo else "StomChat AI"
+    short_name = "EndoChat_Reporter" if is_endo else "StomatBot_Reporter"
+
     token = config.TELEGRAPH_TOKEN
     if not token:
         poster = TelegraphPoster(use_api=True)
-        acc = poster.create_api_token("StomatBot_Reporter")
+        acc = poster.create_api_token(short_name)
         token = acc["access_token"]
 
     paragraphs = html_content.split('\n\n')
@@ -286,7 +291,7 @@ def _create_telegraph_page_sync(title, html_content):
             data={
                 "access_token": token,
                 "title": title[:256],
-                "author_name": "StomatBot AI",
+                "author_name": bot_author,
                 "content": content_str,
                 "return_content": False,
             },
@@ -294,19 +299,47 @@ def _create_telegraph_page_sync(title, html_content):
         ).json()
         if resp.get("ok"):
             return resp["result"]["url"]
-        api_err = resp.get("error", "Unknown")
-        if "CONTENT_TOO_BIG" in str(api_err):
+
+        api_err = str(resp.get("error", "Unknown"))
+        if "CONTENT_TOO_BIG" in api_err:
             raise RuntimeError(f"Telegraph API error: {api_err}")
-        # При других ошибках API делаем fallback на библиотечный метод
+
+        # Обработка FLOOD_WAIT: при короткой задержке (<=10с) пережидаем и повторяем 1 раз
+        m_flood = re.search(r"FLOOD_WAIT_(\d+)", api_err)
+        if m_flood:
+            wait_s = int(m_flood.group(1))
+            if wait_s <= 10:
+                logger.warning("Telegraph %s: спим %d сек перед повторной попыткой", api_err, wait_s + 1)
+                time.sleep(wait_s + 1)
+                resp = requests.post(
+                    "https://api.telegra.ph/createPage",
+                    data={
+                        "access_token": token,
+                        "title": title[:256],
+                        "author_name": bot_author,
+                        "content": content_str,
+                        "return_content": False,
+                    },
+                    timeout=30,
+                ).json()
+                if resp.get("ok"):
+                    return resp["result"]["url"]
+                api_err = str(resp.get("error", "Unknown"))
+                if "CONTENT_TOO_BIG" in api_err:
+                    raise RuntimeError(f"Telegraph API error: {api_err}")
+            else:
+                raise RuntimeError(f"Telegraph flood wait too long: {api_err}")
+
+        # При других ошибках API (например, сериализации узлов) делаем 1 попытку через библиотечный poster
         poster = TelegraphPoster(use_api=True, access_token=token)
-        page = poster.post(title=title, author="StomatBot AI", text=formatted_body)
+        page = poster.post(title=title, author=bot_author, text=formatted_body)
         return page["url"]
     except Exception as e:
-        if "CONTENT_TOO_BIG" in str(e):
+        if "CONTENT_TOO_BIG" in str(e) or "FLOOD_WAIT" in str(e):
             raise
-        poster = TelegraphPoster(use_api=True, access_token=token)
-        page = poster.post(title=title, author="StomatBot AI", text=formatted_body)
-        return page["url"]
+        # Если библиотечный poster тоже упал или произошла сетевая ошибка — не дублируем вызовы,
+        # а сразу выбрасываем исключение наверх для переключения на PDF-фоллбэк
+        raise
 
 
 def _generate_gemini_text_sync(prompt, context, timeout=None):

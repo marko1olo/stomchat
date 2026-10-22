@@ -102,6 +102,21 @@ def test_calculate_quiz_streaks_historical_record():
     assert max_s == 5
 
 
+def test_calculate_quiz_streaks_timezone_ahead():
+    """Если дата ответа по МСК опережает локальную дату сервера на 1 день (ночь), стрик не сгорает."""
+    today = date(2026, 10, 22)
+    # Врач ответил ночью по МСК (уже 23 октября), а сервер еще в 22 октября
+    dates = ["2026-10-23", "2026-10-22", "2026-10-21"]
+    cur, max_s = poll_storage.calculate_quiz_streaks(dates, today)
+    assert cur == 3
+    assert max_s == 3
+
+    # Если единственный ответ был сегодня ночью по опережающему поясу
+    cur_single, max_single = poll_storage.calculate_quiz_streaks(["2026-10-23"], today)
+    assert cur_single == 1
+    assert max_single == 1
+
+
 # ==============================================================================
 # 2. ИНТЕГРАЦИОННЫЕ ТЕСТЫ БАЗЫ ДАННЫХ И get_user_quiz_stats СО СТРИКАМИ
 # ==============================================================================

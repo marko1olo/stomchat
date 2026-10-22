@@ -36,7 +36,10 @@ echo " [2/7] Обновление пакетов и установка сист�
 echo "=========================================================="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip sqlite3 git curl ufw tar gzip
+apt-get install -y -qq python3 python3-venv python3-pip sqlite3 git curl ufw tar gzip tzdata
+
+# Установка часового пояса Europe/Moscow для корректного расписания дайджестов (REPORT_HOUR=22)
+timedatectl set-timezone Europe/Moscow 2>/dev/null || ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
 
 echo "=========================================================="
 echo " [3/7] Создание изолированного пользователя $BOT_USER"

@@ -4,6 +4,7 @@ try:
     from telethon import Button
 except ImportError:
     Button = None
+import config
 import database
 import dental_vocab
 import html_safe
@@ -278,6 +279,26 @@ def embed_media_into_summary_html(final_html: str, media_map: dict, media_captio
                     final_html += f"\n\n{fig_node}"
                 placed_ids.add(m_id)
                 fallback_count += 1
+            else:
+                # Детерминированный фоллбэк: если модель не указала маркер MSG_{m_id}, внедряем снимок в секцию кейсов
+                cases_match = re.search(r'(КЛИНИЧЕСКИЕ КЕЙСЫ|КЛИНИЧЕСКАЯ ПАНОРАМА|КЕЙСЫ|Кейс\s*\d+)', final_html, re.IGNORECASE)
+                if cases_match:
+                    start_pos = cases_match.end()
+                    end_p = final_html.find("\n\n", start_pos)
+                    if end_p != -1:
+                        final_html = final_html[:end_p] + f"\n\n{fig_node}" + final_html[end_p:]
+                    else:
+                        final_html += f"\n\n{fig_node}"
+                    placed_ids.add(m_id)
+                    fallback_count += 1
+                else:
+                    first_p = final_html.find("\n\n")
+                    if first_p != -1:
+                        final_html = final_html[:first_p] + f"\n\n{fig_node}" + final_html[first_p:]
+                    else:
+                        final_html += f"\n\n{fig_node}"
+                    placed_ids.add(m_id)
+                    fallback_count += 1
 
     final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
     logger.info(
@@ -1276,11 +1297,13 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             # Генерация и отправка верстанной журнальной PDF-версии вестника
             try:
                 from digest_pdf import generate_digest_pdf
-                pdf_title = f"Клинический Дайджест StomChat ({date_str})"
+                is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+                pdf_title = f"Клинический Дайджест {'EndoChat' if is_endo else 'StomChat'} ({date_str})"
+                pdf_subtitle = "Ежедневный клинический вестник эндодонтического сообщества EndoChat" if is_endo else "Ежедневный клинический вестник профессионального сообщества"
                 pdf_path = await generate_digest_pdf(
                     html_content=full_html,
                     title=pdf_title,
-                    subtitle="Ежедневный клинический вестник профессионального сообщества",
+                    subtitle=pdf_subtitle,
                     msg_count=msg_count,
                     date_str=date_str,
                 )
@@ -1704,13 +1727,15 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             # Фоновая генерация и отправка журнальной PDF-версии вестника
             try:
                 from digest_pdf import generate_digest_pdf
-                pdf_title = f"Клинический Вестник StomChat ({date_str})"
+                is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+                pdf_title = f"Клинический Вестник {'EndoChat' if is_endo else 'StomChat'} ({date_str})"
+                pdf_subtitle = "Эндодонтический клинический вестник • Недельный обзор" if is_endo else "Большая стоматологическая газета • Недельный обзор"
                 # КРИТИЧНО: В PDF передаем ПОЛНУЮ версию статьи (full_html),
                 # а не усеченную под лимиты сервиса Telegraph!
                 pdf_path = await generate_digest_pdf(
                     html_content=full_html,
                     title=pdf_title,
-                    subtitle="Большая стоматологическая газета • Недельный обзор",
+                    subtitle=pdf_subtitle,
                     msg_count=msg_count,
                     date_str=date_str,
                 )

@@ -33,6 +33,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import tg_safety as T  # noqa: E402
 
 PASS, FAIL = [], []
@@ -187,6 +191,7 @@ _probe = (
     "}))"
 )
 HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(HERE)
 
 
 class _Dead:
@@ -209,7 +214,7 @@ def probe(source, seconds=60):
     try:
         return subprocess.run(
             [sys.executable, "-c", source], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", cwd=HERE, timeout=seconds,
+            encoding="utf-8", errors="replace", cwd=PROJECT_ROOT, timeout=seconds,
         )
     except subprocess.TimeoutExpired:
         return _Dead()

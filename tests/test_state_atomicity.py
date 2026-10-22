@@ -19,9 +19,16 @@ _TMPDIR = tempfile.mkdtemp(prefix="stomstate_")
 # Подменяем пути состояния ДО импорта assistant, чтобы не трогать боевой файл.
 import importlib.util
 
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+_ASSISTANT_PATH = os.path.join(_ROOT_DIR, "assistant.py")
+if not os.path.exists(_ASSISTANT_PATH):
+    _ASSISTANT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
+
 spec = importlib.util.spec_from_file_location(
     "assistant_under_test",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py"),
+    _ASSISTANT_PATH,
 )
 
 

@@ -46,6 +46,10 @@ for stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # ---------------------------------------------------------------------------
 # Изоляция окружения: временный каталог для базы данных, логов и сторожей
 # ---------------------------------------------------------------------------
@@ -393,7 +397,7 @@ async def run_scenario_3_group_daemon() -> None:
         # Намеренно возвращаем огромный текст (> 12 000 символов), чтобы проверить жесткий лимит 8 КБ (8000 символов)
         huge_summary = (
             "Активный участник дискуссий по хирургической стоматологии и имплантологии. "
-            + ("Подробный разбор протоколов костной пластики и расщепления гребня. " * 300)
+            + " ".join(f"Подробный клинический разбор протокола костной пластики номер {i}." for i in range(250))
         )
         resp_json = {
             "specialty": "Хирург-имплантолог",
@@ -777,13 +781,17 @@ def run_scenario_6_regression_suites() -> None:
         test_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), test_file)
         check(f"файл {test_file} существует", os.path.exists(test_path))
 
+        sub_env = dict(os.environ)
+        sub_env["PYTHONPATH"] = _REPO_ROOT + os.pathsep + sub_env.get("PYTHONPATH", "")
+        test_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), test_file)
         proc = subprocess.run(
-            [sys.executable, test_file],
+            [sys.executable, test_file_path],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=_REPO_ROOT,
+            env=sub_env,
             timeout=120,
         )
 

@@ -280,33 +280,46 @@ class FloodCooldown:
     def __len__(self):
         return len(self._until)
 
+    @staticmethod
+    def _normalize_key(chat_id):
+        if chat_id is None:
+            return None
+        if hasattr(chat_id, "id"):
+            return chat_id.id
+        try:
+            return int(chat_id)
+        except (ValueError, TypeError):
+            return str(chat_id)
+
     def remaining(self, chat_id, now=None):
         """Сколько секунд ещё нельзя обращаться к этому чату. 0.0 — можно."""
-        if chat_id is None:
+        key = self._normalize_key(chat_id)
+        if key is None:
             return 0.0
-        until = self._until.get(chat_id)
+        until = self._until.get(key)
         if until is None:
             return 0.0
         left = until - (time.monotonic() if now is None else now)
         if left <= 0:
-            self._until.pop(chat_id, None)
+            self._until.pop(key, None)
             return 0.0
         return left
 
     def block(self, chat_id, seconds):
         """Закрыть чат на `seconds` секунд."""
-        if chat_id is None or not isinstance(seconds, (int, float)):
+        key = self._normalize_key(chat_id)
+        if key is None or not isinstance(seconds, (int, float)):
             return
         if not math.isfinite(float(seconds)) or seconds <= 0:
             return
-        self._until[chat_id] = time.monotonic() + float(seconds)
+        self._until[key] = time.monotonic() + float(seconds)
         self._evict()
 
     def clear(self, chat_id=None):
         if chat_id is None:
             self._until.clear()
         else:
-            self._until.pop(chat_id, None)
+            self._until.pop(self._normalize_key(chat_id), None)
 
     def _evict(self):
         if len(self._until) <= self._max_entries:
@@ -560,13 +573,15 @@ async def guard(make_awaitable, op, chat_id=None, timeout=DEFAULT_TIMEOUT_SECOND
             wait = flood_wait_seconds(error)
             if wait is None:
                 return give_up(kind, REASON_FLOOD_UNKNOWN_WAIT, error=error)
+            # Немедленно регистрируем блокировку чата в кулдауне, чтобы параллельные
+            # задачи не спамили зафлуженный чат во время ожидания/сна.
+            if cooldown is not None and chat_id is not None:
+                cooldown.block(chat_id, wait)
             remaining = deadline - time.monotonic()
             if wait + slice_floor > remaining:
                 # НЕ спим. Сон дольше остатка бюджета — это выход за дедлайн
                 # вызывающего: наверху сработает свой таймаут, готовый ответ
                 # будет потерян, а секунды сна потрачены впустую.
-                if cooldown is not None:
-                    cooldown.block(chat_id, wait)
                 return give_up(kind, REASON_FLOOD_OVER_BUDGET, error=error,
                                flood_seconds=wait)
             await asyncio.sleep(wait)

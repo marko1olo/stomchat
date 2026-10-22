@@ -8,51 +8,53 @@ from datetime import timezone
 import time
 
 import config
+import db_worker
 
 
 logger = logging.getLogger(__name__)
-_DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stomchat-db")
+# Экспортируем _DB_EXECUTOR из db_worker для обратной совместимости с внешними модулями и тестами
+_DB_EXECUTOR = db_worker._DB_EXECUTOR
 
 SAVE_RETRY_ATTEMPTS = 3
 SAVE_RETRY_DELAY_SECONDS = 0.25
 
-# Пути баз, для которых режим журнала уже выставлен в этом процессе.
-#
-# journal_mode = WAL — свойство ФАЙЛА, а не соединения: он записан в заголовок
-# базы и переживает и закрытие соединения, и перезапуск процесса. Установка его
-# на каждом открытии брала блокировку и писала в файл впустую. Замер на копии
-# боевой базы, 40 открытий: 1.936 мс с установкой против 0.735 мс без неё —
-# накладные 1.2 мс, в 2.6 раза, и платятся они на КАЖДОМ обращении к базе,
-# включая save_message на каждом входящем сообщении. Все обращения к базе
-# сериализованы через _DB_EXECUTOR с одним потоком, так что это прямая задержка
-# всей работы с базой, а не параллельная.
-#
-# Ключ — путь, а не флаг: тесты подменяют config.DB_PATH на временные файлы, и
-# каждая новая база должна получить WAL один раз. Полагаться на init_db нельзя:
-# не всякий путь кода её зовёт.
-_WAL_READY = set()
+# Пути баз, для которых режим журнала уже выставлен в этом процессе (делегировано db_worker)
+_WAL_READY = db_worker._WAL_READY_PATHS
 
 
 def _connect():
-    db = sqlite3.connect(config.DB_PATH, timeout=30)
-    db.execute("PRAGMA busy_timeout = 30000")
-    db.execute("PRAGMA synchronous = NORMAL")
-    db.execute("PRAGMA cache_size = -4000")
-    if config.DB_PATH not in _WAL_READY:
-        db.execute("PRAGMA journal_mode = WAL")
-        _WAL_READY.add(config.DB_PATH)
-    return db
+    return db_worker.connect_db(config.DB_PATH, timeout=30)
 
 
-def checkpoint_wal():
-    """Сбрасывает WAL-журнал в основной файл базы данных (TRUNCATE) перед синхронизацией/бекапом."""
-    with _connection() as db:
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+def checkpoint_wal(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
+    """Сбрасывает WAL-журнал в основной файл базы данных (TRUNCATE) перед синхронизацией/бекапом.
+    
+    Проверяет статус возврата: PRAGMA wal_checkpoint(TRUNCATE) возвращает (busy, log, checkpointed).
+    Если busy == 1 (блокировка активными читателями), выполняет повторные попытки с паузой.
+    """
+    for attempt in range(max_retries):
+        with _connection() as db:
+            row = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if row:
+                busy, log_pages, ckpt_pages = row[0], row[1], row[2]
+                if busy == 0:
+                    logger.debug("WAL checkpoint (TRUNCATE) успешен: log=%d, checkpointed=%d", log_pages, ckpt_pages)
+                    return True
+                logger.warning(
+                    "WAL checkpoint busy (попытка %d/%d): log=%d, checkpointed=%d. Ожидание...",
+                    attempt + 1, max_retries, log_pages, ckpt_pages
+                )
+            else:
+                return True
+        if attempt + 1 < max_retries:
+            time.sleep(retry_delay * (attempt + 1))
+    logger.error("WAL checkpoint (TRUNCATE) не завершился после %d попыток из-за блокировок", max_retries)
+    return False
 
 
-async def checkpoint_wal_async():
-    """Асинхронный сброс WAL через рабочий поток базы данных."""
-    return await _run_db(checkpoint_wal)
+async def checkpoint_wal_async(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
+    """Асинхронный сброс WAL через рабочий поток базы данных с контролем статуса busy."""
+    return await _run_db(lambda: checkpoint_wal(max_retries=max_retries, retry_delay=retry_delay))
 @contextmanager
 def _connection():
     db = _connect()
@@ -74,8 +76,7 @@ def _date_text(dt):
 
 
 async def _run_db(operation):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_DB_EXECUTOR, operation)
+    return await db_worker.run_in_db_worker(operation)
 
 
 async def query_db_async(query_sql, params=()):
@@ -398,7 +399,7 @@ async def init_db():
     await purge_broken_media_remote_urls()
 
 
-async def get_messages_for_daily_summary(start_time, end_time, min_count=100, allow_backfill=False):
+async def get_messages_for_daily_summary(start_time, end_time, min_count=100, allow_backfill=True):
     def operation():
         with _connection() as db:
             period_messages = db.execute(

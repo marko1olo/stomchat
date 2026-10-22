@@ -96,7 +96,8 @@ def calculate_quiz_streaks(
     latest = unique_dates[0]
     days_since_latest = (today_date - latest).days
 
-    if days_since_latest in (0, 1):
+    # Учитываем календарные сутки: сегодня (0), вчера (1) или опережение часового пояса (-1, ночь МСК опережает UTC)
+    if -1 <= days_since_latest <= 1:
         current_streak = 1
         for i in range(len(unique_dates) - 1):
             diff = (unique_dates[i] - unique_dates[i + 1]).days

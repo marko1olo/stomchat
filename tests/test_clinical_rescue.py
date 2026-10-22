@@ -83,6 +83,7 @@ def run_tests():
         conn.commit()
 
     now = datetime.datetime.now(datetime.timezone.utc)
+    t_2m = (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
     t_5m = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
     t_25m = (now - datetime.timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S")
     t_40m = (now - datetime.timedelta(minutes=40)).strftime("%Y-%m-%d %H:%M:%S")
@@ -92,9 +93,9 @@ def run_tests():
     bot_id = 777777
 
     with sqlite3.connect(db_path) as conn:
-        # msg 1: слишком свежий (5 мин)
+        # msg 1: слишком свежий (2 мин)
         conn.execute("INSERT INTO messages VALUES (1, ?, 10, 'Dr A', 'Как пройти обломок в 36 зубе?', ?, NULL, 0)",
-                     (chat_id, t_5m))
+                     (chat_id, t_2m))
         # msg 2: идеальный кандидат (25 мин, 0 ответов)
         conn.execute("INSERT INTO messages VALUES (2, ?, 11, 'Dr B', 'Снимок зуба 46, периодонтит, что думаете?', ?, NULL, 1)",
                      (chat_id, t_25m))

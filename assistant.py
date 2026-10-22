@@ -10,7 +10,9 @@ import math
 import os
 import random
 import re
+import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 
@@ -1701,6 +1703,58 @@ def _read_state_file(path):
         return None
 
 
+PM_PING_MAX_ENTRIES = 5000
+PM_PING_TTL_DAYS = 180  # 6 месяцев хранения записей неактивных ЛС-собеседников
+
+
+def _prune_pm_pings(state):
+    """
+    Предотвращает неограниченный рост pm_pings в assistant_state.json на 1GB micro-VPS.
+    Удаляет записи старше PM_PING_TTL_DAYS или давно завершенные/отклоненные пинги (>60 дней).
+    """
+    pings = state.get("pm_pings")
+    if not isinstance(pings, dict) or not pings:
+        return state
+    now = datetime.now()
+    cutoff_active = now - timedelta(days=PM_PING_TTL_DAYS)
+    cutoff_completed = now - timedelta(days=60)
+
+    to_drop = []
+    for uid_str, info in pings.items():
+        if not isinstance(info, dict):
+            to_drop.append(uid_str)
+            continue
+        last_act_str = info.get("last_activity")
+        # default=now: если метки нет (например, новая запись или тестовый стейт), сохраняем её
+        last_act = _parse_state_dt(last_act_str, default=now)
+
+        if (info.get("ping_sent") or info.get("pings_opted_out") or info.get("unanswered_pings", 0) >= 1):
+            if last_act < cutoff_completed:
+                to_drop.append(uid_str)
+                continue
+
+        if last_act < cutoff_active:
+            to_drop.append(uid_str)
+
+    if to_drop:
+        for uid_str in to_drop:
+            pings.pop(uid_str, None)
+        logger.info(f"pruned {len(to_drop)} stale entries from pm_pings")
+
+    if len(pings) > PM_PING_MAX_ENTRIES:
+        sorted_keys = sorted(
+            pings.keys(),
+            key=lambda k: _parse_state_dt(pings[k].get("last_activity") if isinstance(pings[k], dict) else None, default=now),
+            reverse=True
+        )
+        overflow = sorted_keys[PM_PING_MAX_ENTRIES:]
+        for k in overflow:
+            pings.pop(k, None)
+        logger.warning(f"pm_pings exceeded {PM_PING_MAX_ENTRIES} entries; dropped {len(overflow)} overflow records")
+
+    return state
+
+
 def load_state():
     data = _read_state_file(STATE_PATH)
     if data is None:
@@ -1710,6 +1764,10 @@ def load_state():
         data = _read_state_file(STATE_BAK_PATH)
         if data is not None:
             logger.warning("Primary assistant state unreadable. Recovered from backup .bak")
+            try:
+                shutil.copyfile(STATE_BAK_PATH, STATE_PATH)
+            except Exception as heal_err:
+                logger.warning(f"Failed to auto-heal STATE_PATH from .bak: {heal_err}")
         else:
             logger.warning("No readable assistant state found. Starting from defaults.")
             data = {}
@@ -1722,14 +1780,10 @@ def load_state():
 def save_state(state):
     """
     Атомарно сохраняет состояние, сливая изменения вызывающего с текущим
-    содержимым файла.
-
-    Вызывающий обычно держит state, прочитанный десятки секунд назад (между
-    load_state() и save_state() стоят await'ы на LLM-триаж и запросы к БД).
-    Прямая запись такого словаря затирала чужие свежие правки — в частности
-    silenced_until, выставленный, пока шла генерация. Поэтому пишем только те
-    ключи, которые вызывающий действительно тронул.
+    содержимым файла через tempfile.mkstemp + fsync + os.replace.
+    Содержимое гарантированно защищено от порчи (0 байт) при SIGKILL, OOM и авариях питания.
     """
+    tmp_file_path = None
     try:
         with _STATE_FILE_LOCK:
             on_disk = _read_state_file(STATE_PATH)
@@ -1754,29 +1808,49 @@ def save_state(state):
             if preserved:
                 logger.info(f"save_state: preserved concurrent updates for keys {preserved}")
 
+            # Санитарная чистка структур состояния перед сохранением (1GB Micro-VPS)
+            if "processed_threads" in merged and callable(globals().get("_prune_processed_threads")):
+                _prune_processed_threads(merged)
+            _prune_pm_pings(merged)
+
             payload = json.dumps(merged, ensure_ascii=False, indent=2)
 
-            with open(STATE_TMP_PATH, "w", encoding="utf-8") as f:
+            # Атомарная запись через уникальный временный файл в том же каталоге + fsync
+            dir_name = os.path.dirname(os.path.abspath(STATE_PATH)) or "."
+            tmp_fd, tmp_file_path = tempfile.mkstemp(
+                dir=dir_name,
+                prefix="assistant_state_",
+                suffix=".tmp"
+            )
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Целую предыдущую версию держим как .bak — с неё поднимемся,
-            # если процесс убьют между записью tmp и подменой.
+            # Резервная копия .bak: копируем текущий файл БЕЗ его удаления/перемещения!
+            # Это гарантирует, что STATE_PATH существует и валиден в любой момент времени.
             if on_disk and os.path.exists(STATE_PATH):
                 try:
-                    os.replace(STATE_PATH, STATE_BAK_PATH)
+                    shutil.copyfile(STATE_PATH, STATE_BAK_PATH)
                 except Exception as bak_err:
-                    logger.warning(f"Failed to rotate state backup: {bak_err}")
+                    logger.warning(f"Failed to copy state backup: {bak_err}")
 
-            os.replace(STATE_TMP_PATH, STATE_PATH)  # атомарная подмена в пределах тома
+            # Атомарная замена в пределах тома (на Windows MoveFileExW с MOVEFILE_REPLACE_EXISTING)
+            os.replace(tmp_file_path, STATE_PATH)
+            tmp_file_path = None
     except Exception as e:
         logger.error(f"Error saving assistant state: {e}")
-        try:
-            if os.path.exists(STATE_TMP_PATH):
+    finally:
+        if tmp_file_path and os.path.exists(tmp_file_path):
+            try:
+                os.remove(tmp_file_path)
+            except Exception:
+                pass
+        if os.path.exists(STATE_TMP_PATH):
+            try:
                 os.remove(STATE_TMP_PATH)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 def _parse_state_dt(value, default=datetime(2000, 1, 1)):
     """Разбирает ISO-таймстамп из состояния. Битое значение = 'никогда', без исключения."""

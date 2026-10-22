@@ -121,6 +121,25 @@ class TestBatchReactionEngine(unittest.TestCase):
         ))
         self.assertTrue(res)
 
+    def test_evaluate_batch_prevents_duplicate_reactions_to_same_author(self):
+        """Проверка: в одном батче одному врачу ставится строго не более 1 реакции."""
+        m1 = reaction_engine.BufferedMessage(
+            msg_id=701, chat_id=-1001, sender_id=999, sender_name="Д-р Автор",
+            text="Качественная обтурация трех каналов 46 биокерамикой", has_media=True,
+            timestamp=100.0, event=MagicMock()
+        )
+        m2 = reaction_engine.BufferedMessage(
+            msg_id=702, chat_id=-1001, sender_id=999, sender_name="Д-р Автор",
+            text="И прицельный снимок после фиксации накладки", has_media=True,
+            timestamp=105.0, event=MagicMock()
+        )
+        mock_json = '[{"msg_id": 701, "reaction": "🔥", "reason": "Обтурация"}, {"msg_id": 702, "reaction": "👏", "reason": "Фиксация"}]'
+        with patch("gemini_client.generate_text") as mock_gen:
+            mock_gen.return_value = MagicMock(text=mock_json)
+            results = reaction_engine.evaluate_batch_sync([m1, m2])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["msg_id"], 701)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -230,6 +230,7 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 5.5) -
 
         msg_map = {m.msg_id: m for m in messages}
         valid_results = []
+        seen_senders_in_batch = set()
         for item in parsed:
             mid = item.get("msg_id")
             emoji = item.get("reaction")
@@ -248,10 +249,21 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 5.5) -
                 logger.info("[BatchReactions] Hard blocked reaction %r on clinical complication msg_id=%s: %r", emoji, mid, msg_obj.text[:80])
                 continue
 
-            # 3. Лимиты частоты отправки
+            # 3. Защита от дублирования реакций одному врачу в одном батче
+            sender_key = (msg_obj.chat_id, msg_obj.sender_id)
+            if sender_key in seen_senders_in_batch:
+                logger.debug("[BatchReactions] Sender %s already selected in current batch. Skipping duplicate reaction.", msg_obj.sender_id)
+                continue
+
+            # 4. Лимиты частоты отправки
             if _is_rate_limited(msg_obj.chat_id, msg_obj.sender_id):
                 continue
 
+            if len(_GLOBAL_REACTION_HISTORY) + len(valid_results) >= MAX_REACTIONS_PER_HOUR:
+                logger.debug("[BatchReactions] Hourly reaction rate limit reached with current batch (%d/hr)", len(_GLOBAL_REACTION_HISTORY) + len(valid_results))
+                break
+
+            seen_senders_in_batch.add(sender_key)
             valid_results.append(item)
             if len(valid_results) >= MAX_REACTIONS_PER_BATCH:
                 break
@@ -266,12 +278,22 @@ async def flush_chat_batch(chat_id: int):
     """Сброс и нейросетевая обработка накопившегося батча сообщений чата."""
     import assistant
 
-    # 1. Проверка глобальной паузы реакций (FloodWait)
+    # 1. Проверка глобальной паузы реакций (FloodWait) и кулдауна чата
     now = time.time()
     flood_until = getattr(assistant, "_REACTION_FLOOD_UNTIL", 0.0)
     if now < flood_until:
         logger.debug("[BatchReactions] Global FloodWait cooldown active (%.1fs remaining). Skipping flush.", flood_until - now)
         return
+
+    try:
+        import tg_safety
+        cd = tg_safety.default_cooldown()
+        chat_cooldown = cd.remaining(chat_id)
+        if chat_cooldown > 0:
+            logger.debug("[BatchReactions] Chat %s cooldown active (%.1fs remaining). Skipping flush.", chat_id, chat_cooldown)
+            return
+    except Exception:
+        pass
 
     # 2. Защита от параллельного сброса батчей одного чата
     global _CHATS_BEING_FLUSHED
@@ -361,11 +383,22 @@ async def flush_chat_batch(chat_id: int):
                 )
                 await asyncio.sleep(INTER_REACTION_SLEEP)
             except Exception as exc:
+                exc_name = type(exc).__name__
                 if FloodWaitError and isinstance(exc, FloodWaitError):
                     wait_sec = getattr(exc, "seconds", 60) or 60
                     setattr(assistant, "_REACTION_FLOOD_UNTIL", time.time() + wait_sec + 15)
-                    logger.warning("[BatchReactions] FloodWaitError on reaction send: backing off %ds. Reactions paused globally.", wait_sec)
+                    try:
+                        import tg_safety
+                        tg_safety.default_cooldown().block(chat_id, wait_sec)
+                    except Exception:
+                        pass
+                    logger.warning("[BatchReactions] FloodWaitError on reaction send: backing off %ds. Reactions paused globally and for chat %s.", wait_sec, chat_id)
                     break
+
+                if exc_name in ("ChannelPrivateError", "ChatAdminRequiredError", "ChatWriteForbiddenError", "UserBannedInChannelError"):
+                    logger.warning("[BatchReactions] Terminal permission error %s for chat=%s. Halting reaction batch.", exc_name, chat_id)
+                    break
+
                 logger.warning("[BatchReactions] Failed to put reaction '%s' on msg_id=%s: %s", emoji, mid, exc)
 
         logger.info("[BatchReactions] Batch completed: set %d reactions out of %d messages.", applied_count, len(batch_to_eval))
@@ -502,6 +535,9 @@ async def process_incoming_event(
     async with lock:
         buf = _CHAT_BUFFERS.setdefault(chat_id, [])
         buf.append(item)
+        if len(buf) > 50:
+            _CHAT_BUFFERS[chat_id] = buf[-50:]
+            buf = _CHAT_BUFFERS[chat_id]
         if len(buf) >= BATCH_SIZE_THRESHOLD:
             should_flush = True
 

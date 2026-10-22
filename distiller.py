@@ -418,7 +418,39 @@ def clinical_density(rows):
     return n
 
 
-def build_prompt_log(messages):
+REPLY_QUOTE_MAX_CHARS = 80
+
+
+async def fetch_parent_texts(missing_ids, archive_db=None):
+    """
+    Подтягивает имена и тексты родительских сообщений для реплик-ответов,
+    чьи родители оказались за пределами текущей пачки (сохранение клинической связки «вопрос-ответ»).
+    """
+    if not missing_ids:
+        return {}
+    archive_db = archive_db or ARCHIVE_DB
+    lookup = {}
+    clean_ids = sorted({int(i) for i in missing_ids if i})
+    if not clean_ids:
+        return {}
+    try:
+        async with aiosqlite.connect(f"file:{archive_db}?mode=ro", uri=True) as db:
+            chunk_size = 500
+            for i in range(0, len(clean_ids), chunk_size):
+                batch = clean_ids[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in batch)
+                async with db.execute(
+                    f"SELECT msg_id, sender_name, text FROM archive_messages WHERE msg_id IN ({placeholders})",
+                    batch,
+                ) as cur:
+                    async for r_id, r_name, r_text in cur:
+                        lookup[r_id] = (r_name or "Врач", r_text or "")
+    except Exception as exc:
+        logger.warning("fetch_parent_texts failed: %s", exc)
+    return lookup
+
+
+def build_prompt_log(messages, parent_lookup=None):
     """
     Собирает блок сообщений для промпта. Возвращает (текст, статистика).
 
@@ -449,7 +481,17 @@ def build_prompt_log(messages):
             stats["clipped"] += 1
             stats["clipped_chars"] += dropped
             logger.warning("MSG_%s обрезан по границе предложения: отброшено %d симв.", msg_id, dropped)
-        head = f"MSG_{msg_id}" + (f" -> MSG_{reply_to}" if reply_to else "")
+        head = f"MSG_{msg_id}"
+        if reply_to:
+            head += f" -> MSG_{reply_to}"
+            if parent_lookup and reply_to in parent_lookup:
+                p_name, p_text = parent_lookup[reply_to]
+                p_text_clean = (p_text or "").strip()
+                if p_text_clean:
+                    quote = p_text_clean[:REPLY_QUOTE_MAX_CHARS]
+                    if len(p_text_clean) > REPLY_QUOTE_MAX_CHARS:
+                        quote += "…"
+                    head += f" (Ответ {p_name} на «{quote}»)"
         line = f"{head} | {name}: {body}{img}\n"
         if total + len(line) > PROMPT_CHAR_BUDGET and lines:
             stats["deferred"] = [x[0] for x in messages[i:]]
@@ -634,9 +676,15 @@ async def load_existing_hashes():
     return hashes
 
 
-async def process_batch(messages):
+async def process_batch(messages, parent_lookup=None):
     """Синтез статей по пачке реплик. Возвращает (facts, status, stats)."""
-    formatted_msgs, stats = build_prompt_log(messages)
+    if parent_lookup is None:
+        batch_ids = {m[0] for m in messages}
+        missing_parents = [m[6] for m in messages if len(m) > 6 and m[6] and m[6] not in batch_ids]
+        if missing_parents:
+            parent_lookup = await fetch_parent_texts(missing_parents)
+
+    formatted_msgs, stats = build_prompt_log(messages, parent_lookup=parent_lookup)
     if not formatted_msgs.strip():
         logger.info("Пачка msg_id %s..%s: ни одной непустой реплики, вызов модели не нужен",
                     messages[0][0], messages[-1][0])

@@ -16,6 +16,12 @@ tests = [
     "tests/test_validator_policy.py",
     "tests/test_taxonomy_single.py",
     "tests/test_validator_coverage.py",
+    "tests/test_fix_db.py",
+    "tests/test_storage_subsystem.py",
+    "tests/test_anesthesia_calc.py",
+    "tests/test_protocols_ui.py",
+    "tests/test_intent_routing.py",
+    "tests/test_memory_redteam_inquisitor.py",
 ]
 
 all_ok = True

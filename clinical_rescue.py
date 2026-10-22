@@ -702,7 +702,9 @@ async def execute_rescue_for_candidate(
 
     # Сохраняем в bot_sent_messages
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
             bot_cols = _get_table_columns(conn, "bot_sent_messages")
             if "reply_to_msg_id" in bot_cols and "sent_at" in bot_cols:
                 now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")

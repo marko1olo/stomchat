@@ -40,7 +40,9 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-_REPO = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_fixdb_")
 
 # Журнал — во временный каталог ДО импорта модулей проекта: runtime_guard
@@ -280,7 +282,7 @@ async def section_window_ties():
 
     # Добор из прошлого в дневной сводке режется тем же LIMIT.
     old = await database.get_messages_for_daily_summary(
-        base + timedelta(seconds=200), base + timedelta(seconds=300), min_count=3)
+        base + timedelta(seconds=200), base + timedelta(seconds=300), min_count=3, allow_backfill=True)
     ids = [row[0] for row in old]
     check("добор дневной сводки тоже режет по (date, msg_id)", ids == [503, 504, 505], f"got {ids}")
 
@@ -517,10 +519,15 @@ async def section_pending_media():
 
 async def section_production_copy():
     print("\n[11] init_db на КОПИИ боевой базы: данные целы, план запросов меняется")
-    source = os.path.join(_REPO, "stomat_bot.db")
-    if not os.path.exists(source):
-        note("stomat_bot.db рядом нет — раздел пропущен (боевой файл не создаём)")
-        return
+    db_name = os.path.basename(getattr(config, "DB_PATH", "stomat_bot.db"))
+    source = os.path.join(_REPO, db_name)
+    if not os.path.exists(source) or os.path.getsize(source) == 0:
+        # Резервный поиск активной базы
+        alt_db = "endo_bot.db" if "endo" in _REPO.lower() else "stomat_bot.db"
+        source = os.path.join(_REPO, alt_db)
+        if not os.path.exists(source) or os.path.getsize(source) == 0:
+            note(f"{db_name} рядом нет или пуст — раздел пропущен (боевой файл не создаём)")
+            return
 
     path = os.path.join(_TMPDIR, "prod_copy.db")
     shutil.copyfile(source, path)
