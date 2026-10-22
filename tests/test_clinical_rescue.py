@@ -380,6 +380,91 @@ def run_tests():
         bid2 = cr.resolve_bot_id(bot_client=fake_client)
         check("bot_id извлечен из bot_client.me", bid2 == 555666777)
 
+    print("\n[11] Red Team верификация: альбомный инцидент, author group cooldown и ложные подстроки")
+    # 1. Точный текст описания зрения из инцидента с доктором Елисеевым
+    eliseev_desc = (
+        "На представленных изображениях зафиксированы скриншоты интерфейса стоматологического Telegram-бота "
+        "«Docendo Discimus» («Учимся вместе»). На первом снимке отображено стартовое меню бота с перечнем основных "
+        "клинических и административных разделов: расчет доз анестезии, разбор рентгенонимков, генерация медицинских карт. "
+        "Анатомические структуры, зубы, патологические процессы или рентгенограммы на изображениях отсутствуют."
+    )
+    check("инцидент Елисеева: скриншоты интерфейса бота жестко отклонены",
+          not cr.is_clinical_rescue_candidate("", has_media=True, media_description=eliseev_desc))
+
+    # 2. Ложные срабатывания подстрок ('кт' внутри 'доктора', 'кто', 'проект')
+    fake_sub_desc = "Фотография доктора на конференции, проект обсуждается в кулуарах"
+    check("отсутствие ложного срабатывания на подстроку 'кт' в 'доктор/проект'",
+          not cr.is_clinical_rescue_candidate("", has_media=True, media_description=fake_sub_desc))
+
+    # 3. Настоящий клинический снимок с зубами
+    real_dental_desc = "Прицельная рентгенограмма зуба 4.6. Деструкция костной ткани в области апекса дистального корня."
+    check("настоящий снимок 4.6 зуба успешно одобрен",
+          cr.is_clinical_rescue_candidate("", has_media=True, media_description=real_dental_desc))
+
+    # 4. Проверка Author Group Cooldown
+    import assistant
+    test_author_id = 99887711
+    assistant.record_author_group_reply(test_author_id)
+    check("author group cooldown активен после ответа",
+          assistant.is_author_group_cooldown_active(test_author_id))
+
+    # Создаем временную БД для проверки группировки альбомов и отсева по author cooldown
+    inc_tmp_dir = tempfile.mkdtemp()
+    inc_db_path = os.path.join(inc_tmp_dir, "test_inc.db")
+    with sqlite3.connect(inc_db_path) as conn:
+        conn.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                msg_id INTEGER,
+                sender_id INTEGER,
+                sender_name TEXT,
+                text TEXT,
+                date TEXT,
+                reply_to_msg_id INTEGER,
+                has_media INTEGER DEFAULT 0,
+                media_description TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE bot_sent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_id INTEGER,
+                chat_id INTEGER
+            )
+        """)
+        t_now = datetime.datetime.now(datetime.timezone.utc)
+        t_album = (t_now - datetime.timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Кандидат 1 автора с кулдауном (должен быть отброшен)
+        conn.execute("INSERT INTO messages (id, msg_id, sender_id, sender_name, text, date, has_media, media_description) "
+                     "VALUES (10, 10, ?, 'Dr CD', 'Зуб 3.6 снимок', ?, 1, ?)",
+                     (test_author_id, t_album, real_dental_desc))
+
+        # Альбом из двух кадров нового автора 8888 (кадр 20 и кадр 21 с разницей 1 секунда)
+        conn.execute("INSERT INTO messages (id, msg_id, sender_id, sender_name, text, date, has_media, media_description) "
+                     "VALUES (20, 20, 8888, 'Dr Album', 'Коллеги, снимок 4.7, что делать с перфорацией?', ?, 1, ?)",
+                     (t_album, real_dental_desc))
+        conn.execute("INSERT INTO messages (id, msg_id, sender_id, sender_name, text, date, has_media, media_description) "
+                     "VALUES (21, 21, 8888, 'Dr Album', '', ?, 1, ?)",
+                     (t_album, real_dental_desc))
+        conn.commit()
+
+    candidates_found = cr.find_unanswered_clinical_candidates(inc_db_path, chat_id=-10012345, bot_id=1111)
+    check("автор под author group cooldown отсеян",
+          not any(c["sender_id"] == test_author_id for c in candidates_found))
+    check("альбом из 2 кадров сгруппирован в 1 кандидата",
+          len([c for c in candidates_found if c["sender_id"] == 8888]) == 1)
+    cand_album = next(c for c in candidates_found if c["sender_id"] == 8888)
+    check("album_peer_ids содержит второй кадр альбома 21",
+          21 in cand_album.get("album_peer_ids", []))
+
+    # Очистка
+    try:
+        os.remove(inc_db_path)
+        os.rmdir(inc_tmp_dir)
+    except Exception:
+        pass
+
     # Очистка
     try:
         os.remove(prod_db_path)

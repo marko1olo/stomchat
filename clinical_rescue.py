@@ -30,6 +30,20 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+try:
+    from assistant import is_explicitly_non_dental_media, strip_vision_negations
+except Exception:
+    def is_explicitly_non_dental_media(d: str) -> bool:
+        return False
+    def strip_vision_negations(t: str) -> str:
+        return t or ""
+
+try:
+    from dental_vocab import has_dental_term
+except Exception:
+    def has_dental_term(t: str) -> bool:
+        return any(k in (t or "").lower() for k in ("зуб", "канал", "рентген", "кт", "апекс"))
+
 logger = logging.getLogger("clinical_rescue")
 
 # Маркеры клинического вопроса
@@ -132,15 +146,19 @@ def is_clinical_rescue_candidate(
     if clean.startswith("/") or clean.startswith("!"):
         return False
 
-    desc_clean = (media_description or "").strip().lower()
+    desc_raw = (media_description or "").strip()
+    if desc_raw and is_explicitly_non_dental_media(desc_raw):
+        return False
+
+    desc_clean = strip_vision_negations(desc_raw).lower() if desc_raw else ""
 
     # Если есть media_description и там слова неклинического содержимого — КАТЕГОРИЧЕСКИЙ ЗАПРЕТ спасения!
     if desc_clean:
         if any(sw in desc_clean for sw in NON_CLINICAL_STOPWORDS):
             return False
 
-    has_clin_text = any(k in clean for k in CLINICAL_KEYWORDS) or ("🦷" in (text or ""))
-    has_clin_desc = any(k in desc_clean for k in CLINICAL_KEYWORDS) or ("зуб" in desc_clean)
+    has_clin_text = has_dental_term(clean) or ("🦷" in (text or ""))
+    has_clin_desc = has_dental_term(desc_clean)
 
     if has_media:
         # Ликвидация слепого спасения:
@@ -253,6 +271,15 @@ def find_unanswered_clinical_candidates(
             )""")
             params.append(bot_id)
 
+            # Если любой пир того же автора в пределах 45 сек уже помечен в clinical_rescues:
+            where_clauses.append(f"""NOT EXISTS (
+                SELECT 1 FROM messages m_peer
+                JOIN clinical_rescues cr_peer ON cr_peer.msg_id = m_peer.{id_col}
+                WHERE m_peer.sender_id = m.sender_id
+                  AND m_peer.{date_col} >= datetime(m.{date_col}, '-45 seconds')
+                  AND m_peer.{date_col} <= datetime(m.{date_col}, '+45 seconds')
+            )""")
+
             # Если в bot_sent_messages есть reply_to_msg_id (старая схема / тесты)
             if "reply_to_msg_id" in bot_cols:
                 where_clauses.append(f"m.{id_col} NOT IN (SELECT reply_to_msg_id FROM bot_sent_messages WHERE reply_to_msg_id IS NOT NULL)")
@@ -295,9 +322,24 @@ def find_unanswered_clinical_candidates(
                         "media_description": cand_desc
                     })
 
-            # Внутрицикловая дедупликация серии/альбома от одного автора в интервале 10 минут
-            seen_author_turns = []
+            # Проверка author group cooldown: не спасать автора, если бот недавно отвечал ему
+            try:
+                import assistant
+                author_cd_fn = getattr(assistant, "is_author_group_cooldown_active", None)
+            except Exception:
+                author_cd_fn = None
+
+            filtered_by_cd = []
             for c in raw_candidates:
+                s_id = c.get("sender_id")
+                if author_cd_fn and s_id and author_cd_fn(s_id):
+                    logger.debug("Skipping candidate msg_id=%s: author %s group cooldown active", c["msg_id"], s_id)
+                    continue
+                filtered_by_cd.append(c)
+
+            # Внутрицикловая группировка серии/альбома от одного автора в интервале 10 минут
+            grouped_candidates = []
+            for c in filtered_by_cd:
                 s_id = c["sender_id"]
                 raw_dt = c["timestamp"]
                 c_dt = None
@@ -305,16 +347,27 @@ def find_unanswered_clinical_candidates(
                     c_dt = datetime.datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
                 except Exception:
                     pass
-                is_duplicate = False
+                matched_group = None
                 if c_dt:
-                    for prev_s, prev_t in seen_author_turns:
-                        if prev_s == s_id and abs((c_dt - prev_t).total_seconds()) <= 600:
-                            is_duplicate = True
-                            break
-                if not is_duplicate:
-                    candidates.append(c)
-                    if c_dt:
-                        seen_author_turns.append((s_id, c_dt))
+                    for gc in grouped_candidates:
+                        if gc["sender_id"] == s_id:
+                            g_dt = None
+                            try:
+                                g_dt = datetime.datetime.fromisoformat(str(gc["timestamp"]).replace("Z", "+00:00"))
+                            except Exception:
+                                pass
+                            if g_dt and abs((c_dt - g_dt).total_seconds()) <= 600:
+                                matched_group = gc
+                                break
+                if matched_group is not None:
+                    matched_group.setdefault("album_peer_ids", []).append(c["msg_id"])
+                    if c.get("text") and not matched_group.get("text"):
+                        matched_group["text"] = c["text"]
+                        matched_group["message"] = c["message"]
+                else:
+                    c.setdefault("album_peer_ids", [])
+                    grouped_candidates.append(c)
+            candidates = grouped_candidates
     except Exception as e:
         logger.error("Error querying unanswered clinical candidates: %s", e)
     return candidates
@@ -452,7 +505,33 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
         logger.warning("Clinical rescue aborted for msg_id=%s: no text, no vision description, and no images.", msg_id)
         return None
 
-    # Дополнительная проверка: если в описании есть не-клинические стоп-слова — сразу отбой и персистентная блокировка
+    # Дополнительная проверка: если в описании есть не-клинические маркеры — сразу отбой и персистентная блокировка
+    if clean_d and is_explicitly_non_dental_media(clean_d):
+        logger.info("🛑 Media description explicitly non-dental for msg_id=%s ('%s'). Suppressing rescue forever.",
+                    msg_id, clean_d[:100])
+        await asyncio.to_thread(
+            mark_case_and_album_rescued,
+            db_path,
+            msg_id,
+            candidate.get("chat_id"),
+            candidate.get("sender_id"),
+            candidate.get("timestamp") or candidate.get("date")
+        )
+        return None
+
+    if not has_text and clean_d and not has_dental_term(strip_vision_negations(clean_d)):
+        logger.info("🛑 Media description has no dental terms after stripping negations for msg_id=%s. Suppressing rescue forever.",
+                    msg_id)
+        await asyncio.to_thread(
+            mark_case_and_album_rescued,
+            db_path,
+            msg_id,
+            candidate.get("chat_id"),
+            candidate.get("sender_id"),
+            candidate.get("timestamp") or candidate.get("date")
+        )
+        return None
+
     if clean_d and any(sw in clean_d.lower() for sw in NON_CLINICAL_STOPWORDS):
         logger.info("🛑 Media description contains non-clinical markers for msg_id=%s ('%s'). Suppressing rescue forever.",
                     msg_id, clean_d[:100])
@@ -608,6 +687,18 @@ async def execute_rescue_for_candidate(
         candidate.get("timestamp") or candidate.get("date")
     )
     _LAST_RESCUE_TIME[chat_id] = datetime.datetime.now(datetime.timezone.utc)
+
+    # Регистрируем все ID альбома в REPLIED_MSG_IDS и обновляем author cooldown
+    try:
+        import assistant
+        all_rescued_ids = [msg_id] + candidate.get("album_peer_ids", [])
+        for r_id in all_rescued_ids:
+            assistant.REPLIED_MSG_IDS[r_id] = True
+        cand_sender = candidate.get("sender_id")
+        if cand_sender:
+            assistant.record_author_group_reply(cand_sender)
+    except Exception as assist_err:
+        logger.debug("Failed to update assistant state from rescue: %s", assist_err)
 
     # Сохраняем в bot_sent_messages
     try:

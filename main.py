@@ -2243,12 +2243,19 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                                 album_msg_ids=[m.id for m in messages] if messages else None,
                             )
                             if media_replied:
-                                lifeline_manager.cancel_question(msg_id, reason="media_assistant_replied")
+                                for m in (messages or []):
+                                    m_id = getattr(m, "id", None)
+                                    if m_id:
+                                        lifeline_manager.cancel_question(m_id, reason="media_assistant_replied")
                         except Exception as e:
                             logger.exception(f"Unexpected error in run_media_assistant_safe: {e}")
                     runtime_guard.create_task(run_media_assistant_safe(), name=f"media_{msg_id}")
                 else:
                     if already_replied:
+                        for m in (messages or []):
+                            m_id = getattr(m, "id", None)
+                            if m_id:
+                                assistant.REPLIED_MSG_IDS[m_id] = True
                         logger.info("Media assistant skipped for msg_id=%s: already replied by direct ask/dialogue", msg_id)
                     else:
                         logger.info("Media analysis completed for msg_id=%s (trigger_assistant=False, background sync/recovery)", msg_id)
