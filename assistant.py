@@ -13536,10 +13536,13 @@ async def handle_group_direct_ask(bot_client, event, question):
     if await check_and_apply_silence(event, question or getattr(getattr(event, "message", None), "message", ""), getattr(event, "reply_to_msg_id", None)):
         return
 
-    cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
-    if cooldown > 0:
-        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
-        return
+    import inflight_triage
+    inflight_mgr = inflight_triage.get_inflight_manager()
+    if not inflight_mgr.has_active_session(chat_id, event.sender_id):
+        cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
+        if cooldown > 0:
+            await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
+            return
 
     # Получаем стиль отправителя для применения его предпочтений в группе
     user_profile = await database.get_user_profile(event.sender_id)
@@ -13827,44 +13830,51 @@ async def handle_group_direct_ask(bot_client, event, question):
             )
 
         clean_q = (question or "").strip()
+        if not clean_q and not reply_to_msg_id:
+            # A. Проверяем, не написал ли врач вопрос непосредственно ПЕРЕД вызовом команды /ask
+            preceding = await inflight_triage.find_immediate_preceding_question(
+                query_db_async, sender_id, msg_id, max_id_diff=8
+            )
+            if preceding and preceding.get("text"):
+                clean_q = preceding["text"]
+                logger.info(
+                    "handle_group_direct_ask: salvaged question from preceding message #%s: %r",
+                    preceding["msg_id"], clean_q[:60]
+                )
+            else:
+                # B. Ожидаем ввод вопроса в течение 3.5 сек (врач часто отправляет /ask и сразу следом текст)
+                gathered = await inflight_mgr.wait_for_immediate_followup(chat_id, sender_id, timeout=3.5)
+                if gathered and gathered.get("text"):
+                    clean_q = gathered["text"]
+                    if gathered.get("msg_id"):
+                        all_check_ids.append(gathered["msg_id"])
+                    logger.info(
+                        "handle_group_direct_ask: gathered follow-up question within 3.5s grace window: %r",
+                        clean_q[:60]
+                    )
+
         if not clean_q:
-            # Если команда /ask вызвана через Reply — врач уже прикрепил сообщение/снимок!
-            # Категорически запрещено слать шаблон "отправьте команду /ask ответом на снимок"!
             if reply_to_msg_id:
                 effective_question = "Коллега, дай подробный доказательный клинический разбор, протокол и рекомендации по целевому клиническому случаю и снимку выше."
             else:
-                has_clinical_context = any(
-                    has_dental_term(line) or "[клинический снимок" in line.lower() or "media" in line.lower()
-                    for line in reply_chain_lines
+                # Если вопроса нет и реплая нет — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать разбор 30 случайных сообщений чата!
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=(
+                        f"💡 <b>Клинический консилиум StomChat:</b>\n"
+                        f"• Напишите вопрос сразу после команды: <code>/ask протокол фиксации виниров</code>\n"
+                        "• Либо отправьте <code>/ask</code> ответом (Reply) на сообщение со снимком или клиническим кейсом."
+                    ),
+                    reply_to=msg_id,
+                    parse_mode='html',
                 )
-                if not has_clinical_context:
-                    await bot_client.send_message(
-                        entity=chat_id,
-                        message=(
-                            "💡 <b>Клинический консилиум StomChat:</b>\n"
-                            "• Напишите вопрос сразу после команды: <code>/ask протокол фиксации виниров</code>\n"
-                            "• Либо отправьте <code>/ask</code> ответом (Reply) на сообщение со снимком или клиническим кейсом."
-                        ),
-                        reply_to=msg_id,
-                        parse_mode='html',
-                    )
-                    return
-                effective_question = "Проведи клинический разбор недавней дискуссии и клинического случая выше."
+                return
         else:
             effective_question = clean_q
 
-        full_query = (clean_q or "") + (" " + " ".join(reply_chain_lines) if reply_chain_lines else "")
-        wiki_corpus, archive_corpus = "", ""
-        if has_dental_term(full_query):
-            keywords = extract_keywords(full_query)
-            search_kws = select_search_keywords(keywords)
-            if search_kws:
-                wiki_corpus, archive_corpus = await search_knowledge_corpus(search_kws, query_text=effective_question, context_type="group_reply")
-
-        web_snippets = await fetch_dynamic_web_snippets_async(full_query)
-        rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
-        if web_snippets:
-            rag_prompt_section += f"\n\nСВЕЖИЕ ТЕХНИЧЕСКИЕ ДАННЫЕ И СПЕЦИФИКАЦИИ ИЗ СЕТИ:\n{web_snippets}"
+        session = await inflight_mgr.register_session(chat_id, sender_id, msg_id, effective_question)
+        for cid in all_check_ids:
+            session.add_trigger_msg_id(cid)
 
         target_focus_instruction = ""
         if reply_to_msg_id:
@@ -13877,7 +13887,7 @@ async def handle_group_direct_ask(bot_client, event, question):
    - ОБЯЗАТЕЛЬНО обрати внимание на их гипотезы, предложенные материалы и вопросы.
    - Если коллега высказал дельный совет — поддержи и дополни его («Как верно отметил Доктор X...»).
    - Если коллега предложил опасный, необоснованный или устаревший шаг (ятрогения, неоправданное удаление, рискованный материал) — тактично, но твердо скорректируй с опорой на EBM.
-   - Не повторяй банальности, которые коллеги уже озвучили. Принеси добавочную ценность: конкретные размеры ISO/препарирования, протокол адгезии/активации, выбор материалов.
+   - Не повторяй банальности, которые коллеги уже озвучили. Принеси добавочную ценность: размеры ISO/препарирования, протокол адгезии/активации, выбор материалов.
 3. АДРЕСНОСТЬ:
    - Твой ответ адресован Доктору {requester_name}, но служит экспертным ориентиром для всего консилиума чата.
 """
@@ -13896,58 +13906,56 @@ async def handle_group_direct_ask(bot_client, event, question):
    - К запросу приложено клинико-рентгенологическое описание снимка. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «снимки не загрузились», «сообщение пустое» или требовать анкеты. Дай полноценное экспертное заключение на основе имеющихся клинических данных!
 """
 
-        prompt = f"""
+        async def _execute_single_generation(current_query):
+            full_query = (current_query or "") + (" " + " ".join(reply_chain_lines) if reply_chain_lines else "")
+            wiki_corpus, archive_corpus = "", ""
+            if has_dental_term(full_query):
+                keywords = extract_keywords(full_query)
+                search_kws = select_search_keywords(keywords)
+                if search_kws:
+                    wiki_corpus, archive_corpus = await search_knowledge_corpus(search_kws, query_text=current_query, context_type="group_reply")
+
+            web_snippets = await fetch_dynamic_web_snippets_async(full_query)
+            rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
+            if web_snippets:
+                rag_prompt_section += f"\n\nСВЕЖИЕ ТЕХНИЧЕСКИЕ ДАННЫЕ И СПЕЦИФИКАЦИИ ИЗ СЕТИ:\n{web_snippets}"
+
+            prompt = f"""
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
 Ответь профессионально, экспертно и строго по существу.
 {target_focus_instruction}
 {multimodal_notice}
-{reply_context_block}
-Вопрос коллеги:
-{sanitize_user_input_xml(effective_question)}
+[ВОПРОС КОЛЛЕГИ В ЧАТЕ]:
+"{sanitize_user_input_xml(current_query)}"
+
 {rag_prompt_section}
-КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
-{multimodal_instruction}
-1. Объем и структура (АДАПТИВНАЯ КЛИНИЧЕСКАЯ ДЛИНА — ЧУВСТВУЙ ОБЪЕМ САМ):
+{reply_context_block}
+[ПРАВИЛА И СТАНДАРТЫ ОТВЕТА В ЧАТЕ]:
+1. СТРУКТУРА И ГЛУБИНА:
    - Категорически запрещено искусственно сжимать или кастрировать клинический ответ! Чувствуй объем самостоятельно исходя из характера вопроса и сложности клинической ситуации.
    - Если вопрос простой или точечный — ответь емко и по существу (1–3 предложения).
    - Если разбирается клинический случай, снимок, осложнение, дифдиагноз или комплексная реабилитация — дай полноценный, глубокий, обстоятельный разбор со всеми клиническими деталями.
    - Рекомендуемая структура разбора:
      • Экспресс-вердикт: анатомические ориентиры, состояние периапикальных тканей/краевого прилегания/костной ткани, ключевой диагноз или скрытые риски.
      • Синтез консилиума: оценка мнений коллег чата (Доктор ... (Консилиум)), поддержка дельных идей или аргументированная EBM-коррекция опасных заблуждений.
-     • Детальный пошаговый протокол chairside: конкретные инструменты, ISO/параметры препарирования, адгезивные протоколы, концентрации растворов, методика и материалы.
+     • Детальный пошаговый протокол chairside: конкретные инструменты, ISO, конусность, рабочая длина, концентрации растворов (NaOCl %, 17% ЭДТА), протоколы активации, методика и материалы обтурации (биокерамика, гуттаперча, МТА).
    - Плотная, доказательная речь опытного клинициста у кресла без приветствий и пустой «воды».
-   - Точка в конце: Никаких дежурных заискивающих вопросов ради диалога («А что вы думаете?», «Какой протокол у вас?»). Вопрос задавай ТОЛЬКО если без недостающего параметра объективно нельзя поставить дифдиагноз или выбрать тактику.
-2. Тон: живой, практический chairside-стиль опытного коллеги у кресла. Без академической духоты, лекторской зауми и менторского тона доцента. Говори с коллегой на равных, емко, по существу. Без высокомерия, поучений, сарказма и без эмодзи-кривляния.
+   - Точка в конце: Никаких дежурных заискивающих вопросов ради диалога («А что вы думаете?», «Какой силер у вас?»). Вопрос задавай ТОЛЬКО если без недостающего параметра объективно нельзя поставить дифдиагноз или выбрать тактику.
+2. Тон: живой, practical chairside-стиль опытного коллеги у кресла. Без академической духоты, лекторской зауми и менторского тона доцента. Говори с коллегой на равных, емко, по существу. Без высокомерия, поучений, сарказма и без эмодзи-кривляния.
 3. СМАЙЛИКИ: Никаких смайликов и эмодзи.
 4. Разметка: только HTML (<b>жирный</b>). Никакого Markdown.
 5. Только проверенные клинические факты. Не выдумывай упрощенные практические советы (например, "бери любые штифты", "главное бренд X"), если они научно не доказаны. Если в базе нет точных данных по брендам или протоколам, напиши: "В нашей базе знаний нет точных сведений о Х, а клинические рекомендации советуют ориентироваться на...", без отсебятины.
 6. ПРОАКТИВНОСТЬ И ЗАПРЕТ ДЕЖУРНЫХ ВОПРОСОВ: Если суть вопроса неясна или критически не хватает данных — честно признай это и спроси недостающее (КТ, снимок, симптоматику). Но если ответ дан — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО придумывать в конце дежурные вопросы ради поддержания диалога. Завершай точкой!
 7. ДЛИНА ИЗ КОНТЕКСТА: адаптируйся под вопрос. Если можно ответить одной фразой - отвечай коротко. Не растягивай текст.
 8. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — зафиксируй сухой репликой («Понял, молчу.») без извинений и умолкни.
-9. СИНТЕЗ СПОРОВ И МЕТА-ВОПРОСЫ (ТЕЗИС / АНТИТЕЗИС / РЕЗЮМЕ): Если коллега просит сформулировать предмет спора, тезис и антитезис, выделить суть дискуссии или рассудить спор в чате — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО требовать КТ, снимки или симптоматику! Проанализируй контекст сообщений коллег выше, четко выдели предмет разногласий, позицию А (тезис) с аргументами, позицию Б (антитезис) с аргументами и дай краткий синтез на основе доказательной базы.
+9. СИНТЕЗ СПОРОВ И МЕТА-ВОПРОСЫ (ТЕЗИС / АНТИТЕЗИС / РЕЗЮМЕ): Если коллега просит сформулировать предмет спора, тезис и антитезис, выделить суть дискуссии или рассудить спор в чате — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО требовать КТ, снимки или симптоматику! Проанализируй контекст сообщений коллег выше, четко выдели предмет разногласий, позицию А (тезис) с аргументами, позицию Б (антитезис) с аргументами и дай краткий EBM-синтез доказательной стоматологии.
 10. АНТИ-КАТАЛОГ: При вопросах о брендах, системах («какие системы имеют X?») не вываливай простыню из 20-30 названий. Назови 3–4 ключевые платформы/семейства и сфокусируйся на клинических и конструктивных критериях (геометрия, посадка, конус, риски), а не на слепом перечислении каталога.
 
 {style_instruction}
 """
-        max_retries = 2
-        reply_text = None
-        current_prompt = prompt
-        last_ask_reason = ""
-        context_for_validator = reply_chain_lines + [f"Врач: {effective_question}"] if (reply_chain_lines or effective_question) else []
-
-        for attempt in range(max_retries + 1):
-            if attempt > 0:
-                logger.info(
-                    "Group ask reflection retry %s/%s for msg_id=%s. Critique: %s",
-                    attempt, max_retries, msg_id, last_ask_reason
-                )
-                current_prompt = f"""{prompt}
-
-[КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ РЕЦЕНЗЕНТА К ПРЕДЫДУЩЕМУ ЧЕРНОВИКУ (ПОПЫТКА {attempt})]:
-Предыдущий вариант ответа отклонён рецензентом: "{last_ask_reason}".
-НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти критику рецензента, исправь указанные дефекты и перепиши ответ строго доказательно. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
-"""
+            max_retries = 2
+            candidate_reply = ""
+            last_ask_reason = ""
             status_ctx = {
                 "kind": "group_ask",
                 "chat_id": chat_id,
@@ -13958,67 +13966,171 @@ async def handle_group_direct_ask(bot_client, event, question):
                 status_ctx["image_urls"] = multimodal_image_urls
             if target_media_desc:
                 status_ctx["media_description"] = target_media_desc
-            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
-            if error or not response or not getattr(response, "text", None):
-                logger.warning("Group direct ask generation error on attempt %s: %s", attempt, error)
-                if attempt == max_retries:
-                    break
-                continue
+            context_for_validator = f"{reply_context_block}\n\n[Вопрос]: {current_query}"
 
-            candidate_text = response.text.strip()
-            if not candidate_text:
-                continue
+            for attempt in range(max_retries + 1):
+                current_prompt = prompt
+                if attempt > 0:
+                    current_prompt += f"""\n\n[РЕФЛЕКСИЯ И КОРРЕКЦИЯ ОШИБОК - ПОПЫТКА {attempt}]:
+Твой предыдущий черновик ответа был отклонен автоматическим клиническим валидатором по причине:
+"{last_ask_reason}"
+Устрани указанные дефекты и перепиши ответ строго доказательно. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
+"""
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
-            ask_ok, ask_reason = await check_response_quality(
-                context_for_validator, candidate_text,
-                invited=True, reference=wiki_corpus
-            )
-            last_ask_reason = ask_reason or ""
+                if error or not response or not getattr(response, "text", None):
+                    logger.warning("Group direct ask generation error on attempt %s: %s", attempt, error)
+                    if attempt == max_retries:
+                        break
+                    continue
 
-            if not ask_ok:
-                reason_lower = last_ask_reason.lower()
-                _danger_kws = (
-                    "доз", "опасн", "артикул", "ошибк", "риск", "топограф", "токсич",
-                    "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин"
+                draft_text = response.text.strip()
+                if not draft_text:
+                    continue
+
+                ask_ok, ask_reason = await check_response_quality(
+                    context_for_validator, draft_text,
+                    invited=True, reference=wiki_corpus
                 )
-                if not any(w in reason_lower for w in _danger_kws) and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
-                    logger.info("Group ask validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", ask_reason)
-                    candidate_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", candidate_text).strip()
-                    ask_ok = True
-                else:
-                    logger.warning(
-                        "Group ask validator REJECTED draft msg_id=%s (attempt %s/%s): %s",
-                        msg_id, attempt, max_retries, ask_reason
+                last_ask_reason = ask_reason or ""
+
+                if not ask_ok:
+                    reason_lower = last_ask_reason.lower()
+                    _danger_kws = (
+                        "доз", "опасн", "артикул", "ошибк", "риск", "топограф", "токсич",
+                        "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин"
                     )
+                    if not any(w in reason_lower for w in _danger_kws) and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
+                        logger.info("Group ask validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", ask_reason)
+                        draft_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", draft_text).strip()
+                        ask_ok = True
+                    else:
+                        logger.warning(
+                            "Group ask validator REJECTED draft msg_id=%s (attempt %s/%s): %s",
+                            msg_id, attempt, max_retries, ask_reason
+                        )
 
-            if ask_ok:
-                reply_text = candidate_text
-                logger.info("Group ask validator approved msg_id=%s on attempt %s: %s", msg_id, attempt, ask_reason)
-                break
+                if ask_ok:
+                    candidate_reply = draft_text
+                    logger.info("Group ask validator approved msg_id=%s on attempt %s: %s", msg_id, attempt, ask_reason)
+                    break
 
-        if not reply_text:
-            logger.warning("Group ask all %s reflection attempts rejected msg_id=%s. Generating cautious LLM response.", max_retries + 1, msg_id)
-            ebm_prompt = f"""
+            if not candidate_reply:
+                logger.warning("Group ask all %s reflection attempts rejected msg_id=%s. Generating cautious LLM response.", max_retries + 1, msg_id)
+                ebm_prompt = f"""
 Ты — опытный врач-стоматолог консилиума "StomChat".
-Врач спросил: {effective_question}
+Врач спросил: {current_query}
 {reply_context_block}
 Предыдущие варианты ответа не прошли проверку рецензента ("{last_ask_reason}").
 Сформулируй краткий, честный и вежливый ответ коллеге: каких параметров недостаточно для однозначного протокола и какие безопасные ориентиры можно дать.
 """
-            ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
-            ebm_ctx["kind"] = "group_ask_ebm_fallback"
-            ebm_resp, ebm_err = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
-            if ebm_resp and getattr(ebm_resp, "text", None):
-                reply_text = ebm_resp.text.strip()
-            if not reply_text:
-                await bot_client.send_message(
-                    entity=chat_id,
-                    message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
-                    reply_to=msg_id,
-                    parse_mode='html',
+                ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
+                ebm_ctx["kind"] = "group_ask_ebm_fallback"
+                ebm_resp, ebm_err = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
+                if ebm_resp and getattr(ebm_resp, "text", None):
+                    candidate_reply = ebm_resp.text.strip()
+                if not candidate_reply:
+                    await bot_client.send_message(
+                        entity=chat_id,
+                        message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
+                        reply_to=msg_id,
+                        parse_mode='html',
+                    )
+                    return None
+
+            return candidate_reply
+
+        # Супервизор догоняющего контекста и активной генерации
+        restart_count = 0
+        reply_text = None
+        try:
+            while True:
+                gen_task = asyncio.create_task(_execute_single_generation(effective_question))
+                session.set_current_task(gen_task)
+                wait_task = asyncio.create_task(session.wait_for_followup())
+
+                done, pending = await asyncio.wait(
+                    [gen_task, wait_task],
+                    return_when=asyncio.FIRST_COMPLETED
                 )
-                return
+
+                if gen_task in done:
+                    wait_task.cancel()
+                    try:
+                        reply_text = gen_task.result()
+                    except Exception as gen_err:
+                        logger.exception("Error in group direct ask generation: %s", gen_err)
+                        reply_text = None
+                    break
+
+                # Догоняющее сообщение от автора пришло во время генерации!
+                followups = session.pop_unprocessed_followups()
+                if not followups:
+                    continue
+
+                if restart_count >= inflight_triage.MAX_INFLIGHT_RESTARTS:
+                    logger.info("Max in-flight restarts reached (%d). Continuing current generation.", restart_count)
+                    try:
+                        reply_text = await gen_task
+                    except Exception as gen_err:
+                        logger.exception("Error waiting for current task: %s", gen_err)
+                        reply_text = None
+                    break
+
+                # Быстрый In-Flight Триаж
+                triage_res = await inflight_triage.run_inflight_followup_triage(
+                    effective_question,
+                    followups,
+                    bot_name="StomChat",
+                    generate_gemini_fn=generate_gemini_text_async
+                )
+                action = triage_res.get("action", "SUPPLEMENT")
+                logger.info(
+                    "In-flight triage for sender %s: action=%s reason=%s",
+                    sender_id, action, triage_res.get("reason")
+                )
+
+                if action == "CANCEL":
+                    gen_task.cancel()
+                    try:
+                        await gen_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    session.cancel()
+                    logger.info("In-flight generation cancelled per user request.")
+                    return
+
+                elif action == "WAIT_FOR_ANSWER":
+                    try:
+                        reply_text = await gen_task
+                    except Exception as gen_err:
+                        logger.exception("Error waiting for current task: %s", gen_err)
+                        reply_text = None
+                    break
+
+                elif action in ("SUPPLEMENT", "REPLACE"):
+                    # Немедленно отменяем устаревшую генерацию!
+                    gen_task.cancel()
+                    try:
+                        await gen_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                    effective_question = triage_res.get("merged_query") or (effective_question + " " + followups[-1].get("text", ""))
+                    for f in followups:
+                        if f.get("msg_id"):
+                            session.add_trigger_msg_id(f["msg_id"])
+                            all_check_ids.append(f["msg_id"])
+
+                    restart_count += 1
+                    logger.info("Restarting in-flight generation (#%d) with merged question: %r", restart_count, effective_question[:80])
+        finally:
+            session.mark_completed()
+            await inflight_mgr.unregister_session(session)
+
+        if not reply_text:
+            return
 
         reply_text = clean_html_formatting(reply_text)
         reply_text = re.sub(
@@ -14038,7 +14150,7 @@ async def handle_group_direct_ask(bot_client, event, question):
         chunks = list(html_safe.split_html(reply_text, limit=3800)) or [reply_text]
         try:
             for idx, chunk in enumerate(chunks):
-                c_reply_to = msg_id if idx == 0 else None
+                c_reply_to = (max(session.trigger_msg_ids) if session.trigger_msg_ids else msg_id) if idx == 0 else None
                 cur_msg = await bot_client.send_message(
                     entity=chat_id,
                     message=chunk,
@@ -14051,7 +14163,7 @@ async def handle_group_direct_ask(bot_client, event, question):
             logger.warning("Failed to send direct ask reply with HTML/reply_to (%s). Retrying with plain text chunks.", e)
             try:
                 for idx, chunk in enumerate(chunks):
-                    c_reply_to = msg_id if idx == 0 else None
+                    c_reply_to = (max(session.trigger_msg_ids) if session.trigger_msg_ids else msg_id) if idx == 0 else None
                     plain = html_safe.html_to_plain(chunk)
                     cur_msg = await bot_client.send_message(
                         entity=chat_id,
@@ -14072,6 +14184,8 @@ async def handle_group_direct_ask(bot_client, event, question):
                 logger.debug("Failed to save bot sent message: %s", save_err)
 
             # [RACE-01 FIX]: Помечаем оба ID как отвеченные, чтобы воркер медиа-анализа не выдал второй дубль
+            for tid in session.trigger_msg_ids:
+                REPLIED_MSG_IDS[tid] = True
             REPLIED_MSG_IDS[msg_id] = True
             if reply_to_msg_id:
                 REPLIED_MSG_IDS[reply_to_msg_id] = True

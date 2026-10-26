@@ -34,6 +34,7 @@ import assistant
 import user_memory
 import reaction_engine
 import chairside_tools
+import inflight_triage
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -2605,6 +2606,26 @@ async def handle_new_message(event):
                     msg_id, event.chat_id, sender_id,
                 )
 
+        # [IN-FLIGHT CATCHUP]: Проверяем, не является ли сообщение догоняющим дополнением
+        # к активной генерации ответа этого автора или ветки
+        active_inflight_session = None
+        if not is_any_bot:
+            inflight_mgr = inflight_triage.get_inflight_manager()
+            active_inflight_session = inflight_mgr.record_incoming_message(
+                chat_id=event.chat_id,
+                sender_id=sender_id,
+                msg_id=msg_id,
+                text=text,
+                has_media=has_media,
+                reply_to_msg_id=reply_to_msg_id,
+                date=date,
+            )
+            if active_inflight_session:
+                logger.info(
+                    "In-flight catchup: incoming msg_id=%s from %s registered into active session",
+                    msg_id, sender_name
+                )
+
         # Расшифровка голосового идёт ПОСЛЕ сохранения, а не до него.
         #
         # Раньше строка доезжала до базы только по завершении расшифровки:
@@ -2860,6 +2881,12 @@ async def handle_new_message(event):
                     if is_any_bot:
                         logger.info(f"Ignoring direct ask from bot msg_id={msg_id} sender_id={sender_id}")
                         return True
+                    if active_inflight_session:
+                        logger.info(
+                            "Direct ask msg_id=%s from %s captured in active in-flight session. Skipping duplicate handler.",
+                            msg_id, sender_name
+                        )
+                        return True
                     if ask_match:
                         raw_q = ask_match.group(1) or ""
                         _, question = strip_bot_mention(raw_q)
@@ -2935,6 +2962,11 @@ async def handle_new_message(event):
         # Умный авто-ассистент (поддерживает как основной чат, так и диалог в тестовом топике)
         async def run_assistant_safe():
             try:
+                # Если сообщение уже перехвачено активной генерацией автора —
+                # не запускаем пассивный триггер или диалог повторно!
+                if active_inflight_session:
+                    logger.info("Message msg_id=%s belongs to active in-flight session; skipping passive assistant.", msg_id)
+                    return
                 if await run_group_features():
                     return
                 # Если сообщение содержит медиа (фото/видео/снимок-документ),
