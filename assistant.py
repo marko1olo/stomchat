@@ -5811,6 +5811,17 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 logger.info("Message has no dental keywords. Dropping immediately without LLM triage.")
                 return False
 
+            # Probability gate for uninvited passive text replies in chat
+            passive_text_prob = float(getattr(config, "PASSIVE_TEXT_PROBABILITY", 0.66))
+            roll = random.random()
+            if roll >= passive_text_prob:
+                logger.info(
+                    "Passive text trigger skipped by probability roll (roll=%.2f >= %.2f). Setting passive backoff.",
+                    roll, passive_text_prob
+                )
+                record_passive_attempt()
+                return False
+
             should_reply = await check_llm_triage(context_msgs)
             if not should_reply:
                 logger.info("LLM triage decided NOT to reply. Cancelling trigger and setting passive backoff.")
@@ -6709,6 +6720,17 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         return
 
     if is_passive:
+        passive_media_prob = float(getattr(config, "PASSIVE_MEDIA_PROBABILITY", 0.66))
+        roll = random.random()
+        if roll >= passive_media_prob:
+            logger.info(
+                "Media Assistant: passive media trigger skipped by probability roll (roll=%.2f >= %.2f) for msg_id=%s. Backing off.",
+                roll, passive_media_prob, msg_id
+            )
+            state["last_passive_media_run"] = datetime.now().isoformat()
+            save_state(state)
+            return False
+
         state["last_passive_media_run"] = datetime.now().isoformat()
         save_state(state)
 

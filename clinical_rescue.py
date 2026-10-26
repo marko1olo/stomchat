@@ -75,6 +75,8 @@ NON_CLINICAL_STOPWORDS = [
 RESCUE_COOLDOWN_SECONDS = 1800  # 30 минут между спасениями
 MAX_RESCUES_PER_DAY = 4
 CHECK_INTERVAL_SECONDS = 180    # проверка раз в 3 минуты
+DEFAULT_RESCUE_MIN_AGE_MINUTES = 33
+DEFAULT_RESCUE_MAX_AGE_MINUTES = 180
 
 
 def resolve_bot_id(bot_client=None) -> int:
@@ -214,13 +216,25 @@ def find_unanswered_clinical_candidates(
     db_path: str,
     chat_id: int,
     bot_id: int = 0,
-    min_age_minutes: int = 15,
-    max_age_minutes: int = 90
+    min_age_minutes: Optional[int] = None,
+    max_age_minutes: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
     Находит в SQLite сообщения с клиническими вопросами/снимками,
     оставшиеся без единого ответа коллег и бота.
     """
+    if min_age_minutes is None:
+        try:
+            import config
+            min_age_minutes = int(getattr(config, "CLINICAL_RESCUE_MIN_AGE_MINUTES", DEFAULT_RESCUE_MIN_AGE_MINUTES))
+        except Exception:
+            min_age_minutes = DEFAULT_RESCUE_MIN_AGE_MINUTES
+    if max_age_minutes is None:
+        try:
+            import config
+            max_age_minutes = int(getattr(config, "CLINICAL_RESCUE_MAX_AGE_MINUTES", DEFAULT_RESCUE_MAX_AGE_MINUTES))
+        except Exception:
+            max_age_minutes = DEFAULT_RESCUE_MAX_AGE_MINUTES
     ensure_rescue_table(db_path)
     candidates = []
     try:
@@ -750,7 +764,22 @@ async def run_clinical_rescue_cycle(bot_client, db_path: str, chat_id: int, bot_
         return 0
 
     effective_bot_id = bot_id or resolve_bot_id(bot_client)
-    candidates = await asyncio.to_thread(find_unanswered_clinical_candidates, db_path, chat_id, bot_id=effective_bot_id)
+    min_age = DEFAULT_RESCUE_MIN_AGE_MINUTES
+    max_age = DEFAULT_RESCUE_MAX_AGE_MINUTES
+    try:
+        import config
+        min_age = int(getattr(config, "CLINICAL_RESCUE_MIN_AGE_MINUTES", DEFAULT_RESCUE_MIN_AGE_MINUTES))
+        max_age = int(getattr(config, "CLINICAL_RESCUE_MAX_AGE_MINUTES", DEFAULT_RESCUE_MAX_AGE_MINUTES))
+    except Exception:
+        pass
+    candidates = await asyncio.to_thread(
+        find_unanswered_clinical_candidates,
+        db_path,
+        chat_id,
+        bot_id=effective_bot_id,
+        min_age_minutes=min_age,
+        max_age_minutes=max_age
+    )
     if not candidates:
         return 0
 

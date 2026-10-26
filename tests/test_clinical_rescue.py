@@ -85,7 +85,7 @@ def run_tests():
     now = datetime.datetime.now(datetime.timezone.utc)
     t_2m = (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
     t_5m = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-    t_25m = (now - datetime.timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S")
+    t_25m = (now - datetime.timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
     t_40m = (now - datetime.timedelta(minutes=40)).strftime("%Y-%m-%d %H:%M:%S")
     t_120m = (now - datetime.timedelta(minutes=120)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -248,7 +248,7 @@ def run_tests():
     print("\n[8] Дедупликация альбомов и серий (Turn / Album Deduplication)")
     album_tmp_dir = tempfile.mkdtemp()
     album_db_path = os.path.join(album_tmp_dir, "test_album_dedup.db")
-    t_24m = (now - datetime.timedelta(minutes=24)).strftime("%Y-%m-%d %H:%M:%S")
+    t_24m = (now - datetime.timedelta(minutes=34)).strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(album_db_path) as conn:
         conn.execute("""
             CREATE TABLE messages (
@@ -441,7 +441,7 @@ def run_tests():
             )
         """)
         t_now = datetime.datetime.now(datetime.timezone.utc)
-        t_album = (t_now - datetime.timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+        t_album = (t_now - datetime.timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
 
         # Кандидат 1 автора с кулдауном (должен быть отброшен)
         conn.execute("INSERT INTO messages (id, msg_id, sender_id, sender_name, text, date, has_media, media_description) "
