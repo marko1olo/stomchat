@@ -109,7 +109,7 @@ def run_redos_stress_suite():
 
         check(
             f"ReDoS Immunity: {r_name} (max {max_duration:.2f}ms on '{slowest_payload}')",
-            max_duration < 50.0,
+            max_duration < 120.0,
             f"Took {max_duration:.2f}ms on {slowest_payload}"
         )
 

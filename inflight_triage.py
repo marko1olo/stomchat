@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 # Максимальное число перезапусков генерации на одной сессии (защита от флуда)
 MAX_INFLIGHT_RESTARTS = 3
+# Префиксы команд, исключаемые из клинического контекста и сессий догоняющих сообщений
+_EXCLUDED_COMMAND_PREFIXES = (
+    "/wipe", "/delete", "/del", "/save", "/сохранить",
+    "/summary", "/итог", "/sum",
+    "/poll", "/кейс", "/what", "/что", "/calc",
+    "/mute", "/silence", "/unmute", "/bans", "/ban", "/kick",
+    "/chairside", "/torque", "/anes", "/fdi", "/aae", "/sos", "/pharma", "/preserve",
+    "/start", "/help", "/bookmarks", "/menu", "/settings"
+)
 
 # Время жизни сессии в памяти (сек)
 SESSION_MAX_LIFETIME_SECONDS = 180.0
@@ -179,6 +188,11 @@ class InFlightManager:
                 return True
         return False
 
+    def has_waiter(self, chat_id: int, sender_id: int) -> bool:
+        """Проверяет наличие ожидающего pre-gather waiter для автора."""
+        fut = self._initial_waiters.get((chat_id, sender_id))
+        return bool(fut and not fut.done())
+
     def record_incoming_message(
         self,
         chat_id: int,
@@ -191,9 +205,26 @@ class InFlightManager:
     ) -> Optional[InFlightSession]:
         """
         Перехватывает новое сообщение:
-        - Если есть ждущий pre-gather waiter на пустой /ask — разрешает его.
+        - Игнорирует сервисные и административные команды.
+        - Если есть ждущий pre-gather waiter на пустой /ask — разрешает его и клеймит сессию.
         - Если есть активная сессия генерации — добавляет follow-up.
         """
+        clean_text = (text or "").strip()
+        clean_lower = clean_text.lower()
+
+        # Игнорируем пустые сообщения без медиа
+        if not clean_text and not has_media:
+            return None
+
+        # Исключаем административные, сервисные и сторонние команды
+        if any(clean_lower == p or clean_lower.startswith(p + " ") or clean_lower.startswith(p + "@") for p in _EXCLUDED_COMMAND_PREFIXES):
+            logger.debug("record_incoming_message: ignoring excluded command %r", clean_text[:30])
+            return None
+
+        # Если автор начал догоняющее сообщение с /ask, очищаем префикс команды
+        if clean_lower.startswith("/ask"):
+            clean_text = re.sub(r"^/ask(?:@\w+)?\s*", "", clean_text, flags=re.IGNORECASE).strip()
+
         key = (chat_id, sender_id)
 
         # 1. Проверяем pre-gather waiter
@@ -201,19 +232,31 @@ class InFlightManager:
         if fut and not fut.done():
             fut.set_result({
                 "msg_id": msg_id,
-                "text": (text or "").strip(),
+                "text": clean_text,
                 "has_media": bool(has_media),
                 "reply_to_msg_id": reply_to_msg_id,
                 "date": date,
             })
-            logger.info("Resolved initial follow-up waiter for %s msg_id=%s", key, msg_id)
+            logger.info("Resolved initial follow-up waiter for %s msg_id=%s (media=%s)", key, msg_id, has_media)
+            # Немедленно клеймим сессию, чтобы main.py не запустил пассивный триггер-дубликат
+            session = self.get_active_session(
+                chat_id=chat_id, sender_id=sender_id, reply_to_msg_id=reply_to_msg_id, msg_id=msg_id
+            )
+            if not session:
+                session = InFlightSession(chat_id, sender_id, msg_id, clean_text)
+                session.add_trigger_msg_id(msg_id)
+                self._sessions[key] = session
+                self._msg_to_session[(chat_id, msg_id)] = session
+            else:
+                session.record_followup(msg_id, clean_text, has_media=has_media, date=date)
+            return session
 
         # 2. Проверяем активную генерацию
         session = self.get_active_session(
             chat_id=chat_id, sender_id=sender_id, reply_to_msg_id=reply_to_msg_id, msg_id=msg_id
         )
         if session:
-            session.record_followup(msg_id, text, has_media=has_media, date=date)
+            session.record_followup(msg_id, clean_text, has_media=has_media, date=date)
             return session
 
         return None

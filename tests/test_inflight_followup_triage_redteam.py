@@ -275,6 +275,136 @@ class TestInFlightFollowupTriageRedTeam(unittest.IsolatedAsyncioTestCase):
         self.assertIn("фиксации композита к композиту", completed_queries[0])
         self.assertIn("Ответ на: Какая смола лучше? + имею в виду для фиксации композита к композиту", final_answer)
 
+    async def test_record_incoming_message_ignores_excluded_commands(self):
+        """Админские и служебные команды (/wipe, /delete, /calc, /summary) не должны перехватываться."""
+        session = await self.mgr.register_session(self.chat_id, self.sender_id, 100, "Вопрос по эндодонтии")
+        
+        # 1. Попытка привязать /wipe
+        res = self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=101,
+            text="/wipe",
+            has_media=False
+        )
+        self.assertIsNone(res)
+        self.assertEqual(len(session.followup_messages), 0)
+
+        # 2. Попытка привязать /delete с аргументом
+        res2 = self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=102,
+            text="/delete 18500",
+            has_media=False
+        )
+        self.assertIsNone(res2)
+        self.assertEqual(len(session.followup_messages), 0)
+
+        # 3. Попытка привязать /calc
+        res3 = self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=103,
+            text="/calc 2*1.8",
+            has_media=False
+        )
+        self.assertIsNone(res3)
+        self.assertEqual(len(session.followup_messages), 0)
+
+        # 4. Клиническое дополнение должно успешно зафиксироваться
+        res4 = self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=104,
+            text="зуб 16, медиальный щечный",
+            has_media=False
+        )
+        self.assertIsNotNone(res4)
+        self.assertEqual(len(session.followup_messages), 1)
+        self.assertEqual(session.followup_messages[0]['text'], "зуб 16, медиальный щечный")
+
+        await self.mgr.unregister_session(session)
+
+    async def test_record_incoming_message_strips_ask_prefix(self):
+        """Если врач ввел /ask в догоняющем сообщении, префикс очищается."""
+        session = await self.mgr.register_session(self.chat_id, self.sender_id, 200, "Препарирование")
+        
+        self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=201,
+            text="/ask@botname еще про конусность напиши",
+            has_media=False
+        )
+        self.assertEqual(len(session.followup_messages), 1)
+        self.assertEqual(session.followup_messages[0]['text'], "еще про конусность напиши")
+        await self.mgr.unregister_session(session)
+
+    async def test_pregather_waiter_claims_session_prevents_duplicate_passive(self):
+        """Разрешение initial waiter немедленно клеймит сессию, возвращая активный объект."""
+        wait_task = asyncio.create_task(
+            self.mgr.wait_for_immediate_followup(self.chat_id, self.sender_id, timeout=1.0)
+        )
+        await asyncio.sleep(0.01)
+        self.assertTrue(self.mgr.has_waiter(self.chat_id, self.sender_id))
+
+        # Прилетает сообщение от автора
+        claimed = self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=301,
+            text="протокол промывания каналов",
+            has_media=False
+        )
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed.chat_id, self.chat_id)
+        self.assertEqual(claimed.sender_id, self.sender_id)
+
+        # Wait task успешно завершился
+        gathered = await wait_task
+        self.assertIsNotNone(gathered)
+        self.assertEqual(gathered["text"], "протокол промывания каналов")
+        self.assertEqual(gathered["msg_id"], 301)
+        self.assertFalse(self.mgr.has_waiter(self.chat_id, self.sender_id))
+
+        await self.mgr.unregister_session(claimed)
+
+    async def test_find_immediate_preceding_question_with_media_only(self):
+        """Снимок без текста, отправленный перед /ask, должен быть спасен."""
+        mock_db_rows = [
+            (501, "", 1, "2026-10-26 12:00:00"),
+        ]
+
+        async def mock_query(sql, params):
+            return mock_db_rows
+
+        res = await find_immediate_preceding_question(
+            query_db_async_fn=mock_query,
+            sender_id=self.sender_id,
+            current_msg_id=502,
+            max_id_diff=5
+        )
+        self.assertIsNotNone(res)
+        self.assertEqual(res["msg_id"], 501)
+        self.assertTrue(res["has_media"])
+        self.assertEqual(res["text"], "")
+
+    async def test_late_media_followup_records_has_media(self):
+        """Догоняющее сообщение со снимком должно фиксировать has_media=True."""
+        session = await self.mgr.register_session(self.chat_id, self.sender_id, 600, "Что с зубом?")
+        
+        self.mgr.record_incoming_message(
+            chat_id=self.chat_id,
+            sender_id=self.sender_id,
+            msg_id=601,
+            text="",
+            has_media=True
+        )
+        self.assertEqual(len(session.followup_messages), 1)
+        self.assertTrue(session.followup_messages[0]['has_media'])
+        self.assertEqual(session.followup_messages[0]['msg_id'], 601)
+        await self.mgr.unregister_session(session)
 
 if __name__ == "__main__":
     unittest.main()

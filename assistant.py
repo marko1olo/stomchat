@@ -13538,7 +13538,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 
     import inflight_triage
     inflight_mgr = inflight_triage.get_inflight_manager()
-    if not inflight_mgr.has_active_session(chat_id, event.sender_id):
+    if not inflight_mgr.has_active_session(chat_id, event.sender_id) and not inflight_mgr.has_waiter(chat_id, event.sender_id):
         cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
         if cooldown > 0:
             await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
@@ -13835,22 +13835,56 @@ async def handle_group_direct_ask(bot_client, event, question):
             preceding = await inflight_triage.find_immediate_preceding_question(
                 query_db_async, sender_id, msg_id, max_id_diff=8
             )
-            if preceding and preceding.get("text"):
-                clean_q = preceding["text"]
+            if preceding:
+                if preceding.get("text"):
+                    clean_q = preceding["text"]
+                if preceding.get("msg_id"):
+                    all_check_ids.append(preceding["msg_id"])
+                if preceding.get("has_media") and preceding.get("msg_id"):
+                    target_media_ids.append(preceding["msg_id"])
+                    if not clean_q:
+                        clean_q = "Коллега, дай подробный клинический разбор, протокол и рекомендации по прикрепленному клиническому снимку/случаю."
+                    if effective_client:
+                        try:
+                            from media_tools import extract_multimodal_images_async
+                            prec_urls = await extract_multimodal_images_async(
+                                effective_client, chat_id, [preceding["msg_id"]], max_images=16
+                            )
+                            if prec_urls:
+                                multimodal_image_urls = list(dict.fromkeys(multimodal_image_urls + prec_urls))
+                                logger.info("Attached %d multimodal images from preceding msg #%s to direct ask", len(prec_urls), preceding["msg_id"])
+                        except Exception as prec_err:
+                            logger.warning("Error extracting multimodal images from preceding msg: %s", prec_err)
                 logger.info(
-                    "handle_group_direct_ask: salvaged question from preceding message #%s: %r",
-                    preceding["msg_id"], clean_q[:60]
+                    "handle_group_direct_ask: salvaged question from preceding message #%s: %r (media=%s)",
+                    preceding.get("msg_id"), clean_q[:60], preceding.get("has_media")
                 )
             else:
-                # B. Ожидаем ввод вопроса в течение 3.5 сек (врач часто отправляет /ask и сразу следом текст)
+                # B. Ожидаем ввод вопроса в течение 3.5 сек (врач часто отправляет /ask и сразу следом текст/снимок)
                 gathered = await inflight_mgr.wait_for_immediate_followup(chat_id, sender_id, timeout=3.5)
-                if gathered and gathered.get("text"):
-                    clean_q = gathered["text"]
+                if gathered:
+                    if gathered.get("text"):
+                        clean_q = gathered["text"]
                     if gathered.get("msg_id"):
                         all_check_ids.append(gathered["msg_id"])
+                    if gathered.get("has_media") and gathered.get("msg_id"):
+                        target_media_ids.append(gathered["msg_id"])
+                        if not clean_q:
+                            clean_q = "Коллега, дай подробный клинический разбор, протокол и рекомендации по прикрепленному клиническому снимку/случаю."
+                        if effective_client:
+                            try:
+                                from media_tools import extract_multimodal_images_async
+                                gath_urls = await extract_multimodal_images_async(
+                                    effective_client, chat_id, [gathered["msg_id"]], max_images=16
+                                )
+                                if gath_urls:
+                                    multimodal_image_urls = list(dict.fromkeys(multimodal_image_urls + gath_urls))
+                                    logger.info("Attached %d multimodal images from gathered msg #%s to direct ask", len(gath_urls), gathered["msg_id"])
+                            except Exception as gath_err:
+                                logger.warning("Error extracting multimodal images from gathered msg: %s", gath_err)
                     logger.info(
-                        "handle_group_direct_ask: gathered follow-up question within 3.5s grace window: %r",
-                        clean_q[:60]
+                        "handle_group_direct_ask: gathered follow-up question within 3.5s grace window: %r (media=%s)",
+                        clean_q[:60], gathered.get("has_media") if gathered else False
                     )
 
         if not clean_q:
@@ -13906,7 +13940,23 @@ async def handle_group_direct_ask(bot_client, event, question):
    - К запросу приложено клинико-рентгенологическое описание снимка. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «снимки не загрузились», «сообщение пустое» или требовать анкеты. Дай полноценное экспертное заключение на основе имеющихся клинических данных!
 """
 
-        async def _execute_single_generation(current_query):
+        async def _execute_single_generation(current_query, cur_image_urls=None, cur_media_desc=None):
+            active_img_urls = cur_image_urls if cur_image_urls is not None else multimodal_image_urls
+            active_media_desc = cur_media_desc if cur_media_desc is not None else target_media_desc
+
+            cur_mm_notice = ""
+            cur_mm_instruction = ""
+            if active_img_urls:
+                cur_mm_notice = f"""
+[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К твоему запросу прикреплены оригинальные снимки/слайсы ({len(active_img_urls)} шт.) в высоком разрешении. Внимательно сопоставь видимую на снимках картину: анатомию корней и каналов, периапикальные ткани, качество обтурации/реставрации/прилегания, состояние костной ткани, наличие ступеней, перфораций или отломков инструментов. Твой разбор должен базироваться на том, что ты РЕАЛЬНО видишь на этих прикрепленных снимках!]
+"""
+                cur_mm_instruction = """
+   - К запросу прикреплены реальные снимки в высоком разрешении. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «снимки не загрузились», «видны только метки» или «сообщение пустое». Проведи полноценный визуальный разбор прикрепленных снимков!
+"""
+            elif active_media_desc:
+                cur_mm_instruction = """
+   - К запросу приложено клинико-рентгенологическое описание снимка. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать «снимки не загрузились», «сообщение пустое» или требовать анкеты. Дай полноценное экспертное заключение на основе имеющихся клинических данных!
+"""
             full_query = (current_query or "") + (" " + " ".join(reply_chain_lines) if reply_chain_lines else "")
             wiki_corpus, archive_corpus = "", ""
             if has_dental_term(full_query):
@@ -13924,7 +13974,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 Ты - опытный стоматолог-практик с 15-летней клинической историей, отвечаешь коллеге на вопрос в группе "StomChat".
 Ответь профессионально, экспертно и строго по существу.
 {target_focus_instruction}
-{multimodal_notice}
+{cur_mm_notice}
 [ВОПРОС КОЛЛЕГИ В ЧАТЕ]:
 "{sanitize_user_input_xml(current_query)}"
 
@@ -13960,12 +14010,12 @@ async def handle_group_direct_ask(bot_client, event, question):
                 "kind": "group_ask",
                 "chat_id": chat_id,
                 "thinking_level": "HIGH",
-                "has_media": bool(multimodal_image_urls or target_media_desc),
+                "has_media": bool(active_img_urls or active_media_desc),
             }
-            if multimodal_image_urls:
-                status_ctx["image_urls"] = multimodal_image_urls
-            if target_media_desc:
-                status_ctx["media_description"] = target_media_desc
+            if active_img_urls:
+                status_ctx["image_urls"] = active_img_urls
+            if active_media_desc:
+                status_ctx["media_description"] = active_media_desc
 
             context_for_validator = f"{reply_context_block}\n\n[Вопрос]: {current_query}"
 
@@ -14046,7 +14096,7 @@ async def handle_group_direct_ask(bot_client, event, question):
         reply_text = None
         try:
             while True:
-                gen_task = asyncio.create_task(_execute_single_generation(effective_question))
+                gen_task = asyncio.create_task(_execute_single_generation(effective_question, multimodal_image_urls, target_media_desc))
                 session.set_current_task(gen_task)
                 wait_task = asyncio.create_task(session.wait_for_followup())
 
@@ -14122,6 +14172,23 @@ async def handle_group_direct_ask(bot_client, event, question):
                         if f.get("msg_id"):
                             session.add_trigger_msg_id(f["msg_id"])
                             all_check_ids.append(f["msg_id"])
+
+                    # Проверяем, не прикрепил ли автор снимок в догоняющем сообщении!
+                    followup_media_ids = [f["msg_id"] for f in followups if f.get("has_media") and f.get("msg_id")]
+                    if followup_media_ids and effective_client:
+                        try:
+                            from media_tools import extract_multimodal_images_async
+                            new_urls = await extract_multimodal_images_async(
+                                effective_client, chat_id, followup_media_ids, max_images=16
+                            )
+                            if new_urls:
+                                multimodal_image_urls = list(dict.fromkeys(multimodal_image_urls + new_urls))
+                                logger.info(
+                                    "Attached %d new multimodal images from in-flight followup to ask msg_id=%s",
+                                    len(new_urls), msg_id
+                                )
+                        except Exception as extract_err:
+                            logger.warning("Error extracting multimodal images from in-flight followup: %s", extract_err)
 
                     restart_count += 1
                     logger.info("Restarting in-flight generation (#%d) with merged question: %r", restart_count, effective_question[:80])
