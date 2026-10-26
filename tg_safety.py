@@ -599,13 +599,21 @@ def _log_give_up(logger, outcome):
     «бот не ответил» и не диагностируется вообще: telethon свои INFO не пишет
     (runtime_guard.py:79 глушит его до ERROR).
     """
+    err_name = type(outcome.error).__name__ if outcome.error is not None else ""
+    if "MessageNotModified" in err_name:
+        (logger or _LOG).debug(
+            "tg no-op op=%s chat_id=%s (message already has exact target content)",
+            outcome.op, outcome.chat_id,
+        )
+        return
+
     (logger or _LOG).warning(
         "tg give up op=%s chat_id=%s reason=%s kind=%s attempts=%d "
         "elapsed=%.2fs flood_wait=%s error=%s: %s",
         outcome.op, outcome.chat_id, outcome.reason, outcome.kind,
         outcome.attempts, outcome.elapsed,
         "-" if outcome.flood_seconds is None else "%.0fs" % outcome.flood_seconds,
-        type(outcome.error).__name__ if outcome.error is not None else "-",
+        err_name or "-",
         outcome.error if outcome.error is not None else "-",
     )
 
@@ -746,6 +754,11 @@ async def guard(make_awaitable, op, chat_id=None, timeout=DEFAULT_TIMEOUT_SECOND
             return outcome(True, value=task.result())
 
         kind = classify(error)
+        err_name = type(error).__name__
+        if "MessageNotModified" in err_name:
+            # Target message already contains this exact text/content on Telegram servers.
+            # Treat as successful no-op rather than terminal failure.
+            return outcome(True, value=None)
 
         if kind == KIND_FLOOD:
             wait = flood_wait_seconds(error)

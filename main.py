@@ -3298,11 +3298,19 @@ async def handle_private_message(event):
 
                     try:
                         if len(burst) == 1:
-                            await asyncio.wait_for(assistant.handle_private_message(bot_client, burst[0]), timeout=180)
+                            await asyncio.wait_for(assistant.handle_private_message(bot_client, burst[0]), timeout=360)
                         else:
-                            await asyncio.wait_for(assistant.handle_private_message_bundle(bot_client, burst), timeout=180)
+                            await asyncio.wait_for(assistant.handle_private_message_bundle(bot_client, burst), timeout=360)
                     except asyncio.TimeoutError:
-                        logger.error(f"PM burst item processing timed out (> 180s) for chat_id={chat_id}")
+                        logger.error(f"PM burst item processing timed out (> 360s) for chat_id={chat_id}")
+                        try:
+                            await bot_client.send_message(
+                                entity=chat_id,
+                                message="⏱ <i>Обработка клинического запроса заняла больше обычного из-за высокой нагрузки на нейросетевой каскад. Пожалуйста, повторите запрос или уточните вопрос.</i>",
+                                parse_mode="html",
+                            )
+                        except Exception as notify_err:
+                            logger.warning(f"Failed to notify user about timeout in chat_id={chat_id}: {notify_err}")
                     except Exception as item_err:
                         logger.exception(f"Error processing PM burst item for chat_id={chat_id}: {item_err}")
 

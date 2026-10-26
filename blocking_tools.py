@@ -463,6 +463,20 @@ _CHILD_LOG_LEVELS = {
 }
 
 
+_ROUTINE_CHILD_LOG_PATTERNS = (
+    "keys available",
+    "budget planned",
+    "http request:",
+    "https connection",
+    "http/1.1 200",
+    "http/2 200",
+    "request attempt",
+    "allocated timeout",
+    "loaded api keys",
+    "starting new https connection",
+)
+
+
 def _relay_child_log(action, stderr_text):
     """
     Перелить журнал дочернего процесса в свой logger.
@@ -484,6 +498,9 @@ def _relay_child_log(action, stderr_text):
         if not line.strip():
             continue
         level = _CHILD_LOG_LEVELS.get(line.split(" ", 1)[0], logging.INFO)
+        line_lower = line.lower()
+        if level == logging.INFO and any(pat in line_lower for pat in _ROUTINE_CHILD_LOG_PATTERNS):
+            level = logging.DEBUG
         logger.log(level, "[%s] %s", action, line)
 
 
