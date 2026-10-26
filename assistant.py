@@ -4006,8 +4006,16 @@ def clean_html_formatting(text):
         # идёт через html_safe.split_html, и там каждая часть валидна сама.
         return plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    # Convert markdown bullet points '* item' to '• item'
+    text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+    # Convert Markdown bold-italic ***text*** to HTML <b><i>text</i></b>
+    text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', text)
     # Convert Markdown bold **text** to HTML bold <b>text</b>
     text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', text)
+    # Convert Markdown italic *text* (when not preceded or followed by *) to HTML italic <i>text</i>
+    text = re.sub(r'(?<!\*)\*([^\s*\n](?:[^*\n]{0,300}?[^\s*\n])?)\*(?!\*)', r'<i>\1</i>', text)
+    # Strip any remaining stray unmatched **
+    text = re.sub(r'\*\*', '', text)
     # Convert unsupported HTML lists (ul/ol/li) and paragraphs/breaks before tag escaping
     text = re.sub(r'</p\s*>', '\n\n', text, flags=re.IGNORECASE)
     text = re.sub(r'<p[^>]*>', '', text, flags=re.IGNORECASE)
@@ -6294,15 +6302,19 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Врач обратился в диалоге: {text}
 Замечание клинического рецензента к предыдущим черновикам: "{last_quality_reason}".
 Сформулируй сжатый, доказательный и безопасный ответ врачу, прямо отметив, какие клинические детали нужно уточнить для однозначного протокола.
+Требования к оформлению: строго только HTML (<b>жирный</b>). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые звёздочки (** или *) и Markdown.
 """
                 ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 ebm_ctx["kind"] = "dialogue_ebm_fallback"
                 ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
                 if ebm_resp and getattr(ebm_resp, "text", None):
-                    reply_text = ebm_resp.text.strip()
+                    reply_text = clean_html_formatting(ebm_resp.text.strip())
             if not reply_text:
                 logger.warning("All %s attempts rejected or failed in check_and_trigger_assistant msg_id=%s. Suppressing reply.", max_retries + 1, msg_id)
                 return False
+
+        # Гарантированная нормализация HTML и зачистка Markdown-звездочек
+        reply_text = clean_html_formatting(reply_text)
 
         # Санитизация обращений: строгое удаление любых остаточных "Коллега," / "Коллеги,"
         reply_text = re.sub(
@@ -6316,7 +6328,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         # SENDING
         if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
             # Shadow testing: deliver to test chat & topic
-            shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
+            shadow_message = clean_html_formatting(f"[SHADOW TEST]\n\n{reply_text}")
             write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nContext:\n{chr(10).join(context_msgs[-4:])}\nResponse:\n{reply_text}\n---")
             try:
                 sent_msg = await bot_client.send_message(
@@ -6336,7 +6348,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 return False
         else:
             # Live mode OR direct reply in test chat: reply directly to user message!
-            reply_message = reply_text
+            reply_message = clean_html_formatting(reply_text)
 
             # Добавляем ненавязчивую контекстную подсказку про ЛС с вероятностью 15%
             if random.random() < 0.15:
@@ -6997,15 +7009,19 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 1. Опиши видимые рентгенологические/клинические ориентиры.
 2. Укажи, каких проекций, срезов КТ или анамнестических данных не хватает для однозначного диагноза.
 3. Без шаблонов и общих фраз.
+4. Разметка: строго только HTML (<b>жирный</b>). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые звёздочки (** или *) и Markdown.
 """
             ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
             ebm_ctx["kind"] = "media_ebm_fallback"
             ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
             if ebm_resp and getattr(ebm_resp, "text", None):
-                reply_text = ebm_resp.text.strip()
+                reply_text = clean_html_formatting(ebm_resp.text.strip())
         if not reply_text:
             logger.warning("Media assistant all %s attempts rejected or failed for msg_id=%s. Suppressing reply.", max_retries + 1, msg_id)
             return
+
+    # Гарантированная нормализация HTML и зачистка Markdown-звездочек
+    reply_text = clean_html_formatting(reply_text)
 
     # Санитизация обращений: строгое удаление любых остаточных "Коллега," / "Коллеги,"
     reply_text = re.sub(
@@ -7018,7 +7034,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # SENDING
     if SHADOW_TESTING and event.chat_id != TEST_CHAT_ID:
-        shadow_message = f"[SHADOW TEST]\n\n{reply_text}"
+        shadow_message = clean_html_formatting(f"[SHADOW TEST]\n\n{reply_text}")
         write_to_shadow_log(f"Reason: {trigger_reason}\nKeywords: {search_keywords}\nImage description: {media_description}\nResponse:\n{reply_text}\n---")
         try:
             await bot_client.send_message(
@@ -7031,7 +7047,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         except Exception as e:
             logger.error(f"Failed to send shadow media assistant message: {e}")
     else:
-        reply_message = reply_text
+        reply_message = clean_html_formatting(reply_text)
         group_buttons = None
         tooth_match_grp = re.search(
             r'(?:зуб[аеы]?|fdi|tooth|област[ьи]|сегмент[еа]?)\s*([1-4][1-8])\b|\b([1-4][1-8])\s*(?:зуб[аеы]?|tooth)',
@@ -14216,6 +14232,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 
         sent_msg = None
         import html_safe
+        reply_text = clean_html_formatting(reply_text)
         chunks = list(html_safe.split_html(reply_text, limit=3800)) or [reply_text]
         try:
             for idx, chunk in enumerate(chunks):

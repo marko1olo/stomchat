@@ -1350,6 +1350,21 @@ async def patched_send_message(*args, **kwargs):
             logger.warning(f"bot_client.send_message: aborted sending empty message to entity={entity}")
             return None
 
+    # Гарантированная зачистка Markdown-звездочек при отправке с parse_mode='html'
+    parse_mode = kwargs.get("parse_mode")
+    if str(parse_mode).lower() == "html" and text and isinstance(text, str):
+        if "**" in text or re.search(r'(?m)^\s*\*\s+', text):
+            text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+            text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', text)
+            text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', text)
+            text = re.sub(r'\*\*', '', text)
+            if "message" in kwargs:
+                kwargs["message"] = text
+            elif len(args) > 1:
+                args = list(args)
+                args[1] = text
+                args = tuple(args)
+
     # Защита от эскалации FloodWait: если чат на активном кулдауне, не стучимся в сеть Telegram
     try:
         import tg_safety

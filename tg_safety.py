@@ -55,6 +55,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 import sys
 import time
 
@@ -801,6 +802,14 @@ async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
         log = logger or _LOG
         log.warning("tg_safety.send_message: aborted sending empty message to chat_id=%s op=%s", chat_id, op)
         return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
+    if text and str(kwargs.get("parse_mode", "")).lower() == "html":
+        s_text = str(text)
+        if "**" in s_text or re.search(r'(?m)^\s*\*\s+', s_text):
+            s_text = re.sub(r'(?m)^\s*\*\s+', '• ', s_text)
+            s_text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s_text)
+            s_text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s_text)
+            s_text = re.sub(r'\*\*', '', s_text)
+            text = s_text
     return await guard(
         lambda: client.send_message(entity=chat_id, message=text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,
@@ -814,6 +823,14 @@ async def edit_message(client, chat_id, message_id, text,
         log = logger or _LOG
         log.warning("tg_safety.edit_message: aborted editing empty message for chat_id=%s msg_id=%s op=%s", chat_id, message_id, op)
         return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
+    if text and str(kwargs.get("parse_mode", "")).lower() == "html":
+        s_text = str(text)
+        if "**" in s_text or re.search(r'(?m)^\s*\*\s+', s_text):
+            s_text = re.sub(r'(?m)^\s*\*\s+', '• ', s_text)
+            s_text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s_text)
+            s_text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s_text)
+            s_text = re.sub(r'\*\*', '', s_text)
+            text = s_text
     return await guard(
         lambda: client.edit_message(chat_id, message_id, text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,

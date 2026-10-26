@@ -542,8 +542,11 @@ def clean_markdown_to_html(text):
             return f"\n\n{t_tok}\n\n"
         text = re.sub(r'(?:<div class="table-container">\s*)?<table[\s\S]*?</table>(?:\s*</div>)?', _store_table, text_with_tables, flags=re.IGNORECASE)
 
-    # 1. Сначала превращаем Markdown-жирный в HTML-жирный
+    # 1. Сначала превращаем Markdown-жирный в HTML-жирный и зачищаем маркеры списков
+    text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+    text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'\*\*', '', text)
 
     # 2. Обработка заголовков ###, списков и маркеров изображений / таблиц
     marker_re = re.compile(r'^[ \t]*[\-•*+—▶️🛑✅🌟]+\s*')
