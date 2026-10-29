@@ -39,6 +39,7 @@ tests = [
     "tests/test_memory_performance_redteam.py",
     "tests/test_passive_probability_and_rescue_redteam.py",
     "tests/test_inflight_followup_triage_redteam.py",
+    "tests/test_poll_antidup_inquisitor.py",
 ]
 
 all_ok = True
@@ -61,4 +62,4 @@ for test in tests:
 if not all_ok:
     print(f"\nSOME {bot_label} TESTS FAILED!", flush=True)
     sys.exit(1)
-print(f"\nALL {bot_label} TEST SUITES ({len(tests)}/32) ARE 100% GREEN!", flush=True)
+print(f"\nALL {bot_label} TEST SUITES ({len(tests)}/{len(tests)}) ARE 100% GREEN!", flush=True)

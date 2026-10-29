@@ -1044,10 +1044,12 @@ async def scheduler_task(bot_client):
                                 if recent_rows:
                                     chat_context = [f"{r[1]}: {r[3]}" for r in recent_rows if r[3]]
 
+                                recent_polls = await poll_storage.get_recent_poll_topics(limit=45)
                                 payload, media = await poll_engine.generate_poll(
                                     chat_context=chat_context,
                                     force_type=None,
-                                    is_anonymous=True  # MTProto Anonymous Dilemma: анонимный опрос в группе
+                                    is_anonymous=True,  # MTProto Anonymous Dilemma: анонимный опрос в группе
+                                    recent_polls=recent_polls
                                 )
                                 daily_poll_cached_payload = (payload, media)
                         else:

@@ -700,12 +700,139 @@ async def has_poll_in_slot(chat_id: int, slot: str, db_path: Optional[str] = Non
     return await has_poll_today(chat_id, slot=slot, db_path=db_path)
 
 
-async def get_recent_poll_topics(limit: int = 7, db_path: Optional[str] = None) -> List[Dict[str, str]]:
-    """Возвращает список недавних тем и вопросов опросов для исключения дублирования."""
+def normalize_poll_text(text: str) -> str:
+    """Нормализует текст вопроса или темы: нижний регистр, замена ё->е, удаление пунктуации."""
+    if not text:
+        return ""
+    import re
+    t = text.lower().replace("ё", "е")
+    t = re.sub(r"[^\w\s]", " ", t)
+    return " ".join(t.split())
+
+
+POLL_STOP_WORDS: Set[str] = {
+    "какой", "какова", "какая", "какие", "каком", "какую", "каких", "какими",
+    "тактика", "клинический", "клиническая", "клиническое", "клинических",
+    "случай", "пациент", "пациента", "пациентки", "врач", "врача", "доктор",
+    "доказательная", "оптимальная", "протокол", "протоколы", "зуб", "зуба",
+    "зубе", "зубов", "при", "или", "для", "под", "над", "без", "после",
+    "перед", "между", "через", "это", "как", "что", "чем", "где", "куда",
+    "выбор", "выборе", "является", "наиболее", "первичная", "шаг", "шага"
+}
+
+CLINICAL_ANCHOR_CLUSTERS: List[Set[str]] = [
+    {"торк", "имплант"},
+    {"шнайдер", "перфорац"},
+    {"шнайдер", "разрыв"},
+    {"шнайдер", "синус"},
+    {"отлом", "файл"},
+    {"поломк", "файл"},
+    {"отлом", "niti"},
+    {"перфорац", "фуркац"},
+    {"перфорац", "дна"},
+    {"c factor", "стресс"},
+    {"усадка", "c factor"},
+    {"dme", "поднятие"},
+    {"dme", "края"},
+    {"dme", "поддеснев"},
+    {"speedex", "силикон"},
+    {"спидекс", "силикон"},
+    {"ti base", "балансир"},
+    {"ти бейс", "балансир"},
+    {"ti base", "непосадк"},
+    {"ти бейс", "непосадк"},
+    {"внчс", "диск"},
+    {"внчс", "мрт"},
+    {"депрограмматор", "койс"},
+    {"депрограмматор", "лючиа"},
+    {"смазан", "слой"},
+    {"феррул", "экструзи"},
+    {"феррул", "удлинен"},
+    {"токсичност", "артикаин"},
+    {"токсичност", "last"},
+    {"липидн", "интралипид"},
+    {"mb2", "поиск"},
+    {"резорцин", "формалин"},
+    {"экссудат", "канал"},
+    {"vrf", "перелом"},
+    {"vrf", "трещин"},
+    {"flare up", "обострен"},
+    {"билдап", "моляр"}
+]
+
+
+def is_duplicate_poll(
+    question: str,
+    topic: str = "",
+    recent_polls: Optional[List[Dict[str, Any]]] = None,
+    threshold: float = 0.55
+) -> Tuple[bool, Optional[str]]:
+    """
+    Проверяет, является ли вопрос дубликатом любого из недавних опросов (за последние 30-45 дней).
+    Использует 4-уровневую дедупликацию:
+    1. Точное совпадение нормализованного вопроса.
+    2. Вхождение подстрок (substring match для вопросов >= 25 символов).
+    3. Жаккар-коэффициент схожести токенов (без стоп-слов).
+    4. Совпадение клинических семантических якорей (CLINICAL_ANCHOR_CLUSTERS).
+    Возвращает (is_duplicate: bool, reason: Optional[str]).
+    """
+    if not recent_polls or not question:
+        return False, None
+
+    norm_q = normalize_poll_text(question)
+    norm_top = normalize_poll_text(topic)
+    words_q = {w for w in norm_q.split() if len(w) >= 3 and w not in POLL_STOP_WORDS}
+
+    for item in recent_polls:
+        prev_q = str(item.get("question") or "")
+        prev_top = str(item.get("topic") or "")
+        norm_prev_q = normalize_poll_text(prev_q)
+        norm_prev_top = normalize_poll_text(prev_top)
+
+        # 1. Точное совпадение нормализованного вопроса
+        if norm_q == norm_prev_q:
+            return True, f"Точное совпадение вопроса с опросом: '{prev_q[:80]}...'"
+
+        # 2. Вхождение подстрок (для вопросов длинее 25 символов)
+        if len(norm_q) >= 25 and len(norm_prev_q) >= 25:
+            if norm_q in norm_prev_q or norm_prev_q in norm_q:
+                return True, f"Прямое вхождение подстроки вопроса: '{prev_q[:80]}...'"
+
+        # 3. Жаккар-коэффициент схожести токенов (без стоп-слов)
+        words_prev = {w for w in norm_prev_q.split() if len(w) >= 3 and w not in POLL_STOP_WORDS}
+        if words_q and words_prev:
+            intersection = words_q & words_prev
+            union = words_q | words_prev
+            jaccard = len(intersection) / len(union)
+            if jaccard >= threshold:
+                return True, f"Сходство формулировки {int(jaccard*100)}% >= {int(threshold*100)}% с: '{prev_q[:80]}...'"
+
+        # 4. Совпадение клинических семантических якорей
+        full_cand = f"{norm_top} {norm_q}"
+        full_prev = f"{norm_prev_top} {norm_prev_q}"
+
+        def _term_in_text(t: str, txt: str) -> bool:
+            if t in txt:
+                return True
+            if t.endswith("й") and any(t[:-1] + end in txt for end in ("я", "ев", "ем", "е")):
+                return True
+            return False
+
+        for cluster in CLINICAL_ANCHOR_CLUSTERS:
+            cand_hits = sum(1 for term in cluster if _term_in_text(term, full_cand))
+            prev_hits = sum(1 for term in cluster if _term_in_text(term, full_prev))
+            if cand_hits == len(cluster) and prev_hits == len(cluster):
+                return True, f"Совпадение клинического кластера {cluster} с недавним опросом: '{prev_q[:80]}...'"
+
+    return False, None
+
+
+async def get_recent_poll_topics(limit: int = 45, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Возвращает список недавних тем и вопросов опросов для исключения дублирования за 30-45 дней."""
     async with get_db_connection(db_path) as db:
         async with db.execute(
             """
-            SELECT topic, poll_type, question, created_at
+            SELECT id, topic, poll_type, question, case_intro, created_at
             FROM daily_polls
             ORDER BY created_at DESC
             LIMIT ?
@@ -715,9 +842,11 @@ async def get_recent_poll_topics(limit: int = 7, db_path: Optional[str] = None) 
             rows = await cursor.fetchall()
             return [
                 {
+                    "id": r["id"],
                     "topic": r["topic"],
                     "poll_type": r["poll_type"],
                     "question": r["question"],
+                    "case_intro": r["case_intro"] if "case_intro" in r.keys() else None,
                     "created_at": str(r["created_at"])
                 }
                 for r in rows
