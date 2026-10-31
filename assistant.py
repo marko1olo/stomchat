@@ -1807,8 +1807,8 @@ def build_nba_markup(topic_query="", has_media=False, tooth_num=None, msg_id=Non
     tag_clean = re.sub(r"[^\w\s-]", "", tag)[:20].strip().replace(" ", "_") or "case"
 
     buttons = []
-    # Если прикреплен снимок или обнаружен визиограф — добавляем кнопку рентген-фильтров 2х2 HD
-    if is_xray or has_media:
+    # Кнопка рентген-фильтров 2х2 HD добавляется СТРОГО если снимок опознан как прицельный визиограф!
+    if is_xray:
         target_cb = f"xray_filt:{msg_id}" if msg_id else "xray_filt:last"
         buttons.append([
             Button.inline("🔬 Рентген-фильтры 2х2 HD (CLAHE, Негатив, Шарп)", data=target_cb)
@@ -12399,15 +12399,22 @@ async def handle_private_message(bot_client, event):
                     media_description = await vision.describe_image(files_to_analyze, caption=vision_caption, is_passive=False)
                     try:
                         import visiodent_enhancer
-                        pm_xray_analysis = await visiodent_enhancer.analyze_xray_context_and_doubt_async(
-                            user_text=text or "",
-                            vision_description=str(media_description or "")
-                        )
-                        if pm_xray_analysis.get("is_periapical_xray") and pm_xray_analysis.get("has_clinical_doubt"):
+                        meta = getattr(media_description, "metadata", {}) or {}
+                        is_periapical = visiodent_enhancer.is_periapical_xray_confirmed(media_description, text or "")
+                        has_doubt = bool(meta.get("has_clinical_doubt")) or visiodent_enhancer.has_clinical_doubt_heuristic(text or "")
+                        is_periapical_xray_confirmed = is_periapical
+                        if is_periapical and has_doubt:
                             if files_to_analyze and os.path.exists(files_to_analyze[0]):
                                 auto_collage, _ = visiodent_enhancer.generate_visiodent_collage(files_to_analyze[0])
                                 if auto_collage and os.path.exists(auto_collage):
-                                    auto_caption = visiodent_enhancer.format_xray_collage_caption(pm_xray_analysis)
+                                    rec_q = meta.get("recommended_quadrant") or 2
+                                    analysis_payload = {
+                                        "target_tooth": meta.get("target_tooth"),
+                                        "focus_area": meta.get("doubt_subject") or "Прицельный рентгенологический аудит",
+                                        "recommended_quadrant": rec_q,
+                                        "recommendation_text": visiodent_enhancer.get_recommendation_text_for_quadrant(rec_q)
+                                    }
+                                    auto_caption = visiodent_enhancer.format_xray_collage_caption(analysis_payload)
                                     await bot_client.send_file(
                                         entity=chat_id,
                                         file=auto_collage,
@@ -12949,7 +12956,7 @@ async def handle_private_message(bot_client, event):
                 nba_tag = words[0] if words else "dental"
             tooth_match_pm = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{text or ''} {reply_text}")
             detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
-            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth, msg_id=getattr(event.message, 'id', None) if hasattr(event, 'message') else None, is_xray=bool(locals().get('pm_xray_analysis', {}).get('is_periapical_xray')))
+            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth, msg_id=getattr(event.message, 'id', None) if hasattr(event, 'message') else None, is_xray=bool(locals().get('is_periapical_xray_confirmed', False)))
 
             # Удаляем статусное сообщение прямо перед доставкой итогового ответа
             if ticker:
@@ -17912,6 +17919,15 @@ async def handle_xray_collage_callback(bot_client, event, data_str: str):
             return
 
         try:
+            is_valid_img, rej_reason = visiodent_enhancer.validate_visiodent_candidate(temp_download, target_msg.message or "")
+            if not is_valid_img:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=f"⚠️ <b>Отклонено:</b> {rej_reason}\n\n<i>Фильтры 2х2 HD предназначены строго для прицельных визиографов зубов.</i>",
+                    parse_mode="html"
+                )
+                return
+
             collage_path, _ = visiodent_enhancer.generate_visiodent_collage(temp_download)
             if not collage_path or not os.path.exists(collage_path):
                 await bot_client.send_message(
@@ -18009,6 +18025,17 @@ async def handle_group_xray(bot_client, event):
         if not temp_download or not os.path.exists(temp_download):
             if status_msg:
                 await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось загрузить снимок.</i>", parse_mode="html")
+            return
+
+        is_valid_img, rej_reason = visiodent_enhancer.validate_visiodent_candidate(temp_download, target_msg.message or "")
+        if not is_valid_img:
+            if status_msg:
+                await bot_client.edit_message(
+                    chat_id,
+                    status_msg.id,
+                    f"⚠️ <b>Отклонено:</b> {rej_reason}\n\n<i>Команда /xray предназначена строго для прицельных визиографов (интраорального рентгена). На цветных клинических фото, КТ и ОПТГ фильтры не применяются.</i>",
+                    parse_mode="html"
+                )
             return
 
         collage_path, _ = visiodent_enhancer.generate_visiodent_collage(temp_download)

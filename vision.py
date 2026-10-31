@@ -170,16 +170,81 @@ class VisionDescription(str):
     Строковое описание снимка с сохранением подготовленных image_urls (data:image/jpeg;base64,...).
     Полностью совместимо с обычным str для базы данных, логирования и строковых операций,
     но позволяет вызывающему коду извлечь оригинальные изображения для мультимодального вызова Gemini,
-    а также краткую chairside подпись к иллюстрации (short_caption).
+    а также краткую chairside подпись к иллюстрации (short_caption) и структурированные метаданные (metadata).
     """
     image_urls: list[str]
     short_caption: str | None
+    metadata: dict
+    modality: str
 
-    def __new__(cls, content, image_urls=None, short_caption=None):
+    def __new__(cls, content, image_urls=None, short_caption=None, metadata=None):
         instance = super().__new__(cls, content)
         instance.image_urls = list(image_urls) if image_urls else []
         instance.short_caption = short_caption
+        instance.metadata = dict(metadata) if metadata else {}
+        instance.modality = str(instance.metadata.get("modality") or "UNKNOWN")
         return instance
+
+    @property
+    def is_periapical_xray(self) -> bool:
+        return self.modality == "PERIAPICAL_XRAY"
+
+
+def extract_vision_metadata(raw_text: str) -> dict:
+    """
+    Извлекает структурированные метаданные о модальности и фокусе снимка из ответа модели зрения.
+    Секция [МЕТАДАННЫЕ] содержит JSON:
+    {
+      "modality": "PERIAPICAL_XRAY|CBCT|PANORAMIC_OPG|CLINICAL_PHOTO|NON_DENTAL",
+      "has_clinical_doubt": bool,
+      "target_tooth": int|null,
+      "doubt_subject": str|null,
+      "recommended_quadrant": 2|3|4
+    }
+    """
+    if not raw_text:
+        return {}
+
+    # 1. Секция [МЕТАДАННЫЕ]
+    meta_m = re.search(r"\[(?:МЕТАДАННЫЕ|METADATA)\]\s*(\{.*?\})", raw_text, re.DOTALL | re.IGNORECASE)
+    if meta_m:
+        try:
+            parsed = json.loads(meta_m.group(1).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    # 2. Поиск любого JSON блока с modality
+    m_json = re.search(r'\{\s*"modality"\s*:\s*"([^\"]+)".*?\}', raw_text, re.DOTALL)
+    if m_json:
+        try:
+            parsed = json.loads(m_json.group(0).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    return {}
+
+
+def classify_modality_fallback(text: str) -> str:
+    """Безопасный фоллбек определения модальности по тексту, если JSON отсутствовал."""
+    if not text:
+        return "UNKNOWN"
+    t = text.lower()
+    if any(s in t for s in ["скриншот", "мем", "бутылк", "немедицинск", "документ"]):
+        return "NON_DENTAL"
+    if any(s in t for s in ["срез кт", "компьютерная томография", "клкт", "томограмм", "cbct", "аксиальн", "корональн", "сагиттальн"]):
+        return "CBCT"
+    if any(s in t for s in ["оптг", "панорамный снимок", "ортопантомограмм"]):
+        return "PANORAMIC_OPG"
+    if any(s in t for s in ["клиническая фотография", "внутриротовое фото", "фотография полости рта", "зубной протез", "слепочн", "оттиск"]):
+        if not any(x in t for x in ["прицельный", "визиограф", "радиовизиогр"]):
+            return "CLINICAL_PHOTO"
+    if any(x in t for x in ["прицельн", "визиограф", "радиовизиогр", "периапикальн"]):
+        return "PERIAPICAL_XRAY"
+    return "UNKNOWN"
 
 
 def extract_fallback_short_caption(text: str, max_len: int = 160) -> str:
@@ -229,7 +294,8 @@ def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
     if not raw_text:
         return "", ""
 
-    text = raw_text.strip()
+    # Очищаем текст от секции [МЕТАДАННЫЕ]
+    text = re.sub(r"(?:^|\n)[\[\]#*\s\d.)-]*(?:МЕТАДАННЫЕ|METADATA)[\[\]#*\s:\-]*\{.*?\}", "", raw_text.strip(), flags=re.DOTALL | re.IGNORECASE).strip()
 
     detailed_re = re.compile(
         r"(?:^|\n)[\[\]#*\s\d.)-]*(?:ПОДРОБНОЕ\s+ОПИСАНИЕ|КЛИНИЧЕСКОЕ\s+ОПИСАНИЕ|ПОДРОБНЫЙ\s+РАЗБОР)[\[\]#*\s:\-]*",
@@ -454,12 +520,15 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                     cached_entry = _VISION_CACHE[cache_key]
                     cached_text = cached_entry.get("text") if isinstance(cached_entry, dict) else str(cached_entry)
                     cached_short = cached_entry.get("short_caption") if isinstance(cached_entry, dict) else None
+                    cached_meta = cached_entry.get("metadata") if isinstance(cached_entry, dict) else None
+                    if not cached_meta and cached_text:
+                        cached_meta = {"modality": classify_modality_fallback(cached_text)}
                     if cached_text:
                         logger.info("Vision cache hit for key=%s (%s images)", cache_key[:12], len(image_urls))
                         _RECENT_IMAGE_URLS[cached_text[:60]] = image_urls
                         if len(_RECENT_IMAGE_URLS) > 50:
                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
-                        return VisionDescription(cached_text, image_urls=image_urls, short_caption=cached_short)
+                        return VisionDescription(cached_text, image_urls=image_urls, short_caption=cached_short, metadata=cached_meta)
 
             context = f" Контекст от автора: '{caption}'." if caption else ""
             # Описание снимка уходит в отвечающий промпт и становится основанием
@@ -497,11 +566,25 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"4) Без фантомных величин: никаких вымышленных чисел (миллиметры, длина, дефект), если они не читаются на снимке. "
                 f"Для одиночного снимка: 3-6 емких профессиональных предложений (для альбома — зональный синтез). "
                 f"{clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE} "
-                f"ФОРМАТ ОТВЕТА — СТРОГО ДВЕ СЕКЦИИ:\n"
+                f"ФОРМАТ ОТВЕТА — СТРОГО ТРИ СЕКЦИИ:\n"
                 f"[ПОДРОБНОЕ ОПИСАНИЕ]\n"
                 f"<подробный клинический разбор снимка для LLM-контекста: 3-6 предложений>\n\n"
                 f"[КРАТКАЯ ПОДПИСЬ]\n"
                 f"<1-2 коротких chairside-фразы для подписи к фото в статье, макс 120 символов>\n\n"
+                f"[МЕТАДАННЫЕ]\n"
+                f"{{\n"
+                f'  "modality": "PERIAPICAL_XRAY|CBCT|PANORAMIC_OPG|CLINICAL_PHOTO|NON_DENTAL",\n'
+                f'  "has_clinical_doubt": true/false,\n'
+                f'  "target_tooth": 11-48 или null,\n'
+                f'  "doubt_subject": "кратко суть сомнения врача или null",\n'
+                f'  "recommended_quadrant": 2/3/4\n'
+                f"}}\n"
+                f"Значения modality:\n"
+                f"- PERIAPICAL_XRAY: ТОЛЬКО прицельный внутриротовой рентген 1-3 зубов (радиовизиограф).\n"
+                f"- CBCT: срез или 3D-реконструкция компьютерной томографии (КТ / КЛКТ).\n"
+                f"- PANORAMIC_OPG: панорамный снимок (ОПТГ) зубных рядов обеих челюстей.\n"
+                f"- CLINICAL_PHOTO: цветная клиническая фотография в полости рта (зубы, десны, коронки, слепки, раббердам).\n"
+                f"- NON_DENTAL: мем, скриншот чата, документ, бытовое немедицинское фото.\n\n"
                 f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ без английских фраз, черновиков и тегов <think>."
             )
 
@@ -642,19 +725,22 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         logger.info(f"Vision success via {provider} ({model_name})")
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
                                         # Разбор двойного формата [ПОДРОБНОЕ ОПИСАНИЕ] / [КРАТКАЯ ПОДПИСЬ]
+                                        metadata = extract_vision_metadata(russian_text)
                                         detailed_ctx, short_cap = parse_dual_vision_description(russian_text)
                                         if not detailed_ctx:
                                             detailed_ctx = russian_text
                                         if not short_cap:
                                             short_cap = extract_fallback_short_caption(detailed_ctx, max_len=160)
+                                        if not metadata:
+                                            metadata = {"modality": classify_modality_fallback(detailed_ctx)}
                                         _RECENT_IMAGE_URLS[detailed_ctx[:60]] = image_urls
                                         if len(_RECENT_IMAGE_URLS) > 50:
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
                                         if not skip_cache and cache_key:
-                                            _VISION_CACHE[cache_key] = {"text": detailed_ctx, "short_caption": short_cap, "ts": time.time()}
+                                            _VISION_CACHE[cache_key] = {"text": detailed_ctx, "short_caption": short_cap, "metadata": metadata, "ts": time.time()}
                                             _save_vision_cache(_VISION_CACHE)
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
-                                        return VisionDescription(detailed_ctx, image_urls=image_urls, short_caption=short_cap)
+                                        return VisionDescription(detailed_ctx, image_urls=image_urls, short_caption=short_cap, metadata=metadata)
 
 
                                     if english_fallback is None:

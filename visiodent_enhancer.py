@@ -4,7 +4,7 @@ visiodent_enhancer.py - Интеллектуальный модуль обраб
 
 Пайплайн:
 1. Фильтрация и валидация: обработка ТОЛЬКО прицельных визиографических снимков
-   (отсечение КТ, ОПТГ, цветных клинических фото зубов, скриншотов и мемов).
+   (строгое отсечение КТ, ОПТГ, цветных клинических фото зубов, скриншотов и мемов).
 2. Обработка изображения (OpenCV + Pillow):
    - Bilateral Denoising: подавление дробового зерна сенсора без размытия краев дентина/эмали/кости/металла.
    - Dynamic Range Expansion: нормализация гистограммы (1%-99% процентили) + адаптивная гамма.
@@ -14,12 +14,12 @@ visiodent_enhancer.py - Интеллектуальный модуль обраб
    - Квадрант 4: Контурный фильтр (Unsharp Masking: микроструктура периодонтальной щели, отломков NiTi, ступеней).
    - Сборка в 2х2 HD сетку с темными делителями и читаемыми TrueType HUD-плашками (Pillow).
 3. LLM/Heuristic Анализ клинических сомнений:
-   - Выявление зуба FDI, зоны интереса и предмета сомнения (отломок, периодонтит, латераль, апекс, трещина).
+   - Извлечение modality, объекта сомнения и зуба из VisionDescription.metadata.
    - Назначение приоритетного квадранта (2, 3 или 4) с прикладным chairside-обоснованием.
 4. Telegram UX/UI:
    - ЛС: автоматическая отправка коллажа при наличии сомнений; при отсутствии сомнений — инлайн-кнопка.
-   - Группа: вызов по команде /xray или /рентген, при прямом призыве (@bot со снимком),
-     либо компактная кнопка ухода в ЛС при пассивном триаже.
+   - Группа: вызов по команде /xray или /рентген, при прямом призыве (@bot со снимком).
+   - Защита: отсечение цветных фото, КТ, ОПТГ и немедицинских изображений.
 """
 
 import os
@@ -38,24 +38,23 @@ logger = logging.getLogger("visiodent_enhancer")
 # Пути к системным TrueType шрифтам Windows с полной поддержкой кириллицы
 FONT_CANDIDATES = [
     r"C:\Windows\Fonts\segoeuib.ttf",
-    r"C:\Windows\Fonts\arialbd.ttf",
+    r"C:\Windows\Fontsrialbd.ttf",
     r"C:\Windows\Fonts\segoeui.ttf",
-    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fontsrial.ttf",
 ]
 RESOLVED_FONT_PATH = next((f for f in FONT_CANDIDATES if os.path.exists(f)), None)
 
 # Ключевые маркеры прицельного визиографа (Periapical / Bitewing X-Ray)
 PERIAPICAL_KEYWORDS = [
     "прицельн", "визиограф", "радиовизиогр", "радиовизиограмм", "рентгенограмм", "периапикальн",
-    "интраоральн", "внутриротов", "снимок зуба", "рентген зуба", "верхушк", "апекс",
-    "корень", "корня", "канал", "каналы", "обтураци", "гуттаперч"
+    "интраоральн", "снимок зуба", "рентген зуба"
 ]
 
 # Маркеры исключения (НЕ визиограф)
 NON_PERIAPICAL_STOPWORDS = [
     "кт", "клкт", "томограф", "оптг", "панорам", "ортопантомограмм",
     "клиническое фото", "внутриротовое фото", "фото полости рта",
-    "скриншот", "мем", "интерфейс", "документ", "срез"
+    "скриншот", "мем", "интерфейс", "документ", "срез", "бутылк", "еда", "котик"
 ]
 
 # Клинические триггеры сомнений и развилок
@@ -243,13 +242,32 @@ def generate_visiodent_collage(
         return None, None
 
 
+def is_periapical_xray_confirmed(vision_description: Any, user_text: str = "") -> bool:
+    """
+    Проверяет, является ли снимок прицельным визиографом (НЕ КТ, НЕ ОПТГ, НЕ цветным фото, НЕ мемом).
+    1. Проверяет modality из vision metadata (PERIAPICAL_XRAY).
+    2. Если metadata отсутствует: применяет строгий текстовый фоллбек отсечения.
+    """
+    if vision_description and hasattr(vision_description, "metadata") and isinstance(vision_description.metadata, dict):
+        modality = vision_description.metadata.get("modality")
+        if modality:
+            return modality == "PERIAPICAL_XRAY"
+
+    v_str = str(vision_description or "")
+    from vision import classify_modality_fallback
+    modality = classify_modality_fallback(v_str)
+    if modality != "UNKNOWN":
+        return modality == "PERIAPICAL_XRAY"
+
+    return is_periapical_xray_heuristic(user_text, v_str)
+
+
 def is_periapical_xray_heuristic(text: str = "", vision_description: str = "") -> bool:
     """Быстрый эвристический чекер: относится ли снимок к прицельному радиовизиографу."""
     combined = f"{text or ''} {vision_description or ''}".lower()
-    
+
     # Жесткий фильтр исключений
     if any(stop in combined for stop in NON_PERIAPICAL_STOPWORDS):
-        # Если есть слово "кт" или "оптг" без явного "прицельный", отсекаем
         if not any(per in combined for per in ["прицельн", "визиограф", "радиовизиограф"]):
             return False
 
@@ -265,39 +283,106 @@ def has_clinical_doubt_heuristic(text: str = "") -> bool:
     return any(trig in t_lower for trig in DOUBT_TRIGGERS)
 
 
+def validate_visiodent_candidate(img_source: Union[str, bytes], user_text: str = "") -> Tuple[bool, str]:
+    """
+    Валидирует файл изображения перед ручным запуском /xray или кликом инлайн-кнопки.
+    Отсекает цветные клинические фотографии, ОПТГ и явные запросы КТ.
+    """
+    try:
+        t_low = (user_text or "").lower()
+        if any(w in t_low for w in ["срез кт", "компьютерная томография", "клкт", "томограмм", "cbct"]):
+            return False, "Обнаружен срез КТ/КЛКТ. Фильтры 2х2 разработаны строго для прицельных визиограмм."
+
+        if isinstance(img_source, bytes):
+            nparr = np.frombuffer(img_source, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif isinstance(img_source, str) and os.path.exists(img_source):
+            img = cv2.imread(img_source, cv2.IMREAD_COLOR)
+        else:
+            return False, "Не удалось открыть изображение"
+
+        if img is None:
+            return False, "Поврежденный графический файл"
+
+        h, w = img.shape[:2]
+        aspect = max(w, h) / max(1, min(w, h))
+        if aspect > 1.82:
+            return False, f"Панорамный снимок (ОПТГ) или широкий скриншот (соотношение сторон {aspect:.2f} > 1.82)."
+
+        b, g, r = cv2.split(img)
+        diff = float(np.mean(np.abs(r.astype(int) - g.astype(int)) + np.abs(g.astype(int) - b.astype(int)) + np.abs(r.astype(int) - b.astype(int))) / 3.0)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1]
+        mean_sat = float(np.mean(sat))
+        p75_sat = float(np.percentile(sat, 75))
+
+        if diff > 18.0 or mean_sat > 45.0 or p75_sat > 55.0:
+            return False, f"Цветное клиническое фото полости рта/зубов (различие RGB каналов {diff:.1f})."
+
+        return True, "OK"
+    except Exception as exc:
+        logger.warning("validate_visiodent_candidate error: %s", exc)
+        return True, "OK"
+
+
+def get_recommendation_text_for_quadrant(quad: int) -> str:
+    """Возвращает прикладное клиническое пояснение для рекомендованного квадранта."""
+    if quad == 4:
+        return "Используйте Квадрант 4 (Контурная резкость) для детальной оценки краев объекта, границ отломка и просвета канала."
+    elif quad == 3:
+        return "Используйте Квадрант 3 (Негатив), где плотная кость темнеет, а очаги разрежения и трещины светятся яркими белыми контурами."
+    else:
+        return "Используйте Квадрант 2 (CLAHE) для выравнивания локального контраста и четкой визуализации анатомии каналов."
+
+
 async def analyze_xray_context_and_doubt_async(
     user_text: str = "",
-    vision_description: str = ""
+    vision_description: Any = ""
 ) -> Dict[str, Any]:
     """
     Анализирует контекст запроса врача и описание снимка.
     Возвращает структурированный вердикт с фокусом внимания и рекомендованным квадрантом.
     """
     user_t = (user_text or "").strip()
-    vis_desc = (vision_description or "").strip()
+    vis_desc = str(vision_description or "").strip()
 
-    # 1. Быстрая эвристическая проверка
-    is_xray = is_periapical_xray_heuristic(user_t, vis_desc)
-    has_doubt = has_clinical_doubt_heuristic(user_t)
+    # 1. Проверяем наличие метаданных из модели зрения
+    meta = getattr(vision_description, "metadata", {}) or {}
+    if not isinstance(meta, dict):
+        meta = {}
 
-    # Извлечение номера зуба (FDI)
-    tooth_match = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{user_t} {vis_desc}")
-    target_tooth = tooth_match.group(1) if tooth_match else None
-
-    # Определение рекомендованного квадранта по паттернам патологии
-    t_lower = user_t.lower()
-    if any(k in t_lower for k in ["отломок", "обломок", "сломал", "сепарац", "ступен", "нависающ", "край"]):
-        rec_quad = 4
-        rec_text = "Используйте Квадрант 4 (Контурная резкость) для детальной оценки краев объекта, границ отломка и просвета канала."
-        focus = f"Зуб {target_tooth or ''}: поиск отломка инструмента / микроструктурных дефектов канала".strip()
-    elif any(k in t_lower for k in ["периодонтит", "очаг", "кист", "разрежени", "трещин", "перелом", "зажив"]):
-        rec_quad = 3
-        rec_text = "Используйте Квадрант 3 (Негатив), где плотная кость темнеет, а очаги разрежения и трещины светятся яркими белыми контурами."
-        focus = f"Зуб {target_tooth or ''}: ревизия периапикальной зоны и плотности костной ткани".strip()
+    modality = meta.get("modality")
+    if modality:
+        is_xray = (modality == "PERIAPICAL_XRAY")
     else:
-        rec_quad = 2
-        rec_text = "Используйте Квадрант 2 (CLAHE) для выравнивания локального контраста и четкой визуализации анатомии каналов."
-        focus = f"Зуб {target_tooth or ''}: рентгено-анатомический анализ корневых каналов".strip()
+        is_xray = is_periapical_xray_confirmed(vision_description, user_t)
+
+    has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t)
+    target_tooth = meta.get("target_tooth")
+    if not target_tooth:
+        tooth_match = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{user_t} {vis_desc}")
+        target_tooth = tooth_match.group(1) if tooth_match else None
+
+    rec_quad = meta.get("recommended_quadrant")
+    if not rec_quad:
+        t_lower = user_t.lower()
+        if any(k in t_lower for k in ["отломок", "обломок", "сломал", "сепарац", "ступен", "нависающ", "край"]):
+            rec_quad = 4
+        elif any(k in t_lower for k in ["периодонтит", "очаг", "кист", "разрежени", "трещин", "перелом", "зажив"]):
+            rec_quad = 3
+        else:
+            rec_quad = 2
+
+    focus = meta.get("doubt_subject")
+    if not focus:
+        if rec_quad == 4:
+            focus = f"Зуб {target_tooth or ''}: поиск отломка инструмента / дефектов канала".strip()
+        elif rec_quad == 3:
+            focus = f"Зуб {target_tooth or ''}: ревизия периапикальной зоны и плотности костной ткани".strip()
+        else:
+            focus = f"Зуб {target_tooth or ''}: рентгено-анатомический анализ корневых каналов".strip()
+
+    rec_text = get_recommendation_text_for_quadrant(rec_quad)
 
     result = {
         "is_periapical_xray": is_xray,
