@@ -2971,6 +2971,11 @@ async def handle_new_message(event):
                     await assistant.handle_group_calc(bot_client, event, calc_arg)
                     return True
 
+                # 6. Рентген-фильтры 2х2 HD (Визиограф) прямо в группе
+                if assistant.is_xray_command(cmd_no_mention_lower):
+                    await assistant.handle_group_xray(bot_client, event)
+                    return True
+
                 pass
             except Exception as e:
                 logger.exception(f"Error executing group feature: {e}")
@@ -4222,6 +4227,12 @@ async def start_bot():
 
     logger.info("🚀 Инициализация базы данных...")
     await asyncio.wait_for(database.init_db(), timeout=30)
+    try:
+        import poll_storage
+        await poll_storage.init_poll_tables()
+        logger.info("✅ Poll tables initialized in SQLite")
+    except Exception as poll_init_err:
+        logger.warning("Could not initialize poll tables: %s", poll_init_err)
 
     # Нарастающий бэкофф подключения к Telegram (10s -> 30s -> 60s -> 120s -> 300s).
     # Предотвращает бан по IP при падении серверов Telegram или сбоях сети.

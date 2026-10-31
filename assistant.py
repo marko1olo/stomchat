@@ -1796,7 +1796,7 @@ get_main_reply_keyboard = build_reply_keyboard
 get_main_inline_keyboard = build_main_menu_markup
 
 
-def build_nba_markup(topic_query="", has_media=False, tooth_num=None):
+def build_nba_markup(topic_query="", has_media=False, tooth_num=None, msg_id=None, is_xray=False):
     """
     Формирует интерактивные кнопки Next Best Action под клиническим ответом в ЛС:
     мгновенное сохранение в закладки, связанные протоколы, поиск в PubMed, экспорт в PDF,
@@ -1807,6 +1807,12 @@ def build_nba_markup(topic_query="", has_media=False, tooth_num=None):
     tag_clean = re.sub(r"[^\w\s-]", "", tag)[:20].strip().replace(" ", "_") or "case"
 
     buttons = []
+    # Если прикреплен снимок или обнаружен визиограф — добавляем кнопку рентген-фильтров 2х2 HD
+    if is_xray or has_media:
+        target_cb = f"xray_filt:{msg_id}" if msg_id else "xray_filt:last"
+        buttons.append([
+            Button.inline("🔬 Рентген-фильтры 2х2 HD (CLAHE, Негатив, Шарп)", data=target_cb)
+        ])
     # Если в запросе или ответе фигурирует конкретный зуб (FDI 11-48), добавляем целевую кнопку
     resolved_tooth = tooth_num
     if not resolved_tooth and tag:
@@ -1907,6 +1913,7 @@ async def init_assistant(bot_client):
                 # находились.
                 types.BotCommand(command='wiki', description='Открыть стоматологическую энциклопедию'),
                 types.BotCommand(command='calc', description='Открыть шпаргалку-калькулятор анестезии'),
+            types.BotCommand(command='xray', description='Рентген-фильтры 2х2 HD (визиограф)'),
                 types.BotCommand(command='chairside', description='Инструменты экспресс-помощи у кресла'),
                 types.BotCommand(command='torque', description='Торк и обороты эндо-файлов (ProTaper, SOCO...)'),
                 types.BotCommand(command='anes', description='Экстренная анестезия и расчет доз карпул'),
@@ -11329,6 +11336,7 @@ async def handle_private_message(bot_client, event):
                 "• /protocols — вывести список доступных клинических протоколов.\n"
                 "• /wiki — открыть интерактивную стоматологическую энциклопедию. Синоним — /encyclopedia.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
+                "• /xray — рентген-фильтры 2х2 HD (визиограф: CLAHE, негатив, шарп). Синонимы — /рентген, /визиограф, /x_ray.\n"
                 "• /chairside — открыть меню экспресс-помощника у кресла (анестезия, торки файлов, обломки, антибиотики).\n"
                 "• /torque &lt;система&gt; — торк, обороты и протокол эндо-файлов (ProTaper, WaveOne, SOCO, VDW...). Синоним — /торк.\n"
                 "• /anes &lt;вес/сода&gt; — экспресс-расчет карпул анестезии или протокол буферизации содой. Синоним — /анестезия.\n"
@@ -12389,6 +12397,26 @@ async def handle_private_message(bot_client, event):
                     # ПЕРЕДАЕМ ИСТОРИЮ ЧАТА В ВИЖН-МОДЕЛЬ ДЛЯ КОНТЕКСТА
                     vision_caption = f"Caption: {text or ''}\nContext: {history_context_text[:1000]}"
                     media_description = await vision.describe_image(files_to_analyze, caption=vision_caption, is_passive=False)
+                    try:
+                        import visiodent_enhancer
+                        pm_xray_analysis = await visiodent_enhancer.analyze_xray_context_and_doubt_async(
+                            user_text=text or "",
+                            vision_description=str(media_description or "")
+                        )
+                        if pm_xray_analysis.get("is_periapical_xray") and pm_xray_analysis.get("has_clinical_doubt"):
+                            if files_to_analyze and os.path.exists(files_to_analyze[0]):
+                                auto_collage, _ = visiodent_enhancer.generate_visiodent_collage(files_to_analyze[0])
+                                if auto_collage and os.path.exists(auto_collage):
+                                    auto_caption = visiodent_enhancer.format_xray_collage_caption(pm_xray_analysis)
+                                    await bot_client.send_file(
+                                        entity=chat_id,
+                                        file=auto_collage,
+                                        caption=auto_caption,
+                                        parse_mode="html"
+                                    )
+                                    media_tools.cleanup_temp_files([auto_collage])
+                    except Exception as xray_pm_err:
+                        logger.warning("PM Visiodent auto-collage error: %s", xray_pm_err)
             except Exception as e:
                 logger.error(f"Error analyzing media in PM: {e}")
                 media_error_shown = True
@@ -12921,7 +12949,7 @@ async def handle_private_message(bot_client, event):
                 nba_tag = words[0] if words else "dental"
             tooth_match_pm = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{text or ''} {reply_text}")
             detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
-            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth)
+            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth, msg_id=getattr(event.message, 'id', None) if hasattr(event, 'message') else None, is_xray=bool(locals().get('pm_xray_analysis', {}).get('is_periapical_xray')))
 
             # Удаляем статусное сообщение прямо перед доставкой итогового ответа
             if ticker:
@@ -15734,6 +15762,11 @@ async def handle_quiz_callback(bot_client, event):
         await handle_nba_callback(bot_client, event, data_str)
         return
 
+    # 0.6. X-RAY ENHANCEMENT COLLAGE xray_filt:* OR xray_pm:*
+    if data_str.startswith(("xray_filt:", "xray_pm:")):
+        await handle_xray_collage_callback(bot_client, event, data_str)
+        return
+
     # CHAIRSIDE CLINICAL SUITE & TOOLS
     if data_str.startswith(("chairside:", "fdi:", "aae:", "files:", "file_sys:", "pres_st:", "pres_eval:", "preserve:", "anes_sos:", "sos:anesthesia_buffering", "sos:file_matrix", "file_frag:", "pharma:")):
         import chairside_tools
@@ -17812,6 +17845,208 @@ async def handle_group_calc(bot_client, event, calc_arg: str = ""):
         parse_mode='html'
     )
     logger.info("Sent group calc menu card to chat %s", chat_id)
+
+
+def is_xray_command(text: str) -> bool:
+    """Проверяет, является ли команда вызовом рентген-фильтров /xray или /рентген."""
+    t = (text or "").strip().lower()
+    return t in ("/xray", "/рентген", "/визиограф", "/x_ray") or t.startswith(("/xray ", "/рентген ", "/визиограф ", "/x_ray "))
+
+
+async def handle_xray_collage_callback(bot_client, event, data_str: str):
+    """
+    Обработчик инлайн-кнопок xray_filt:* и xray_pm:*.
+    Генерирует и отправляет 2x2 HD диагностический коллаж рентгенограммы (визиографа).
+    """
+    try:
+        parts = data_str.split(":", 1)
+        action = parts[0]
+        raw_msg_id = parts[1] if len(parts) > 1 else ""
+
+        chat_id = event.chat_id
+        user_id = getattr(event, "sender_id", chat_id)
+
+        try:
+            await event.answer("🔬 Формирую 2х2 HD коллаж снимка (CLAHE, Негатив, Шарп)...", alert=False)
+        except Exception:
+            pass
+
+        target_msg = None
+        if raw_msg_id.isdigit():
+            try:
+                target_msg = await bot_client.get_messages(chat_id, ids=int(raw_msg_id))
+            except Exception as get_err:
+                logger.warning("Could not fetch msg_id=%s: %s", raw_msg_id, get_err)
+
+        if not target_msg or not (target_msg.photo or getattr(target_msg, "media", None)):
+            try:
+                cur_msg = await event.get_message()
+                if cur_msg and cur_msg.is_reply:
+                    target_msg = await cur_msg.get_reply_message()
+                elif cur_msg and (cur_msg.photo or getattr(cur_msg, "media", None)):
+                    target_msg = cur_msg
+            except Exception:
+                pass
+
+        if not target_msg or not (target_msg.photo or getattr(target_msg, "media", None)):
+            await bot_client.send_message(
+                entity=chat_id,
+                message="⚠️ <i>Не удалось найти исходный снимок для обработки. Пожалуйста, отправьте снимок повторно.</i>",
+                parse_mode="html"
+            )
+            return
+
+        import media_tools
+        import visiodent_enhancer
+
+        os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
+        temp_download = await target_msg.download_media(
+            file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"xray_cb_{target_msg.id}_")
+        )
+        if not temp_download or not os.path.exists(temp_download):
+            await bot_client.send_message(
+                entity=chat_id,
+                message="❌ <i>Не удалось скачать снимок из Telegram. Попробуйте ещё раз.</i>",
+                parse_mode="html"
+            )
+            return
+
+        try:
+            collage_path, _ = visiodent_enhancer.generate_visiodent_collage(temp_download)
+            if not collage_path or not os.path.exists(collage_path):
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message="❌ <i>Ошибка алгоритма обработки рентгена. Убедитесь, что это прицельный снимок.</i>",
+                    parse_mode="html"
+                )
+                return
+
+            analysis = await visiodent_enhancer.analyze_xray_context_and_doubt_async(
+                user_text=target_msg.message or "",
+                vision_description=""
+            )
+            caption = visiodent_enhancer.format_xray_collage_caption(analysis)
+
+            dest_chat = user_id if action == "xray_pm" else chat_id
+            reply_to = None if action == "xray_pm" else target_msg.id
+
+            await bot_client.send_file(
+                entity=dest_chat,
+                file=collage_path,
+                caption=caption,
+                reply_to=reply_to,
+                parse_mode="html"
+            )
+
+            if action == "xray_pm" and dest_chat != chat_id:
+                try:
+                    await event.answer("🔬 Коллаж 2х2 HD отправлен вам в личные сообщения!", alert=True)
+                except Exception:
+                    pass
+
+            media_tools.cleanup_temp_files([collage_path])
+        finally:
+            media_tools.cleanup_temp_files([temp_download])
+    except Exception as exc:
+        logger.exception("Error in handle_xray_collage_callback: %s", exc)
+
+
+async def handle_group_xray(bot_client, event):
+    """
+    Обработчик команды /xray и /рентген в общем чате или ЛС.
+    Обрабатывает снимок из текущего сообщения или из реплая и выгружает 2x2 HD коллаж.
+    """
+    chat_id = event.chat_id
+    msg = getattr(event, "message", None) or event
+    reply_msg_id = getattr(msg, "id", None)
+
+    target_msg = None
+    if getattr(msg, "photo", None) or (getattr(msg, "media", None) and hasattr(msg.media, "photo")):
+        target_msg = msg
+    elif getattr(msg, "is_reply", False):
+        try:
+            target_msg = await msg.get_reply_message()
+        except Exception as rep_err:
+            logger.warning("Failed to fetch reply message in /xray: %s", rep_err)
+
+    if not target_msg or not (getattr(target_msg, "photo", None) or getattr(target_msg, "media", None)):
+        await bot_client.send_message(
+            entity=chat_id,
+            message=(
+                "🔬 <b>Рентген-фильтры 2х2 HD (Визиограф)</b>\n\n"
+                "💡 <i>Ответьте командой /xray на сообщение со снимком или прикрепите прицельный рентген к команде.</i>\n\n"
+                "Бот сформирует сетку 2х2:\n"
+                "1. Оригинал (Grayscale)\n"
+                "2. Адаптивный контраст (CLAHE — границы каналов)\n"
+                "3. Негатив (Инверсия — подсвечивание очагов деструкции кости)\n"
+                "4. Контурный фильтр (Шарп — микроструктура отломков и трещин)"
+            ),
+            reply_to=reply_msg_id,
+            parse_mode="html"
+        )
+        return
+
+    status_msg = None
+    try:
+        status_msg = await bot_client.send_message(
+            entity=chat_id,
+            message="🔬 <i>Обрабатываю снимок: фильтры CLAHE, Инверсия, Шарп (HD 2x2)...</i>",
+            reply_to=reply_msg_id,
+            parse_mode="html"
+        )
+    except Exception:
+        pass
+
+    import media_tools
+    import visiodent_enhancer
+
+    os.makedirs(media_tools.MEDIA_TEMP_DIR, exist_ok=True)
+    temp_download = None
+    try:
+        temp_download = await target_msg.download_media(
+            file=os.path.join(media_tools.MEDIA_TEMP_DIR, f"xray_cmd_{target_msg.id}_")
+        )
+        if not temp_download or not os.path.exists(temp_download):
+            if status_msg:
+                await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось загрузить снимок.</i>", parse_mode="html")
+            return
+
+        collage_path, _ = visiodent_enhancer.generate_visiodent_collage(temp_download)
+        if not collage_path or not os.path.exists(collage_path):
+            if status_msg:
+                await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Не удалось обработать снимок. Убедитесь, что это графический файл.</i>", parse_mode="html")
+            return
+
+        analysis = await visiodent_enhancer.analyze_xray_context_and_doubt_async(
+            user_text=target_msg.message or "",
+            vision_description=""
+        )
+        caption = visiodent_enhancer.format_xray_collage_caption(analysis)
+
+        if status_msg:
+            try:
+                await bot_client.delete_messages(chat_id, [status_msg.id])
+            except Exception:
+                pass
+
+        await bot_client.send_file(
+            entity=chat_id,
+            file=collage_path,
+            caption=caption,
+            reply_to=target_msg.id,
+            parse_mode="html"
+        )
+        media_tools.cleanup_temp_files([collage_path])
+    except Exception as exc:
+        logger.exception("Error in handle_group_xray: %s", exc)
+        if status_msg:
+            try:
+                await bot_client.edit_message(chat_id, status_msg.id, "❌ <i>Произошла ошибка при обработке снимка.</i>", parse_mode="html")
+            except Exception:
+                pass
+    finally:
+        if temp_download:
+            media_tools.cleanup_temp_files([temp_download])
 
 
 PING_QUIET_START_HOUR = 22   # с 22:00 по Москве (Europe/Moscow, UTC+3) — тихие часы
