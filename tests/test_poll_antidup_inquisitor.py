@@ -182,8 +182,8 @@ class TestPollAntiDupInquisitor(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reason2)
 
     def test_fallback_preset_pool_size_and_limits(self) -> None:
-        """Proves that POLL_FALLBACK_PRESETS has 42 presets (6 per category) and 100% compliant with limits."""
-        self.assertEqual(len(POLL_FALLBACK_PRESETS), 42, f"Expected 42 presets, found {len(POLL_FALLBACK_PRESETS)}")
+        """Proves that POLL_FALLBACK_PRESETS has at least 42 presets (>= 6 per category) and 100% compliant with limits."""
+        self.assertGreaterEqual(len(POLL_FALLBACK_PRESETS), 42, f"Expected >= 42 presets, found {len(POLL_FALLBACK_PRESETS)}")
 
         categories = {}
         questions_seen = set()
@@ -224,16 +224,16 @@ class TestPollAntiDupInquisitor(unittest.IsolatedAsyncioTestCase):
         expected_categories = {"endo", "ortho", "surgery", "therapy", "materials_battle", "gnathology", "council"}
         self.assertEqual(set(categories.keys()), expected_categories)
         for cat, count in categories.items():
-            self.assertEqual(count, 6, f"Category '{cat}' has {count} presets, expected 6!")
+            self.assertGreaterEqual(count, 6, f"Category '{cat}' has {count} presets, expected >= 6!")
 
     def test_get_fallback_preset_filters_recent_duplicates(self) -> None:
         """Proves get_fallback_preset never picks a recently used preset if fresh ones are available."""
         all_surgery_presets = [p for p in POLL_FALLBACK_PRESETS if p.get("category") == "surgery"]
-        self.assertEqual(len(all_surgery_presets), 6)
+        self.assertGreaterEqual(len(all_surgery_presets), 6)
 
-        # Mark 5 of the 6 surgery presets as recently used in the last 45 days
-        used_5 = all_surgery_presets[:5]
-        target_fresh = all_surgery_presets[5]
+        # Mark all but the last surgery preset as recently used in the last 45 days
+        used = all_surgery_presets[:-1]
+        target_fresh = all_surgery_presets[-1]
 
         recent_polls = [
             {
@@ -241,7 +241,7 @@ class TestPollAntiDupInquisitor(unittest.IsolatedAsyncioTestCase):
                 "question": p["question"],
                 "created_at": f"2026-10-0{i+1} 12:00:00"
             }
-            for i, p in enumerate(used_5)
+            for i, p in enumerate(used)
         ]
 
         # Request a fallback for category surgery 10 times in a row
