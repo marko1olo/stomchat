@@ -953,7 +953,7 @@ async def scheduler_task(bot_client):
             cutoff_hour = getattr(config, "DAILY_POLL_CUTOFF_HOUR", 16)
             is_after_start = (now_msk.hour > poll_hour) or (now_msk.hour == poll_hour and now_msk.minute >= poll_minute)
             is_before_cutoff = now_msk.hour < cutoff_hour
-            is_poll_time = is_after_start and is_before_cutoff
+            is_poll_time = is_after_start and is_before_cutoff and getattr(config, "ENABLE_DAILY_POLLS", True)
 
             if is_poll_time:
                 # Сброс кэша опроса при наступлении новых суток по МСК
@@ -1117,7 +1117,7 @@ async def scheduler_task(bot_client):
             # 4. ВЕЧЕРНИЙ КЛИНИЧЕСКИЙ РАЗБОР И ЗАКРЫТИЕ ОПРОСА (21:00 - 22:00 MSK)
             resolution_hour = getattr(config, "DAILY_POLL_RESOLUTION_HOUR", 21)
             resolution_cutoff_hour = getattr(config, "DAILY_POLL_RESOLUTION_CUTOFF_HOUR", 22)
-            is_resolution_time = resolution_hour <= now_msk.hour < resolution_cutoff_hour
+            is_resolution_time = (resolution_hour <= now_msk.hour < resolution_cutoff_hour) and getattr(config, "ENABLE_DAILY_POLLS", True)
 
             if is_resolution_time:
                 for target in targets:
