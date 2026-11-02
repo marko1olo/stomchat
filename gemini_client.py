@@ -962,18 +962,17 @@ def cascade_for_context(status_context=None, prompt=None):
         return cascade
     elif is_chatbot:
         # Клинические ответы в чате и ЛС (HIGH и MEDIUM):
-        # Максимальный интеллект: сначала флагманы gemini-3.8-flash -> gemini-3.7-flash -> gemini-3.6-flash,
-        # затем тяжелый reasoning-резерв AgentRouter (gpt-6.1-sol),
-        # затем спасительный безотказный gemini-3.5-flash-lite (на случай исчерпания суточных квот 3.8/3.7/3.6),
+        # ФЛАГМАН ДЛЯ ЧАТОВ И БЕСЕДЫ БЕЗ МЕДИА: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ!
+        # При отказе AgentRouter каскад перехватывают флагманы Google: gemini-3.8-flash ->
+        # gemini-3.7-flash -> gemini-3.6-flash, затем безотказный танк gemini-3.5-flash-lite,
         # gemini-3.1-flash-lite и Groq.
-        cascade = [
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-        ]
+        cascade = []
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             (groq_primary, "groq"),
@@ -2147,11 +2146,10 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
     agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
-    cascade = [
-        (groq_primary, "groq"),
-    ]
+    cascade = []
     if provider_pool("agentrouter"):
         cascade.append((agentrouter_model, "agentrouter"))
+    cascade.append((groq_primary, "groq"))
     cascade.extend([
         ("gemini-3.5-flash-lite", "gemini"),
         (groq_secondary, "groq"),
