@@ -843,13 +843,14 @@ def cascade_for_context(status_context=None, prompt=None):
     """
     if is_media_task(status_context, prompt):
         has_agentrouter = bool(provider_pool("agentrouter"))
+        agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
         groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
         cascade = [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
         ]
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
@@ -871,6 +872,7 @@ def cascade_for_context(status_context=None, prompt=None):
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
     has_agentrouter = bool(provider_pool("agentrouter"))
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
 
@@ -885,7 +887,7 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.6-flash", "gemini"),
         ]
         if has_agentrouter:
-            base.append(("deepseek-v4-flash", "agentrouter"))
+            base.append((agentrouter_model, "agentrouter"))
         return base
     elif kind == "daemon_memory":
         # Фоновое обновление досье врача: используем легкие Flash-Lite и Groq
@@ -896,13 +898,13 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.6-flash", "gemini"),
         ]
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         return cascade
     elif is_clinical_review:
         # Независимый кросс-модельный рецензент: опрос от Gemini проверяет DeepSeek / Qwen!
         if has_agentrouter:
             return [
-                ("deepseek-v4-flash", "agentrouter"),
+                (agentrouter_model, "agentrouter"),
                 (groq_primary, "groq"),
                 (groq_secondary, "groq"),
                 ("gemini-3.8-flash", "gemini"),
@@ -927,7 +929,7 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.1-flash-lite", "gemini"),
         ]
         if has_agentrouter:
-            base.append(("deepseek-v4-flash", "agentrouter"))
+            base.append((agentrouter_model, "agentrouter"))
         return base
     elif is_chatbot and bool(
         kind in ("assistant_media", "assistant_media_pm")
@@ -943,7 +945,7 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.1-flash-lite", "gemini"),
         ]
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.append((groq_primary, "groq"))
         return cascade
     elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
@@ -954,7 +956,7 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.6-flash", "gemini"),
         ]
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
             (groq_primary, "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
@@ -969,7 +971,7 @@ def cascade_for_context(status_context=None, prompt=None):
             ("gemini-3.5-flash-lite", "gemini"),
         ]
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
             (groq_primary, "groq"),
             ("gemini-3.1-flash-lite", "gemini"),
@@ -996,7 +998,7 @@ def cascade_for_context(status_context=None, prompt=None):
                 seen.add(m)
                 cascade.append(m)
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
             ("gemini-3.1-flash-lite", "gemini"),
             (groq_primary, "groq"),
@@ -1020,7 +1022,7 @@ def cascade_for_context(status_context=None, prompt=None):
                 seen.add(m)
                 cascade.append(m)
         if has_agentrouter:
-            cascade.append(("deepseek-v4-flash", "agentrouter"))
+            cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
             ("gemini-3.1-flash-lite", "gemini"),
             (groq_primary, "groq"),
@@ -1349,7 +1351,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                                 continue
                             if any(kw in err_str for kw in ("payload too large", "413", "entity too large", "request too large")):
                                 logger.warning("Model %s payload too large for provider limit (%s); falling back to next model", model_name, err_str[:120])
-                                break
+                                raise
                             raise
                     text_result = response.choices[0].message.content if (response.choices and len(response.choices) > 0) else None
                     if response.choices and len(response.choices) > 0:
@@ -2104,11 +2106,12 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
 
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
     cascade = [
         (groq_primary, "groq"),
     ]
     if provider_pool("agentrouter"):
-        cascade.append(("deepseek-v4-flash", "agentrouter"))
+        cascade.append((agentrouter_model, "agentrouter"))
     cascade.extend([
         ("gemini-3.5-flash-lite", "gemini"),
         (groq_secondary, "groq"),
@@ -2116,7 +2119,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     ])
 
     for model_name, provider in cascade:
-        keys = config.GROQ_KEYS if provider == "groq" else config.GOOGLE_KEYS
+        keys = config.GROQ_KEYS if provider == "groq" else (config.AGENTROUTER_KEYS if provider == "agentrouter" else config.GOOGLE_KEYS)
         live_keys, cooldown_keys, _ = available_keys(provider, keys)
         candidates = live_keys or cooldown_keys
         if not candidates:
