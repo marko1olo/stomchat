@@ -6929,7 +6929,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Предыдущий вариант разбора отклонён рецензентом: "{last_media_reason}".
 НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти критику рецензента, не ставь категоричных диагнозов без достаточных ориентиров, исключи недостоверные утверждения и перепиши разбор строго доказательно.
 """
-        status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "MEDIUM", "has_media": True}
+        status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH", "has_media": True}
         if image_urls:
             status_ctx["image_urls"] = image_urls
         if has_text_desc:
@@ -9940,7 +9940,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 2. Разметка: только HTML. Без Markdown.
 """
 
-    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
@@ -11532,7 +11532,7 @@ async def handle_private_message(bot_client, event):
 Будь лаконичен, профессионален.
 """
             async with _safe_typing_action(bot_client, chat_id):
-                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
@@ -12189,7 +12189,7 @@ async def handle_private_message(bot_client, event):
 2. Не пиши правильный ответ и не давай вариантов! Врач должен ответить своими словами (или голосом).
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+            status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
             async with _safe_typing_action(bot_client, chat_id):
                 response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
             await bot_client.delete_messages(chat_id, status_msg.id)
@@ -12864,7 +12864,7 @@ async def handle_private_message(bot_client, event):
                 status_ctx = {
                     "kind": "pm_chat",
                     "chat_id": chat_id,
-                    "thinking_level": "HIGH" if (has_media or bool(media_description)) else "MEDIUM",
+                    "thinking_level": "HIGH",
                     "has_media": bool(has_media or media_description),
                 }
                 if media_description:
@@ -13270,7 +13270,7 @@ NO — если это:
 Предыдущий вариант ответа отклонён рецензентом: "{last_mention_reason}".
 НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Учти критику рецензента, ответь строго по существу сообщения #{msg_id}, исключи сомнительные утверждения.
 """
-            reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+            reply_ctx = {"kind": "bot_mention_reply", "chat_id": chat_id, "thinking_level": "HIGH"}
             async with _safe_typing_action(bot_client, chat_id):
                 reply_resp, reply_err = await generate_gemini_text_async(current_reply_prompt, reply_ctx, timeout=120)
 
@@ -13497,7 +13497,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 - Будь краток: вся сводка должна занимать не более 800 символов.
 - КЛИНИЧЕСКИЙ ЗДРАВЫЙ СМЫСЛ: История переписки может содержать ошибки и галлюцинации участников. Клиническую рекомендацию формулируй ТОЛЬКО на основе EBM и золотых стандартов стоматологии, не копируй сомнительные утверждения из чата.
 """
-        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+        status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
         async with _safe_typing_action(bot_client, chat_id):
             response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
@@ -14421,7 +14421,7 @@ async def handle_group_quiz(bot_client, event):
 }
 Ответ должен быть валидным JSON, без markdown разметки и без ```json.
 """
-    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     try:
@@ -15629,7 +15629,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
         prompt = f"Дай краткий доказательный клинический протокол по теме: {chosen_topic_desc}"
 
     # 5. Вызываем генерацию через Gemini
-    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
     response = None
     error = None
     if generate_gemini_text_async:
@@ -16880,7 +16880,7 @@ async def handle_quiz_callback(bot_client, event):
 2. Не раскрывай, какой вариант верный!
 3. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
-            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "MEDIUM"}
+            status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "HIGH"}
             async with _safe_typing_action(bot_client, event.sender_id):
                 response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
 
@@ -17664,7 +17664,7 @@ async def check_and_trigger_referee(bot_client, event, text) -> bool:
 4. Разметка: только HTML (<b>жирный</b>). Без Markdown.
 """
 
-    status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
@@ -17770,7 +17770,7 @@ async def handle_term_explainer(bot_client, event, term):
 4. ЕСЛИ термин неоднозначен (несколько значений) — коротко укажи оба варианта через «; или».
 5. ЕСЛИ справка пуста и термин тебе незнаком — честно напиши: «Точных данных по этому термину нет в нашей базе. Уточни у коллег!» — и ничего не выдумывай.
 """
-    status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+    status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
 
@@ -18256,7 +18256,7 @@ async def check_and_send_pm_pings(bot_client):
                     f"   • Любые дежурные навязчивые вопросы, спам, лекции\n"
                     f"5. Тон: сдержанный, уважительный, профессиональный.\n"
                     f"6. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>).\n"""
-                status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
 
                 if not error and response and getattr(response, "text", None):

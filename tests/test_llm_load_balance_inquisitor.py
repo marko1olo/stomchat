@@ -40,7 +40,8 @@ class TestLLMLoadBalanceInquisitor(unittest.TestCase):
         # Если AgentRouter настроен, 3-й должна быть deepseek-v4-flash
         has_ar = bool(gemini_client.provider_pool("agentrouter"))
         if has_ar:
-            self.assertEqual(cascade[2], ("deepseek-v4-flash", "agentrouter"))
+            expected_ar = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+            self.assertEqual(cascade[2], (expected_ar, "agentrouter"))
 
     def test_chairside_chat_timeout_ceilings(self):
         """

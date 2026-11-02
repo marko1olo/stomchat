@@ -843,7 +843,7 @@ def cascade_for_context(status_context=None, prompt=None):
     """
     if is_media_task(status_context, prompt):
         has_agentrouter = bool(provider_pool("agentrouter"))
-        agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
+        agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
         groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
         cascade = [
             ("gemini-3.8-flash", "gemini"),
@@ -872,7 +872,7 @@ def cascade_for_context(status_context=None, prompt=None):
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
     has_agentrouter = bool(provider_pool("agentrouter"))
-    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
 
@@ -948,33 +948,35 @@ def cascade_for_context(status_context=None, prompt=None):
             cascade.append((agentrouter_model, "agentrouter"))
         cascade.append((groq_primary, "groq"))
         return cascade
-    elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
+    elif is_chatbot and thinking_level == "LOW":
         cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            (groq_primary, "groq"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
         ]
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
-        cascade.extend([
-            (groq_primary, "groq"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            (groq_secondary, "groq"),
-        ])
         return cascade
     elif is_chatbot:
+        # Клинические ответы в чате и ЛС (HIGH и MEDIUM):
+        # Максимальный интеллект: сначала флагманы gemini-3.8-flash -> gemini-3.7-flash -> gemini-3.6-flash,
+        # затем тяжелый reasoning-резерв AgentRouter (gpt-6.1-sol),
+        # затем спасительный безотказный gemini-3.5-flash-lite (на случай исчерпания суточных квот 3.8/3.7/3.6),
+        # gemini-3.1-flash-lite и Groq.
         cascade = [
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
         ]
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
-            (groq_primary, "groq"),
+            ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
+            (groq_primary, "groq"),
             (groq_secondary, "groq"),
         ])
         return cascade
@@ -1326,6 +1328,44 @@ def generate_text(prompt, status_context=None, timeout=None):
 
                     while True:
                         try:
+                            if provider == "agentrouter":
+                                import requests as _req
+                                ar_base = PROVIDER_BASE_URLS.get("agentrouter", "https://agentrouter.org/v1").rstrip("/")
+                                ar_headers = {
+                                    "Authorization": f"Bearer {api_key}",
+                                    "User-Agent": "opencode/1.18.25",
+                                    "Content-Type": "application/json"
+                                }
+                                ar_input = adapted_prompt if "adapted_prompt" in locals() else _adapt_prompt_for_text_model(prompt, status_context)
+                                ar_payload = {
+                                    "model": model_name,
+                                    "input": ar_input
+                                }
+                                ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=call_timeout)
+                                if ar_resp.status_code == 200:
+                                    ar_data = ar_resp.json()
+                                    extracted_txt = None
+                                    for out_item in ar_data.get("output", []):
+                                        if out_item.get("type") == "message":
+                                            msg_content = out_item.get("content", [])
+                                            if isinstance(msg_content, list) and msg_content:
+                                                extracted_txt = msg_content[0].get("text")
+                                            elif isinstance(msg_content, str):
+                                                extracted_txt = msg_content
+                                    if not extracted_txt:
+                                        raise RuntimeError(f"AgentRouter empty message output: {ar_data}")
+                                    response = type("DummyResp", (), {
+                                        "choices": [type("Choice", (), {
+                                            "message": type("Msg", (), {"content": extracted_txt})(),
+                                            "finish_reason": "stop"
+                                        })()]
+                                    })()
+                                    break
+                                elif ar_resp.status_code in (400, 404) and "not support" not in ar_resp.text.lower():
+                                    response = client.chat.completions.create(**create_kwargs)
+                                    break
+                                else:
+                                    raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
                             response = client.chat.completions.create(**create_kwargs)
                             break
                         except TypeError as err:
@@ -2106,7 +2146,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
 
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
-    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash"
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
     cascade = [
         (groq_primary, "groq"),
     ]
