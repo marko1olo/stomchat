@@ -103,7 +103,7 @@ class TestVisionDualDescription(unittest.TestCase):
         media_captions = {
             101: "Снимок зуба 4.6",
             102: "Препарирование под винир 1.1",
-            103: "Несвязанный снимок другого врача"
+            103: "Немедицинский скриншот / мем другого пользователя"
         }
 
         result_html = embed_media_into_summary_html(html_input, media_map, media_captions, max_images=4)
@@ -120,6 +120,33 @@ class TestVisionDualDescription(unittest.TestCase):
         # 4. Captions in figcaption must be chairside short captions
         self.assertIn("<figcaption>Снимок зуба 4.6</figcaption>", result_html)
         self.assertIn("<figcaption>Препарирование под винир 1.1</figcaption>", result_html)
+
+    def test_metadata_bullet_points_cleanup_and_parsing(self):
+        raw = """[ПОДРОБНОЕ ОПИСАНИЕ]
+На клиническом фото визуализируется зуб 36 с препарированным уступом.
+
+[КРАТКАЯ ПОДПИСЬ]
+Препарирование зуба 36 под коронку.
+
+[МЕТАДАННЫЕ]
+* **Тип изображения:** Внутриротовая дентальная фотография (клинический фотопротокол).
+* **Область исследования:** Зуб 36.
+* **Клиническое сомнение:** Краевое прилегание уступа."""
+
+        detailed, short = vision.parse_dual_vision_description(raw)
+        meta = vision.extract_vision_metadata(raw)
+
+        self.assertIn("зуб 36", detailed)
+        self.assertEqual(short, "Препарирование зуба 36 под коронку.")
+        self.assertNotIn("МЕТАДАННЫЕ", short)
+        self.assertNotIn("Тип изображения", short)
+        self.assertEqual(meta.get("modality"), "CLINICAL_PHOTO")
+        self.assertEqual(meta.get("target_tooth"), 36)
+        self.assertTrue(meta.get("has_clinical_doubt"))
+
+    def test_classify_modality_fallback_photoprotocol(self):
+        text = "Клинический фотопротокол демонстрирует этап ортопедической реабилитации зубов нижней челюсти"
+        self.assertEqual(vision.classify_modality_fallback(text), "CLINICAL_PHOTO")
 
 
 if __name__ == "__main__":

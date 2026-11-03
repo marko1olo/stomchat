@@ -225,6 +225,35 @@ def extract_vision_metadata(raw_text: str) -> dict:
         except Exception:
             pass
 
+    # 3. Разбор не-JSON формата [МЕТАДАННЫЕ] (списки, ключ-значение)
+    meta_section_m = re.search(r"\[(?:МЕТАДАННЫЕ|METADATA)\][\s:\-]*([\s\S]*?)(?=\n\s*\[|\Z)", raw_text, re.IGNORECASE)
+    if meta_section_m:
+        sec_text = meta_section_m.group(1).strip()
+        parsed = {}
+        sec_lower = sec_text.lower()
+        if any(w in sec_lower for w in ["прицельн", "визиограф", "periapical"]):
+            parsed["modality"] = "PERIAPICAL_XRAY"
+        elif any(w in sec_lower for w in ["cbct", "клкт", "компьютерная томография", "томограмм"]):
+            parsed["modality"] = "CBCT"
+        elif any(w in sec_lower for w in ["панорамн", "оптг", "panoramic"]):
+            parsed["modality"] = "PANORAMIC_OPG"
+        elif any(w in sec_lower for w in ["клиническ", "фото", "внутриротов", "clinical"]):
+            parsed["modality"] = "CLINICAL_PHOTO"
+        elif any(w in sec_lower for w in ["немедицинск", "скриншот", "мем", "non_dental"]):
+            parsed["modality"] = "NON_DENTAL"
+        else:
+            parsed["modality"] = classify_modality_fallback(sec_text)
+
+        tooth_m = re.search(r"(?:зуб[а-я]*|tooth|target_tooth)[\s:#*-]*([1-4][1-8])\b", sec_text, re.IGNORECASE)
+        if tooth_m:
+            try:
+                parsed["target_tooth"] = int(tooth_m.group(1))
+            except Exception:
+                parsed["target_tooth"] = None
+
+        parsed["has_clinical_doubt"] = any(w in sec_lower for w in ["сомнени", "деструкци", "воспален", "осложнен", "дефект", "патологи", "true"])
+        return parsed
+
     return {}
 
 
@@ -239,7 +268,10 @@ def classify_modality_fallback(text: str) -> str:
         return "CBCT"
     if any(s in t for s in ["оптг", "панорамный снимок", "ортопантомограмм"]):
         return "PANORAMIC_OPG"
-    if any(s in t for s in ["клиническая фотография", "внутриротовое фото", "фотография полости рта", "зубной протез", "слепочн", "оттиск"]):
+    if any(s in t for s in [
+        "клиническая фотография", "клиническое фото", "фотопротокол", "внутриротовое фото",
+        "фотография полости рта", "фото полости рта", "зубной протез", "слепочн", "оттиск", "препарирован"
+    ]):
         if not any(x in t for x in ["прицельный", "визиограф", "радиовизиогр"]):
             return "CLINICAL_PHOTO"
     if any(x in t for x in ["прицельн", "визиограф", "радиовизиогр", "периапикальн"]):
@@ -294,8 +326,8 @@ def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
     if not raw_text:
         return "", ""
 
-    # Очищаем текст от секции [МЕТАДАННЫЕ]
-    text = re.sub(r"(?:^|\n)[\[\]#*\s\d.)-]*(?:МЕТАДАННЫЕ|METADATA)[\[\]#*\s:\-]*\{.*?\}", "", raw_text.strip(), flags=re.DOTALL | re.IGNORECASE).strip()
+    # Очищаем текст от секции [МЕТАДАННЫЕ] (как JSON, так и Markdown/списки)
+    text = re.sub(r"(?:^|\n)[\[\]#*\s\d.)-]*(?:МЕТАДАННЫЕ|METADATA)[\s\S]*?(?=\n\s*\[(?:ПОДРОБНОЕ|КРАТКАЯ)|\Z)", "", raw_text.strip(), flags=re.IGNORECASE).strip()
 
     detailed_re = re.compile(
         r"(?:^|\n)[\[\]#*\s\d.)-]*(?:ПОДРОБНОЕ\s+ОПИСАНИЕ|КЛИНИЧЕСКОЕ\s+ОПИСАНИЕ|ПОДРОБНЫЙ\s+РАЗБОР)[\[\]#*\s:\-]*",
@@ -697,7 +729,9 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 ],
                                 max_tokens=800 if provider == "groq" else 1200
                             )
-                            content = resp.choices[0].message.content
+                            choice = resp.choices[0] if resp.choices else None
+                            finish_reason = getattr(choice, "finish_reason", None) if choice else None
+                            content = choice.message.content if choice else None
                             if content:
                                 # Общий помощник вместо местной копии срезки. В
                                 # прежней ветке незакрытого тега при пустом начале
@@ -705,6 +739,26 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 # модели уходили как клиническое описание снимка.
                                 text = gemini_client.strip_reasoning(content)
                                 if text:
+                                    # Проверка на обрыв генерации (по токенам или обрыв слова)
+                                    is_truncated = False
+                                    if finish_reason == "length":
+                                        is_truncated = True
+                                    elif len(text.strip()) < 180:
+                                        t_str = text.strip()
+                                        if not any(t_str.endswith(p) for p in [".", "!", "?", "…", "»", '"', "}", "]"]):
+                                            is_truncated = True
+                                        else:
+                                            last_w = t_str.split()[-1] if t_str.split() else ""
+                                            if len(last_w) <= 2 and last_w.isalpha():
+                                                is_truncated = True
+
+                                    if is_truncated:
+                                        logger.warning(
+                                            f"Vision {provider} ({model_name}) returned truncated/unfinished description (finish_reason={finish_reason}, len={len(text)}): {text[:60]}... Trying next model in cascade."
+                                        )
+                                        if english_fallback is None:
+                                            english_fallback = text
+                                        continue
                                     # Инструкции «отвечай строго по-русски» мало:
                                     # замер по живой базе показал 1285 английских
                                     # описаний из 3375 — 38%. Они уходят в промпт

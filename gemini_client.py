@@ -1236,7 +1236,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                             max_allowed_for_model = rem
                         # Chairside потолок ожидания врача: не перебивать req_timeout гигантским числом!
                         chat_ceiling = 50.0 if thinking_level == "HIGH" else 35.0
-                        call_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
+                        if provider == "agentrouter" or thinking_level == "HIGH":
+                            call_timeout = max(MIN_REQUEST_SECONDS, min(rem, chat_ceiling, max_allowed_for_model))
+                        else:
+                            call_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
                 elif provider == "agentrouter":
                     rem = (deadline - time.monotonic()) if deadline else 140.0
                     if kind in summary_kinds:
@@ -2179,7 +2182,43 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                 if provider == "gemini" and "lite" not in model_name:
                     supp_kwargs["reasoning_effort"] = "medium"
                 try:
-                    response = client.chat.completions.create(**supp_kwargs)
+                    if provider == "agentrouter":
+                        import requests as _req
+                        ar_base = PROVIDER_BASE_URLS.get("agentrouter", "https://agentrouter.org/v1").rstrip("/")
+                        ar_headers = {
+                            "Authorization": f"Bearer {api_key}",
+                            "User-Agent": "opencode/1.18.25",
+                            "Content-Type": "application/json"
+                        }
+                        ar_input = f"{system_prompt}\n\n{user_prompt}"
+                        ar_payload = {
+                            "model": model_name,
+                            "input": ar_input
+                        }
+                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=min(45.0, timeout or 45.0))
+                        if ar_resp.status_code == 200:
+                            ar_data = ar_resp.json()
+                            extracted_txt = None
+                            for out_item in ar_data.get("output", []):
+                                if out_item.get("type") == "message":
+                                    msg_content = out_item.get("content", [])
+                                    if isinstance(msg_content, list) and msg_content:
+                                        extracted_txt = msg_content[0].get("text")
+                                    elif isinstance(msg_content, str):
+                                        extracted_txt = msg_content
+                            if extracted_txt:
+                                response = type("DummyResp", (), {
+                                    "choices": [type("Choice", (), {
+                                        "message": type("Msg", (), {"content": extracted_txt})(),
+                                        "finish_reason": "stop"
+                                    })()]
+                                })()
+                            else:
+                                raise RuntimeError(f"AgentRouter empty supplement output: {ar_data}")
+                        else:
+                            raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
+                    else:
+                        response = client.chat.completions.create(**supp_kwargs)
                 except (TypeError, Exception) as err:
                     if "reasoning_effort" in str(err).lower():
                         supp_kwargs.pop("reasoning_effort", None)
