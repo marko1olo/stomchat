@@ -1236,7 +1236,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                             max_allowed_for_model = rem
                         # Chairside потолок ожидания врача: не перебивать req_timeout гигантским числом!
                         chat_ceiling = 50.0 if thinking_level == "HIGH" else 35.0
-                        if provider == "agentrouter" or thinking_level == "HIGH":
+                        if provider == "agentrouter":
+                            # Потолок для AgentRouter (gpt-6.1-sol) расширен до 1.5 минут (90.0с)
+                            call_timeout = max(MIN_REQUEST_SECONDS, min(rem, 90.0, max_allowed_for_model))
+                        elif thinking_level == "HIGH":
                             call_timeout = max(MIN_REQUEST_SECONDS, min(rem, chat_ceiling, max_allowed_for_model))
                         else:
                             call_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
@@ -2195,7 +2198,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                             "model": model_name,
                             "input": ar_input
                         }
-                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=min(45.0, timeout or 45.0))
+                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=min(90.0, timeout or 90.0))
                         if ar_resp.status_code == 200:
                             ar_data = ar_resp.json()
                             extracted_txt = None
