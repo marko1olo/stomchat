@@ -626,10 +626,11 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
 # Короткие классификаторы: у всех вызывающих thinking_level LOW и ответ в одну
 # строку. Первой идёт groq-llama — на такой задаче она быстрее lite-моделей.
 TRIAGE_KINDS = frozenset({
-    "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
+    "llama_triage", "bot_mention_triage", "referee_analyser",
     "group_ping_hot_check", "protocol_extraction",
     "react_standalone_triage", "react_triage",  # реакции — дешёвый lite-каскад
     "poll_triage",
+    # response_validator убран: клинический рецензент требует HIGH thinking_level.
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
 CHAT_KINDS = frozenset({
@@ -2134,6 +2135,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         "3. КЛИНИЧЕСКАЯ ДЕЛЬТА (когда дополнение РЕАЛЬНО нужно):\n"
         "   - Выдавай дополнение ТОЛЬКО если упущены критические риски осложнений, анатомические ориентиры, точные дозировки или обязательные протокольные этапы (изоляция, экспозиция, выбор цемента/файлов).\n"
         "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+        "   - Солкосерил и Актовегин: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО! Препарат отозван с мирового рынка и из РФ в 2020 г., запрещен в доказательной стоматологии. Вместо него для слизистой (афты, язвы, ожог NaOCl) указывать ТОЛЬКО: Асепта бальзам адгезивный, Холисал гель, Винилин, Афтофикс. Запрещено прижигание спиртом/перекисью/марганцовкой.\n"
         "   - Педиатрическая токсичность: для детей (<12 лет) артикаин строго не более 5.0 мг/кг (до 4 лет / <15 кг противопоказан). Никогда не указывать 7 мг/кг для ребенка!\n"
         "   - Перфорация дна гайморовой пазухи: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО советовать электрокоагуляцию верхушки/пазухи или адреналиновые тампоны в пазуху! Допустима только бережная коллагеновая губка без проталкивания в синус, герметичное ушивание, антибиотики, сосудосуживающие капли и ЛОР.\n"
         "   - Топографическая подмена: строго следовать зубу и возрасту из запроса врача, не выдумывать другой зуб или возраст.\n"
@@ -2155,11 +2157,11 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     cascade = []
     if provider_pool("agentrouter"):
         cascade.append((agentrouter_model, "agentrouter"))
-    cascade.append((groq_primary, "groq"))
     cascade.extend([
-        ("gemini-3.5-flash-lite", "gemini"),
-        (groq_secondary, "groq"),
         ("gemini-3.8-flash", "gemini"),
+        (groq_secondary, "groq"),
+        (groq_primary, "groq"),
+        ("gemini-3.5-flash-lite", "gemini"),
     ])
 
     for model_name, provider in cascade:
@@ -2183,7 +2185,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                     "max_tokens": 800 if provider == "groq" else 2048,
                 }
                 if provider == "gemini" and "lite" not in model_name:
-                    supp_kwargs["reasoning_effort"] = "medium"
+                    supp_kwargs["reasoning_effort"] = "high"
                 try:
                     if provider == "agentrouter":
                         import requests as _req
