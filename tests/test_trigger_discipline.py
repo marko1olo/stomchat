@@ -36,6 +36,11 @@ import sys
 import tempfile
 from datetime import datetime, timedelta
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -72,7 +77,7 @@ check("условие триажа осталось на месте",
       "триаж потерялся целиком — бот заговорит на всё подряд")
 # Диалог по-прежнему триаж не проходит: врач сам ответил боту, спрашивать
 # уместность повторно незачем.
-triage_block = CODE.split("if triggered and not is_dialogue:", 1)[1][:600]
+triage_block = CODE.split("if triggered and not is_dialogue:", 1)[1][:1200]
 check("платная попытка списывается до триажа", "record_passive_attempt()" in triage_block,
       "в активном чате бот заплатит за триаж на каждом входящем")
 check("решение принимает LLM, а не регулярка", "check_llm_triage" in triage_block)

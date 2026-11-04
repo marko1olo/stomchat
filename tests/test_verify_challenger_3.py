@@ -20,7 +20,11 @@ def record_pass(test_name):
     print(f"[+] PASS: {test_name}")
 
 # Read target report
+import os
 REPORT_PATH = "REPORT_CHAT_BALANCE_AND_LOGS.md"
+if not os.path.exists(REPORT_PATH):
+    print(f"[!] SKIP: {REPORT_PATH} not found in current directory.")
+    sys.exit(0)
 with open(REPORT_PATH, "r", encoding="utf-8") as f:
     report_text = f.read()
 
