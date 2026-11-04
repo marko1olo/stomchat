@@ -185,7 +185,7 @@ check("вложенность бюджета: внутренний таймау�
       _elapsed < 30, f"заняло {_elapsed:.1f} с")
 
 print("\n[5] Немые пути в main.py закрыты")
-SRC = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"),
+SRC = open(os.path.join(_REPO_ROOT, "main.py"),
            encoding="utf-8").read()
 _code_lines = [ln for ln in SRC.splitlines() if ln.strip().startswith("except")]
 check("голого `except:` в коде main.py не осталось",

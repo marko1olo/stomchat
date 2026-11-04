@@ -4264,7 +4264,18 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
         return False, f"validator_unavailable: {detail}"
 
     try:
-        context_str = "\n".join(context_msgs[-10:])
+        if isinstance(context_msgs, str):
+            context_str = context_msgs[-4000:]
+        elif isinstance(context_msgs, (list, tuple)):
+            c_list = [str(m) for m in context_msgs if m]
+            if len(c_list) > 12:
+                # Всегда сохраняем первое сообщение (корень клинического случая) + последние реплики
+                preserved = [c_list[0]] + c_list[-11:]
+                context_str = "\n".join(preserved)
+            else:
+                context_str = "\n".join(c_list)
+        else:
+            context_str = str(context_msgs or "")
         # Рецензент видит и справку, на которой строился ответ. Без неё он не мог
         # отличить число из базы знаний от выдуманного: оба выглядят одинаково
         # правдоподобно. Даём ТОЛЬКО выжимку вики — дистиллированные факты.
@@ -4289,12 +4300,14 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 
 ОЦЕНИ ЧЕРНОВИК ПО ЧЕТЫРЁМ КРИТЕРИЯМ:
 
-1. УМЕСТНОСТЬ И ПРЯМОЙ ОТВЕТ:
-   — Ответ обязан отвечать строго на то, что реально спросил врач в последнем сообщении.
+1. УМЕСТНОСТЬ И ПРЯМОЙ ОТВЕТ В РАМКАХ КЛИНИЧЕСКОГО ТРЕДА:
+   — Ответ обязан отвечать по существу клинической проблемы, обсуждаемой в ветке/диалоге.
+   — ВНИМАНИЕ К КОНТЕКСТУ ТРЕДА И КЛИНИЧЕСКИМ СЛУЧАЯМ: если в контексте диалога или ветки описан клинический случай (зуб, снимки, кровотечение, САП, отломок, перфорация), а текущая реплика врача — это краткий вопрос/призыв («выручай», «что делать?», «подскажи», «как быть?», «ботик видео не умеет смотреть?»), ответ ОБЯЗАН разбирать описанный клинический случай из контекста ветки! Использование данных случая из контекста ветки (номер зуба, анатомия, каналы, отломки) НЕ ЯВЛЯЕТСЯ галлюцинацией, подменой темы или топографической ошибкой. Это строго правильное, ожидаемое решение!
    — Если вопрос конкретный («какими клампами?», «какой файл?», «сколько мг?») — черновик обязан дать конкретные артикулы/инструменты/дозировки, а не общую лекцию по теме.
    — ПОДМЕНА ВОПРОСА И УХОД В СТОРОНУ: Если врач спросил про конкретный клинический этап (изоляция, кламп, силер, анестезия), а черновик уклонился от ответа и начал поучать врача по посторонней теме (скученность, окклюзия, общая гигиена) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — ОПЕЧАТКИ Т9: Если врач опечатался со смартфона («озонировать» вместо «изолировать», «кланы» вместо «клампы»), черновик обязан отвечать по реальному смыслу клинической процедуры (изоляция коффердамом). Если черновик воспринял опечатку буквально и выдумал озонотерапию или маргинальную чушь — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
-   — Если бот влезает без приглашения (пассивный триггер) и ответ не добавляет ничего сверх того, что врач уже изложил сам в своём вопросе — ОТКЛОНИ.
+   — Если бот влезает без приглашения (пассивный триггер) и ответ не добавляет ничего сверх того, что врач уже изложил сам в своём вопросе — ОТКЛОНИ. При прямом запросе (invited=True) не придирайся к отсутствию «новизны», если дан четкий профессиональный ответ.
+   — ЗАПРЕТ ШАБЛОННЫХ ОТПИСОК: Запрещено отклонять ответ с требованием «запросить снимок/КТ», если снимок или подробное описание зуба уже есть в контексте переписки!
    — Если тема чата — флуд, приветствия, оффтоп без клинического содержания — ОТКЛОНИ.
 
 2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И ДОКАЗАТЕЛЬНОСТЬ (EBM):
@@ -6525,8 +6538,28 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if re.search(rf"(?i)@{re.escape(BOT_USERNAME)}\b", text):
             is_mentioned = True
 
-    # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
-    is_passive = not (is_direct_reply or is_mentioned)
+    # Проверяем продолжение активного клинического диалога с автором кейса
+    is_dialogue_continuation = False
+    sender_id = getattr(message, 'sender_id', None)
+    if sender_id:
+        last_case_author = state.get("last_case_author_id")
+        last_case_bot_msg = state.get("last_case_bot_msg_id")
+        last_case_time = _parse_state_dt(state.get("last_case_time"))
+        is_reply_to_bot_case = bool(last_case_bot_msg and getattr(message, 'reply_to_msg_id', None) == last_case_bot_msg)
+        is_same_author_window = bool(
+            last_case_author
+            and str(sender_id) == str(last_case_author)
+            and abs((datetime.now() - last_case_time).total_seconds()) < 30 * 60
+        )
+        if is_reply_to_bot_case or is_same_author_window:
+            is_dialogue_continuation = True
+            logger.info(
+                "Media message from author %s recognized as dialogue continuation with bot (is_reply=%s, same_author_window=%s).",
+                sender_id, is_reply_to_bot_case, is_same_author_window
+            )
+
+    # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply, mention or dialogue continuation
+    is_passive = not (is_direct_reply or is_mentioned or is_dialogue_continuation)
 
     # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
     age_minutes = 0.0
@@ -14232,7 +14265,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                 last_ask_candidate = draft_text
 
                 ask_ok, ask_reason = await check_response_quality(
-                    context_for_validator, draft_text,
+                    [context_for_validator], draft_text,
                     invited=True, reference=wiki_corpus
                 )
                 last_ask_reason = ask_reason or ""
@@ -14270,7 +14303,10 @@ async def handle_group_direct_ask(bot_client, event, question):
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):
                         candidate_reply = cand_fb
                 if not candidate_reply:
-                    if not last_ask_candidate:
+                    if last_ask_candidate and not _TOXIC_PRACTICE_RE.search(last_ask_candidate):
+                        logger.info("Delivering last_ask_candidate after validator reflection exhausted (msg_id=%s)", msg_id)
+                        candidate_reply = last_ask_candidate
+                    elif not last_ask_candidate:
                         await bot_client.send_message(
                             entity=chat_id,
                             message="⚠️ <i>Не удалось разобрать вопрос — модели сейчас недоступны. Попробуйте через пару минут.</i>",
@@ -14278,13 +14314,14 @@ async def handle_group_direct_ask(bot_client, event, question):
                             parse_mode='html',
                         )
                         return None
-                    await bot_client.send_message(
-                        entity=chat_id,
-                        message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
-                        reply_to=msg_id,
-                        parse_mode='html',
-                    )
-                    return None
+                    else:
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
+                            reply_to=msg_id,
+                            parse_mode='html',
+                        )
+                        return None
 
             return candidate_reply
 

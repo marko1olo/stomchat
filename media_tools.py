@@ -129,22 +129,138 @@ def _prepare_image_sync(file_path):
                 logger.debug("img.close() exception: %s", exc)
 
 
-def _extract_frame_sync(video_path):
+def _extract_frame_sync(video_path: str):
+    """
+    Адаптивно извлекает 4 ключевых кадра (15%, 40%, 65%, 85%) из видео и собирает
+    информативный коллаж 2x2 с временными метками для мультимодального анализа Gemini Vision.
+    Игнорирует темные/пустые начальные кадры (заставки, отсутствие подсветки микроскопа).
+    Потоково декодирует кадры через OpenCV без загрузки видеофайла в RAM.
+    """
     import cv2
+    import numpy as np
+
+    if not video_path:
+        return None, "Файл видео отсутствует или пуст"
 
     vid_cap = None
+    frame_path = video_path + ".jpg"
     try:
-        vid_cap = cv2.VideoCapture(video_path)
-        success, image = vid_cap.read()
-        if not success:
-            return None, "Не удалось прочитать первый кадр"
+        vid_cap = cv2.VideoCapture(os.fspath(video_path))
+        if not vid_cap.isOpened():
+            return None, "Не удалось открыть видеофайл через OpenCV"
 
-        frame_path = video_path + ".jpg"
-        if not cv2.imwrite(frame_path, image):
-            return None, "Не удалось сохранить первый кадр"
+        total_frames = int(vid_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(vid_cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if fps <= 0.0 or np.isnan(fps):
+            fps = 25.0
+
+        pct_list = [0.15, 0.40, 0.65, 0.85]
+        extracted_frames = []
+        frame_labels = []
+
+        if total_frames >= 4:
+            target_indices = [int(total_frames * p) for p in pct_list]
+        elif total_frames > 1:
+            target_indices = list(range(total_frames))
+        else:
+            target_indices = [0]
+
+        for target_idx in target_indices:
+            f_idx = max(0, min(target_idx, total_frames - 1 if total_frames > 0 else 0))
+            vid_cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+            success, frame = vid_cap.read()
+
+            if success and frame is not None:
+                # Проверка на темные/неинформативные кадры (заставки, темное поле микроскопа)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                lum = float(cv2.mean(gray)[0])
+                std = float(cv2.meanStdDev(gray)[1][0][0])
+                if (lum < 12.0 or std < 5.0) and total_frames > 4:
+                    step = max(1, int(fps * 0.5))
+                    probe_deltas = [step, step * 2, step * 3]
+                    if target_idx > total_frames * 0.7:
+                        probe_deltas = [-step, -step * 2, -step * 3]
+                    for d in probe_deltas:
+                        cand_idx = f_idx + d
+                        if 0 <= cand_idx < total_frames:
+                            vid_cap.set(cv2.CAP_PROP_POS_FRAMES, cand_idx)
+                            s, p_frame = vid_cap.read()
+                            if s and p_frame is not None:
+                                p_gray = cv2.cvtColor(p_frame, cv2.COLOR_BGR2GRAY)
+                                if float(cv2.mean(p_gray)[0]) >= 12.0 and float(cv2.meanStdDev(p_gray)[1][0][0]) >= 5.0:
+                                    frame = p_frame
+                                    f_idx = cand_idx
+                                    break
+
+            if success and frame is not None:
+                sec = f_idx / fps if fps > 0 else 0.0
+                pct = (f_idx / total_frames * 100) if total_frames > 0 else 0.0
+                extracted_frames.append(frame)
+                frame_labels.append(f"#{len(extracted_frames)} T={sec:.1f}s ({pct:.0f}%)")
+
+        # Если ни один кадр не извлечен по таймлайну, аварийная попытка первого кадра
+        if not extracted_frames:
+            vid_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            success, frame = vid_cap.read()
+            if success and frame is not None:
+                extracted_frames.append(frame)
+                frame_labels.append("#1 0.0s")
+            else:
+                return None, "Не удалось прочитать ни одного кадра из видео"
+
+        # Одиночный кадр
+        if len(extracted_frames) == 1:
+            frame = extracted_frames[0]
+            h, w = frame.shape[:2]
+            if max(h, w) > 1200:
+                scale = 1200.0 / max(h, w)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            if not cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+                return None, "Не удалось сохранить кадр"
+            return frame_path, None
+
+        # Нормализация ячеек коллажа (целевая ширина ячейки 540px)
+        f0_h, f0_w = extracted_frames[0].shape[:2]
+        cell_w = 540
+        cell_h = int(cell_w * (f0_h / f0_w)) if f0_w > 0 else 360
+        cell_h = max(270, min(cell_h, 540))
+
+        processed_cells = []
+        for f, label in zip(extracted_frames, frame_labels):
+            cell = cv2.resize(f, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
+            overlay = cell.copy()
+            badge_w = 175
+            cv2.rectangle(overlay, (4, 4), (badge_w, 30), (20, 20, 20), -1)
+            cv2.addWeighted(overlay, 0.7, cell, 0.3, 0, cell)
+            cv2.putText(cell, label, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+            processed_cells.append(cell)
+
+        # Сборка сетки
+        if len(processed_cells) == 4:
+            row1 = np.hstack([processed_cells[0], processed_cells[1]])
+            row2 = np.hstack([processed_cells[2], processed_cells[3]])
+            collage = np.vstack([row1, row2])
+        elif len(processed_cells) == 2:
+            collage = np.hstack([processed_cells[0], processed_cells[1]])
+        elif len(processed_cells) == 3:
+            blank_cell = np.zeros_like(processed_cells[0])
+            row1 = np.hstack([processed_cells[0], processed_cells[1]])
+            row2 = np.hstack([processed_cells[2], blank_cell])
+            collage = np.vstack([row1, row2])
+        else:
+            collage = np.hstack(processed_cells)
+
+        if not cv2.imwrite(frame_path, collage, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+            return None, "Не удалось сохранить коллаж кадров"
         return frame_path, None
+
     except Exception as exc:
-        return None, f"Ошибка извлечения кадра: {exc}"
+        if os.path.exists(frame_path):
+            try:
+                os.remove(frame_path)
+            except OSError:
+                pass
+        return None, f"Ошибка извлечения кадров: {exc}"
     finally:
         if vid_cap is not None:
             vid_cap.release()

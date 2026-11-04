@@ -2406,6 +2406,30 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                         database.update_media_description(message.id, "-"),
                         timeout=30,
                     )
+                # ФОЛЛБЭК НА ТЕКСТОВЫЙ АССИСТЕНТ: если зрение не смогло распознать снимки (503/таймаут),
+                # но у сообщения есть подробный клинический текст от врача — разбираем клинический случай текстом!
+                already_replied = any(getattr(m, "id", None) in assistant.REPLIED_MSG_IDS for m in (messages or []))
+                if trigger_assistant and not already_replied and text and len(text.strip()) > 5:
+                    logger.info("Falling back to text assistant for media message with clinical text msg_id=%s", msg_id)
+                    async def run_text_fallback():
+                        try:
+                            first_msg = messages[0] if messages else None
+                            if not first_msg:
+                                return
+                            parent_id = getattr(first_msg, "reply_to_msg_id", None)
+                            sender = getattr(first_msg, "sender", None)
+                            sender_fn = getattr(sender, "first_name", None) if sender else None
+                            replied = await assistant.check_and_trigger_assistant(
+                                bot_client, first_msg, msg_id, text, parent_id, sender_first_name=sender_fn
+                            )
+                            if replied:
+                                for m in (messages or []):
+                                    m_id = getattr(m, "id", None)
+                                    if m_id:
+                                        lifeline_manager.cancel_question(m_id, reason="media_fallback_text_replied")
+                        except Exception as tf_err:
+                            logger.exception("Text fallback failed for msg_id=%s: %s", msg_id, tf_err)
+                    runtime_guard.create_task(run_text_fallback(), name=f"text_fallback_{msg_id}")
         else:
             # Ни один файл не скачался и не подготовился. В базу при этом не
             # писалось НИЧЕГО: строка оставалась с пустым media_description, то

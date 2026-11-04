@@ -577,8 +577,16 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                     f"выдели те аспекты (макроархитектура, окклюзия, боковые опоры, локальные дефекты, эндо/пародонт, лабораторные этапы и т.д.), "
                     f"которые читаются на снимках. Не перечисляй домены ради перечисления — включай только те, по которым серия даёт достаточно информации."
                 )
+            video_collage_guidance = (
+                " ВИДЕО-РАСКАДРОВКИ И КОЛЛАЖИ: если на изображении представлен коллаж из 2-4 кадров с временными метками "
+                "(например, '#1 T=1.5s', '#2 T=4.0s' и т.д.), это раскадровка стоматологического видео (эндодонтический микроскоп, "
+                "операционный протокол или прокрутка срезов КЛКТ). Проанализируй динамику процесса во времени от ранних этапов к поздним: "
+                "последовательность этапов вмешательства (доступ -> поиск устьев/MB2 -> инструментация -> обтурация) "
+                "либо изменения анатомии по срезам КТ (коронковая часть -> зона фуркации -> средняя треть -> апекс и периапикальная зона)."
+            )
+
             system_prompt = (
-                f"Это стоматологическое изображение из врачебного сообщества.{context}{album_notice} "
+                f"Это стоматологическое изображение из врачебного сообщества.{context}{album_notice}{video_collage_guidance} "
                 f"Оценивай любые снимки: внутриротовые фото (фронт, окклюзия, уступы, ретракторы, коронки, раббердам); "
                 f"рентгенографию (прицельные, bitewing, ОПТГ, срезы КЛКТ, 3D); лабораторные сканы, wax-up, CAD/CAM. Не требуй другой снимок. "
                 f"НЕМЕДИЦИНСКИЕ ИЗОБРАЖЕНИЯ: если это мем, котик, еда, скриншот мессенджера/интерфейса, бытовое фото — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать зубы, кариес или рентген! Кратко и точно опиши суть («Скриншот переписки...», «Мем с собакой...»). Если на картинке есть текст или подписи — разбери их смысл. "
@@ -624,7 +632,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
-                ("qwen/qwen3.6-27b", "groq"),
+                ("qwen/qwen3.8-27b", "groq"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()
@@ -632,12 +640,13 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             active_pool = unbanned_pool if unbanned_pool else models_pool
             # Gemini-модели (3.5 и 3.1) всегда идут первыми — они нативно видят снимки и анатомию.
             # Groq (Qwen) остаётся строго резервом на случай отказа или бана Google.
-            gemini_active = [m for m in active_pool if m[1] == "gemini"]
-            fallback_active = [m for m in active_pool if m[1] != "gemini"]
-            if is_passive and len(gemini_active) > 1:
-                s_idx = random.randint(0, len(gemini_active) - 1)
-                gemini_active = gemini_active[s_idx:] + gemini_active[:s_idx]
-            models_cascade = gemini_active + fallback_active
+            if is_passive and len(active_pool) > 1:
+                s_idx = random.randint(0, len(active_pool) - 1)
+                models_cascade = active_pool[s_idx:] + active_pool[:s_idx]
+            else:
+                gemini_active = [m for m in active_pool if m[1] == "gemini"]
+                fallback_active = [m for m in active_pool if m[1] != "gemini"]
+                models_cascade = gemini_active + fallback_active
             if not models_cascade:
                 models_cascade = active_pool
 
