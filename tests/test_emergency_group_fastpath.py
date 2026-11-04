@@ -64,14 +64,13 @@ async def test_direct_ask():
 
     with patch("assistant.is_bot_sender", return_value=False), \
          patch("assistant.is_group_reply_in_flight", return_value=False), \
+         patch("assistant.check_user_cooldown", return_value=0), \
          patch("assistant.check_and_apply_silence", return_value=False):
         await A.handle_group_direct_ask(bot, event, "срочно анафилаксия на ультракаин, без сознания!")
         check("Direct ask отправил экстренное сообщение", bot.send_message.called)
         sent_args = bot.send_message.call_args[1]
         check("Direct ask отправил адреналиновый протокол", "АДРЕНАЛИН" in sent_args["message"])
         check("Direct ask указал правильный reply_to", sent_args["reply_to"] == 8888)
-
-asyncio.run(test_direct_ask())
 
 print("\n[4] Верификация фаст-паса в check_bot_mention_trigger (@docendobot)")
 async def test_bot_mention():
@@ -85,7 +84,9 @@ async def test_bot_mention():
     event.message.reply_to = None
 
     with patch("assistant.is_negative_feedback", return_value=False), \
-         patch("assistant.check_adversarial_input", return_value=(False, None)):
+         patch("assistant.check_adversarial_input", return_value=(False, None)), \
+         patch("assistant.check_user_cooldown", return_value=0), \
+         patch("assistant.is_silenced", return_value=False):
         ret = await A.check_bot_mention_trigger(
             bot, event, 9999, "@docendobot гипохлорит за апекс раздуло щеку отек"
         )
@@ -93,8 +94,6 @@ async def test_bot_mention():
         check("Bot mention отправил сообщение", bot.send_message.called)
         sent_args = bot.send_message.call_args[1]
         check("Bot mention отправил протокол гипохлоритовой аварии", "ГИПОХЛОРИТОВАЯ АВАРИЯ" in sent_args["message"])
-
-asyncio.run(test_bot_mention())
 
 print("\n[5] Верификация защиты от ложных срабатываний в пассивном режиме (check_and_trigger_assistant)")
 async def test_passive_emergency():
@@ -107,6 +106,7 @@ async def test_passive_emergency():
     # Историческое/теоретическое обсуждение вебинара НЕ должно вызывать реанимационный протокол
     with patch("assistant.is_bot_sender", return_value=False), \
          patch("assistant.check_and_apply_silence", return_value=False), \
+         patch("assistant.check_user_cooldown", return_value=0), \
          patch("assistant.is_silenced", return_value=False):
         A.REPLIED_MSG_IDS.clear()
         ret_webinar = await A.check_and_trigger_assistant(
@@ -123,10 +123,12 @@ async def test_passive_emergency():
         sent_args = bot.send_message.call_args[1]
         check("Отправлен реанимационный протокол", "АНАФИЛАКТИЧЕСКИЙ ШОК" in sent_args["message"])
 
-asyncio.run(test_passive_emergency())
-
-print(f"\nTOTAL CHECKS: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print(f"FAILED TESTS: {FAIL}")
-    sys.exit(1)
-print("EMERGENCY GROUP FAST-PATH & VALIDATOR HARDENING VERIFICATION: 100% GREEN!\n")
+if __name__ == "__main__":
+    asyncio.run(test_direct_ask())
+    asyncio.run(test_bot_mention())
+    asyncio.run(test_passive_emergency())
+    print(f"\nTOTAL CHECKS: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print(f"FAILED TESTS: {FAIL}")
+        sys.exit(1)
+    print("EMERGENCY GROUP FAST-PATH & VALIDATOR HARDENING VERIFICATION: 100% GREEN!\n")
