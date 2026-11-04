@@ -755,6 +755,7 @@ _DAEMON_TASK_NAMES = frozenset({
     "heartbeat",
     "reaction_engine_worker",
     "media_analysis",
+    "outbox_worker",
 })
 
 

@@ -552,12 +552,50 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         _record_failure("key_rate_limited", error_text, api_key)
         return "key_rate_limited"
 
+    is_auth_error = any(m in err_msg for m in (
+        "401", "403", "unauthorized", "invalid_api_key", "incorrect api key",
+        "permission", "forbidden", "key has been revoked", "free tier is not available",
+        "project-unavailable", "billing"
+    ))
+    if is_auth_error:
+        if provider == "gemini":
+            is_api_permanent = any(m in err_msg for m in (
+                "api_key_invalid", "permission_denied", "consumer_invalid",
+                "key has been revoked", "unregistered_callers", "not registered", "401",
+                "free tier is not available", "billing", "project-unavailable"
+            ))
+            if is_api_permanent:
+                ban_duration = 31536000  # 365 days for google
+                set_key_cooldown(provider, api_key, ban_duration)
+                logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
+            else:
+                set_key_cooldown(provider, api_key, 3600)
+                logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
+        else:
+            is_groq_permanent = any(m in err_msg for m in ("401", "invalid", "incorrect", "revoked", "unauthorized"))
+            if is_groq_permanent:
+                set_key_cooldown(provider, api_key, 86400)
+                logger.warning(f"{provider.capitalize()} key denied/invalid (401): {err_msg[:120]}. Placed on cooldown 24h.")
+            else:
+                logger.info(f"{provider.capitalize()} key encountered transient 403 ({err_msg[:120]}), switching without cooldown.")
+        _record_failure("key_denied", error_text, api_key)
+        return "key_denied"
+
+    if any(m in err_msg for m in ("404", "not_found", "not found", "does not exist")):
+        if model_name:
+            ban_model(model_name, 3600) # 1 hour
+            logger.warning(f"{provider.capitalize()} model {model_name} not found (404). Banned for 1h.")
+        _record_failure("model_not_found", error_text, api_key)
+        return "model_not_found"
+
     is_transient_overload = (
         "503" in err_msg
         or "504" in err_msg
-        or "unavailable" in err_msg
+        or "service unavailable" in err_msg
+        or "temporarily unavailable" in err_msg
         or "overload" in err_msg
         or "deadline" in err_msg
+        or (provider == "gemini" and "unavailable" in err_msg and "project-unavailable" not in err_msg)
     )
     if _SERVER_ERROR_RE.search(err_msg) or is_transient_overload:
         if model_name:
@@ -577,37 +615,6 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
             )
         _record_failure("model_overloaded", error_text, api_key)
         return "model_overloaded"
-
-    if any(m in err_msg for m in ("404", "not_found", "not found", "does not exist")):
-        if model_name:
-            ban_model(model_name, 3600) # 1 hour
-            logger.warning(f"{provider.capitalize()} model {model_name} not found (404). Banned for 1h.")
-        _record_failure("model_not_found", error_text, api_key)
-        return "model_not_found"
-
-    is_auth_error = any(m in err_msg for m in ("401", "403", "unauthorized", "invalid_api_key", "incorrect api key", "permission", "forbidden", "key has been revoked"))
-    if is_auth_error:
-        if provider == "gemini":
-            is_api_permanent = any(m in err_msg for m in (
-                "api_key_invalid", "permission_denied", "consumer_invalid",
-                "key has been revoked", "unregistered_callers", "not registered", "401"
-            ))
-            if is_api_permanent:
-                ban_duration = 31536000  # 365 days for google
-                set_key_cooldown(provider, api_key, ban_duration)
-                logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
-            else:
-                set_key_cooldown(provider, api_key, 3600)
-                logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
-        else:
-            is_groq_permanent = any(m in err_msg for m in ("401", "invalid", "incorrect", "revoked", "unauthorized"))
-            if is_groq_permanent:
-                set_key_cooldown(provider, api_key, 86400)
-                logger.warning(f"{provider.capitalize()} key denied/invalid (401): {err_msg[:120]}. Placed on cooldown 24h.")
-            else:
-                logger.info(f"{provider.capitalize()} key encountered transient 403 ({err_msg[:120]}), switching without cooldown.")
-        _record_failure("key_denied", error_text, api_key)
-        return "key_denied"
 
     _record_failure("request_failed", error_text, api_key)
     return "request_failed"
