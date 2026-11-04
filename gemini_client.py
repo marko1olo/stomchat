@@ -1232,7 +1232,8 @@ def generate_text(prompt, status_context=None, timeout=None):
                     if provider in ("gemini", "agentrouter"):
                         rem = (deadline - time.monotonic()) if deadline else 120.0
                         has_more_models = (model_index < len(active_cascade) - 1)
-                        fallback_reserve = 12.0 if len(active_cascade) > 2 else 4.0
+                        remaining_models_count = len(active_cascade) - 1 - model_index
+                        fallback_reserve = min(35.0, max(14.0, remaining_models_count * 7.0)) if has_more_models else 0.0
                         if has_more_models and rem > fallback_reserve:
                             max_allowed_for_model = min(rem, max(MIN_REQUEST_SECONDS, rem - fallback_reserve))
                         else:

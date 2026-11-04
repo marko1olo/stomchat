@@ -6294,7 +6294,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - Запасной практический протокол.
 """
             async with _safe_typing_action(bot_client, event.chat_id):
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
 
             if error:
                 logger.error(f"Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -7006,7 +7006,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if has_text_desc:
             status_ctx["media_description"] = str(media_description).strip()
         async with _safe_typing_action(bot_client, event.chat_id):
-            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
+            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
 
         if error:
             logger.error(f"Media Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -12990,7 +12990,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
 
                 if error:
                     logger.warning("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -13041,7 +13041,7 @@ async def handle_private_message(bot_client, event):
                 )
                 c_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 c_ctx["kind"] = "pm_cautious_ebm"
-                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=90)
+                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=120)
                 if c_resp and getattr(c_resp, "text", None):
                     cand_fb = sanitize_clinical_pm_output(c_resp.text.strip())
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):
@@ -14251,7 +14251,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 "{last_ask_reason}"
 Устрани указанные дефекты и перепиши ответ строго доказательно по Золотому 3-шаговому стандарту. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
 """
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
 
                 if error or not response or not getattr(response, "text", None):
                     logger.warning("Group direct ask generation error on attempt %s: %s", attempt, error)

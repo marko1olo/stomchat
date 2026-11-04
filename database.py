@@ -312,6 +312,21 @@ async def init_db():
             # каждого пользователя в почасовом цикле пингов. Таблица не чистится
             # и растёт бессрочно.
             db.execute("CREATE INDEX IF NOT EXISTS idx_pm_user ON pm_messages(user_id, id)")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    parse_mode TEXT DEFAULT 'html',
+                    status TEXT DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    sent_at TIMESTAMP
+                )
+                """
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_bot_outbox_status ON bot_outbox(status, id)")
             db.execute("DROP INDEX IF EXISTS idx_pm_date")
             db.execute("CREATE INDEX IF NOT EXISTS idx_pm_date_user ON pm_messages(date, user_id)")
 
@@ -1993,6 +2008,74 @@ async def search_clinical_protocols(query, limit=5):
     """Полнотекстовый поиск по протоколам для RAG-подмешивания."""
     return await get_clinical_protocols(search=query, limit=limit)
 
+async def enqueue_outbox_message(chat_id: int, text: str, parse_mode: str = "html") -> int:
+    """Ставит исходящее сообщение в очередь bot_outbox для гарантированной отправки активным ботом."""
+    def operation():
+        with _connection() as db:
+            cur = db.execute(
+                """
+                INSERT INTO bot_outbox (chat_id, text, parse_mode, status, created_at)
+                VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                """,
+                (chat_id, text, parse_mode)
+            )
+            return cur.lastrowid
+    return await _run_db(operation)
 
 
+async def get_pending_outbox_messages(limit: int = 5):
+    """Выбирает ожидающие отправки сообщения из bot_outbox."""
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                """
+                SELECT id, chat_id, text, parse_mode, created_at
+                FROM bot_outbox
+                WHERE status = 'pending'
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "chat_id": r[1],
+                    "text": r[2],
+                    "parse_mode": r[3] or "html",
+                    "created_at": r[4],
+                }
+                for r in rows
+            ]
+    return await _run_db(operation)
+
+
+async def mark_outbox_sent(outbox_id: int):
+    """Помечает сообщение в bot_outbox как успешно доставленное."""
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                UPDATE bot_outbox
+                SET status = 'sent', sent_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (outbox_id,)
+            )
+    return await _run_db(operation)
+
+
+async def mark_outbox_failed(outbox_id: int, error_message: str):
+    """Помечает сообщение в bot_outbox как ошибочное с фиксацией причины."""
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                UPDATE bot_outbox
+                SET status = 'failed', error_message = ?
+                WHERE id = ?
+                """,
+                (str(error_message)[:1000], outbox_id)
+            )
+    return await _run_db(operation)
 

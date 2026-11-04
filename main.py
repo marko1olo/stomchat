@@ -1230,6 +1230,34 @@ async def scheduler_task(bot_client):
 PING_PHASE_TIMEOUT_SECONDS = 1200
 
 
+async def outbox_worker_task(bot_client):
+    """Фоновый воркер отправки исходящих сообщений из bot_outbox через активный MTProto bot_client."""
+    logger.info("📤 Фоновый воркер bot_outbox активен.")
+    while True:
+        try:
+            pending = await database.get_pending_outbox_messages(limit=3)
+            for item in pending:
+                oid = item["id"]
+                chat_id = item["chat_id"]
+                text = item["text"]
+                pm = item.get("parse_mode") or "html"
+                try:
+                    await bot_client.send_message(chat_id, text, parse_mode=pm)
+                    await database.mark_outbox_sent(oid)
+                    await database.save_pm_message(chat_id, "Assistant", text)
+                    logger.info("Outbox worker successfully delivered msg %d to chat_id=%s", oid, chat_id)
+                except Exception as send_err:
+                    err_str = str(send_err)
+                    logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
+                    await database.mark_outbox_failed(oid, err_str)
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug("Outbox worker loop error: %s", e)
+        await asyncio.sleep(5.0)
+
+
 async def pm_ping_scheduler_task(bot_client):
     """Задача периодической проверки неактивности пользователей в ЛС и отправки им пинга."""
     logger.info("📅 Планировщик пингов в ЛС активен.")
@@ -4290,6 +4318,7 @@ async def start_bot():
     # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
     runtime_guard.create_task(pm_ping_scheduler_task(bot_client), "pm_ping_scheduler")
+    runtime_guard.create_task(outbox_worker_task(bot_client), "outbox_worker")
     runtime_guard.create_task(runtime_telemetry_task(), "runtime_telemetry")
     runtime_guard.create_task(summary_watchdog_task(), "summary_watchdog")
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")
