@@ -3853,7 +3853,7 @@ _EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
     r'скриншот\w*\s+[^.\n]{0,30}(?:интерфейс\w*|приложен\w*|соцсет\w*|социальн\w*\s+сет\w*|профил\w*|переписк\w*|чат\w*|экран\w*|сайт\w*|мессенджер\w*|бот\w*|канал\w*|программ\w*)|'
     r'интерфейс\w*\s+[^.\n]{0,30}(?:цифров\w*|программн\w*|telegram|телеграм|бот\w*|мессенджер\w*|приложен\w*|комплекс\w*)|'
     r'карточк\w*\s+спикер\w*|рекламн\w*\s+баннер\w*|афиш\w*|презентационн\w*\s+карточк\w*|'
-    r'мем\b|мем[а-яё]*|комикс\w*|карикатур\w*|юмористическ\w*|'
+    r'(?:мем[ыаеу]?|мемом|мемов|мемах|мемам|мемами|мемас\w*|мемчик\w*)\b|комикс\w*|карикатур\w*|юмористическ\w*|'
     r'чек\b|квитанци\w*|накладн\w*|банковск\w*\s+(?:перевод|чек|выписк\w*)|прайс[- ]?лист\w*|'
     r'фотографи\w*\s+(?:человек\w*|лиц\w*|селфи)|портрет\b|'
     r'(?:медицинск\w*|анатомическ\w*|стоматологическ\w*|зубочелюстн\w*|зубн\w*|внутриротов\w*|рентгенолог\w*)\s+[^.\n]{0,60}(?:структур\w*|объект\w*|патолог\w*|элемент\w*|снимк\w*|ряд\w*|данные)\s+[^.\n]{0,40}(?:не\s+дифференциру\w*|не\s+визуализиру\w*|отсутству\w*|не\s+обнаружен\w*)|'
@@ -6538,29 +6538,6 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if re.search(rf"(?i)@{re.escape(BOT_USERNAME)}\b", text):
             is_mentioned = True
 
-    # Проверяем продолжение активного клинического диалога с автором кейса
-    is_dialogue_continuation = False
-    sender_id = getattr(message, 'sender_id', None)
-    if sender_id:
-        last_case_author = state.get("last_case_author_id")
-        last_case_bot_msg = state.get("last_case_bot_msg_id")
-        last_case_time = _parse_state_dt(state.get("last_case_time"))
-        is_reply_to_bot_case = bool(last_case_bot_msg and getattr(message, 'reply_to_msg_id', None) == last_case_bot_msg)
-        is_same_author_window = bool(
-            last_case_author
-            and str(sender_id) == str(last_case_author)
-            and abs((datetime.now() - last_case_time).total_seconds()) < 30 * 60
-        )
-        if is_reply_to_bot_case or is_same_author_window:
-            is_dialogue_continuation = True
-            logger.info(
-                "Media message from author %s recognized as dialogue continuation with bot (is_reply=%s, same_author_window=%s).",
-                sender_id, is_reply_to_bot_case, is_same_author_window
-            )
-
-    # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply, mention or dialogue continuation
-    is_passive = not (is_direct_reply or is_mentioned or is_dialogue_continuation)
-
     # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
     age_minutes = 0.0
     msg_dt = getattr(message, 'date', None)
@@ -6572,17 +6549,53 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         except Exception as db_dt_err:
             logger.debug("Error checking media message date: %s", db_dt_err)
 
+    msg_dt_utc = None
+    msg_dt_local = None
     if msg_dt:
         try:
-            if hasattr(msg_dt, "astimezone"):
-                msg_dt_utc = msg_dt.astimezone(timezone.utc).replace(tzinfo=None)
-            elif hasattr(msg_dt, "tzinfo") and msg_dt.tzinfo is not None:
-                msg_dt_utc = msg_dt.replace(tzinfo=None)
+            # Даты из Telegram и из SQLite messages всегда хранятся в UTC.
+            # Если tzinfo отсутствует, явно размечаем как UTC, чтобы astimezone не трактовал дату как локальную.
+            if getattr(msg_dt, "tzinfo", None) is None:
+                msg_dt_aware = msg_dt.replace(tzinfo=timezone.utc)
             else:
-                msg_dt_utc = msg_dt
+                msg_dt_aware = msg_dt.astimezone(timezone.utc)
+            msg_dt_utc = msg_dt_aware.replace(tzinfo=None)
+            msg_dt_local = msg_dt_aware.astimezone().replace(tzinfo=None)
             age_minutes = (datetime.utcnow() - msg_dt_utc).total_seconds() / 60.0
         except Exception:
             age_minutes = 0.0
+    if not isinstance(age_minutes, (int, float)):
+        age_minutes = 0.0
+
+    # Проверяем продолжение активного клинического диалога с автором кейса
+    is_dialogue_continuation = False
+    sender_id = getattr(message, 'sender_id', None)
+    if sender_id:
+        last_case_author = state.get("last_case_author_id")
+        last_case_bot_msg = state.get("last_case_bot_msg_id")
+        last_case_time = _parse_state_dt(state.get("last_case_time"))
+        is_reply_to_bot_case = bool(last_case_bot_msg and getattr(message, 'reply_to_msg_id', None) == last_case_bot_msg)
+
+        # Вычисляем дельту времени между отправкой сообщения и диалогом с ботом
+        if msg_dt_local:
+            delta_time_sec = abs((msg_dt_local - last_case_time).total_seconds())
+        else:
+            delta_time_sec = abs((datetime.now() - last_case_time).total_seconds())
+
+        is_same_author_window = bool(
+            last_case_author
+            and str(sender_id) == str(last_case_author)
+            and delta_time_sec < 30 * 60
+        )
+        if is_reply_to_bot_case or is_same_author_window:
+            is_dialogue_continuation = True
+            logger.info(
+                "Media message from author %s recognized as dialogue continuation with bot (is_reply=%s, same_author_window=%s, delta=%.1fs).",
+                sender_id, is_reply_to_bot_case, is_same_author_window, delta_time_sec
+            )
+
+    # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply, mention or dialogue continuation
+    is_passive = not (is_direct_reply or is_mentioned or is_dialogue_continuation)
     if not isinstance(age_minutes, (int, float)):
         age_minutes = 0.0
 
