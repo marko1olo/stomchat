@@ -4094,7 +4094,7 @@ async def sync_recent_messages(bot_client=None, max_lookback_hours: int = 24, ma
                 is_mention = True
             elif bot_username and f"@{bot_username}" in text_lower:
                 is_mention = True
-            elif any(f"@{h}" in text_lower for h in _get_bot_mention_names()):
+            elif any(f"@{h}" in text_lower for h in bot_mention_names()):
                 is_mention = True
             elif text_lower.startswith("бот,") or text_lower.startswith("бот ") or text_lower == "бот":
                 is_mention = True
