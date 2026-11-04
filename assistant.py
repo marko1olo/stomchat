@@ -18398,37 +18398,116 @@ async def check_and_send_pm_pings(bot_client):
                 portrait = user_profile.get("profile_portrait") or ""
                 portrait_hint = f"\nКлинический профиль врача: {portrait}\n" if portrait else ""
 
-                prompt = f"""Ты — клинический консультант доказательного сообщества \"StomChat\".\n"
-                    f"Врач обращался к тебе в ЛС {time_hint}.\n"
-                    f"{portrait_hint}\n"
-                    f"История вашей последней переписки:\n"
-                    f"{context_str}\n\n"
-                    f"Задачи:\n"
-                    f"1. Проанализируй переписку: обсуждался ли в ней РЕАЛЬНЫЙ клинический случай конкретного пациента, снимки, тактика или острая проблема (эндодонтия, ступенька, блокировка канала, сломанный файл, открытый апекс, кровотечение, перфорация, ожог слизистой NaOCl, беременная пациентка, боль после лечения, выбор анестезии)?\n"
-                    f"2. ЕСЛИ реального клинического кейса НЕ БЫЛО (смолл-ток, кнопки, калькулятор, тест команд) или случай уже полностью решен в диалоге (врач написал что все получилось/удалил/прошел) — верни СТРОГО ОДНО СЛОВО: NONE. Запрещено спамить!\n"
-                    f"3. ЕСЛИ прошло менее 3 дней (<72 ч), но кейс НЕ является острым и незавершенным у кресла — верни СТРОГО ОДНО СЛОВО: NONE (дать время на естественную динамику).\n"
-                    f"4. ЕСЛИ обсуждался активный клинический случай — напиши строго 1 короткую, заботливую коллегиальную реплику по существу клинической динамики (например: «Коллега, добрый день! Как вчера разрешилась ситуация со ступенькой в 37? Удалось обойти?» или «Коллега, добрый день! Как состояние слизистой после ожога NaOCl? Боль утихла?»).\n"
-                    f"5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
-                    f"   • Фразы «ты куда пропал», «давно не общались», «я ждал ответа», «как дела»\n"
-                    f"   • Любые дежурные навязчивые вопросы, спам, длинные лекции\n"
-                    f"6. Тон: живой, профессиональный, коллегиальный.\n"
-                    f"7. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>).\n"""
+                # ЭТАП 1: Триаж клинического контекста ("обдумывание спустя время")
+                # Оцениваем, был ли реальный клинический кейс и требует ли он врачебного контроля
+                triage_prompt = f"""Ты — клинический триаж-модератор врачебного сообщества "StomChat".
+Проанализируй недавнюю переписку с врачом-стоматологом ({time_hint}).
+{portrait_hint}
+Последние сообщения:
+{context_str}
+
+Задачи триажа:
+1. Выясни, обсуждался ли РЕАЛЬНЫЙ клинический кейс конкретного пациента (зуб, симптомы, осложнение, ступенька, отломок, ожог слизистой, боль после эндо/лечения, анестезия, выбор материала)?
+2. Завершен ли кейс в переписке? (Врач написал «спасибо», «всё получилось», «прошёл канал», «удалил», «пациент ушёл довольный», или это был смолл-ток, кнопки, калькулятор /calc, викторина /quiz).
+3. Требуется ли проактивный коллегиальный контроль динамики у пациента спустя {time_hint}?
+4. Нужно ли проконсультироваться с экспертной клинической моделью для точной формулировки вопроса, чтобы исключить ошибки и некомпетентность?
+
+Ответь СТРОГО в формате JSON без разметки Markdown:
+{{
+  "has_active_case": true/false,
+  "case_topic": "краткая суть кейса или null",
+  "is_case_resolved": true/false,
+  "should_follow_up": true/false,
+  "consult_expert": true/false,
+  "clinical_focus": "что конкретно требует клинического контроля (например: динамика боли, заживление слизистой, обход ступеньки) или null",
+  "reason": "краткое пояснение"
+}}"""
+                triage_ctx = {"kind": "pm_ping_triage", "chat_id": chat_id, "thinking_level": "LOW"}
+                t_resp, t_err = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=45)
+
+                triage_data = {}
+                if not t_err and t_resp and getattr(t_resp, "text", None):
+                    raw_t = t_resp.text.strip()
+                    m = re.search(r"\{[\s\S]*\}", raw_t)
+                    if m:
+                        try:
+                            triage_data = json.loads(m.group(0))
+                        except Exception:
+                            pass
+
+                has_active = triage_data.get("has_active_case", False)
+                is_resolved = triage_data.get("is_case_resolved", False)
+                should_follow_up = triage_data.get("should_follow_up", False)
+                clinical_focus = triage_data.get("clinical_focus") or triage_data.get("case_topic") or ""
+
+                if not triage_data and t_resp and getattr(t_resp, "text", None):
+                    raw_upper = t_resp.text.upper()
+                    if "NONE" in raw_upper or "FALSE" in raw_upper:
+                        should_follow_up = False
+
+                if not should_follow_up or is_resolved or not has_active:
+                    logger.info(
+                        f"PM ping triage for chat_id={chat_id}: no active follow-up needed "
+                        f"(active={has_active}, resolved={is_resolved}, reason={triage_data.get('reason')})."
+                    )
+                    if hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
+                        commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    else:
+                        commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
+                    continue
+
+                # ЭТАП 2: Экспертный синтез через флагманскую модель (HIGH thinking, flagship cascade)
+                logger.info(
+                    f"PM ping triage approved follow-up for chat_id={chat_id}. "
+                    f"Consulting expert model on focus: '{clinical_focus}'..."
+                )
+                expert_prompt = f"""Ты — опытный врач-стоматолог, модератор клинического консилиума "StomChat".
+Ты общаешься с дипломированным коллегой в личных сообщениях. Врач обращался к тебе {time_hint}.
+{portrait_hint}
+Клинический фокус случая: {clinical_focus}
+Последние сообщения диалога:
+{context_str}
+
+Задачи:
+1. Сформулируй строго 1 короткую, коллегиальную реплику по существу клинической динамики пациента (1-2 предложения).
+2. Задай точечный вопрос по существу клинического исхода (динамика симптомов, результат манипуляции у кресла, реакция тканей).
+3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+   • Банальные фразы клиентской поддержки: «как дела», «как поживаете», «ты куда пропал», «я ждал ответа», «надеюсь у вас всё хорошо».
+   • Длинные лекции, поучения, непрошеные советы или общие рассуждения.
+   • Смайлики и эмодзи (никаких 😂, 👨‍⚕️, 👍).
+   • Любые отозванные препараты (Солкосерил, Актовегин) и токсические практики.
+4. Тон: живой, профессиональный, коллегиальный («Врач — Врачу»).
+5. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
+Начинай сразу с текста обращения к коллеге."""
+
                 status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=90)
+                response, error = await generate_gemini_text_async(expert_prompt, status_ctx, timeout=90)
 
                 if not error and response and getattr(response, "text", None):
                     reply_text = response.text.strip()
                     if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:
-                        logger.info(f"PM ping for chat_id={chat_id}: no clinical case to follow up (NONE).")
-                        # Если прошло >= 72 ч и кейса нет — архивируем без назойливости.
-                        # Если прошло 18-72 ч — кейс еще может развиваться, фиксируем время триажа без сжигания!
+                        logger.info(f"PM ping for chat_id={chat_id}: expert returned empty/NONE.")
                         if hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
                             commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
                         else:
                             commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
                         continue
 
+                    # Санитарная и EBM-проверка ("чтобы херню не сморозить"):
+                    if _TOXIC_PRACTICE_RE.search(reply_text):
+                        logger.warning(f"PM ping rejected due to toxic practice mention: {reply_text[:80]}")
+                        commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
+                        continue
+
+                    # Срезаем эмодзи и спам-клише
+                    reply_text = re.sub(r"[\U00010000-\U0010ffff]|[\u2600-\u27ff]", "", reply_text).strip()
                     reply_text = clean_html_formatting(reply_text)
+
+                    banned_cliches = ("как дела", "куда пропал", "давно не общались", "я ждал", "как ваши дела")
+                    if any(cliche in reply_text.lower() for cliche in banned_cliches):
+                        logger.warning(f"PM ping rejected due to banned cliche: {reply_text[:80]}")
+                        commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
+                        continue
 
                     fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
                     if fresh.get("pings_opted_out") or fresh.get("ping_sent", False):

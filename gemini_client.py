@@ -630,6 +630,7 @@ TRIAGE_KINDS = frozenset({
     "group_ping_hot_check", "protocol_extraction",
     "react_standalone_triage", "react_triage",  # реакции — дешёвый lite-каскад
     "poll_triage",
+    "pm_ping_triage",
     # response_validator убран: клинический рецензент требует HIGH thinking_level.
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
