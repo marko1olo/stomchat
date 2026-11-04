@@ -13047,7 +13047,7 @@ async def handle_private_message(bot_client, event):
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):
                         reply_text = cand_fb
                 if not reply_text:
-                    err_msg = "<i>Коллега, для точной оценки клинической ситуации уточните ключевой параметр (локализацию, симптоматику или динамику).</i>"
+                    err_msg = "<i>Коллега, в запросе недостаточно клинических данных для однозначного протокола. Уточните ключевые детали (локализацию, симптомы или снимок).</i>"
                     await bot_client.send_message(entity=chat_id, message=err_msg, parse_mode='html')
                     try:
                         await database.save_pm_message(chat_id, "Assistant", err_msg)
