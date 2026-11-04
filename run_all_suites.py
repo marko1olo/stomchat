@@ -48,7 +48,12 @@ all_ok = True
 bot_label = "STOMCHAT" if "stom" in sys.executable.lower() or "stom" in sys.path[0].lower() else "ENDOCHAT"
 print(f"==================== RUNNING ALL SUITES ({len(tests)} SUITES) ====================", flush=True)
 for test in tests:
-    res = subprocess.run([sys.executable, test], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        res = subprocess.run([sys.executable, test], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    except subprocess.TimeoutExpired:
+        all_ok = False
+        print(f"  [FAIL] {test:42} -> TIMED OUT (>120s)", flush=True)
+        continue
     if res.returncode == 0:
         lines = [l for l in res.stdout.strip().split("\n") if l.strip()]
         last_line = lines[-1] if lines else "OK"

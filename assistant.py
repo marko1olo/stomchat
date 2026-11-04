@@ -5870,8 +5870,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         if triggered and not is_dialogue:
             # Fast local dental check BEFORE calling check_llm_triage:
             if not has_dental_term(text or ""):
-                logger.info("Message has no dental keywords. Dropping immediately without LLM triage.")
-                return False
+                has_thread_dental = any(has_dental_term(m) for m in (context_msgs or []))
+                if not has_thread_dental:
+                    logger.info("Message and thread context have no dental keywords. Dropping without LLM triage.")
+                    return False
 
             # Probability gate for uninvited passive text replies in chat
             passive_text_prob = float(getattr(config, "PASSIVE_TEXT_PROBABILITY", 0.66))
@@ -10243,7 +10245,7 @@ def is_clinical_consultation_query(text: str, has_media: bool, has_dental_topic:
     )
     has_medical_marker = any(m in text_clean for m in medical_markers)
 
-    return bool(tooth_match and has_medical_marker)
+    return bool(has_dental_term(text_clean) or tooth_match or has_medical_marker)
 
 
 async def handle_private_message_bundle(bot_client, events_burst):
@@ -10981,20 +10983,15 @@ async def handle_private_message(bot_client, event):
             detected = detect_user_intent(text)
 
             # Если детерминированный fast-path не сработал, запускаем семантический LLM-триаж
-            if not detected and len(text.split()) >= 3:
+            if not detected and len((text or "").strip()) >= 5:
                 try:
                     sem_res = await classify_pm_intent_semantic_async(text)
                     sem_intent = sem_res.get("intent")
                     sem_conf = float(sem_res.get("confidence", 1.0))
-                    if sem_intent and sem_intent != "CLINICAL_CHAT" and sem_conf >= 0.75:
+                    if sem_intent and sem_intent != "CLINICAL_CHAT" and sem_conf >= 0.70:
                         if sem_intent == "WEB_SEARCH":
-                            t_lower = text.lower()
-                            is_explicit_web = any(w in t_lower for w in ("стать", "исследован", "pubmed", "пабмед", "cochrane", "ссылк", "гугл", "погугл", "в сети", "в интернете", "источник", "найди публикац"))
-                            if is_explicit_web:
-                                q = sem_res.get("search_query") or text
-                                detected = UserIntent(INTENT_WEB_SEARCH, q)
-                            else:
-                                logger.info("Semantic triage suggested WEB_SEARCH for clinical topic without explicit literature request. Preserving CLINICAL_CHAT for chat_id=%s", chat_id)
+                            q = sem_res.get("search_query") or text
+                            detected = UserIntent(INTENT_WEB_SEARCH, q)
                         elif sem_intent == "CALCULATOR":
                             detected = UserIntent(INTENT_CALCULATOR, text)
                         elif sem_intent == "QUIZ":
@@ -12789,7 +12786,7 @@ async def handle_private_message(bot_client, event):
 """
         else:
             # Определяем тип запроса: это клинический вопрос или свободная тема
-            has_clinical_topic = has_dental_topic or bool(wiki_corpus)
+            has_clinical_topic = True  # Always enforce Master Cognitive Architecture in direct PM consultations
             if has_clinical_topic:
                 query_lower = (text or "").lower()
                 query_words = len((text or "").split())

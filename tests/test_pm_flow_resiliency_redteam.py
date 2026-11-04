@@ -41,6 +41,7 @@ class TestPmRateLimitPacing(unittest.IsolatedAsyncioTestCase):
         """Если сообщение пришло во время кулдауна, бот не дропает его, а ждет и отвечает."""
         chat_id = 7716348189
         mock_client = AsyncMock()
+        mock_client.action = MagicMock()
         mock_event = MagicMock()
         mock_event.chat_id = chat_id
         mock_event.sender_id = chat_id
@@ -75,6 +76,7 @@ class TestPmRateLimitPacing(unittest.IsolatedAsyncioTestCase):
              patch("assistant.generate_gemini_text_async") as mock_gemini, \
              patch("assistant.check_response_quality", AsyncMock(return_value=(True, "ok"))), \
              patch("assistant.send_message_chunks_async", AsyncMock()) as mock_send_chunks, \
+             patch("assistant._async_pm_supplement_job", AsyncMock()), \
              patch("asyncio.sleep", side_effect=fake_sleep):
 
             resp_mock = MagicMock()
