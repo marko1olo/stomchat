@@ -33,6 +33,13 @@ assistant.WIKI_TREE (53 кода кнопок) и дерево reclass.py (62 к
 
 Запуск: python test_taxonomy_single.py    (offline, боевые базы только на чтение)
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import ast
 import asyncio
 import contextlib

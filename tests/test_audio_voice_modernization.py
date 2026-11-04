@@ -5,6 +5,14 @@ Targeted test suite verifying:
 3. Groq Whisper whisper-large-v3-turbo model and prompt hinting parameter passing.
 4. Silence hallucination filtering for Russian/English Whisper phantoms.
 """
+import sys
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import os
 import subprocess
 import tempfile

@@ -25,6 +25,13 @@
 
 Запуск: python test_fix_pm2.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import io
 import os
 import re
@@ -99,10 +106,10 @@ check("после перезапуска ключ не возвращается 
 
 print("\n[2] Подсветка в /search выживает после подготовки текста")
 # clean_html_formatting сохраняет ровно три тега; всё остальное экранируется.
-for tag in ("b", "i", "code"):
+for tag in ("b", "i", "u", "code"):
     out = A.clean_html_formatting(f"текст <{tag}>выделено</{tag}> дальше")
     check(f"тег <{tag}> сохраняется", f"<{tag}>выделено</{tag}>" in out, f"got {out!r}")
-for tag in ("u", "mark", "span"):
+for tag in ("mark", "span"):
     out = A.clean_html_formatting(f"текст <{tag}>выделено</{tag}> дальше")
     check(f"тег <{tag}> экранируется и НЕ выделяет", f"<{tag}>" not in out, f"got {out!r}")
 
@@ -143,7 +150,7 @@ check("детектор random поймал бы возврат",
       "random.randint" in "candidate = random.randint(100000, 999999)")
 check("детектор <u> поймал бы возврат", "<u>\\1</u>" in 'sub(kw, r"<u>\\1</u>", content)')
 check("экранирование действительно превращает тег в текст",
-      "&lt;" in A.clean_html_formatting("<u>x</u>"),
+      "&lt;" in A.clean_html_formatting("<mark>x</mark>"),
       "если бы не экранировалось, проверка выше ничего не значила")
 
 shutil.rmtree(_TMPDIR, ignore_errors=True)

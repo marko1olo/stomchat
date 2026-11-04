@@ -12,6 +12,8 @@ import asyncio
 import os
 import sys
 import unittest
+import tempfile
+import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta
 
@@ -35,7 +37,15 @@ class TestPmRateLimitPacing(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         super().setUp()
+        self._tmpdir = tempfile.mkdtemp(prefix="stom_pm_resil_")
+        self._orig_state_path = assistant.STATE_PATH
+        assistant.STATE_PATH = os.path.join(self._tmpdir, "test_state.json")
         assistant.USER_COOLDOWNS.clear()
+
+    def tearDown(self):
+        assistant.STATE_PATH = self._orig_state_path
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        super().tearDown()
 
     async def test_pm_rate_limit_never_drops_message(self):
         """Если сообщение пришло во время кулдауна, бот не дропает его, а ждет и отвечает."""

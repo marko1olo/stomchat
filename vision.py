@@ -394,7 +394,6 @@ def _load_vision_cache() -> dict:
 
 def _save_vision_cache(cache_data: dict) -> None:
     tmp_path = None
-    global _VISION_CACHE
     try:
         if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
             sorted_items = sorted(
@@ -435,7 +434,6 @@ def _save_vision_cache(cache_data: dict) -> None:
 
 def clear_vision_cache():
     """Сбрасывает кэш разбора изображений в памяти и на диске."""
-    global _VISION_CACHE
     _VISION_CACHE.clear()
     if os.path.exists(VISION_CACHE_FILE):
         try:
@@ -626,6 +624,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
+                ("qwen/qwen3.6-27b", "groq"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()

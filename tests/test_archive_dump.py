@@ -43,7 +43,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts", "archive"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "scripts", "archive"))
 import deppd  # noqa: E402
 
 PASS, FAIL = [], []

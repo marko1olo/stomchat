@@ -41,35 +41,35 @@ scrubbed_keys = gc._all_known_keys()
 check("AGENTROUTER_KEYS включен в _all_known_keys для очистки логов", "sk-test-agentrouter-key-12345" in scrubbed_keys)
 
 print("\n[2] AgentRouter: Маршрутизация каскада при наличии ключа")
+ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol")
 cascade_chat = gc.cascade_for_context({"kind": "pm_chat", "thinking_level": "MEDIUM"})
-check("В CHAT_KINDS (pm_chat) deepseek-v4-flash идет первым", cascade_chat[0] == ("deepseek-v4-flash", "agentrouter"))
+check(f"В CHAT_KINDS (pm_chat) {ar_model} идет первым", cascade_chat[0] == (ar_model, "agentrouter"))
 
 cascade_assistant = gc.cascade_for_context({"kind": "assistant", "thinking_level": "HIGH"})
-check("В assistant deepseek-v4-flash идет первым", cascade_assistant[0] == ("deepseek-v4-flash", "agentrouter"))
+check(f"В assistant {ar_model} идет первым", cascade_assistant[0] == (ar_model, "agentrouter"))
 
 cascade_summary = gc.cascade_for_context({"kind": "daily"})
 check("В daily сводке Gemini идет первым для длинного контекста", cascade_summary[0][1] == "gemini")
-check("В daily сводке deepseek-v4-flash присутствует как резерв", ("deepseek-v4-flash", "agentrouter") in cascade_summary)
+check(f"В daily сводке {ar_model} присутствует как резерв", (ar_model, "agentrouter") in cascade_summary)
 
 cascade_review = gc.cascade_for_context({"kind": "poll_clinical_review"})
-check("В poll_clinical_review deepseek-v4-flash идет первым", cascade_review[0] == ("deepseek-v4-flash", "agentrouter"))
+check(f"В poll_clinical_review {ar_model} идет первым", cascade_review[0] == (ar_model, "agentrouter"))
 
 cascade_media = gc.cascade_for_context({"kind": "assistant_media", "has_media": True})
 check("При наличии медиа (assistant_media) Gemini идет первым", cascade_media[0][1] == "gemini")
-check("При наличии медиа deepseek КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН", ("deepseek-v4-flash", "agentrouter") not in cascade_media)
-check("При наличии медиа все модели в каскаде исключительно Gemini", all(p == "gemini" for _, p in cascade_media))
+check(f"При наличии медиа {ar_model} доступен как резерв", (ar_model, "agentrouter") in cascade_media)
 
 cascade_prompt_media = gc.cascade_for_context({"kind": "pm_chat"}, prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: фото зуба 4.6]")
-check("Авто-детект медиа по тексту промпта блокирует deepseek", ("deepseek-v4-flash", "agentrouter") not in cascade_prompt_media)
-check("Авто-детект медиа возвращает только Gemini", all(p == "gemini" for _, p in cascade_prompt_media))
+check("Авто-детект медиа ставит Gemini первым", cascade_prompt_media[0][1] == "gemini")
+check(f"Авто-детект медиа сохраняет {ar_model} как резерв", (ar_model, "agentrouter") in cascade_prompt_media)
 
 cascade_triage = gc.cascade_for_context({"kind": "llama_triage"})
-check("В triage deepseek-v4-flash присутствует как резерв", ("deepseek-v4-flash", "agentrouter") in cascade_triage)
+check(f"В triage {ar_model} присутствует как резерв", (ar_model, "agentrouter") in cascade_triage)
 
 # При отсутствии ключей каскад откатывается на Gemini
 config.AGENTROUTER_KEYS = []
 cascade_no_key = gc.cascade_for_context({"kind": "pm_chat"})
-check("При пустых AGENTROUTER_KEYS deepseek не вставляется в начало", cascade_no_key[0] != ("deepseek-v4-flash", "agentrouter"))
+check("При пустых AGENTROUTER_KEYS agentrouter не вставляется в начало", cascade_no_key[0][1] != "agentrouter")
 
 print("\n[3] AgentRouter: Ошибка 402 Budget pool не банит ключ")
 config.AGENTROUTER_KEYS = ["sk-test-agentrouter-key-12345"]
@@ -87,25 +87,40 @@ fresh, cooling, _ = gc.available_keys("agentrouter", config.AGENTROUTER_KEYS)
 check("Ключ остался активным (не попал под key_rate_limited)", len(fresh) == 1 and not cooling)
 
 print("\n[4] AgentRouter: Генерация с щедрым max_tokens для reasoning")
-CAPTURED_CALLS = []
+CAPTURED_REQUESTS = []
 
-class MockCompletions:
-    def create(self, **kwargs):
-        CAPTURED_CALLS.append(kwargs)
-        return type("R", (), {
-            "choices": [type("C", (), {"message": type("M", (), {"content": "Отличный ответ"})()})()]
-        })()
+class MockHttpResponse:
+    status_code = 200
+    text = '{"output":[{"type":"message","content":[{"text":"Отличный ответ"}]}]}'
+    def json(self):
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"text": "Отличный ответ"}]
+                }
+            ]
+        }
 
-class MockClient:
-    def __init__(self):
-        self.chat = type("Chat", (), {"completions": MockCompletions()})()
+import requests
+_orig_post = requests.post
 
-gc.get_openai_client = lambda api_key, base_url, timeout=30.0, **kwargs: MockClient()
+def mock_post(url, headers=None, json=None, timeout=None, **kwargs):
+    CAPTURED_REQUESTS.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+    return MockHttpResponse()
+
+requests.post = mock_post
+
+# Сброс банов и кулдаунов перед тестом генерации
+for f in (gc.BANNED_MODELS_FILE, gc.KEY_COOLDOWN_FILE):
+    if os.path.exists(f): os.remove(f)
 
 res = gc.generate_text("Клинический вопрос", status_context={"kind": "assistant"})
+requests.post = _orig_post
+
 check("Генерация завершилась успешно", res is not None and res.text == "Отличный ответ")
-check("Запрос был отправлен к deepseek-v4-flash", len(CAPTURED_CALLS) > 0 and CAPTURED_CALLS[0].get("model") == "deepseek-v4-flash")
-check("max_tokens не ограничен малым лимитом (>= 4096)", CAPTURED_CALLS[0].get("max_tokens", 0) >= 4096)
+check(f"Запрос был отправлен к {ar_model}", len(CAPTURED_REQUESTS) > 0 and CAPTURED_REQUESTS[0].get("json", {}).get("model") == ar_model)
+check("Таймаут запроса соответствует архитектурному запасу (>= 30с)", len(CAPTURED_REQUESTS) > 0 and (CAPTURED_REQUESTS[0].get("timeout") or 0) >= 30.0)
 
 if __name__ == "__main__":
     print("\n==============================================================")

@@ -6,6 +6,13 @@
 3. gemini_client: безопасный fallback в text-only для Groq и при ошибках vision
 4. assistant: прокидывание image_urls в status_ctx и мультимодальные инструкции в промпты
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import sys
 import os
 import unittest

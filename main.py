@@ -52,7 +52,6 @@ _PROCESSED_KEYS_SET = set()
 
 
 def _mark_processed(chat_id, msg_id):
-    global PROCESSED_MSG_IDS
     key = (chat_id, msg_id)
     if key in _PROCESSED_KEYS_SET:
         return False
@@ -1231,7 +1230,7 @@ PING_PHASE_TIMEOUT_SECONDS = 1200
 
 
 async def outbox_worker_task(bot_client):
-    """Фоновый воркер отправки исходящих сообщений из bot_outbox через активный MTProto bot_client."""
+    """Фоновый воркер отправки исходящих сообщений из bot_outbox через активный MTProto bot_client с защитой tg_safety."""
     logger.info("📤 Фоновый воркер bot_outbox активен.")
     while True:
         try:
@@ -1242,10 +1241,25 @@ async def outbox_worker_task(bot_client):
                 text = item["text"]
                 pm = item.get("parse_mode") or "html"
                 try:
-                    await bot_client.send_message(chat_id, text, parse_mode=pm)
-                    await database.mark_outbox_sent(oid)
-                    await database.save_pm_message(chat_id, "Assistant", text)
-                    logger.info("Outbox worker successfully delivered msg %d to chat_id=%s", oid, chat_id)
+                    outcome = await tg_safety.send_message(
+                        bot_client,
+                        chat_id,
+                        text,
+                        parse_mode=pm,
+                        timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+                        op="outbox_worker:send",
+                    )
+                    if outcome.ok:
+                        await database.mark_outbox_sent(oid)
+                        await database.save_pm_message(chat_id, "Assistant", text)
+                        logger.info("Outbox worker successfully delivered msg %d to chat_id=%s", oid, chat_id)
+                    else:
+                        err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
+                        if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
+                            logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
+                        else:
+                            logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
+                            await database.mark_outbox_failed(oid, err_str)
                 except Exception as send_err:
                     err_str = str(send_err)
                     logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
@@ -2545,7 +2559,7 @@ async def handle_new_message(event):
         chat_id = event.chat_id
 
         if _is_processed(chat_id, msg_id):
-            logger.info(f"Deduplicator: Skipping already processed chat_id={chat_id} msg_id={msg_id}")
+            logger.debug(f"Deduplicator: Skipping already processed chat_id={chat_id} msg_id={msg_id}")
             return
         _mark_processed(chat_id, msg_id)
 
@@ -2730,7 +2744,7 @@ async def handle_new_message(event):
             # Сообщение бота уже сохранено в базу выше — дальше ничего не делаем.
             if is_any_bot:
                 if not is_bot:
-                    logger.info(f"Deduplicator: Message is from another bot (sender_id={sender_id}, username={sender_username}). Skipping triggers.")
+                    logger.debug(f"Deduplicator: Message is from another bot (sender_id={sender_id}, username={sender_username}). Skipping triggers.")
                 return
 
             # Check bookmark saving command
@@ -2802,7 +2816,7 @@ async def handle_new_message(event):
                     or cmd_mentioned
                 )
 
-            if (event.photo or event.video or snapshot_document is not None):
+            if (event.photo or event.video or snapshot_document is not None) and not is_media_command:
                 should_trigger_media = not is_media_command
                 if getattr(event, "grouped_id", None):
                     # [SYS-03 FIX] Guard against late-arriving frames after album was already processed.
@@ -3267,6 +3281,14 @@ async def handle_private_message(event):
     text_lower = raw_text.lower()
     is_fast_cmd = raw_text.startswith("/") or text_lower in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
     if is_fast_cmd:
+        # Если пришла команда отмены/сброса (/cancel, /wipe, /stop), немедленно снимаем зависший воркер
+        if raw_text.startswith(("/cancel", "/wipe", "/stop")):
+            worker = _PM_BURST_WORKERS.pop(chat_id, None)
+            if worker and not worker.done():
+                logger.info("Cancelling active PM burst worker for chat_id=%s on abort command: %s", chat_id, raw_text)
+                worker.cancel()
+            _PM_PENDING_QUEUES.pop(chat_id, None)
+
         if await chairside_tools.handle_if_chairside_command(bot_client, event, raw_text):
             return
 
@@ -3414,7 +3436,7 @@ async def handle_callback_query(event):
     cb_id = getattr(event, "id", None)
     if cb_id is not None:
         if cb_id in _HANDLED_CALLBACK_SET:
-            logger.info(f"Deduplicator: skipping repeated callback id={cb_id}")
+            logger.debug(f"Deduplicator: skipping repeated callback id={cb_id}")
             try:
                 await event.answer()
             except Exception as exc:
@@ -4366,6 +4388,7 @@ async def start_bot():
         await stop_media_analysis_workers()
         reaction_engine.stop_engine_worker()
         runtime_guard.stop_watchdog()
+        await runtime_guard.cancel_all_tasks(timeout=3.0)
 
 
 def acquire_single_instance_lock():
@@ -4408,7 +4431,7 @@ if __name__ == '__main__':
             logger.info("Received SIGTERM from systemd. Initiating graceful shutdown and WAL checkpoint...")
             try:
                 if hasattr(database, "_DB_EXECUTOR"):
-                    database._DB_EXECUTOR.shutdown(wait=False)
+                    database._DB_EXECUTOR.shutdown(wait=True)
                 database.checkpoint_wal()
             except Exception as e:
                 logger.warning(f"Error during WAL checkpoint on shutdown: {e}")

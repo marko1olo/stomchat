@@ -2,6 +2,13 @@
 Проверка двухуровневого гейта пассивного триггера.
 Запуск: python test_passive_gate.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import importlib.util
 import json
 import os
@@ -23,7 +30,7 @@ sys.modules["config"].DENTAL_KEYWORDS = []
 sys.modules["blocking_tools"].generate_gemini_text_async = None
 
 spec = importlib.util.spec_from_file_location(
-    "assistant_under_test", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
+    "assistant_under_test", os.path.join(_REPO_ROOT, "assistant.py")
 )
 A = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(A)

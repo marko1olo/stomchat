@@ -3,7 +3,6 @@ import os
 import json
 import logging
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import timezone
 import time

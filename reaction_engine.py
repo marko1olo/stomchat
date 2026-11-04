@@ -35,14 +35,17 @@ INTER_REACTION_SLEEP = 2.0         # Пауза между отправками 
 
 # ── Детерминированный негативный клинический фильтр ───────────────────────────
 COMPLICATION_PATTERNS = [
-    r"\bперфорац\w*",
-    r"\bпроби[лт]\w*\s+(?:дно|корен|апекс|стенк)",
-    r"\bслома[ллс]\w*",
+    r"\bперфор\w*",
+    r"\bпроби[лт]\w*(?:\s+(?:дно|корен\w*|апекс\w*|стенк\w*|бифуркац\w*|синус\w*))?",
+    r"\bслома[нлс]\w*",
     r"\bполомк\w*",
     r"\bотлом\w*",
     r"\bоблом\w*",
+    r"\bперелом\w*",
     r"\bвывели?\s+(?:за\s+апекс|за\s+верхушк)",
+    r"\bвыход\w*\s+(?:силер\w*|гуттаперч\w*)\s+(?:за\s+апекс|в\s+канал)",
     r"\bгипохлор\w*\s+(?:авари|ожог|выход|отек|отёк|всплеск|осложнен)",
+    r"\bожог\w*",
     r"\bпарестез\w*",
     r"\bонемен\w*",
     r"\bанафилак\w*",
@@ -51,13 +54,15 @@ COMPLICATION_PATTERNS = [
     r"\bаспирац\w*",
     r"\bпроглотил\w*",
     r"\bвдохнул\w*",
-    r"\bтрещин\w*\s+корн",
-    r"\bвертикальн\w*\s+перелом",
+    r"\bтрещин\w*",
     r"\bнекроз\w*",
     r"\bфлегмон\w*",
     r"\bгной\w*",
     r"\bпериостит\w*",
     r"\bятроген\w*",
+    r"\bкровотечен\w*",
+    r"\bвывих\w*",
+    r"\bэмфизем\w*",
 ]
 CLINICAL_COMPLICATION_RE = re.compile("|".join(COMPLICATION_PATTERNS), re.IGNORECASE)
 
@@ -89,6 +94,7 @@ _CHAT_BUFFERS: Dict[int, List[BufferedMessage]] = {}
 _CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
 _CHATS_BEING_FLUSHED: Set[int] = set()
 _GLOBAL_REACTION_HISTORY: List[float] = []
+_CHAT_REACTION_HISTORY: Dict[int, List[float]] = {}
 _SENDER_REACTION_TIMESTAMPS: Dict[Tuple[int, int], float] = {}
 _FLUSHER_TASK: Optional[asyncio.Task] = None
 
@@ -108,16 +114,30 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
 
 
 def _is_rate_limited(chat_id: int, sender_id: int) -> bool:
-    """Проверяет соблюдение глобальных и per-sender лимитов реакций."""
+    """Проверяет соблюдение глобальных, per-chat и per-sender лимитов реакций."""
     now = time.time()
-    # 1. Проверка глобального почасового лимита
     cutoff = now - 3600.0
-    _GLOBAL_REACTION_HISTORY[:] = [t for t in _GLOBAL_REACTION_HISTORY if t > cutoff]
-    if len(_GLOBAL_REACTION_HISTORY) >= MAX_REACTIONS_PER_HOUR:
-        logger.debug("[BatchReactions] Hourly reaction rate limit reached (%d/hr)", len(_GLOBAL_REACTION_HISTORY))
+
+    # 1. Проверка per-chat почасового лимита
+    chat_hist = _CHAT_REACTION_HISTORY.setdefault(chat_id, [])
+    chat_hist[:] = [t for t in chat_hist if t > cutoff]
+    if len(chat_hist) >= MAX_REACTIONS_PER_HOUR:
+        logger.debug("[BatchReactions] Chat %s hourly reaction rate limit reached (%d/hr)", chat_id, len(chat_hist))
         return True
 
-    # 2. Проверка per-sender кулдауна
+    # 2. Проверка глобального почасового лимита
+    _GLOBAL_REACTION_HISTORY[:] = [t for t in _GLOBAL_REACTION_HISTORY if t > cutoff]
+    if len(_GLOBAL_REACTION_HISTORY) >= MAX_REACTIONS_PER_HOUR * 3:
+        logger.debug("[BatchReactions] Global reaction rate limit reached (%d/hr)", len(_GLOBAL_REACTION_HISTORY))
+        return True
+
+    # 3. Проверка per-sender кулдауна с периодической очисткой старых таймстампов
+    if len(_SENDER_REACTION_TIMESTAMPS) > 200:
+        s_cutoff = now - max(3600.0, SENDER_COOLDOWN_SECONDS * 2)
+        stale_keys = [k for k, ts in list(_SENDER_REACTION_TIMESTAMPS.items()) if ts < s_cutoff]
+        for k in stale_keys:
+            _SENDER_REACTION_TIMESTAMPS.pop(k, None)
+
     key = (chat_id, sender_id)
     last_time = _SENDER_REACTION_TIMESTAMPS.get(key, 0.0)
     if (now - last_time) < SENDER_COOLDOWN_SECONDS:
@@ -194,7 +214,7 @@ def build_batch_prompt(messages: List[BufferedMessage], allowed_emojis_str: str)
 Все остальные сообщения должны остаться БЕЗ реакций.
 
 КЛИНИЧЕСКИЕ ПРАВИЛА И ЭТИКА:
-1. НИКОГДА не ставить легкомысленные или радостные реакции (😂, 🤣, 🔥, 👍) на врачебную беду, сломанные инструменты, перфорации, боль, отеки, гной или осложнения! Если врач в отчаянии или жалуется на беду — СТРОГО НОЛЬ РЕАКЦИЙ.
+1. НИКОГДА не ставить легкомысленные или радостные реакции (😂, 🤣, 🔥, 👍, 👏, ⚡, 🎉, 👌, 💡, 💯, ❤️) на врачебную беду, сломанные инструменты, переломы корня, перфорации, кровотечения, ожоги, эмфиземы, боль, отеки, гной или осложнения! Если врач в отчаянии или жалуется на беду/ошибку — СТРОГО НОЛЬ РЕАКЦИЙ.
 2. На прямые вопросы коллег, просьбы о помощи, сомнения и жалобы на работу бота — СТРОГО НОЛЬ РЕАКЦИЙ (пустой список). Не ставь реакции на вопросы.
 3. Реакций достойны только:
    - Реально классные клинические результаты, КЛКТ, прицельные снимки с плотной обтурацией, красивая реставрация -> 🔥, 👏, 👍
@@ -267,8 +287,9 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 5.5) -
             if _is_rate_limited(msg_obj.chat_id, msg_obj.sender_id):
                 continue
 
-            if len(_GLOBAL_REACTION_HISTORY) + len(valid_results) >= MAX_REACTIONS_PER_HOUR:
-                logger.debug("[BatchReactions] Hourly reaction rate limit reached with current batch (%d/hr)", len(_GLOBAL_REACTION_HISTORY) + len(valid_results))
+            chat_hist = _CHAT_REACTION_HISTORY.setdefault(msg_obj.chat_id, [])
+            if len(chat_hist) + len(valid_results) >= MAX_REACTIONS_PER_HOUR:
+                logger.debug("[BatchReactions] Hourly reaction rate limit reached for chat %s with current batch (%d/hr)", msg_obj.chat_id, len(chat_hist) + len(valid_results))
                 break
 
             seen_senders_in_batch.add(sender_key)
@@ -304,7 +325,6 @@ async def flush_chat_batch(chat_id: int):
         logger.debug("[BatchReactions] tg_safety cooldown check failed for chat %s: %s", chat_id, e)
 
     # 2. Защита от параллельного сброса батчей одного чата
-    global _CHATS_BEING_FLUSHED
     if chat_id in _CHATS_BEING_FLUSHED:
         logger.debug("[BatchReactions] Chat %s is already being flushed. Skipping parallel flush.", chat_id)
         return
@@ -383,6 +403,7 @@ async def flush_chat_batch(chat_id: int):
                 applied_count += 1
                 curr_t = time.time()
                 _GLOBAL_REACTION_HISTORY.append(curr_t)
+                _CHAT_REACTION_HISTORY.setdefault(chat_id, []).append(curr_t)
                 _SENDER_REACTION_TIMESTAMPS[(chat_id, msg_obj.sender_id)] = curr_t
 
                 logger.info(
@@ -415,7 +436,7 @@ async def flush_chat_batch(chat_id: int):
 
 
 async def _flusher_loop():
-    """Фоновый таймер проверки буферов на сброс по таймауту тишины."""
+    """Фоновый таймер проверки буферов на сброс по таймауту тишины и очистки устаревших сообщений."""
     logger.info("Batch reaction flusher loop active")
     while True:
         try:
@@ -426,9 +447,36 @@ async def _flusher_loop():
                 if cid in _CHATS_BEING_FLUSHED:
                     continue
                 buf = _CHAT_BUFFERS.get(cid, [])
+                if not buf:
+                    _CHAT_BUFFERS.pop(cid, None)
+                    continue
+
+                # Очистка устаревших сообщений (> 30 минут) для предотвращения утечки event в памяти
+                if (now - buf[-1].timestamp) >= 1800.0:
+                    lock = _get_lock(cid)
+                    async with lock:
+                        active = [m for m in _CHAT_BUFFERS.get(cid, []) if (now - m.timestamp) < 1800.0]
+                        if active:
+                            _CHAT_BUFFERS[cid] = active
+                        else:
+                            _CHAT_BUFFERS.pop(cid, None)
+                    continue
+
                 if len(buf) >= 2 and (now - buf[-1].timestamp) >= IDLE_FLUSH_INTERVAL:
                     logger.info("[BatchReactions] Triggering idle flush for chat %s (buffer size: %d, idle: %.1fs)", cid, len(buf), now - buf[-1].timestamp)
                     _safe_create_task(flush_chat_batch(cid), name=f"reaction_idle_flush_{cid}")
+
+            # Периодическая очистка старых таймстампов per-sender и per-chat
+            s_cutoff = now - 3600.0
+            stale_s_keys = [k for k, ts in list(_SENDER_REACTION_TIMESTAMPS.items()) if ts < s_cutoff]
+            for k in stale_s_keys:
+                _SENDER_REACTION_TIMESTAMPS.pop(k, None)
+
+            for cid, hist in list(_CHAT_REACTION_HISTORY.items()):
+                hist[:] = [t for t in hist if t > s_cutoff]
+                if not hist:
+                    _CHAT_REACTION_HISTORY.pop(cid, None)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -437,12 +485,10 @@ async def _flusher_loop():
 
 
 def start_engine_worker(loop: Optional[asyncio.AbstractEventLoop] = None):
-    """Инициализация фонового таймера батчинга."""
+    """Инициализация фонового таймера батчинга с регистрацией в runtime_guard."""
     global _FLUSHER_TASK
-    if loop is None:
-        loop = asyncio.get_event_loop()
     if _FLUSHER_TASK is None or _FLUSHER_TASK.done():
-        _FLUSHER_TASK = loop.create_task(_flusher_loop())
+        _FLUSHER_TASK = _safe_create_task(_flusher_loop(), name="reaction_engine_worker")
         logger.info("Batch reaction flusher task started")
 
 
@@ -520,7 +566,6 @@ async def process_incoming_event(
         sender_name = f"Doctor_{sender_id}"
 
     # Инициализация таймера если еще не запущен
-    global _FLUSHER_TASK
     if _FLUSHER_TASK is None or _FLUSHER_TASK.done():
         try:
             loop = asyncio.get_running_loop()

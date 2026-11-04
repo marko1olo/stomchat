@@ -32,6 +32,13 @@ flood_sleep_threshold=20 (main.py:883, 900-910), то есть ОДИН await в
 
 Запуск: python test_tg_delivery.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import logging
 import os
@@ -335,7 +342,7 @@ async def run():
     real_id, real_name = assistant.BOT_ID, assistant.BOT_USERNAME
     searched = {"n": 0}
 
-    async def fake_search(keywords):
+    async def fake_search(keywords, *args, **kwargs):
         searched["n"] += 1
         return "", ""
 
@@ -533,7 +540,7 @@ async def run():
         async def _counts(cat_id):
             return {}
 
-        async def _corpus(kws):
+        async def _corpus(kws, *args, **kwargs):
             return "Справка про уступ.", ""
 
         database.set_user_style = _style
@@ -678,7 +685,7 @@ async def run():
     real_id2, real_name2 = assistant.BOT_ID, assistant.BOT_USERNAME
     seen2 = {"n": 0}
 
-    async def fake_search2(keywords):
+    async def fake_search2(keywords, *args, **kwargs):
         seen2["n"] += 1
         return "", ""
 

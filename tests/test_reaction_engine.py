@@ -2,6 +2,13 @@
 """
 test_reaction_engine.py — Тесты для батчевого нейросетевого движка реакций.
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import os
 import sys
@@ -140,6 +147,56 @@ class TestBatchReactionEngine(unittest.TestCase):
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0]["msg_id"], 701)
 
+
+    def test_per_chat_rate_limiting_fairness(self):
+        """One chat hitting MAX_REACTIONS_PER_HOUR must not block another chat."""
+        import time
+        chat1 = -100111
+        chat2 = -100222
+        now = time.time()
+        reaction_engine._CHAT_REACTION_HISTORY[chat1] = [now - 10.0] * reaction_engine.MAX_REACTIONS_PER_HOUR
+        reaction_engine._CHAT_REACTION_HISTORY[chat2] = []
+        
+        self.assertTrue(reaction_engine._is_rate_limited(chat1, sender_id=50))
+        self.assertFalse(reaction_engine._is_rate_limited(chat2, sender_id=50))
+
+    def test_start_engine_worker_registered_with_runtime_guard(self):
+        """start_engine_worker must register flusher task under reaction_engine_worker name."""
+        async def _run():
+            import runtime_guard
+            reaction_engine.stop_engine_worker()
+            reaction_engine.start_engine_worker()
+            try:
+                report = runtime_guard.get_active_tasks_report()
+                daemon_names = [r["name"] for r in report]
+                self.assertIn("reaction_engine_worker", daemon_names)
+            finally:
+                reaction_engine.stop_engine_worker()
+        asyncio.run(_run())
+
+    def test_complication_guard_blocks_tragic_failures(self):
+        """Clinical complication guard blocks celebratory reactions on real dental emergencies."""
+        tragic_cases = [
+            "сломан файл в верхушке",
+            "перфорировал дно полости",
+            "перелом корня 21 зуба",
+            "пробита бифуркация при поиске канала",
+            "кровотечение из канала не останавливается",
+            "ожог слизистой коагулятором"
+        ]
+        for text in tragic_cases:
+            self.assertTrue(reaction_engine.is_clinical_complication(text), f"Failed to detect complication in: {text}")
+
+        m_bad = reaction_engine.BufferedMessage(
+            msg_id=801, chat_id=-1001, sender_id=777, sender_name="Д-р Доктор",
+            text="Сломан каналонаполнитель в канале, перелом корня", has_media=False,
+            timestamp=100.0, event=MagicMock()
+        )
+        mock_json = '[{"msg_id": 801, "reaction": "😂", "reason": "Смешно"}]'
+        with patch("gemini_client.generate_text") as mock_gen:
+            mock_gen.return_value = MagicMock(text=mock_json)
+            results = reaction_engine.evaluate_batch_sync([m_bad])
+            self.assertEqual(len(results), 0, "Celebratory reaction on clinical tragedy was NOT blocked!")
 
 if __name__ == "__main__":
     unittest.main()

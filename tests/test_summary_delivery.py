@@ -11,6 +11,12 @@ LLM-вызовом — до конца суток это десятки плат
 
 Запуск: python test_summary_delivery.py
 """
+import os
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import re
 import sys

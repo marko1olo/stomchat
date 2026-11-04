@@ -465,6 +465,8 @@ _CHILD_LOG_LEVELS = {
 
 _ROUTINE_CHILD_LOG_PATTERNS = (
     "keys available",
+    "budget",
+    "planned",
     "budget planned",
     "http request:",
     "https connection",
@@ -590,7 +592,7 @@ async def _kill_process_tree(proc):
         except (ProcessLookupError, OSError) as exc:
             # Процесс уже мёртв — штатный исход, а не отказ: сюда приходят и после
             # успешного taskkill выше.
-            logger.debug("Subprocess already exited on kill pid=%s: %s", proc.pid, exc)
+            _ = exc
 
 
 _MAX_CONCURRENT_SUBPROCESSES = max(1, int(os.getenv("MAX_CONCURRENT_SUBPROCESSES", "2")))
@@ -680,7 +682,7 @@ async def _run_json_tool_guarded(action, payload, timeout=None):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             # Закрытие пайпа у мёртвого ребёнка — штатный исход и ничего не
             # говорит о причине; отказ записи уже сделан выше.
-            logger.debug("Subprocess stdin already closed pid=%s: %s", proc.pid, exc)
+            _ = exc
 
     async def _read_chunks(stream, sink):
         while True:

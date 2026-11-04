@@ -6,6 +6,13 @@ Red Team Inquisitor Test Suite: Железобетонная персистен�
 3. Атомарное обогащение записи врача описанием снимка без дублирования.
 4. Устойчивость _async_pm_supplement_job (не пишет в БД при ошибках Telegram, отменяется при context drift).
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import sys
 import os
@@ -20,6 +27,9 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
+import config
+import tempfile
+import shutil
 import database
 import assistant
 import tg_safety
@@ -27,17 +37,17 @@ import tg_safety
 
 class TestPmPersistenceInquisitor(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        # Очищаем тестовые сообщения перед тестом
-        def clear_db():
-            with database._connection() as db:
-                db.execute("DELETE FROM pm_messages WHERE user_id = 999888777")
-        await database._run_db(clear_db)
+        self._tmpdir = tempfile.mkdtemp(prefix="stom_pm_persist_")
+        self._orig_db_path = config.DB_PATH
+        self._orig_state_path = assistant.STATE_PATH
+        config.DB_PATH = os.path.join(self._tmpdir, "test_stomat.db")
+        assistant.STATE_PATH = os.path.join(self._tmpdir, "test_state.json")
+        await database.init_db()
 
     async def asyncTearDown(self):
-        def clear_db():
-            with database._connection() as db:
-                db.execute("DELETE FROM pm_messages WHERE user_id = 999888777")
-        await database._run_db(clear_db)
+        config.DB_PATH = self._orig_db_path
+        assistant.STATE_PATH = self._orig_state_path
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     async def test_save_pm_message_returns_lastrowid_and_update_works(self):
         """Проверяем, что save_pm_message возвращает id, а update_pm_message_text корректно обновляет запись."""

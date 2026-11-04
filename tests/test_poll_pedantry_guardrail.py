@@ -4,6 +4,12 @@ Verifies that poll generator prompts, reviewer criteria, and weekly rubricator
 strictly avoid metallurgical file trivia, 3Y/5Y zirconium crystal phase pedantry,
 and micron/millimeter catching in favor of real chairside clinical dilemmas.
 """
+import os
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import inspect
 import unittest
 import poll_engine

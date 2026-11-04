@@ -878,7 +878,14 @@ check("каждая такая запись содержит операцию, �
 check("сообщение об отказе начинается опознаваемо (можно грепать журнал)",
       all(r.getMessage().startswith("tg give up ") for r in _own))
 
-print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    sys.exit(1 if FAIL else 0)
+
+
+def test_tg_safety_all_checks_passed():
+    assert not FAIL, f"tg_safety checks failed: {FAIL}"
+    assert len(PASS) >= 135, f"Expected >= 135 checks, got {len(PASS)}"
+

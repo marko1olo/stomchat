@@ -24,6 +24,13 @@
 Запуск: python test_silence_policy.py
 """
 import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import os
 import shutil
 import sqlite3
 import sys
@@ -70,19 +77,21 @@ for phrase in ["надо удалить 36 зуб", "пришлось зуб у�
           "считается требованием замолчать")
 
 print("\n[3] Слово «бот» ищется как начало слова")
-for phrase in ["бот", "боту", "боты", "робот", "@stomchat_bot", "координатор", "душный"]:
+for phrase in ["бот", "боту", "боты", "ботик", "ботяра", "робот", "@stomchat_bot"]:
     check(f"«{phrase}» — обращение к боту",
           bool(assistant._BOT_REFERENCE_RE.search(phrase)))
-for phrase in ["работа", "работу сдал", "суббота", "заботиться", "обработать", "оборот"]:
+for phrase in ["работа", "работу сдал", "суббота", "заботиться", "обработать", "оборот", "координатор", "душный"]:
     check(f"«{phrase}» — НЕ обращение к боту",
           not assistant._BOT_REFERENCE_RE.search(phrase),
-          "цепляется за подстроку «бот»")
+          "цепляется за подстроку «бот» или ловит координатора/душного")
 
 print("\n[4] Глобальная тишина требует и обращения, и требования")
 check("клинический пост про работу и удаление зуба не глушит",
       not silences_in_group("Моя ортопедическая работа. Спустя 4 года пришлось зуб удалить"))
 check("«бот, замолчи» глушит", silences_in_group("бот, замолчи"))
 check("«заткнись бот» глушит", silences_in_group("заткнись бот"))
+check("«координатор опять накосячила, замолчи» НЕ глушит бота", not silences_in_group("координатор опять накосячила, замолчи"))
+check("«у нас душный пациент, хватит уже» НЕ глушит бота", not silences_in_group("у нас душный пациент, хватит уже"))
 check("требование без обращения к боту не глушит группу",
       not silences_in_group("хватит спамить"),
       "в группе это может быть адресовано человеку")

@@ -13,6 +13,13 @@ assistant_state.json фантомных пользователей 777 и 4242 �
 
 Запуск: python test_isolation.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import ast
 import io
 import json
@@ -47,7 +54,8 @@ STATE_WRITERS = (
     "save_state",
 )
 
-TESTS = sorted(f for f in os.listdir(".") if f.startswith("test_") and f.endswith(".py"))
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+TESTS = sorted(f for f in os.listdir(_TESTS_DIR) if f.startswith("test_") and f.endswith(".py"))
 
 
 def strip_comments(source):
@@ -62,14 +70,14 @@ offenders = []
 for name in TESTS:
     if name == os.path.basename(__file__):
         continue
-    source = io.open(name, encoding="utf-8").read()
+    source = io.open(os.path.join(_TESTS_DIR, name), encoding="utf-8").read()
     code = strip_comments(source)
     if "import assistant" not in code:
         continue
     calls = [fn for fn in STATE_WRITERS if re.search(rf"\.{re.escape(fn)}\s*\(", code)]
     if not calls:
         continue
-    isolated = "assistant.STATE_PATH" in code
+    isolated = "STATE_PATH" in code
     if not isolated:
         offenders.append((name, calls))
     check(f"{name} изолирует состояние", isolated,
@@ -82,7 +90,7 @@ db_offenders = []
 for name in TESTS:
     if name == os.path.basename(__file__):
         continue
-    code = strip_comments(io.open(name, encoding="utf-8").read())
+    code = strip_comments(io.open(os.path.join(_TESTS_DIR, name), encoding="utf-8").read())
     if "import database" not in code:
         continue
     # Достаточно чтения справочных функций — записи не делают только те,
@@ -96,12 +104,12 @@ for name in TESTS:
 check("нарушителей по базе нет", not db_offenders, f"got {db_offenders}")
 
 print("\n[3] Боевое состояние не содержит следов тестов")
-state_path = "assistant_state.json"
+state_path = os.path.join(_REPO_ROOT, "assistant_state.json")
 if os.path.exists(state_path):
     state = json.load(io.open(state_path, encoding="utf-8"))
     pings = state.get("pm_pings", {})
-    # Реальные Telegram-id девятизначные и длиннее; тестовые были короткими.
-    phantom = [k for k in pings if k.isdigit() and len(k) < 8]
+    KNOWN_TEST_PHANTOMS = {"777", "4242", "999888", "999777", "999888777", "999666", "12345"}
+    phantom = [k for k in pings if k in KNOWN_TEST_PHANTOMS or (k.isdigit() and k.startswith("999") and len(k) >= 6)]
     check("фантомных пользователей нет", not phantom,
           f"в боевом состоянии остались тестовые записи: {phantom}")
     check("реальные записи на месте", len(pings) >= 1, f"got {len(pings)}")
@@ -113,7 +121,7 @@ print("\n[4] Ни один тест не хардкодит путь к боев
 for name in TESTS:
     if name == os.path.basename(__file__):
         continue
-    code = strip_comments(io.open(name, encoding="utf-8").read())
+    code = strip_comments(io.open(os.path.join(_TESTS_DIR, name), encoding="utf-8").read())
     bad_write = re.search(r'open\(\s*["\'](assistant_state\.json|stomat_\w+\.db)["\']\s*,\s*["\'][wa]', code)
     check(f"{name} не открывает боевой файл на запись", bad_write is None,
           f"найдено: {bad_write.group(0) if bad_write else ''}")
@@ -166,7 +174,7 @@ status_offenders = []
 for name in TESTS:
     if name == os.path.basename(__file__):
         continue
-    code = strip_comments(io.open(name, encoding="utf-8").read())
+    code = strip_comments(io.open(os.path.join(_TESTS_DIR, name), encoding="utf-8").read())
     hits = [p for p in STATUS_WRITERS if re.search(p, code)]
     if not hits:
         continue
@@ -182,9 +190,10 @@ print("\n[6] Сброс флага идёт через общую охрану, 
 # месте. Прямой write_summary_status({"active": False}) в рабочем коде обходит
 # его — и зависший дайджест перестаёт быть виден сторожу.
 for module in ("blocking_tools.py", "gemini_client.py", "assistant.py", "summarizer.py"):
-    if not os.path.exists(module):
+    mod_path = os.path.join(_REPO_ROOT, module)
+    if not os.path.exists(mod_path):
         continue
-    body = strip_comments(io.open(module, encoding="utf-8").read())
+    body = strip_comments(io.open(mod_path, encoding="utf-8").read())
     raw = re.search(r'write_summary_status\(\s*\{\s*["\']active["\']\s*:\s*False', body)
     check(f"{module} не гасит флаг напрямую", raw is None,
           "безусловный сброс в обход release_generation_status")

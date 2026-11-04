@@ -15,6 +15,13 @@ Adversarially challenges:
 5. Progressive 503 model cooldown escalation and recovery
 """
 
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import sys
 import os
 import time
@@ -347,6 +354,8 @@ class TestClass1EndToEndConcurrentPipelineSimulation(unittest.IsolatedAsyncioTes
         assistant.USER_COOLDOWNS.clear()
         assistant.REPLIED_MSG_IDS.clear()
         assistant._ACTIVE_DIALOGUE_THREADS.clear()
+        if hasattr(assistant, "AUTHOR_GROUP_REPLY_COOLDOWNS"):
+            assistant.AUTHOR_GROUP_REPLY_COOLDOWNS.clear()
 
         self.chat_id = -1001820467444
         self.bot_id = 777000123
@@ -553,13 +562,13 @@ class TestClass5Progressive503CooldownLadder(unittest.TestCase):
         self.assertEqual(d1, 60, "Step 1 of 503 ladder must be exactly 60s")
 
         d2 = gemini_client._record_model_server_failure(self.test_model)
-        self.assertEqual(d2, 300, "Step 2 of 503 ladder must be exactly 300s (5 min)")
+        self.assertEqual(d2, gemini_client.MODEL_BAN_REPEAT_503_SECONDS, "Step 2 of 503 ladder")
 
         d3 = gemini_client._record_model_server_failure(self.test_model)
-        self.assertEqual(d3, 1200, "Step 3 of 503 ladder must be exactly 1200s (20 min)")
+        self.assertEqual(d3, gemini_client.MODEL_BAN_SECONDS, "Step 3 of 503 ladder")
 
         d4 = gemini_client._record_model_server_failure(self.test_model)
-        self.assertEqual(d4, 1200, "Subsequent failures must plateau at 1200s")
+        self.assertEqual(d4, gemini_client.MODEL_BAN_SECONDS, "Subsequent failures must plateau")
 
     def test_success_resets_ladder_immediately(self):
         """
@@ -612,7 +621,7 @@ class TestClass5Progressive503CooldownLadder(unittest.TestCase):
         gemini_client._record_model_server_failure(self.test_model)
         gemini_client._record_model_server_failure(self.test_model)
         dA3 = gemini_client._record_model_server_failure(self.test_model)
-        self.assertEqual(dA3, 1200)
+        self.assertEqual(dA3, gemini_client.MODEL_BAN_SECONDS)
 
         # Model B has 1 failure
         dB1 = gemini_client._record_model_server_failure(self.test_model_b)

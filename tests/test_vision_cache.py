@@ -22,6 +22,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import vision
 import gemini_client as gc
 

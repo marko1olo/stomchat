@@ -23,6 +23,13 @@ main.handle_new_message на настоящих telethon-объектах Messag
 
 Запуск: python test_voice_offline.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import inspect
 import logging

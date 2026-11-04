@@ -36,6 +36,13 @@
 
 Запуск: python test_debt_registry.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import io
 import os
 import re
@@ -65,11 +72,10 @@ def check(name, cond, detail=""):
 # пометку — добавь строку сюда и в свой _fix_*.md.
 # ---------------------------------------------------------------------------
 REGISTERED = {
-    "web_lookup.py": 1,      # P1 врач: отсев рекламы бьёт по clinicaltrials.gov
     "main.py": 1,            # P2 врач: tg_safety в main.py не подключён нигде
     "blocking_tools.py": 1,  # P3 внутр: стем _converted литералом в двух модулях
 }
-DECLARED_TOTAL = 3
+DECLARED_TOTAL = 2
 
 # ---------------------------------------------------------------------------
 # Парсер. Пометка — это КОММЕНТАРИЙ, и строки комментариев берутся у tokenize, а

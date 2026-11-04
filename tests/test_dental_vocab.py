@@ -11,6 +11,12 @@
 
 Запуск: python test_dental_vocab.py
 """
+import os
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import sys
 
 for _stream in (sys.stdout, sys.stderr):
@@ -198,6 +204,19 @@ for phrase in [
     "Одонтогенный гайморит от корня 1.6",
     "Свищевой ход закрылся после ретрита",
     "Работал ультразвуком через эндочак",
+]:
+    check(f"«{phrase[:40]}» клиника", dv.has_dental_term(phrase.lower()) is True)
+
+print("\n[13] Red-Team: FDI дефисы и препараты (септонест, бупивакаин, ah plus)")
+for phrase in [
+    "зуб 4-6 глубокий кариес",
+    "4-6 зуб периодонтит",
+    "в 4-6 полость",
+    "септонест 1:100 000 дозировка",
+    "бупивакаин при длительной операции",
+    "маркаин противопоказан детям",
+    "изоляция через рабердам",
+    "силер ah plus в канале",
 ]:
     check(f"«{phrase[:40]}» клиника", dv.has_dental_term(phrase.lower()) is True)
 

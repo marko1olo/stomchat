@@ -10,6 +10,13 @@ Message и проверяет результат чтением из насто�
 
 Запуск: python test_snapshot_document.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import os
 import shutil
@@ -54,7 +61,7 @@ ENQUEUED = []
 SENT = []
 
 
-async def fake_enqueue(messages, msg_id, text):
+async def fake_enqueue(messages, msg_id, text, *args, **kw):
     ENQUEUED.append({"msg_id": msg_id, "count": len(messages), "text": text})
 
 

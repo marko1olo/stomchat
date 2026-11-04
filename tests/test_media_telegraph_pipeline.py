@@ -10,6 +10,12 @@ test_media_telegraph_pipeline.py — Тестирование пайплайна
 5. Наличие строгих инструкций [IMG_XXXXX] в системных промптах daily и weekly в summarizer.py.
 """
 
+import os
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import re
 import sys
 

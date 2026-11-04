@@ -23,6 +23,13 @@
 
 Запуск: python test_report_targets.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import logging
 import os
 import sys
@@ -148,7 +155,7 @@ check("в журнале виден индекс битой цели", "[1]" in 
 check("цель без chat_id отброшена", all("chat_id" in t for t in targets))
 
 print("\n[6] Список, где битые ВСЕ, отдельно объявляется провалом рассылки")
-targets, trap = resolve_with(["мусор", 42])
+targets, trap = resolve_with(["мусор", {"invalid": 1}])
 check("целей нет", targets == [])
 check("сказано, что не уйдёт никому", "НИКОМУ" in trap.text(),
       f"журнал: {trap.text()!r}")
@@ -160,7 +167,7 @@ check("отказ чтения попал в журнал", bool(trap.errors()),
       "именно это глотал голый except")
 
 print("\n[8] Голого except в scheduler_task больше нет")
-SRC = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"),
+SRC = open(os.path.join(_REPO_ROOT, "main.py"),
            encoding="utf-8").read()
 _start = SRC.index("async def scheduler_task")
 _body = SRC[_start:_start + 4000]

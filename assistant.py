@@ -1360,16 +1360,30 @@ def detect_user_intent(text: str) -> UserIntent:
     if norm_no_punct in ('калькулятор', 'калькулятор анестезии', 'шпаргалка по анестезии', 'расчет анестезии', 'расчёт анестезии', 'дозы анестетиков', 'максимальная доза анестезии', 'расчет карпул', 'расчёт карпул', '/calc'):
         return UserIntent(INTENT_CALCULATOR, clean)
 
-    if re.match(r'^(посчитай|рассчитай|расчет|расчёт|калькулятор)\s+(мне\s+)?(анестези[юия]|дозировк[уи]|доз[уа]|карпул[ы]?)\b', norm_no_punct) or \
-       re.match(r'^(посчитай|рассчитай)\s+доз[уа]\b', norm_no_punct) or \
-       re.match(r'^(сколько|какая)\s+(карпул|дозировка|доза|максимальная\s+доза)\b', norm_no_punct) or \
-       re.match(r'^(максимальная\s+доза|дозировка|доза)\s+', norm_no_punct) or \
-       re.match(rf'^(дозировк[аиеу]?|доза|дозы|расчет|расчёт)\s+(препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
-       re.match(rf'^(посчитай|рассчитай)\s+(дозировку\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
-       re.match(r'^(дозировка|расчет|расчёт)\s+анестезии\b', norm_no_punct):
-        return UserIntent(INTENT_CALCULATOR, clean)
+    # Red-Team Guard: исключаем запросы антибиотиков, НПВС и тяжелой соматики (инфаркт, криз, блокада)
+    # из детерминированного калькулятора, направляя их в LLM-триаж (CLINICAL_CHAT)
+    is_non_anesthetic = bool(re.search(
+        r'\b(?:амоксиклав|амоксициллин|аугментин|ибупрофен|парацетамол|нурофен|линкомицин|ципролет|'
+        r'цефтриаксон|кеторол|нимесил|найз|супрастин|дексаметазон|антибиотик|нпвс|нпвп)\w*\b',
+        norm
+    ))
+    is_somatic_clinical = bool(re.search(
+        r'\b(?:криз|инфаркт|стенокарди|преэклампси|эклампси|блокад|аритми|гипертензи|давлен|'
+        r'кардиостимулятор|пейсмейкер|порок|аллерги)\w*\b',
+        norm
+    ))
+
+    if not is_non_anesthetic and not is_somatic_clinical:
+        if re.match(r'^(посчитай|рассчитай|расчет|расчёт|калькулятор)\s+(мне\s+)?(анестези[юия]|дозировк[уи]|доз[уа]|карпул[ы]?)\b', norm_no_punct) or \
+           re.match(r'^(посчитай|рассчитай)\s+доз[уа]\b', norm_no_punct) or \
+           re.match(rf'^(сколько|какая)\s+(карпул|дозировка|доза|максимальная\s+доза)\s+(?:препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
+           re.match(rf'^(дозировк[аиеу]?|доза|дозы|расчет|расчёт)\s+(препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
+           re.match(rf'^(посчитай|рассчитай)\s+(дозировку\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
+           re.match(r'^(дозировка|расчет|расчёт)\s+анестезии\b', norm_no_punct):
+            return UserIntent(INTENT_CALCULATOR, clean)
 
     # 7. INTENT_WEB_SEARCH
+
     m_goog = re.match(r'^(?:погугли|загугли|гугли|погуглить)\s*(.*)$', norm, re.IGNORECASE)
     if m_goog:
         prefix_len = len(norm) - len(m_goog.group(1))
@@ -1416,6 +1430,9 @@ def detect_user_intent(text: str) -> UserIntent:
         raw_q = re.sub(r'^(?:по|про|о|об)\s+', '', raw_q, flags=re.IGNORECASE).strip()
         return UserIntent(INTENT_WEB_SEARCH, raw_q)
 
+    # Клинические протоколы («найди протокол адгезивной фиксации emax») обрабатываются
+    # клиническим ядром/LLM (CLINICAL_CHAT), а не отправляются слепо в веб-поиск
+
     m_proto = re.match(r'^(?:найди|поищи)\s+протокол(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
     if m_proto:
         prefix_len = len(norm) - len(m_proto.group(1))
@@ -1444,13 +1461,16 @@ async def classify_pm_intent_semantic_async(text: str) -> dict:
 3. "QUIZ": запрос на запуск викторины/теста для проверки знаний врача ("хочу квиз", "проверь мои знания", "задай клинический тест"). ВНИМАНИЕ: если врач задает свой вопрос по лечению пациента ("какой силер?", "почему болит?"), это СТРОГО "CLINICAL_CHAT"!
 4. "CASE": запрос на запуск интерактивного симулятора / разбор виртуального клинического случая по шагам (диагностическая игра). ВНИМАНИЕ: если врач описывает СВОЕГО реального пациента для консультации ("у меня пациент 45 лет, зуб 3.6..."), это НЕ симулятор, а "CLINICAL_CHAT"!
 5. "BOOKMARKS": запрос на просмотр сохраненных клинических постов или закладок.
-6. "CLINICAL_CHAT": обычная клиническая консультация, диагностика, тактика лечения, интерпретация симптомов, рекомендации коллеге.
+6. "STYLE": запрос на выбор, переключение или настройку стиля/режима общения бота ("поменяй стиль", "смени стиль", "хочу краткие ответы", "академический стиль", "режим блиц", "подробный стиль", "стиль общения").
+7. "MENU": запрос открытия главного меню бота, клавиатуры или навигации ("меню", "открой меню", "главное меню", "покажи кнопки").
+8. "HELP": запрос справки, возможностей ассистента или инструкций по использованию ("помощь", "справка", "что ты умеешь", "как тобой пользоваться", "инструкция", "возможности").
+9. "CLINICAL_CHAT": обычная клиническая консультация, диагностика, тактика лечения, интерпретация симптомов, рекомендации коллеге.
 
 Запрос врача:
 "{text}"
 
 Ответь СТРОГО в формате JSON без Markdown:
-{{"intent": "WEB_SEARCH|CALCULATOR|QUIZ|CASE|BOOKMARKS|CLINICAL_CHAT", "search_query": "поисковый запрос или null", "drug": "articaine|mepivacaine|lidocaine|null", "weight_kg": null, "confidence": 1.0}}"""
+{{"intent": "WEB_SEARCH|CALCULATOR|QUIZ|CASE|BOOKMARKS|STYLE|MENU|HELP|CLINICAL_CHAT", "search_query": "поисковый запрос или null", "drug": "articaine|mepivacaine|lidocaine|null", "weight_kg": null, "confidence": 1.0}}"""
 
     status_ctx = {"kind": "pm_chat", "thinking_level": "LOW"}
     try:
@@ -1478,7 +1498,9 @@ async def classify_pm_intent_semantic_async(text: str) -> dict:
 def calculate_anesthesia_instant(text: str) -> str | None:
     """
     Выполняет мгновенный клинический расчет дозировки анестезии и допустимого количества карпул
-    на основе веса пациента и выбранного препарата (артикаин 4%, мепивакаин 3%, лидокаин 2%).
+    через эталонный клинический движок anesthesia_calc.
+    Обеспечивает соблюдение кардио-лимитов адреналина (0.04 мг / 2 карпулы),
+    педиатрических стоп-факторов (<15 кг) и расчет по весу пациента.
     """
     if not text:
         return None
@@ -1488,141 +1510,47 @@ def calculate_anesthesia_instant(text: str) -> str | None:
     if ped_guard and ped_guard.get("is_pediatric"):
         return ped_guard.direct_response
 
-    lower = text.lower()
+    import anesthesia_calc
+    res = anesthesia_calc.calculate_anesthesia_dose(text)
+    if res.is_valid:
+        return res.html_report
 
-    # 1. Распознавание препарата
-    drug = None
-    if re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин)\w*', lower):
-        drug = "articaine"
-    elif re.search(r'\b(?:мепивакаин|скандонест|мепивастезин|мепидонт)\w*', lower):
-        drug = "mepivacaine"
-    elif re.search(r'\b(?:лидокаин|ксилокаин|ксилонор)\w*', lower):
-        drug = "lidocaine"
-
-    # 2. Определение возраста/статуса
-    is_child = bool(re.search(r'\b(?:ребен|детск|ребёнк|малыш|детям)\w*', lower))
-
-    # 3. Извлечение веса через клинический санитизатор (защита от номеров зубов FDI и АД)
-    import anesthesia_calc as _ac_module
-    weight = _ac_module.parse_weight_from_text(lower)
-    if weight is None:
-        weight_match = re.search(r'(?<!\d)(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg|килограмм[а-яё]*)(?!\d)', lower)
-        if weight_match:
-            try:
-                weight = float(weight_match.group(1).replace(',', '.'))
-            except ValueError:
-                weight = None
-
-    if weight is None:
-        if drug == "articaine":
-            return (
-                "🧮 <b>Расчет дозировки: Артикаин 4% (1:100 000 / 1:200 000)</b>\n\n"
-                "• <b>Норма:</b> 7 мг/кг (взрослые), 5 мг/кг (дети).\n"
-                "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 7.3 карпулы по 1.7 мл).\n"
-                "• <b>1 карпула 1.7 мл 4%:</b> = <b>68 мг</b> артикаина гидрохлорида.\n\n"
-                "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
-            )
-        elif drug == "mepivacaine":
-            return (
-                "🧮 <b>Расчет дозировки: Мепивакаин 3% (Скандонест без вазоконстриктора)</b>\n\n"
-                "• <b>Норма:</b> 4.4 мг/кг.\n"
-                "• <b>Абсолютный максимум:</b> не более <b>400 мг</b> (≈ 7.4 карпулы по 1.8 мл).\n"
-                "• <b>1 карпула 1.8 мл 3%:</b> = <b>54 мг</b> мепивакаина гидрохлорида.\n\n"
-                "💡 <i>Укажите вес пациента для точного расчета, например: «дозировка скандонеста на 60 кг» или «скандонест ребенку 20 кг».</i>"
-            )
-        elif drug == "lidocaine":
-            return (
-                "🧮 <b>Расчет дозировки: Лидокаин 2% (с адреналином)</b>\n\n"
-                "• <b>Норма:</b> 7 мг/кг (взрослые), 4.4 мг/кг (дети).\n"
-                "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 13.8 карпул по 1.8 мл).\n"
-                "• <b>1 карпула 1.8 мл 2%:</b> = <b>36 мг</b> лидокаина гидрохлорида.\n\n"
-                "💡 <i>Укажите вес пациента для точного расчета, например: «лидокаин на 70 кг».</i>"
-            )
-        return None
-
-    if weight < 3 or weight > 300:
-        return f"⚠️ <i>Указан некорректный вес ({weight} кг). Пожалуйста, укажите реальный вес пациента.</i>"
-
-    # Педиатрический стоп-фактор: артикаин строго противопоказан до 4 лет (< 15 кг)
-    if weight < 15.0 and (drug == "articaine" or drug is None):
+    # Если вес не указан, выдаем подробную клиническую справку по запрошенному препарату
+    drug_key = anesthesia_calc.detect_anesthetic_drug(text)
+    if "mepivacaine" in drug_key:
         return (
-            f"⛔ <b>ПЕДИАТРИЧЕСКАЯ БЕЗОПАСНОСТЬ (Вес {weight:g} кг / возраст < 4 лет):</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "• <b>4% Артикаин КАТЕГОРИЧЕСКИ ПРОТИВОПОКАЗАН</b> детям до 4 лет (масса тела < 15 кг) согласно инструкции МЗ РФ!\n"
-            "• <b>Препарат выбора у детей раннего возраста:</b> Мепивакаин 3% без вазоконстриктора или Лидокаин 2% строго по расчету мг/кг.\n"
-            f"• <b>Мепивакаин 3%:</b> максимум {int((weight * 4.4) / 54.0)} карпулы ({weight * 4.4:.1f} мг).\n"
-            "⚠️ <i>Округление доз у детей — строго ВНИЗ к меньшему целому!</i>"
+            "🧮 <b>Расчет дозировки: Мепивакаин 3% (Скандонест без вазоконстриктора)</b>\n\n"
+            "• <b>Норма:</b> 4.4 мг/кг.\n"
+            "• <b>Абсолютный максимум:</b> не более <b>400 мг</b> (≈ 7.4 карпулы по 1.8 мл).\n"
+            "• <b>1 карпула 1.8 мл 3%:</b> = <b>54 мг</b> мепивакаина гидрохлорида.\n\n"
+            "💡 <i>Укажите вес пациента для точного расчета, например: «дозировка скандонеста на 60 кг» или «скандонест ребенку 20 кг».</i>"
         )
-
-    if weight < 35:
-        is_child = True
-
-    if drug == "articaine" or drug is None:
-        drug_name = "Артикаин 4% (1:100 000 / 1:200 000)"
-        carpsize = 1.7
-        mg_per_carp = 68.0
-        mg_per_kg = 5.0 if is_child else 7.0
-        abs_max_mg = 500.0
-    elif drug == "mepivacaine":
-        drug_name = "Мепивакаин 3% (Скандонест без адреналина)"
-        carpsize = 1.8
-        mg_per_carp = 54.0
-        mg_per_kg = 4.4
-        abs_max_mg = 400.0
-    elif drug == "lidocaine":
-        drug_name = "Лидокаин 2% (с адреналином)"
-        carpsize = 1.8
-        mg_per_carp = 36.0
-        mg_per_kg = 4.4 if is_child else 7.0
-        abs_max_mg = 500.0
-
-    calc_by_weight = weight * mg_per_kg
-    effective_max_mg = min(calc_by_weight, abs_max_mg)
-    hit_ceiling = calc_by_weight >= abs_max_mg
-    ceiling_weight_threshold = abs_max_mg / mg_per_kg
-
-    max_carpules_exact = effective_max_mg / mg_per_carp
-    safe_carpules_floor = int(max_carpules_exact)
-
-    # Правильное склонение в родительном падеже: "до N карпул / карпулы"
-    rem100 = safe_carpules_floor % 100
-    rem10 = safe_carpules_floor % 10
-    if rem100 in (11, 12, 13, 14):
-        carp_declension = f"{safe_carpules_floor} карпул"
-    elif rem10 == 1:
-        carp_declension = f"{safe_carpules_floor} карпулы"
-    else:
-        carp_declension = f"{safe_carpules_floor} карпул"
-
-    category_str = "Ребёнок" if is_child else "Взрослый"
-
-    out = [
-        f"🧮 <b>Клинический расчет анестезии: {drug_name}</b>\n",
-        f"👤 <b>Пациент:</b> {category_str}, вес <b>{weight:g} кг</b>",
-        f"📏 <b>Норма расчета:</b> {mg_per_kg} мг/кг (абсолютный потолок: {abs_max_mg:g} мг)\n",
-        "📊 <b>Математический расчет:</b>",
-        f"• По весу ({weight:g} кг × {mg_per_kg} мг/кг) = <b>{calc_by_weight:g} мг</b>",
-    ]
-
-    if hit_ceiling:
-        out.append(
-            f"• ⚠️ <b>Сработал абсолютный потолок {abs_max_mg:g} мг</b> "
-            f"(для данного препарата наступает уже при весе ≥ {ceiling_weight_threshold:.1f} кг)."
+    elif "lidocaine" in drug_key:
+        return (
+            "🧮 <b>Расчет дозировки: Лидокаин 2% (с адреналином)</b>\n\n"
+            "• <b>Норма:</b> 7 мг/кг (взрослые), 4.4 мг/кг (дети).\n"
+            "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 13.8 карпул по 1.8 мл).\n"
+            "• <b>1 карпула 1.8 мл 2%:</b> = <b>36 мг</b> лидокаина гидрохлорида.\n\n"
+            "💡 <i>Укажите вес пациента для точного расчета, например: «лидокаин на 70 кг».</i>"
         )
-        out.append(f"• <b>Итоговый допустимый предел:</b> <b>{effective_max_mg:g} мг</b>\n")
-    else:
-        out.append(f"• <b>Итоговый допустимый предел:</b> <b>{effective_max_mg:g} мг</b> (не превышает потолок {abs_max_mg:g} мг)\n")
-
-    out.extend([
-        f"💉 <b>Допустимое количество карпул (по {carpsize} мл = {mg_per_carp:g} мг):</b>",
-        f"• Точное значение: <code>{effective_max_mg:g} / {mg_per_carp:g}</code> = <b>{max_carpules_exact:.2f} карпул</b>",
-        f"• <b>Безопасный максимум:</b> <b>до {carp_declension}</b> ({safe_carpules_floor * mg_per_carp:g} мг)\n",
-        "⚠️ <i>Примечание: Это максимальная доза для соматически здорового пациента. "
-        "При коморбидности (сердечно-сосудистые патологии, печеночная/почечная недостаточность) "
-        "дозировку следует снижать, а также строго контролировать дозу вазоконстриктора (адреналина)!</i>"
-    ])
-
-    return "\n".join(out)
+    elif "bupivacaine" in drug_key:
+        return (
+            "🧮 <b>Расчет дозировки: Бупивакаин 0.5% (Маркаин с адреналином 1:200 000)</b>\n\n"
+            "• <b>Норма:</b> 2.0 мг/кг (взрослые). ДЕТЯМ ДО 12 ЛЕТ ПРОТИВОПОКАЗАН!\n"
+            "• <b>Абсолютный максимум:</b> не более <b>90 мг</b> (≈ 10 карпул по 1.8 мл).\n"
+            "• <b>1 карпула 1.8 мл 0.5%:</b> = <b>9 мг</b> бупивакаина.\n\n"
+            "💡 <i>Укажите вес пациента для точного расчета, например: «бупивакаин на 70 кг».</i>"
+        )
+    elif re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|анестез\w*|карпул\w*)\b', text, re.IGNORECASE):
+        return (
+            "🧮 <b>Расчет дозировки: Артикаин 4% (1:100 000 / 1:200 000)</b>\n\n"
+            "• <b>Норма:</b> 7 мг/кг (взрослые), 5 мг/кг (дети).\n"
+            "• <b>Абсолютный максимум:</b> не более <b>500 мг</b> (≈ 7.3 карпулы по 1.7 мл).\n"
+            "• <b>1 карпула 1.7 мл 4%:</b> = <b>68 мг</b> артикаина гидрохлорида.\n"
+            "• <b>Кардиологический лимит:</b> при сердечно-сосудистой патологии максимум <b>2 карпулы</b> (0.04 мг адреналина)!\n\n"
+            "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
+        )
+    return res.error_message
 
 
 def calculate_endo_instant(text: str) -> str | None:
@@ -1880,7 +1808,6 @@ def get_main_menu_card_text() -> str:
 
 
 async def init_assistant(bot_client):
-    global BOT_ID
     try:
         await resolve_bot_identity(bot_client)
         logger.info(f"Assistant initialized with BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
@@ -4087,7 +4014,7 @@ _SILENCE_EXACT = ("отвали", "уймись", "угомонись")
 # сообщений: подстрочный список давал 623 совпадения, из них клинических —
 # подавляющая часть.
 _SILENCE_PHRASES = (
-    "не пиши", "не пишите", "хватит спамить", "закрой рот", "не зуди",
+    "не пиши", "не пишите", "хватит спамить", "хватит писать", "закрой рот", "не зуди",
     "удали бот", "удалить бот", "удалите бот", "выключи бот", "выключите бот",
     "выруби бот", "отключи бот", "убери бот", "выкинуть бот", "забаньте бот",
     # «надоел» отдельным словом не годится: «эта работа надоела» — не про бота,
@@ -4099,16 +4026,19 @@ _SILENCE_PHRASES = (
 # «работа» и «суббота»; упоминания — по любому @…bot.
 # Предотвращаем ложные срабатывания на «координатор лечения» и «душный пациент» / «душно».
 _BOT_REFERENCE_RE = re.compile(
-    r"\bбот\w{0,3}\b|\bробот\w{0,3}\b|\bкоординатор\s+бота\b|\bдушнила\b|@\w*bot\b",
+    r"\bбот(?:[а-яё]{0,3}|яр[а-яё]*|ик[а-яё]*)?\b|\bробот(?:[а-яё]{0,3})?\b|@\w*bot\b",
     re.IGNORECASE,
 )
 
 _BOT_PERF_CRITIQUE_RE = re.compile(
     r'(?i)\b(?:тупит|тормозит|завис\w*|глючит|лагает|долго\s+(?:отвечает|думает|грузит|обрабатывает)|'
-    r'(?:бот\s+)?туп(?:ой|ит)|мертв\w*|не\s+отвечает)\b'
+    r'(?:бот\s+)?туп(?:ой|ит)|(?:бот\s+)?мертв(?:ый|а|о|ы)?(?:\s+бот)?|не\s+отвечает)\b'
 )
 
-_BOT_WORD_RE = re.compile(r'\bбот(?:[ауеы]|ом|ов|ам|ами|ах)?\b', re.IGNORECASE)
+_BOT_WORD_RE = re.compile(
+    r"\b(?:бот(?:[а-яё]{0,3}|яр[а-яё]*|ик[а-яё]*)?|робот(?:[а-яё]{0,3})?)\b",
+    re.IGNORECASE,
+)
 
 _SILENCE_DEMAND_RE = re.compile(
     "|".join(rf"\b{re.escape(word)}\w{{0,3}}\b" for word in _SILENCE_DEMANDS),
@@ -4123,7 +4053,7 @@ _SILENCE_EXACT_RE = re.compile(
 _BOT_BREAKDOWN_RE = re.compile(
     r"(?i)\b(?:он|бот|робот|ассистент)\s+(?:сломал(?:ся|ась)?|завис(?:нул)?|глючит|бредит|сошел\s+с\s+ума|тронулся|не\s+работает|погнал)\b|"
     r"\b(?:он|бот|робот)\s+(?:сломан|поломался)\b|"
-    r"\bты\s+(?:сломал(?:ся)?|завис|бредишь|гонишь|ошибся|глючишь)\b|"
+    r"\bты\s+(?:сломал(?:ся)?|завис|бредишь|гонишь|глючишь)\b|"
     r"\b(?:он|ты)\s+(?:сломался|сломался\s*,\s*он)\b"
 )
 
@@ -4140,6 +4070,9 @@ def is_negative_feedback(text):
     if _SILENCE_EXACT_RE.search(text_lower):
         return True
     if _BOT_BREAKDOWN_RE.search(text_lower):
+        # Если есть клинический контекст или вопрос, это уточнение/диалог, а не требование тишины
+        if "?" in text_lower or (has_dental_term and has_dental_term(text_lower)):
+            return False
         return True
     return bool(_SILENCE_DEMAND_RE.search(text_lower))
 
@@ -4220,7 +4153,6 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     is_about_bot = False
 
     # Check if reply to bot
-    global BOT_ID
     if reply_to_msg_id:
         check_bot_ids = get_known_bot_ids() | ({BOT_ID} if BOT_ID else set())
         try:
@@ -5107,7 +5039,7 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
         mg_per_carp = 36.0
         mg_per_kg_child = 4.4
         abs_max_mg = 300.0
-    elif re.search(r'\b(?:анестези\w*|карпул\w*|дозировк\w*|укол\w*)\b', lower):
+    elif re.search(r'\b(?:анестези\w*|карпул\w*|обезбол\w*|укол\w*)\b', lower):
         drug = "articaine"
         drug_name = "Артикаин 4% (стандарт)"
         carpsize = 1.7
@@ -5307,8 +5239,6 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     if msg_id in REPLIED_MSG_IDS:
         logger.info("Assistant already replied to message %s. Skipping text trigger.", msg_id)
         return False
-
-    global BOT_ID
 
     # 1. Проверяем глобальную критику / требование выключить бота
     if await check_and_apply_silence(event, text, reply_to_msg_id):
@@ -5661,21 +5591,16 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             last_case_bot_msg = state.get("last_case_bot_msg_id")
             last_case_time = _parse_state_dt(state.get("last_case_time"))
 
-            # В бурной дискуссии бот не должен встревать в каждую реплику автора кейса:
-            # 1. Проверяем авторский кулдаун в группе: если бот уже отвечал автору (< 10 минут назад),
-            #    не встреваем в его реплики без прямого обращения/тега/Reply на бота!
-            # 2. Требуем наличия явного клинического вопроса к боту
-            has_explicit_author_question = bool(
-                text and ("?" in text or "？" in text or any(qw in text.lower().split() for qw in ("как", "какой", "какая", "почему", "чем", "подскажите", "мнения")))
-            )
-            author_group_cd_active = bool(sender_id and is_author_group_cooldown_active(sender_id))
+            # В активном окне разбора клинического случая (30 минут):
+            # Передаем принятие решения нейротриажу (check_dialogue_continuation_triage),
+            # не блокируя автора авторским кулдауном и жестким списком вопросительных слов.
+            is_substantive_message = bool(text and len(text.strip()) >= 5 and not is_conversation_closer(text))
 
             if (
                 last_case_author
                 and sender_id == last_case_author
                 and (datetime.now() - last_case_time) < timedelta(minutes=30)
-                and not author_group_cd_active
-                and has_explicit_author_question
+                and is_substantive_message
             ):
                 # Проверяем критику / негативный фидбек от автора кейса
                 if is_negative_feedback(text):
@@ -6604,6 +6529,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     is_passive = not (is_direct_reply or is_mentioned)
 
     # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
+    age_minutes = 0.0
     msg_dt = getattr(message, 'date', None)
     if not msg_dt:
         try:
@@ -7019,7 +6945,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if error:
             logger.error(f"Media Assistant Gemini generation error on attempt {attempt}: {error}")
             if attempt == max_retries:
-                break
+                return
             continue
 
         candidate_text = getattr(response, "text", None)
@@ -11006,6 +10932,12 @@ async def handle_private_message(bot_client, event):
                             detected = UserIntent(INTENT_CASE)
                         elif sem_intent == "BOOKMARKS":
                             detected = UserIntent(INTENT_BOOKMARKS, sem_res.get("search_query") or "")
+                        elif sem_intent == "STYLE":
+                            detected = UserIntent(INTENT_STYLE)
+                        elif sem_intent == "MENU":
+                            detected = UserIntent(INTENT_MENU)
+                        elif sem_intent == "HELP":
+                            detected = UserIntent(INTENT_HELP)
                 except Exception as sem_err:
                     logger.debug(f"Semantic triage skipped: {sem_err}")
 
@@ -11311,6 +11243,34 @@ async def handle_private_message(bot_client, event):
             )
             buttons = chairside_tools.build_aae_step_markup(step=1, tooth_num="Клинический кейс")
             await bot_client.send_message(entity=chat_id, message=aae_intro, buttons=buttons, parse_mode='html')
+            return
+
+        if text.lower().startswith(("/torque", "/торк")):
+            import chairside_tools
+            parts = text.strip().split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            await chairside_tools.handle_torque_command(bot_client, event, arg)
+            return
+
+        if text.lower().startswith(("/anes", "/анестезия")):
+            import chairside_tools
+            parts = text.strip().split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            await chairside_tools.handle_anes_command(bot_client, event, arg)
+            return
+
+        if text.lower().startswith(("/pharma", "/антибиотики", "/нпвп")):
+            import chairside_tools
+            parts = text.strip().split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            await chairside_tools.handle_pharma_command(bot_client, event, arg)
+            return
+
+        if text.lower().startswith(("/preserve", "/феррул", "/сохранение")):
+            import chairside_tools
+            parts = text.strip().split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            await chairside_tools.handle_preserve_command(bot_client, event, arg)
             return
 
         if text.lower().startswith(("/start consult", "/start_consult")):
@@ -12884,11 +12844,13 @@ async def handle_private_message(bot_client, event):
 9. ЗАПРЕТ ОТОЗВАННЫХ ПРЕПАРАТОВ (СОЛКОСЕРИЛ, АКТОВЕГИН):
    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО рекомендовать Солкосерил (дентальную пасту/мазь/желе) и Актовегин! Препарат отозван производителем с мирового рынка и из РФ еще в 2020 г., не продается и не имеет доказанной эффективности. При декубитальных язвах, афтах, травмах и ожогах слизистой (в т.ч. гипохлоритом NaOCl) назначай ТОЛЬКО современные доступные доказательные средства: Асепта бальзам адгезивный, Холисал гель, Винилин (бальзам Шостаковского), Афтофикс. Запрещено химическое прижигание спиртом/перекисью/марганцовкой."""
 
+            if len(context_msgs) > 1:
+                context_msgs = context_msgs[:-1]
             prompt = f"""
 {system_role}
 
 История предыдущего диалога (контекст):
-{chr(10).join(_fit_pm_history(context_msgs[:-1])) if len(context_msgs) > 1 else "(ранее диалога не было)"}
+{chr(10).join(_fit_pm_history(context_msgs)) if context_msgs else "(ранее диалога не было)"}
 
 ТЕКУЩИЙ ВОПРОС ВРАЧА (ОТВЕЧАЙ СТРОГО НА НЕГО):
 {text}
@@ -13835,7 +13797,7 @@ async def handle_group_direct_ask(bot_client, event, question):
             # Исключаем параллельные несвязанные клинические кейсы других врачей в общем чате.
             between_rows = await query_db_async(
                 "SELECT msg_id, sender_name, text, date, media_description, sender_id, has_media, reply_to_msg_id FROM messages "
-                "WHERE msg_id > ? AND msg_id < ? ORDER BY msg_id ASC LIMIT 50",
+                "WHERE msg_id > ? AND msg_id < ? ORDER BY date ASC, msg_id ASC LIMIT 50",
                 (reply_to_msg_id, msg_id)
             )
             for r in (between_rows or []):
@@ -13882,6 +13844,9 @@ async def handle_group_direct_ask(bot_client, event, question):
         requester_name = "Коллега"
 
         # 1. Собираем медиа-файлы (снимки/рентген) ДО сборки текста контекста,
+        # чтобы статус наличия изображений был на 100% точен в разметке
+        multimodal_image_urls = []
+        target_media_ids = []
         # Если само сообщение команды содержит медиа (фото/видео прикреплено прямо к /ask или обращению)
         event_media = bool(
             getattr(event, "photo", None)
@@ -13891,9 +13856,6 @@ async def handle_group_direct_ask(bot_client, event, question):
         )
         if event_media and msg_id not in target_media_ids:
             target_media_ids.insert(0, msg_id)
-        # чтобы статус наличия изображений был на 100% точен в разметке
-        multimodal_image_urls = []
-        target_media_ids = []
         if reply_to_msg_id:
             for r in collected_msgs:
                 r_mid = r[0]
@@ -14308,6 +14270,14 @@ async def handle_group_direct_ask(bot_client, event, question):
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):
                         candidate_reply = cand_fb
                 if not candidate_reply:
+                    if not last_ask_candidate:
+                        await bot_client.send_message(
+                            entity=chat_id,
+                            message="⚠️ <i>Не удалось разобрать вопрос — модели сейчас недоступны. Попробуйте через пару минут.</i>",
+                            reply_to=msg_id,
+                            parse_mode='html',
+                        )
+                        return None
                     await bot_client.send_message(
                         entity=chat_id,
                         message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",

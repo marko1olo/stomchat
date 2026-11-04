@@ -216,6 +216,52 @@ class TestIntentClassifier(unittest.TestCase):
                 res = detect_user_intent(text)
                 self.assertIn(res.name, [None, INTENT_WEB_SEARCH])
 
+        # 5. Red-Team: Antibiotics and NSAIDs must not be hijacked by INTENT_CALCULATOR
+        pharma_cases = [
+            "дозировка амоксиклава при периостите у ребенка 25 кг",
+            "доза ибупрофена после удаления ретинированного зуба 3.8",
+            "максимальная доза нурофена ребенку 4 года",
+            "дозировка линкомицина взрослым",
+        ]
+        for text in pharma_cases:
+            with self.subTest(text=text):
+                res = detect_user_intent(text)
+                self.assertNotEqual(res.name, INTENT_CALCULATOR)
+
+        # 6. Red-Team: Acute cardiac pathology / crisis must not be hijacked by instant calculator
+        somatic_cases = [
+            "дозировка артикаина при гипертоническом кризе",
+            "посчитай мне дозу ультракаина у пациента с инфарктом миокарда в анамнезе 2 месяца назад",
+            "максимальная доза мепивакаина если у пациента АВ-блокада 2 степени",
+        ]
+        for text in somatic_cases:
+            with self.subTest(text=text):
+                res = detect_user_intent(text)
+                self.assertNotEqual(res.name, INTENT_CALCULATOR)
+
+        # 5. Red-Team: Antibiotics and NSAIDs must not be hijacked by INTENT_CALCULATOR
+        pharma_cases = [
+            "дозировка амоксиклава при периостите у ребенка 25 кг",
+            "доза ибупрофена после удаления ретинированного зуба 3.8",
+            "максимальная доза нурофена ребенку 4 года",
+            "дозировка линкомицина взрослым",
+        ]
+        for text in pharma_cases:
+            with self.subTest(text=text):
+                res = detect_user_intent(text)
+                self.assertNotEqual(res.name, INTENT_CALCULATOR)
+
+        # 6. Red-Team: Acute cardiac pathology / crisis must not be hijacked by instant calculator
+        somatic_cases = [
+            "дозировка артикаина при гипертоническом кризе",
+            "посчитай мне дозу ультракаина у пациента с инфарктом миокарда в анамнезе 2 месяца назад",
+            "максимальная доза мепивакаина если у пациента АВ-блокада 2 степени",
+        ]
+        for text in somatic_cases:
+            with self.subTest(text=text):
+                res = detect_user_intent(text)
+                self.assertNotEqual(res.name, INTENT_CALCULATOR)
+
 
 class TestAnesthesiaInstantCalculator(unittest.TestCase):
     """Test instant anesthesia calculation function calculate_anesthesia_instant."""

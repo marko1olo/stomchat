@@ -11,6 +11,8 @@ import os
 import re
 import sys
 import unittest
+import tempfile
+import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -135,7 +137,15 @@ class TestZeroDeadScreenLiveStatus(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         super().setUp()
+        self._tmpdir = tempfile.mkdtemp(prefix="stom_pm_flow_")
+        self._orig_state_path = assistant.STATE_PATH
+        assistant.STATE_PATH = os.path.join(self._tmpdir, "test_state.json")
         assistant.USER_COOLDOWNS.clear()
+
+    def tearDown(self):
+        assistant.STATE_PATH = self._orig_state_path
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        super().tearDown()
 
     async def test_photo_analysis_stages_sequence(self):
         """При анализе снимка статус проходит: 1. Скачиваю -> 2. Изучаю анатомию -> 3. Формирую протокол -> Удаление."""

@@ -406,5 +406,31 @@ class TestInFlightFollowupTriageRedTeam(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.followup_messages[0]['msg_id'], 601)
         await self.mgr.unregister_session(session)
 
+    async def test_inflight_msg_to_session_leak_on_completed(self):
+        """Old trigger_msg_ids must be pruned when register_session is called for next session."""
+        s1 = await self.mgr.register_session(self.chat_id, self.sender_id, 100, "Q1")
+        s1.mark_completed()
+        s2 = await self.mgr.register_session(self.chat_id, self.sender_id, 200, "Q2")
+        self.assertNotIn((self.chat_id, 100), self.mgr._msg_to_session)
+        self.assertIn((self.chat_id, 200), self.mgr._msg_to_session)
+        await self.mgr.unregister_session(s2)
+
+    async def test_inflight_followup_indexed_in_msg_to_session(self):
+        """Follow-up messages must be indexed in _msg_to_session for reply_to_msg_id lookup."""
+        s = await self.mgr.register_session(self.chat_id, self.sender_id, 100, "Q1")
+        self.mgr.record_incoming_message(self.chat_id, self.sender_id, 101, "Followup text", False)
+        found = self.mgr.get_active_session(self.chat_id, reply_to_msg_id=101)
+        self.assertEqual(found, s)
+        await self.mgr.unregister_session(s)
+
+    async def test_inflight_prune_stale_sessions(self):
+        """Expired or completed sessions must be pruned by prune_stale_sessions()."""
+        s1 = await self.mgr.register_session(self.chat_id, self.sender_id, 100, "Q1")
+        s1.start_time = time.time() - 250.0  # Expired (> 180s)
+        pruned = await self.mgr.prune_stale_sessions()
+        self.assertGreaterEqual(pruned, 1)
+        self.assertNotIn((self.chat_id, self.sender_id), self.mgr._sessions)
+        self.assertNotIn((self.chat_id, 100), self.mgr._msg_to_session)
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ clinical_rescue.py — Демон спасения «повисших» клин
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import html
 import logging
@@ -52,7 +53,12 @@ QUESTION_MARKERS = [
     "кто сталкивался", "посоветуйте", "какой силер", "как пройти",
     "чем обработать", "как лучше", "поделитесь опытом", "что думаете",
     "мнения?", "ваше мнение", "как лечить", "что выбрать", "посоветуете",
-    "какая тактика", "кто как делает", "в чем причина"
+    "какая тактика", "кто как делает", "в чем причина",
+    "помогите", "помощь", "прошу помощи", "нужен совет", "нужна помощь", "нужна подсказка",
+    "подсказка", "как быть", "что предпринять", "взгляните", "посмотрите", "оцените",
+    "разбор", "тактика", "жалобы", "клинический случай", "кейс", "осложнение",
+    "сломал", "сломан", "сломалась", "перфорация", "перфорировал", "перелом", "обломок",
+    "отломок", "не могу пройти", "не проходит", "не получается", "сомневаюсь", "сомнения"
 ]
 
 CLINICAL_KEYWORDS = [
@@ -122,9 +128,7 @@ def resolve_bot_id(bot_client=None) -> int:
 def ensure_rescue_table(db_path: str):
     """Гарантирует существование таблицы clinical_rescues в БД."""
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS clinical_rescues (
                     msg_id INTEGER PRIMARY KEY,
@@ -176,8 +180,22 @@ def is_clinical_rescue_candidate(
     # Текстовое сообщение без медиа
     if len(clean) < 15:
         return False
-    has_q = ("?" in clean) or any(m in clean for m in QUESTION_MARKERS)
-    return has_q and has_clin_text
+    has_clin_kw = any(k in clean for k in CLINICAL_KEYWORDS)
+    has_q = ("?" in clean) or any(m in clean for m in QUESTION_MARKERS) or (len(clean) >= 40 and has_clin_kw)
+    return has_q and (has_clin_text or has_clin_kw)
+
+
+@contextlib.contextmanager
+def _open_rescue_db(db_path: str, timeout: float = 30.0):
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA cache_size = -4000")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _get_table_columns(conn, table_name: str) -> set:
@@ -193,9 +211,7 @@ def _get_table_columns(conn, table_name: str) -> set:
 def check_recent_chat_activity(db_path: str, chat_id: int, minutes: int = 5) -> int:
     """Считает число сообщений в чате за последние N минут (Activity Guard)."""
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             cols = _get_table_columns(conn, "messages")
             date_col = "date" if "date" in cols else "timestamp"
             where_clauses = [f"{date_col} >= datetime('now', ?)"]
@@ -238,9 +254,7 @@ def find_unanswered_clinical_candidates(
     ensure_rescue_table(db_path)
     candidates = []
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             conn.execute("PRAGMA cache_size = -4000")
             conn.row_factory = sqlite3.Row
             cols = _get_table_columns(conn, "messages")
@@ -399,9 +413,7 @@ def mark_case_and_album_rescued(
     в таблице clinical_rescues, исключая повторные спасения других кадров.
     """
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute("""
                 INSERT OR REPLACE INTO clinical_rescues (msg_id, chat_id, rescued_at)
@@ -451,9 +463,7 @@ def mark_case_rescued(
 def get_rescues_count_24h(db_path: str, chat_id: int) -> int:
     """Возвращает число спасений за последние 24 часа."""
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COUNT(*) FROM clinical_rescues
@@ -735,9 +745,7 @@ async def execute_rescue_for_candidate(
 
     # Сохраняем в bot_sent_messages
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
+        with _open_rescue_db(db_path, timeout=30.0) as conn:
             bot_cols = _get_table_columns(conn, "bot_sent_messages")
             if "reply_to_msg_id" in bot_cols and "sent_at" in bot_cols:
                 now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")

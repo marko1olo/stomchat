@@ -16,12 +16,16 @@ import asyncio
 import logging
 import random
 import sqlite3
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional, Set
+
+try:
+    from runtime_guard import throttled_log
+except Exception:
+    throttled_log = None
 
 try:
     import config
@@ -119,10 +123,19 @@ def run_with_lock_retry(
         except Exception as exc:
             if is_lock_error(exc) and attempt + 1 < max_retries:
                 delay = min(DB_LOCK_RETRY_MAX_DELAY, base_delay * (2 ** attempt)) + random.uniform(0.01, 0.05)
-                logger.warning(
-                    "SQLite lock contention (attempt %d/%d): %s. Backing off for %.3fs",
-                    attempt + 1, max_retries, exc, delay
-                )
+                if throttled_log:
+                    throttled_log(
+                        logging.WARNING,
+                        "db_lock_contention",
+                        "SQLite lock contention (attempt %d/%d): %s. Backing off for %.3fs",
+                        attempt + 1, max_retries, exc, delay,
+                        logger=logger,
+                    )
+                else:
+                    logger.warning(
+                        "SQLite lock contention (attempt %d/%d): %s. Backing off for %.3fs",
+                        attempt + 1, max_retries, exc, delay
+                    )
                 time.sleep(delay)
                 continue
             raise
@@ -138,10 +151,19 @@ async def run_in_db_worker(
     """
     depth = get_worker_queue_depth()
     if depth > MAX_QUEUE_BACKLOG:
-        logger.warning(
-            "DB worker queue backlog is high (%d tasks pending). Possible write spike or lock delay.",
-            depth
-        )
+        if throttled_log:
+            throttled_log(
+                logging.WARNING,
+                "db_queue_backlog",
+                "DB worker queue backlog is high (%d tasks pending). Possible write spike or lock delay.",
+                depth,
+                logger=logger,
+            )
+        else:
+            logger.warning(
+                "DB worker queue backlog is high (%d tasks pending). Possible write spike or lock delay.",
+                depth
+            )
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(

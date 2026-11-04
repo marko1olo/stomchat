@@ -183,12 +183,19 @@ class TestInputParsingRobustness(unittest.TestCase):
 
     def test_zero_and_negative_weight_rejected(self):
         """Нулевой и отрицательный вес бракуются без исключений и деления на 0."""
-        r_zero = ac.calculate_anesthesia_dose("артикаин 0 кг")
-        self.assertFalse(r_zero.is_valid)
-        self.assertIn("строго положительным", r_zero.error_message)
+        for bad in ("артикаин 0 кг", "артикаин -15 кг", "-50", "-70", "-5", 0, -1):
+            r = ac.calculate_anesthesia_dose(bad)
+            self.assertFalse(r.is_valid)
+            self.assertIn("строго положительным", r.error_message)
 
-        r_neg = ac.calculate_anesthesia_dose("артикаин -15 кг")
-        self.assertFalse(r_neg.is_valid)
+    def test_extreme_valid_weight_parsing(self):
+        res280 = ac.calculate_anesthesia_dose("280")
+        self.assertTrue(res280.is_valid)
+        self.assertEqual(res280.weight_kg, 280.0)
+
+    def test_cardiac_conduction_and_pacemaker_detection(self):
+        self.assertTrue(ac.detect_cardiac_risk("максимальная доза мепивакаина если у пациента АВ-блокада 2 степени"))
+        self.assertTrue(ac.detect_cardiac_risk("пациент с электрокардиостимулятором"))
 
     def test_below_minimum_weight_rejected(self):
         """Вес < 3 кг не разрешен в амбулаторной стоматологии."""

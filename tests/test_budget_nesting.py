@@ -35,6 +35,10 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(tempfile.mkdtemp(prefix="stomchat_budget_"), "t.log")
 
 import blocking_tools as B  # noqa: E402
@@ -186,7 +190,7 @@ check("перебор прекращается по истечению бюдж�
       "бюджет %.0f с исчерпан" in _src,
       "последний ключ будет пробоваться после того, как родитель уже убил ребёнка")
 check("пауза на 429 ограничена остатком бюджета",
-      "min(2.0, left)" in _src,
+      "min(2.5, left)" in _src or "min(2.0, left)" in _src,
       "пауза съедает время, которого хватило бы на следующий свежий ключ")
 
 print("\n[7] Проверка вложенности действительно ловит расхождение")

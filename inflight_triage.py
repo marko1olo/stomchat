@@ -119,19 +119,64 @@ class InFlightManager:
         self._initial_waiters: Dict[Tuple[int, int], asyncio.Future] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
 
+    def _prune_stale_sessions_unlocked(self, now: float) -> int:
+        """Очищает завершенные, отмененные или протухшие по TTL сессии."""
+        pruned = 0
+        stale_keys = []
+        for key, s in list(self._sessions.items()):
+            if s.is_completed or s.is_cancelled or (now - s.start_time) >= SESSION_MAX_LIFETIME_SECONDS:
+                stale_keys.append(key)
+                for mid in list(s.trigger_msg_ids):
+                    self._msg_to_session.pop((s.chat_id, mid), None)
+                pruned += 1
+
+        for key in stale_keys:
+            self._sessions.pop(key, None)
+
+        stale_m_keys = [
+            m_key for m_key, s in list(self._msg_to_session.items())
+            if s.is_completed or s.is_cancelled or (now - s.start_time) >= SESSION_MAX_LIFETIME_SECONDS
+        ]
+        for m_key in stale_m_keys:
+            self._msg_to_session.pop(m_key, None)
+
+        return pruned
+
+    async def prune_stale_sessions(self) -> int:
+        """Публичный метод фоновой очистки устаревших сессий."""
+        async with self._lock:
+            return self._prune_stale_sessions_unlocked(time.time())
+
     async def register_session(
         self, chat_id: int, sender_id: int, trigger_msg_id: int, query: str
     ) -> InFlightSession:
         """Регистрирует новую сессию генерации для автора в чате."""
         async with self._lock:
+            now = time.time()
+            self._prune_stale_sessions_unlocked(now)
+
             key = (chat_id, sender_id)
+            preserved_unprocessed = []
+            preserved_triggers = set()
             old = self._sessions.get(key)
-            if old and not old.is_completed and not old.is_cancelled:
-                logger.info("Cancelling previous uncompleted session for %s", key)
-                old.cancel()
+            if old:
+                preserved_unprocessed = list(old._unprocessed_followups)
+                preserved_triggers = set(old.trigger_msg_ids)
+                if not old.is_completed and not old.is_cancelled:
+                    logger.info("Cancelling previous uncompleted session for %s", key)
+                    old.cancel()
                 self._sessions.pop(key, None)
+                for mid in list(old.trigger_msg_ids):
+                    self._msg_to_session.pop((chat_id, mid), None)
 
             session = InFlightSession(chat_id, sender_id, trigger_msg_id, query)
+            # Переносим неразобранные фоллоу-апы из прерванной/замещенной сессии, чтобы не терять реплики автора
+            for f in preserved_unprocessed:
+                if f.get("msg_id") != trigger_msg_id:
+                    session.add_followup(f["text"], f.get("msg_id"), f.get("has_media", False), f.get("media_type"))
+            for mid in preserved_triggers:
+                session.add_trigger_msg_id(mid)
+
             self._sessions[key] = session
             if trigger_msg_id:
                 self._msg_to_session[(chat_id, trigger_msg_id)] = session
@@ -147,6 +192,7 @@ class InFlightManager:
                 m_key = (session.chat_id, mid)
                 if self._msg_to_session.get(m_key) is session:
                     self._msg_to_session.pop(m_key, None)
+            self._prune_stale_sessions_unlocked(time.time())
 
     def get_active_session(
         self,
@@ -160,23 +206,26 @@ class InFlightManager:
         # 1. Поиск по reply_to_msg_id
         if reply_to_msg_id:
             s = self._msg_to_session.get((chat_id, reply_to_msg_id))
-            if s and not s.is_completed and not s.is_cancelled:
-                if (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
+            if s:
+                if not s.is_completed and not s.is_cancelled and (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
                     return s
+                self._msg_to_session.pop((chat_id, reply_to_msg_id), None)
 
         # 2. Поиск по msg_id
         if msg_id:
             s = self._msg_to_session.get((chat_id, msg_id))
-            if s and not s.is_completed and not s.is_cancelled:
-                if (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
+            if s:
+                if not s.is_completed and not s.is_cancelled and (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
                     return s
+                self._msg_to_session.pop((chat_id, msg_id), None)
 
         # 3. Поиск по sender_id
         if sender_id:
             s = self._sessions.get((chat_id, sender_id))
-            if s and not s.is_completed and not s.is_cancelled:
-                if (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
+            if s:
+                if not s.is_completed and not s.is_cancelled and (now - s.start_time) < SESSION_MAX_LIFETIME_SECONDS:
                     return s
+                self._sessions.pop((chat_id, sender_id), None)
 
         return None
 
@@ -257,6 +306,8 @@ class InFlightManager:
         )
         if session:
             session.record_followup(msg_id, clean_text, has_media=has_media, date=date)
+            if msg_id:
+                self._msg_to_session[(chat_id, msg_id)] = session
             return session
 
         return None
@@ -446,12 +497,29 @@ async def run_inflight_followup_triage(
                 elif "```" in clean_json:
                     clean_json = clean_json.split("```", 1)[1].split("```", 1)[0].strip()
 
-                m = re.search(r"\{.*\}", clean_json, re.DOTALL)
-                if m:
-                    parsed = json.loads(m.group(0))
+                parsed = None
+                try:
+                    import user_memory
+                    parsed = user_memory._extract_json_object(clean_json)
+                except Exception:
+                    parsed = None
+                if not parsed:
+                    m = re.search(r"\{.*\}", clean_json, re.DOTALL)
+                    if m:
+                        try:
+                            parsed = json.loads(m.group(0))
+                        except Exception:
+                            parsed = None
+
+                if parsed:
                     action = str(parsed.get("action", "")).strip().upper()
                     if action in ("SUPPLEMENT", "REPLACE", "WAIT_FOR_ANSWER", "CANCEL"):
-                        merged = parsed.get("merged_query") or f"{orig_clean}\n{combined_followup}"
+                        if action == "WAIT_FOR_ANSWER":
+                            merged = parsed.get("merged_query") or orig_clean
+                        elif action == "CANCEL":
+                            merged = ""
+                        else:
+                            merged = parsed.get("merged_query") or f"{orig_clean}\n{combined_followup}"
                         return {
                             "action": action,
                             "merged_query": merged.strip(),

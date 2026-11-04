@@ -32,6 +32,13 @@ config.py стоит в .gitignore и на боевую машину через 
 
 Запуск: python test_config_contract.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import ast
 import importlib.util
 import io
@@ -420,6 +427,7 @@ EXPECTED = {
     "REPORT_TARGETS": [{"chat_id": -100123, "topic_id": None}],
     "GOOGLE_KEYS": ["kA", "kB"],
     "GROQ_KEYS": ["kC"],
+    "AGENTROUTER_KEYS": ["kD"],
     "TELEGRAPH_TOKEN": "ENVSTUB_TELEGRAPH_TOKEN",
     "GEMINI_MODEL": "ENVSTUB_GEMINI_MODEL",
     "GROQ_MODEL": "ENVSTUB_GROQ_MODEL",

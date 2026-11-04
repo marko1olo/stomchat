@@ -85,11 +85,12 @@ async def run_tests():
     check("пустой промпт отдает аккуратную заглушку", "формируется" in empty_prompt)
 
     print("\n[5] Пакетная загрузка для чанка до 20 пользователей в группе")
+    valid_specs = ["Терапевт", "Хирург-стоматолог", "Ортопед", "Эндодонтист", "Ортодонт"]
     for i in range(1, 6):
         await database.save_user_memory(
             user_id=1000 + i,
-            specialty=f"Специализация-{i}",
-            clinical_summary=f"Опыт врача {i} в клинической практике.",
+            specialty=valid_specs[i - 1],
+            group_summary=f"Опыт врача {i} в клинической практике.",
             username=f"doc_{i}",
             first_name=f"Доктор-{i}"
         )

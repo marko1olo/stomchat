@@ -3,10 +3,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+
+logger = logging.getLogger("runtime_guard")
 
 
 def _default_log_path():
@@ -153,6 +156,12 @@ def throttled_log(level, key, message, *args, logger=None):
         if last is not None and now - last < THROTTLE_WINDOW_SECONDS:
             _throttle_state[key] = (last, suppressed + 1)
             return False
+        if len(_throttle_state) > 512:
+            expired_keys = [k for k, v in _throttle_state.items() if now - v[0] >= THROTTLE_WINDOW_SECONDS]
+            for k in expired_keys:
+                _throttle_state.pop(k, None)
+            if len(_throttle_state) > 512:
+                _throttle_state.clear()
         _throttle_state[key] = (now, 0)
     if suppressed:
         message += " [подавлено похожих: %d за %.0f c]"
@@ -305,6 +314,24 @@ except Exception:
     pass
 
 
+class RedactingFormatter(logging.Formatter):
+    _PATTERNS = (
+        (re.compile(r"AIza[0-9A-Za-z-_]{35}"), lambda m: m.group(0)[:4] + "…" + m.group(0)[-4:]),
+        (re.compile(r"gsk_[0-9A-Za-z]{48,}"), lambda m: m.group(0)[:4] + "…" + m.group(0)[-4:]),
+        (re.compile(r"tvly-[0-9A-Za-z]{32,}"), lambda m: m.group(0)[:5] + "…" + m.group(0)[-4:]),
+        (re.compile(r"sk-[0-9A-Za-z]{20,}"), lambda m: m.group(0)[:4] + "…" + m.group(0)[-4:]),
+        (re.compile(r"\b\d{8,11}:[A-Za-z0-9_-]{35}\b"), lambda m: m.group(0).split(":")[0] + ":[REDACTED]"),
+        (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), lambda m: "Bearer " + m.group(0)[7:11] + "…"),
+        (re.compile(r"([?&]key=)[^&\s]+"), lambda m: m.group(1) + "…"),
+    )
+
+    def format(self, record):
+        msg = super().format(record)
+        for pat, repl in self._PATTERNS:
+            msg = pat.sub(repl, msg)
+        return msg
+
+
 def configure_logging():
     try:
         import sys
@@ -322,7 +349,7 @@ def configure_logging():
         except Exception:
             pass
 
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = RedactingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     file_handler = RotatingFileHandler(
         LOG_PATH,
         maxBytes=5 * 1024 * 1024,
@@ -347,6 +374,8 @@ def configure_logging():
     # есть RPC-уровень не был виден ни разу. Без этой строки нельзя ни
     # подтвердить, ни опровергнуть, что бот попадает под ограничение частоты.
     logging.getLogger("telethon.client.users").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def utc_now_text():
@@ -681,7 +710,7 @@ def _watchdog_loop():
         # Мониторинг аномально зависших разовых задач (утечка корутин без таймаута)
         try:
             now_mono = time.monotonic()
-            for t, meta in list(_ACTIVE_TASK_METADATA.items()):
+            for meta in list(_ACTIVE_TASK_METADATA.values()):
                 name = meta.get("name", "")
                 if any(d in name for d in _DAEMON_TASK_NAMES):
                     continue
@@ -694,7 +723,12 @@ def _watchdog_loop():
                         name, age, TASK_STALE_WARN_SECONDS,
                     )
         except Exception as task_scan_exc:
-            logger.debug("watchdog task scan error: %s", task_scan_exc)
+            throttled_log(
+                logging.WARNING,
+                "watchdog_task_scan_failed",
+                "watchdog task scan error: %s",
+                task_scan_exc,
+            )
 
         age = time.monotonic() - _last_heartbeat_monotonic
         if age > WATCHDOG_STALE_SECONDS:
@@ -795,9 +829,25 @@ def get_active_tasks_report() -> list[dict]:
     return sorted(report, key=lambda x: x["age_seconds"], reverse=True)
 
 
+async def cancel_all_tasks(timeout: float = 3.0):
+    """
+    Отменяет и ожидает завершения всех активных фоновых задач при graceful shutdown.
+    Гарантирует, что при остановке бота фоновые демоны корректно завершаются без race conditions.
+    """
+    tasks = [t for t in list(_ACTIVE_TASKS) if not t.done()]
+    if not tasks:
+        return
+    for t in tasks:
+        t.cancel()
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+
 def _log_task_result(task):
     if task.cancelled():
-        logging.getLogger(__name__).warning("background task cancelled name=%s", task.get_name())
+        logging.getLogger(__name__).info("background task cancelled name=%s", task.get_name())
         return
     exc = task.exception()
     if exc is not None:

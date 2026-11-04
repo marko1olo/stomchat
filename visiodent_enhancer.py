@@ -38,9 +38,9 @@ logger = logging.getLogger("visiodent_enhancer")
 # Пути к системным TrueType шрифтам Windows с полной поддержкой кириллицы
 FONT_CANDIDATES = [
     r"C:\Windows\Fonts\segoeuib.ttf",
-    r"C:\Windows\Fontsrialbd.ttf",
+    r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\segoeui.ttf",
-    r"C:\Windows\Fontsrial.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
 ]
 RESOLVED_FONT_PATH = next((f for f in FONT_CANDIDATES if os.path.exists(f)), None)
 

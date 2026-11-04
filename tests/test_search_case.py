@@ -27,6 +27,13 @@ extract_keywords, который делает text.lower(). Факты вики 
 
 Запуск: python test_search_case.py
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import io
 import os

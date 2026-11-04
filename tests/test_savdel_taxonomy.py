@@ -29,6 +29,13 @@
 Боевые базы этот тест открывает ТОЛЬКО в режиме ro и только для чтения схемы и
 контрольного замера. Весь экспорт гоняется по временным базам в TEMP.
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import io
 import contextlib

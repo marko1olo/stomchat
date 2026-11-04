@@ -14,11 +14,16 @@
 
 Запуск: python test_fix_cascade.py
 """
-import json
 import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import json
 import re
 import shutil
-import sys
 import tempfile
 import time as _real_time
 
@@ -282,18 +287,18 @@ for label, text in (
     ("limit 500 requests", "429 Too Many Requests: rate limit reached, limit 500 requests per day"),
     ("503 в тексте 429", "429 rate limit; retry later (503 upstream note)"),
 ):
-    reset({"gemini-3.5-flash-lite": Exception(text)}, spend_full_timeout=False)
+    reset({CHAT_FIRST: Exception(text)}, spend_full_timeout=False)
     gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
     banned = gc.get_banned_models()
     cooled = gc.get_key_cooldowns()
-    check(f"«{label}»: модель не забанена", "gemini-3.5-flash-lite" not in banned, f"got {banned}")
+    check(f"«{label}»: модель не забанена", CHAT_FIRST not in banned, f"got {banned}")
     check(f"«{label}»: ключ отправлен на кулдаун",
           any(gc._key_fingerprint("gemini", k) in cooled for k in GOOGLE_KEYS), f"got {cooled}")
     check(f"«{label}»: причина названа исчерпанием ключа",
           (gc.get_last_failure() or {}).get("reason") != "model_overloaded",
           f"got {gc.get_last_failure()}")
 
-reset({"gemini-3.5-flash-lite": Exception("429 quota exceeded, limit 500 per day")},
+reset({CHAT_FIRST: Exception("429 quota exceeded, limit 500 per day")},
       spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
 cooled_keys = [k for k in GOOGLE_KEYS if gc._key_fingerprint("gemini", k) in gc.get_key_cooldowns()]

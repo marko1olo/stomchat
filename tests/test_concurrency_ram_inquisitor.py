@@ -158,5 +158,24 @@ class TestConcurrencyAndRamInvariants(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(called_with_sem, "media_tools._run_tool must be guarded by subprocess semaphore")
 
 
+    async def test_08_runtime_guard_cancel_all_tasks_graceful(self):
+        """Verifies that runtime_guard.cancel_all_tasks cancels active tasks cleanly."""
+        finished = []
+        async def mock_daemon():
+            try:
+                while True:
+                    await asyncio.sleep(10.0)
+            except asyncio.CancelledError:
+                finished.append(True)
+                raise
+
+        task = runtime_guard.create_task(mock_daemon(), name="test_mock_daemon")
+        await asyncio.sleep(0.01)
+        self.assertIn(task, runtime_guard._ACTIVE_TASKS)
+        await runtime_guard.cancel_all_tasks(timeout=1.0)
+        self.assertTrue(task.done())
+        self.assertTrue(task.cancelled())
+        self.assertEqual(len(finished), 1)
+
 if __name__ == "__main__":
     unittest.main()

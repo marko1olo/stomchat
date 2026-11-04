@@ -11,6 +11,13 @@
    - если неактивность >= 24 часов: тихое очищение состояния без спама врачу.
 5. Миграция колонок user_memories в database.py: логирование неожиданных ошибок вместо немого pass.
 """
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import json
 import os

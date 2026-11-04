@@ -10,8 +10,7 @@ anesthesia_calc.py — Клинический калькулятор местн�
 5. Библиотека эталонных протоколов реанимации у кресла: анафилактический шок, LAST (интралипид 20%), коллапс, гипогликемия.
 """
 
-from dataclasses import dataclass, field
-import html
+from dataclasses import dataclass
 import logging
 import math
 import re
@@ -270,7 +269,8 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
     # 2. Сердечно-сосудистый статус
     is_cardiac = bool(re.search(
         r'\b(?:кардио\w*|сердечн\w*|гипертон\w*|давлен\w*|ибс\b|аритми\w*|стенокарди\w*|инфаркт\w*|'
-        r'стент\w*|тахикарди\w*|брадикарди\w*|бета-блокатор\w*|кардиопатолог\w*|сердц\w*)\b',
+        r'стент\w*|тахикарди\w*|брадикарди\w*|бета-блокатор\w*|кардиопатолог\w*|сердц\w*|блокад\w*|'
+        r'(?:электро)?кардиостимулятор\w*|экс\b|пейсмейкер\w*|порок\w*)\b',
         cleaned
     ))
 
@@ -289,10 +289,15 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
 
     sanitized = re.sub(r'\b(\d{2,3})\s*[/\\|\-]\s*(\d{2,3})\b', _mask_bp, cleaned)
 
-    # 3. Маскирование номеров зубов (FDI 11-48, 51-85)
-    sanitized = re.sub(r'\b(?:зуб[а-яё]*|fdi|#)\s*([1-8][1-8])\b', ' [TOOTH] ', sanitized)
-    sanitized = re.sub(r'\b([1-8][1-8])\s*(?:зуб[а-яё]*|fdi)\b', ' [TOOTH] ', sanitized)
-    sanitized = re.sub(r'\bзуб[а-яё]*\s+(\d{1,2})\b', ' [TOOTH] ', sanitized)
+    # 3.0. Маскирование диапазонов зубов (16-17, 46-47, 16-18)
+    sanitized = re.sub(r'\b(?:зуб[а-яё]*|fdi|#|област[ьи]|сегмент[а-яё]*)?\s*([1-8][1-8]\s*[-–—]\s*[1-8][1-8])\s*(?:зуб[а-яё]*|fdi|tooth)?\b', ' [TOOTH_RANGE] ', sanitized, flags=re.IGNORECASE)
+
+    # 3. Маскирование номеров зубов (FDI 11-48, 51-85) с защитой от точек, запятых и дефисов
+    sanitized = re.sub(r'\b(?:зуб[а-яё]*|fdi|#|област[ьи]|сегмент[а-яё]*)\s*([1-8][\.,\-]?[1-8])\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\b([1-8][\.,\-]?[1-8])\s*(?:зуб[а-яё]*|fdi|tooth)\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\b(?:зуб[а-яё]*|#)\s*([1-8][\.,\-]?[1-8]|\d{1,2})\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'(?<!\w)(?:#|fdi)\s*([1-8][\.,\-]?[1-8])\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'(?<![\d\.])\b([1-8][\.,][1-8])\b(?![\d\.])', ' [TOOTH] ', sanitized)
 
     # 4. Маскирование карпул, ампул, миллилитров, процентов, каналов
     sanitized = re.sub(r'\b\d+(?:\.\d+)?\s*(?:карпул[а-яё]*|карп[а-яё]*|ампул[а-яё]*|мл|ml|процент[а-яё]*|%)\b', ' [UNIT] ', sanitized)
@@ -343,12 +348,15 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
                     weight = float(acc)
                     break
 
-    # 6.4. Изолированное число (только если нет других единиц и контекста)
+    # 6.4. Изолированное число (включая отрицательные и до клинического потолка 300 кг)
     if weight is None:
-        for num_str in re.findall(r'\b\d+(?:\.\d+)?\b', sanitized):
+        for num_str in re.findall(r'(?<![\w\.\-])(-?\d+(?:\.\d+)?)\b', sanitized):
             try:
                 val = float(num_str)
-                if 5.0 <= val <= 250.0:
+                if val < 0:
+                    weight = val
+                    break
+                if 3.0 <= val <= 300.0:
                     weight = val
                     break
             except ValueError:
@@ -446,7 +454,7 @@ def calculate_anesthesia_dose(
         is_estimated_weight = parsed_params["is_weight_estimated"]
         parsed_age = parsed_params["age"]
 
-    if weight is None:
+    if weight is None or not isinstance(weight, (int, float)) or not math.isfinite(weight):
         return AnesthesiaCalculationResult(
             is_valid=False,
             error_message="⚠️ <i>Не удалось определить вес пациента. Укажите вес в кг (например: «артикаин на 70 кг» или «/anes 20»).</i>"
@@ -506,10 +514,10 @@ def calculate_anesthesia_dose(
     # Бупивакаин противопоказан детям < 12 лет / < 40 кг
     if drug.key == "bupivacaine_05" and (weight < 40.0 or pediatric):
         contra_msg = (
-            f"⛔ <b>ПРОТИВОПОКАЗАНИЕ: БУПИВАКАИН (МАРКАИН) ДЕТЯМ ЗАПРЕЩЕН!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Бупивакаин строго противопоказан детям до 12 лет из-за высокой кардиотоксичности.\n"
-            f"• Препарат выбора: Мепивакаин 3% или Лидокаин 2%."
+            "⛔ <b>ПРОТИВОПОКАЗАНИЕ: БУПИВАКАИН (МАРКАИН) ДЕТЯМ ЗАПРЕЩЕН!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "• Бупивакаин строго противопоказан детям до 12 лет из-за высокой кардиотоксичности.\n"
+            "• Препарат выбора: Мепивакаин 3% или Лидокаин 2%."
         )
         return AnesthesiaCalculationResult(
             is_valid=True,
@@ -1005,6 +1013,8 @@ def calculate_cumulative_remaining_dose(
     Расчет остаточной безопасной дозы при комбинации анестетиков (кумулятивная токсичность).
     Основан на правиле аддитивной токсичности (суммирование долей максимальной дозы каждого анестетика).
     """
+    if weight_kg is None or not isinstance(weight_kg, (int, float)) or not math.isfinite(weight_kg) or weight_kg <= 0:
+        return "⛔ <i>Не указана или некорректна масса тела пациента для расчета кумулятивной дозы.</i>"
     target_drug = DRUG_CATALOG.get(target_drug_key, DRUG_CATALOG["articaine_100"])
     pediatric = weight_kg < 40.0
 
@@ -1075,3 +1085,31 @@ def calculate_cumulative_remaining_dose(
         res_lines.append(f"• 🛡 <b>Итоговый безопасный объем:</b> <b>до {final_safe_carpules} карпул</b>")
 
     return "\n".join(res_lines)
+
+
+def extract_canonical_tooth(text: str) -> Optional[int]:
+    """
+    Извлекает канонический номер зуба по системе FDI (постоянные 11-48, молочные 51-85).
+    Защищен от ложного совпадения с весом (70 кг), давлением (120/80), дозировками и процентами.
+    """
+    if not text:
+        return None
+    # 1. Поиск с префиксными маркерами: зуб 46, зуба 16, #36, FDI 26
+    m = re.search(r'(?i)(?:зуб[а-яё]*|fdi|#|сегмент)\s*([1-8][1-8])\b', text)
+    if m:
+        val = int(m.group(1))
+        if 11 <= val <= 48 or 51 <= val <= 85:
+            return val
+    # 2. Поиск с постфиксными маркерами: 46 зуб, 36 tooth, 26 fdi
+    m2 = re.search(r'(?i)\b([1-8][1-8])\s*(?:зуб[а-яё]*|tooth|fdi)\b', text)
+    if m2:
+        val = int(m2.group(1))
+        if 11 <= val <= 48 or 51 <= val <= 85:
+            return val
+    # 3. Изолированный номер зуба FDI, если рядом нет единиц измерения веса, давления, процентов
+    clean = re.sub(r'\b\d+(?:[.,]\d+)?\s*(?:кг|kg|кило|г|g|мл|ml|%|мг|mg|мм|mm|карпул[а-яё]*)\b', ' ', text, flags=re.IGNORECASE)
+    clean = re.sub(r'\b\d{2,3}\s*[/\\|\-]\s*\d{2,3}\b', ' ', clean)
+    m3 = re.search(r'\b([1-4][1-8]|[5-8][1-5])\b', clean)
+    if m3:
+        return int(m3.group(1))
+    return None

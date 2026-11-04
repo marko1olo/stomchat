@@ -1108,7 +1108,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         # Если ранние модели Google сбоят (503/400/timeout), Groq должен получить попытку.
         # Дедлайн (deadline) динамически страхует от вылета за общий бюджет.
         if models_fit < len(active_cascade):
-            logger.info(
+            logger.debug(
                 "Budget %.0fs nominally fits %s of %s cascade models; tail preserved for fast fallbacks.",
                 budget, models_fit, len(active_cascade)
             )
@@ -1132,7 +1132,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
         deadline = time.monotonic() + usable
-        logger.info(
+        logger.debug(
             "Budget %.0fs: %s models x %s attempts x %.1fs = %.0fs planned.",
             budget, len(active_cascade), max_attempts, req_timeout,
             len(active_cascade) * max_attempts * req_timeout
@@ -1152,7 +1152,6 @@ def generate_text(prompt, status_context=None, timeout=None):
             keys = list(provider_pool(provider))
             # Адрес провайдера берём из общей таблицы PROVIDER_BASE_URLS: два литерала
             # здесь были источником, с которого их скопировали остальные пути.
-            client_maker = lambda k: get_provider_client(provider, k, timeout=req_timeout)
 
             if not keys:
                 logger.warning(f"No API keys for {provider}. Skipping {model_name}.")
@@ -1184,7 +1183,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                 )
                 continue
             if len(available) < len(keys):
-                logger.info(
+                logger.debug(
                     "%s: %s of %s keys available, rest on cooldown.",
                     provider, len(available), len(keys)
                 )
@@ -2097,12 +2096,9 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             # и бан модели на 20 минут оставил бы врача вообще без расшифровок.
             failure_reason = note_key_failure("groq", api_key, str(e))
             if failure_reason == "key_rate_limited":
-                # Пауза строго >= 2.5-3.0 сек согласно Iron Law для защиты от блокировок
-                rate_delay = 2.5
-                if usable:
-                    left = usable - (time.monotonic() - started)
-                    rate_delay = max(2.5, min(3.0, left))
-                time.sleep(rate_delay)
+                # Пауза строго 2.5 сек по Iron Law, но ограничена остатком бюджета
+                left = (usable - (time.monotonic() - started)) if usable else 2.5
+                time.sleep(max(0.0, min(2.5, left)))
             continue
 
     if actual_file_path != file_path and os.path.exists(actual_file_path):
