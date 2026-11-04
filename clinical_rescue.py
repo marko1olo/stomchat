@@ -595,6 +595,8 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
         "3. Форматирование СТРОГО в чистом HTML (<b>, <i>, <code>). НИКАКОГО сырого Markdown (никаких ** или ##)!\n"
         "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать эмодзи и задавать дежурные псевдо-вовлекающие вопросы в конце ответа.\n"
         "5. Если к посту прикреплен снимок или дано его описание, детально проанализируй анатомию, периапикальное состояние и обтурацию. Никогда не говори, что снимки не видны, если они переданы.\n"
+        "6. ЗАПРЕТ ОТОЗВАННЫХ ПРЕПАРАТОВ (СОЛКОСЕРИЛ, АКТОВЕГИН): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО рекомендовать Солкосерил (дентальную пасту/мазь/желе) и Актовегин! Препарат отозван с мирового рынка и из РФ еще в 2020 г., не продается и не имеет доказанной эффективности. При декубитальных язвах, афтах, травмах и ожогах слизистой (в т.ч. гипохлоритом NaOCl) назначай ТОЛЬКО современные доступные доказательные средства: Асепта бальзам адгезивный, Холисал гель, Винилин (бальзам Шостаковского), Афтофикс. Запрещено химическое прижигание спиртом/перекисью/марганцовкой.\n"
+        "7. ЗОЛОТОЙ 3-ШАГОВЫЙ СТАНДАРТ: 1) Прямой ответ и конкретные материалы/инструменты 2) Клинический фокус фиксации/выполнения у кресла 3) Альтернативный практический протокол.\n"
     )
 
     try:
@@ -638,6 +640,19 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
                 )
                 return None
 
+            # Токсические практики и ятрогения (детерминированная блокировка)
+            from assistant import _TOXIC_PRACTICE_RE
+            if _TOXIC_PRACTICE_RE.search(clean_resp):
+                logger.error("🛑 Clinical rescue generated toxic practice taboo for msg_id=%s. Suppressing rescue forever.", msg_id)
+                await asyncio.to_thread(
+                    mark_case_and_album_rescued,
+                    db_path,
+                    msg_id,
+                    candidate.get("chat_id"),
+                    candidate.get("sender_id"),
+                    candidate.get("timestamp") or candidate.get("date")
+                )
+                return None
             # Очистка от случайных Markdown-тегов
             if clean_resp.startswith("```html"):
                 clean_resp = clean_resp[7:]
@@ -645,6 +660,9 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
                 clean_resp = clean_resp[3:]
             if clean_resp.endswith("```"):
                 clean_resp = clean_resp[:-3]
+            from assistant import sanitize_clinical_pm_output, clean_html_formatting
+            clean_resp = clean_html_formatting(clean_resp)
+            clean_resp = sanitize_clinical_pm_output(clean_resp)
             return clean_resp.strip()
     except Exception as exc:
         logger.error("Error generating clinical rescue response: %s", exc)

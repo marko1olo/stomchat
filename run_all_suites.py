@@ -41,6 +41,7 @@ tests = [
     "tests/test_inflight_followup_triage_redteam.py",
     "tests/test_poll_antidup_inquisitor.py",
     "tests/test_zero_mirroring_redteam.py",
+    "tests/test_emergency_group_fastpath.py",
 ]
 
 all_ok = True

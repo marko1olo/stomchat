@@ -4351,34 +4351,39 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 
 ОЦЕНИ ЧЕРНОВИК ПО ЧЕТЫРЁМ КРИТЕРИЯМ:
 
-1. УМЕСТНОСТЬ
-   — Ответ должен отвечать на то, что реально спросил врач в последнем сообщении.
-   — Если вопрос конкретный («какими клампами?», «какой файл?», «сколько мг?») — ответ должен быть конкретным, а не общей лекцией по теме.
+1. УМЕСТНОСТЬ И ПРЯМОЙ ОТВЕТ:
+   — Ответ обязан отвечать строго на то, что реально спросил врач в последнем сообщении.
+   — Если вопрос конкретный («какими клампами?», «какой файл?», «сколько мг?») — черновик обязан дать конкретные артикулы/инструменты/дозировки, а не общую лекцию по теме.
+   — ПОДМЕНА ВОПРОСА И УХОД В СТОРОНУ: Если врач спросил про конкретный клинический этап (изоляция, кламп, силер, анестезия), а черновик уклонился от ответа и начал поучать врача по посторонней теме (скученность, окклюзия, общая гигиена) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — ОПЕЧАТКИ Т9: Если врач опечатался со смартфона («озонировать» вместо «изолировать», «кланы» вместо «клампы»), черновик обязан отвечать по реальному смыслу клинической процедуры (изоляция коффердамом). Если черновик воспринял опечатку буквально и выдумал озонотерапию или маргинальную чушь — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — Если бот влезает без приглашения (пассивный триггер) и ответ не добавляет ничего сверх того, что врач уже изложил сам в своём вопросе — ОТКЛОНИ.
    — Если тема чата — флуд, приветствия, оффтоп без клинического содержания — ОТКЛОНИ.
 
-2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И КОНКРЕТНЫЕ ЦИФРЫ:
-   — КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Выдуманные дозировки, выдуманные артикулы/системы, выдуманные значения торков, либо грубые ошибки, противоречащие доказательной медицине (EBM) — ОТКЛОНИ.
-   — Запрещённые препараты (Солкосерил, Актовегин) или опасные процедуры (электрокоагуляция в гайморову пазуху, адреналиновые тампоны в пазуху) — ОТКЛОНИ.
+2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И ДОКАЗАТЕЛЬНОСТЬ (EBM):
+   — ТОКСИЧЕСКИЕ И ЯТРОГЕННЫЕ ПРАКТИКИ: Запрещённые препараты (Солкосерил, Актовегин, мышьяк, резорцин-формалин, депофорез) или опасные процедуры (химическое прижигание слизистой спиртом/перекисью/марганцовкой, промывание NaOCl под давлением, адреналиновые тампоны в гайморову пазуху) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Выдуманные дозировки, выдуманные артикулы/системы, выдуманные значения торков, либо грубые ошибки, противоречащие доказательной медицине — ОТКЛОНИ.
    — Педиатрия: артикаин >5 мг/кг у ребёнка <12 лет / <40 кг — токсическая передозировка, ОТКЛОНИ.
    — Топографические ошибки: перепутал зуб, орган, сторону, поверхность — ОТКЛОНИ.
 
-3. ПРОФЕССИОНАЛЬНЫЙ ТОН
-   — Аудитория — дипломированные врачи. Фразы для пациентов («обратитесь к очному врачу», «я всего лишь ИИ», «нужен очный осмотр») — ОТКЛОНИ.
+3. ПРОФЕССИОНАЛЬНЫЙ ТОН И КОЛЛЕГИАЛЬНОСТЬ:
+   — Аудитория — дипломированные врачи. Общение строго на равных: оперирующий врач — оперирующему врачу.
+   — МЕНТОРСТВО, САМОУВЕРЕННОЕ ПОУЧЕНИЕ ИЛИ ОБВИНЕНИЕ ВРАЧА: Если черновик упрекает коллегу в невнимательности, агрессивно поучает или читает нотации с позиции превосходства («почему вы не видите...») — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — Пациентские дисклеймеры («обратитесь к очному врачу», «я всего лишь ИИ», «нужен очный осмотр») — ОТКЛОНИ.
    — Самоидентификация как машина/робот/алгоритм, мета-шутки про ИИ — ОТКЛОНИ.
    — Неуместные эмодзи (😅😂😎😤😏🤣🤡🙄), сарказм, токсичность — ОТКЛОНИ.
    — Самооправдания про серверы, нагрузку, медлительность — ОТКЛОНИ.
 
-4. СОДЕРЖАТЕЛЬНОСТЬ
-   — Псевдонаучный жаргон, бессодержательные утверждения без механизма — ОТКЛОНИ.
+4. СОДЕРЖАТЕЛЬНОСТЬ И ЗОЛОТОЙ 3-ШАГОВЫЙ СТАНДАРТ:
+   — Псевдонаучный жаргон, бессодержательные утверждения без биологического/биомеханического механизма — ОТКЛОНИ.
+   — Ответ должен строиться по золотому стандарту: 1) Прямой ответ на вопрос с инструментами/материалами 2) Нюанс фиксации/выполнения у кресла 3) Альтернативный план.
    — Черновик упоминает системные промпты или внутренние настройки бота — ОТКЛОНИ.
    — Беспочвенная критика коллег без клинических оснований — ОТКЛОНИ.
 
 ОДОБРИ (ok: true), если черновик:
-— Отвечает именно на заданный вопрос, а не на смежную тему
-— Клинически корректен и безопасен
-— Тон — коллегиальный, профессиональный, без лишней воды
-— Добавляет реальную ценность сверх того, что врач уже знает из своего вопроса
+— Отвечает именно на заданный вопрос (с учетом опечаток Т9), а не на смежную тему
+— Клинически корректен, безопасен и не содержит токсичных/отозванных практик
+— Тон — коллегиальный, профессиональный, без менторства и без лишней воды
+— Добавляет реальную практическую ценность у кресла
 
 Отвечай СТРОГО в формате JSON без дополнительного текста:
 {{"ok": true/false, "reason": "одна фраза на русском — конкретно ПОЧЕМУ одобрил или ЧТО именно отклонил"}}
@@ -4419,14 +4424,6 @@ async def generate_dialogue_fallback_async(
     Строго через LLM: никаких захардкоженных ответов или шаблонных канцеляритов.
     """
     reason_lower = (quality_reason or "").lower()
-    has_clinical_danger = any(w in reason_lower for w in (
-        "доз", "опасн", "артикул", "ошибк", "риск", "топограф", "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин"
-    ))
-    if not has_clinical_danger and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн", "тон", "саркастич", "токсич")):
-        sanitized = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", draft_reply or "").strip()
-        if len(sanitized) >= 40:
-            logger.info("Dialogue draft sanitized from emoji/tone defects and allowed: %s", quality_reason)
-            return clean_html_formatting(sanitized), ""
 
     try:
         last_context = "\n".join(str(m) for m in (context_msgs[-4:] if context_msgs else ["Клинический вопрос врача."]))
@@ -4448,6 +4445,9 @@ async def generate_dialogue_fallback_async(
         fb_text = getattr(response, "text", "") if response else ""
         fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
         if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
+            if _TOXIC_PRACTICE_RE.search(fb_text):
+                logger.error("🛑 Toxic practice in dialogue fallback rejected: %s", fb_text[:80])
+                return "", "toxic_practice_in_fallback"
             return fb_text, ""
         return "", err or "empty_fallback"
     except Exception as e:
@@ -5314,6 +5314,35 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     # Check if the bot is temporarily silenced
     if is_silenced(state):
         return False
+
+    # FAST-PATH: Экстренная реанимация при острых жизнеугрожающих состояниях в группе (Правило MED-06)
+    # (Анафилаксия, коллапс после анестетика, гипохлоритовая авария, асфиксия при флегмоне)
+    sos_category = detect_pm_emergency(text)
+    if sos_category in ("anaphylaxis", "hypochlorite", "phlegmon_airway"):
+        norm_txt = (text or "").lower()
+        is_theoretical_or_historical = bool(re.search(
+            r'\b(?:вебинар\w*|стать[яеи]\w*|лекци[яеи]\w*|курс\w*|книг\w*|вчера|прошл\w*|читал\w*|смотрел\w*|слушал\w*|исследован\w*)\b',
+            norm_txt
+        ))
+        if not is_theoretical_or_historical and msg_id not in REPLIED_MSG_IDS:
+            sos_text, sos_buttons = format_emergency_response(sos_category, is_group=True)
+            if sos_text:
+                try:
+                    await bot_client.send_message(
+                        entity=event.chat_id,
+                        message=sos_text,
+                        reply_to=msg_id,
+                        buttons=sos_buttons if sos_buttons else None,
+                        parse_mode='html'
+                    )
+                    REPLIED_MSG_IDS[msg_id] = True
+                    logger.warning(
+                        "RULE MED-06 SOS Life-Threatening Fast-Path triggered in group chat_id=%s, msg_id=%s, type=%s",
+                        event.chat_id, msg_id, sos_category
+                    )
+                    return True
+                except Exception as e_sos:
+                    logger.error(f"Failed to send SOS response in group text trigger: {e_sos}")
 
     # Calculate context length guidelines
     try:
@@ -10396,11 +10425,14 @@ def detect_pm_emergency(text: str) -> Optional[str]:
     return None
 
 
-def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
+def format_emergency_response(sos_category: str, is_group: bool = False) -> Tuple[str, List[Any]]:
     """
     Формирует мгновенный экстренный протокол первой строкой по Правилу MED-06.
     """
     from telethon import Button
+    text = ""
+    buttons: List[Any] = []
+
     if sos_category == "anaphylaxis":
         text = (
             "🚨 <b>СКОРАЯ 112 НЕМЕДЛЕННО! ЭКСТРЕННАЯ РЕАНИМАЦИЯ: АНАФИЛАКТИЧЕСКИЙ ШОК</b>\n"
@@ -10419,7 +10451,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("🧪 LAST / Токсичность (Интралипид)", data="sos:last")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
 
     elif sos_category == "hypochlorite":
         text = (
@@ -10438,7 +10469,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
 
     elif sos_category == "perforation":
         text = (
@@ -10458,7 +10488,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("📐 Оценка феррула (/preserve)", data="preserve:ferrule")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
 
     elif sos_category == "file_fracture":
         text = (
@@ -10477,7 +10506,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("💔 Матрица решений по файлам", data="sos:file_matrix")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
 
     elif sos_category == "phlegmon_airway":
         text = (
@@ -10496,7 +10524,16 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
         buttons = [
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
+
+    if not text:
+        return "", []
+
+    if is_group:
+        username = get_bot_username()
+        group_buttons = [[Button.url("🚨 Все SOS-протоколы в ЛС", f"https://t.me/{username}?start=sos")]] if username else []
+        return text, group_buttons
+
+    return text, buttons
 
     return "", []
 
@@ -13204,6 +13241,27 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     if reply_to_msg_id is None and getattr(event, 'message', None) and getattr(event.message, 'reply_to', None):
         reply_to_msg_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
 
+    # FAST-PATH: SOS и экстренная реанимация при прямом обращении к боту в группе (Правило MED-06)
+    sos_category = detect_pm_emergency(text)
+    if sos_category and not (text or "").startswith("/"):
+        sos_text, sos_buttons = format_emergency_response(sos_category, is_group=True)
+        if sos_text:
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=sos_text,
+                    reply_to=msg_id,
+                    buttons=sos_buttons if sos_buttons else None,
+                    parse_mode='html'
+                )
+                logger.warning(
+                    "RULE MED-06 SOS Fast-Path triggered in group mention for chat_id=%s, msg_id=%s, type=%s",
+                    chat_id, msg_id, sos_category
+                )
+                return True
+            except Exception as e_sos:
+                logger.error(f"Failed to send SOS response in group mention: {e_sos}")
+
     try:
         # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
         # Было: LIMIT 6, плоский формат без структуры ответов.
@@ -13662,6 +13720,27 @@ async def handle_group_direct_ask(bot_client, event, question):
 
     if await check_and_apply_silence(event, question or getattr(getattr(event, "message", None), "message", ""), getattr(event, "reply_to_msg_id", None)):
         return
+
+    # FAST-PATH: SOS и экстренная реанимация в /ask (Правило MED-06)
+    sos_category = detect_pm_emergency(question)
+    if sos_category:
+        sos_text, sos_buttons = format_emergency_response(sos_category, is_group=True)
+        if sos_text:
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=sos_text,
+                    reply_to=msg_id,
+                    buttons=sos_buttons if sos_buttons else None,
+                    parse_mode='html'
+                )
+                logger.warning(
+                    "RULE MED-06 SOS Fast-Path triggered in group direct ask for chat_id=%s, msg_id=%s, type=%s",
+                    chat_id, msg_id, sos_category
+                )
+                return
+            except Exception as e_sos:
+                logger.error(f"Failed to send SOS response in group direct ask: {e_sos}")
 
     import inflight_triage
     inflight_mgr = inflight_triage.get_inflight_manager()
