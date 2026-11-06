@@ -1559,9 +1559,17 @@ def calculate_endo_instant(text: str) -> str | None:
     - Протокол ирригации NaOCl & EDTA (объёмы, подогрев, экспозиция, PUI/EDDY, запрет PCA).
     - Конусность и диаметр файла (ISO Taper & Tip formula Dx = D0 + taper*x, Danger Zone).
     - Торк и обороты эндомотора (RPM & Torque для ProTaper, WaveOne, Reciproc, SOCO, ультразвук).
+    - Базовые рутинные клинические протоколы (терапия, эндодонтия, ортопедия, хирургия).
     """
     if not text:
         return None
+    try:
+        import chairside_clinical_routines
+        routine_proto = chairside_clinical_routines.get_routine_clinical_protocol(text)
+        if routine_proto:
+            return routine_proto
+    except Exception as e_routine:
+        logger.debug("calculate_endo_instant routine check error: %s", e_routine)
     lower = text.lower().strip()
 
     # 1. Запрос протокола ирригации / NaOCl / EDTA
@@ -4030,8 +4038,29 @@ def clean_html_formatting(text):
         # идёт через html_safe.split_html, и там каждая часть валидна сама.
         return plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    # Convert markdown bullet points '* item' to '• item'
-    text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+    # 1. Convert Markdown code blocks ``` ... ``` to <pre><code> ... </code></pre>
+    def _convert_code_block(m):
+        code_content = m.group(1).strip()
+        return f"<pre><code>{code_content}</code></pre>"
+    text = re.sub(r'```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)```', _convert_code_block, text)
+
+    # 2. Convert Markdown inline code `code` to <code>code</code>
+    text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
+
+    # 3. Convert Markdown headers #{1,6} Header to <b>Header</b> at line start
+    def _convert_header(m):
+        header_text = m.group(1).strip()
+        if header_text.startswith("<b>") and header_text.endswith("</b>"):
+            return header_text
+        return f"<b>{header_text}</b>"
+    text = re.sub(r'(?m)^[ \t]*#{1,6}[ \t]+(.*)$', _convert_header, text)
+
+    # Strip any inline/remaining markdown headers (e.g. "Запрос: ### 1. Протокол") while preserving dental sizes like #25.04
+    text = re.sub(r'#{1,6}[ \t]+', '', text)
+    text = re.sub(r'#{2,}', '', text)
+
+    # 4. Convert markdown bullet points '* item', '- item', '+ item' to '• item'
+    text = re.sub(r'(?m)^\s*[\*\-\+]\s+', '• ', text)
     # Convert Markdown bold-italic ***text*** to HTML <b><i>text</i></b>
     text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', text)
     # Convert Markdown bold **text** to HTML bold <b>text</b>
@@ -12526,6 +12555,21 @@ async def handle_private_message(bot_client, event):
             )
             return
 
+        if not has_media and text:
+            try:
+                import chairside_clinical_routines
+                fast_routine = chairside_clinical_routines.get_routine_clinical_protocol(text)
+                if fast_routine:
+                    logger.info("Delivering instant chairside routine protocol in PM for chat_id=%s", chat_id)
+                    await send_message_chunks_async(bot_client, chat_id, fast_routine, parse_mode='html')
+                    try:
+                        await database.save_pm_message(chat_id, "Assistant", fast_routine)
+                    except Exception as s_err:
+                        logger.error(f"Failed to persist PM assistant reply: {s_err}")
+                    return
+            except Exception as e_cr:
+                logger.debug("Failed chairside_clinical_routines check in PM: %s", e_cr)
+
         status_msg = None
         ticker = None
         if has_media:
@@ -14245,6 +14289,27 @@ async def handle_group_direct_ask(bot_client, event, question):
                 return
         else:
             effective_question = clean_q
+
+        try:
+            import chairside_clinical_routines
+            routine_proto = chairside_clinical_routines.get_routine_clinical_protocol(effective_question)
+            if routine_proto and not target_media_ids and not reply_to_msg_id:
+                logger.info("Delivering instant chairside routine protocol in group ask for msg_id=%s", msg_id)
+                sent_msg = await bot_client.send_message(
+                    entity=chat_id,
+                    message=routine_proto,
+                    reply_to=msg_id,
+                    parse_mode='html'
+                )
+                if sent_msg and hasattr(sent_msg, 'id'):
+                    REPLIED_MSG_IDS[msg_id] = True
+                    try:
+                        await database.save_bot_sent_message(sent_msg.id, chat_id)
+                    except Exception as save_err:
+                        logger.debug("Failed to save bot sent message in ask: %s", save_err)
+                return
+        except Exception as e_cr:
+            logger.debug("Failed chairside_clinical_routines in ask: %s", e_cr)
 
         session = await inflight_mgr.register_session(chat_id, sender_id, msg_id, effective_question)
         for cid in all_check_ids:
