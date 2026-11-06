@@ -316,7 +316,7 @@ SOURCE_TIERS = (
     )),
     # 2. Профессиональные организации, регуляторы, инструкции к препаратам и ведущие академические центры.
     (2, (
-        "ada.org", "efp.org", "aae.org", "aaoms.org", "aaid-implant.org",
+        "ada.org", "efp.org", "aae.org", "e-s-e.org", "ese-endo.eu", "aaoms.org", "aaid-implant.org",
         "who.int", "fdiworlddental.org", "fda.gov", "cdc.gov", "ema.europa.eu",
         "mayoclinic.org", "clevelandclinic.org", "clinicalkey.com",
         "grls.rosminzdrav.ru", "rlsnet.ru", "drugs.com", "dailymed.nlm.nih.gov",
@@ -1166,6 +1166,17 @@ async def run_lookup(question, search_call, generate_call,
         return _refusal(ready["message"], OUTCOME_SEARCH_FAILED,
                         attempts=attempts, elapsed=time.monotonic() - started)
     if not results:
+        if attempts == 0:
+            log.warning(
+                "web lookup: попытка поиска не состоялась из-за исчерпания бюджета (осталось %.1fс из %.0fс) — OUTCOME_NO_BUDGET",
+                left(), budget,
+            )
+            return _refusal(
+                "Времени на поиск по сети не осталось: лимит времени команды исчерпан до старта поиска.",
+                OUTCOME_NO_BUDGET,
+                attempts=0,
+                elapsed=time.monotonic() - started
+            )
         log.warning(
             "web lookup: выдача пуста без отказа провайдера, попыток %d, запрос "
             "%d символов — врачу уходит «ничего не нашлось»", attempts, len(query),

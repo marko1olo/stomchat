@@ -196,6 +196,9 @@ def _save_expiry_map(path, data):
     """
     tmp_path = f"{path}.{os.getpid()}_{int(time.time() * 1000000)}.tmp"
     try:
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
         os.replace(tmp_path, path)
@@ -845,61 +848,58 @@ def _adapt_prompt_for_text_model(prompt: str, status_context: dict | None = None
 def cascade_for_context(status_context=None, prompt=None):
     """
     Формирует каскад (model_name, provider) в зависимости от контекста задачи.
-    Для медиа/фото/рентгена: мультимодальные модели Gemini (3.8 -> 3.7 -> 3.6 -> 3.5 -> lite) первыми,
-    затем надежный текстовый резерв (DeepSeek через AgentRouter и Groq) на случай отказа Google.
-    Для CHAT_KINDS: gemini-3.5-flash-lite в начале для быстрых ответов (при LOW/MEDIUM),
-    но gemini-3.8-flash доступен для глубоких рассуждений (при HIGH).
-    Для daemon_memory и простых задач с LOW не проваливается во флагманский gemini-3.8-flash.
+    - Для response_validator и triage: строго легкие быстрые модели (без gpt-6.1-sol и без gemini-3.8).
+    - Для клинических кейсов с медиа/фото: флагман gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ, затем Gemini резерв.
+    - Для CHAT_KINDS: флагман gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ при HIGH/MEDIUM.
     """
-    if is_media_task(status_context, prompt):
-        has_agentrouter = bool(provider_pool("agentrouter"))
-        agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
-        groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
-        cascade = [
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-        ]
-        if has_agentrouter:
-            cascade.append((agentrouter_model, "agentrouter"))
-        cascade.extend([
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            (groq_primary, "groq"),
-        ])
-        return cascade
-
     kind = status_context.get("kind") if status_context else None
-    is_triage = kind in TRIAGE_KINDS
-    summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
-    if kind in summary_kinds and (not status_context or "thinking_level" not in status_context):
-        thinking_level = "HIGH"
-    else:
-        thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
-
-    is_chatbot = kind in CHAT_KINDS
-    is_clinical_review = (kind == "poll_clinical_review")
-    is_poll_gen = kind in POLL_GEN_KINDS
     has_agentrouter = bool(provider_pool("agentrouter"))
     agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
+    is_triage = kind in TRIAGE_KINDS
 
-    if is_triage:
-        base = [
-            ("gemini-3.5-flash-lite", "gemini"),
-            (groq_primary, "groq"),
+    # 1. response_validator и triage (быстрый фильтр безопасности и классификаторы):
+    # Строго быстрые модели с таймаутом <= 7-15с. НИКАКИХ gpt-6.1-sol и НИКАКИХ gemini-3.8-flash!
+    if is_triage or kind == "response_validator":
+        return [
             ("gemini-3.1-flash-lite", "gemini"),
-            (groq_secondary, "groq"),
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.6-flash", "gemini"),
         ]
+
+    # 2. Фоновое распознавание картинок (vision):
+    # Быстрые Flash-модели без AgentRouter / gpt-6.1-sol
+    if kind in ("vision", "image_description", "chairside_vision"):
+        return [
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+        ]
+
+    # 3. Клинический разбор кейсов с медиа/фото/рентгеном:
+    if is_media_task(status_context, prompt):
+        cascade = []
         if has_agentrouter:
-            base.append((agentrouter_model, "agentrouter"))
-        return base
-    elif kind == "daemon_memory":
+            cascade.append((agentrouter_model, "agentrouter"))
+        cascade.extend([
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            (groq_primary, "groq"),
+            ("gemini-3.5-flash-lite", "gemini"),
+        ])
+        return cascade
+
+    summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
+    thinking_level = status_context.get("thinking_level", "HIGH") if status_context else "HIGH"
+
+    is_chatbot = kind in CHAT_KINDS
+    is_clinical_review = (kind == "poll_clinical_review")
+    is_poll_gen = kind in POLL_GEN_KINDS
+    if kind == "daemon_memory":
         # Фоновое обновление досье врача: используем легкие Flash-Lite и Groq
         cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
@@ -941,23 +941,6 @@ def cascade_for_context(status_context=None, prompt=None):
         if has_agentrouter:
             base.append((agentrouter_model, "agentrouter"))
         return base
-    elif is_chatbot and bool(
-        kind in ("assistant_media", "assistant_media_pm")
-        or (status_context and (status_context.get("image_urls") or status_context.get("has_media")))
-    ):
-        has_agentrouter = bool(provider_pool("agentrouter"))
-        cascade = [
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-        ]
-        if has_agentrouter:
-            cascade.append((agentrouter_model, "agentrouter"))
-        cascade.append((groq_primary, "groq"))
-        return cascade
     elif is_chatbot and thinking_level == "LOW":
         cascade = [
             ("gemini-3.5-flash-lite", "gemini"),
@@ -972,21 +955,18 @@ def cascade_for_context(status_context=None, prompt=None):
         return cascade
     elif is_chatbot:
         # Клинические ответы в чате и ЛС (HIGH и MEDIUM):
-        # ФЛАГМАН ДЛЯ ЧАТОВ И БЕСЕДЫ БЕЗ МЕДИА: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ!
-        # При отказе AgentRouter каскад перехватывают флагманы Google: gemini-3.8-flash ->
-        # gemini-3.7-flash -> gemini-3.6-flash, затем безотказный танк gemini-3.5-flash-lite,
-        # gemini-3.1-flash-lite и Groq.
+        # ФЛАГМАН: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ!
         cascade = []
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
         cascade.extend([
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.6-flash", "gemini"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
             (groq_primary, "groq"),
-            (groq_secondary, "groq"),
         ])
         return cascade
     elif kind in summary_kinds:
@@ -1052,15 +1032,16 @@ def generate_text(prompt, status_context=None, timeout=None):
     # НИКТО — это прямо сказано в комментарии к таблице и закреплено проверкой
     # test_fix_cascade.py:264. Живой флаг, вычисляемый из мёртвого условия, читается
     # как «здесь есть ветка для личных сообщений», которой нет.
-    is_triage = kind in TRIAGE_KINDS
-    is_chatbot = kind in CHAT_KINDS
+    is_validator = (kind == "response_validator")
+    is_triage = (kind in TRIAGE_KINDS) or is_validator
+    is_chatbot = (kind in CHAT_KINDS) and not is_validator
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
     summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
     if kind in summary_kinds and (not status_context or "thinking_level" not in status_context):
         thinking_level = "HIGH"
     else:
-        thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
+        thinking_level = status_context.get("thinking_level", "HIGH") if status_context else "HIGH"
 
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
 
@@ -1101,7 +1082,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         # На резерв не жертвуем последней попыткой: при совсем малом бюджете
         # (меньше 8 с такие вызывающие сейчас не передают) лучше один запрос на
         # весь бюджет, чем ноль запросов и гарантированный None.
-        min_req_step = 2.0 if is_triage else 4.0
+        min_req_step = 2.0 if is_triage else 7.0
         usable = max(min(budget, MIN_REQUEST_SECONDS), budget * BUDGET_RESERVE_SHARE)
         models_fit = max(1, min(len(active_cascade), int(usable // min_req_step)))
         # НЕ обрезаем каскад: быстрые резервные модели (Groq/Qwen) отвечают за 0.8-1.5с.
@@ -1126,8 +1107,8 @@ def generate_text(prompt, status_context=None, timeout=None):
         elif is_chatbot:
             # Chairside потолок таймаута на один HTTP-запрос в живом чате у кресла:
             # Не позволяем первичному вызову висеть 110+ секунд!
-            # Для HIGH: максимум 50с. Для MEDIUM: максимум 35с.
-            chat_max = 50.0 if thinking_level == "HIGH" else 35.0
+            # Для HIGH: максимум 120с. Для MEDIUM: максимум 45с.
+            chat_max = 120.0 if thinking_level == "HIGH" else 45.0
             req_timeout = max(15.0, min(req_timeout, chat_max))
         # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
         # убийства родителем, иначе причину провала записать будет некому.
@@ -1204,61 +1185,55 @@ def generate_text(prompt, status_context=None, timeout=None):
                     elif kind in summary_kinds:
                         min_needed = 10.0
                     else:
-                        min_needed = 7.0
+                        min_needed = min(7.0, float(timeout or 7.0))
                     if remaining < min_needed:
-                        subsequent_models = active_cascade[model_index + 1:]
-                        subsequent_min_needed = min(
-                            (1.5 if p == "groq" else (2.0 if "lite" in m else (2.5 if p == "agentrouter" else 3.5)))
-                            for m, p in subsequent_models
-                        ) if subsequent_models else 999.0
-
-                        if remaining < 1.5 or remaining < subsequent_min_needed:
-                            logger.warning(
-                                "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
-                                max(0.0, remaining), min_needed, model_name
-                            )
-                            _record_failure(
-                                "budget_exhausted",
-                                f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
-                            )
-                            out_of_budget = True
-                            break
-                        else:
-                            logger.info(
-                                "Skipping slow model %s (%.1fs left < %.1fs needed); proceeding to faster fallback in cascade.",
-                                model_name, max(0.0, remaining), min_needed
-                            )
-                            break
+                        logger.warning(
+                            "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
+                            max(0.0, remaining), min_needed, model_name
+                        )
+                        _record_failure(
+                            "budget_exhausted",
+                            f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
+                        )
+                        out_of_budget = True
+                        break
                     # Последнему запросу отдаём ровно остаток бюджета, а не полную
                     # долю: сумма таймаутов запросов не должна вылезать за timeout.
                     req_timeout = min(req_timeout, remaining)
 
                 call_timeout = req_timeout
-                if is_chatbot:
-                    if provider in ("gemini", "agentrouter"):
+                if provider == "agentrouter":
+                    rem = (deadline - time.monotonic()) if deadline else 240.0
+                    if kind in summary_kinds:
+                        call_timeout = max(180.0, min(720.0, rem))
+                    else:
+                        has_more_models = (model_index < len(active_cascade) - 1)
+                        remaining_models_count = len(active_cascade) - 1 - model_index
+                        fallback_reserve = min(24.0, max(12.0, remaining_models_count * 4.0)) if has_more_models else 0.0
+                        if deadline is not None and rem > fallback_reserve:
+                            max_allowed = max(MIN_REQUEST_SECONDS, rem - fallback_reserve)
+                            call_timeout = max(180.0, min(rem, max_allowed, 240.0))
+                        elif deadline is not None:
+                            call_timeout = max(MIN_REQUEST_SECONDS, rem)
+                        else:
+                            call_timeout = 240.0
+                elif is_chatbot:
+                    if provider == "gemini":
                         rem = (deadline - time.monotonic()) if deadline else 120.0
                         has_more_models = (model_index < len(active_cascade) - 1)
                         remaining_models_count = len(active_cascade) - 1 - model_index
                         fallback_reserve = min(35.0, max(14.0, remaining_models_count * 7.0)) if has_more_models else 0.0
+                        min_step = 2.0 if is_triage else min(7.0, float(timeout or 7.0))
                         if has_more_models and rem > fallback_reserve:
-                            max_allowed_for_model = min(rem, max(MIN_REQUEST_SECONDS, rem - fallback_reserve))
+                            max_allowed_for_model = min(rem, max(min_step, rem - fallback_reserve))
                         else:
                             max_allowed_for_model = rem
                         # Chairside потолок ожидания врача: не перебивать req_timeout гигантским числом!
-                        chat_ceiling = 50.0 if thinking_level == "HIGH" else 35.0
-                        if provider == "agentrouter":
-                            # Потолок для AgentRouter (gpt-6.1-sol) расширен до 1.5 минут (90.0с)
-                            call_timeout = max(MIN_REQUEST_SECONDS, min(rem, 90.0, max_allowed_for_model))
-                        elif thinking_level == "HIGH":
-                            call_timeout = max(MIN_REQUEST_SECONDS, min(rem, chat_ceiling, max_allowed_for_model))
+                        chat_ceiling = 120.0 if thinking_level == "HIGH" else 45.0
+                        if thinking_level == "HIGH":
+                            call_timeout = max(min_step, min(rem, chat_ceiling, max_allowed_for_model))
                         else:
-                            call_timeout = max(MIN_REQUEST_SECONDS, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
-                elif provider == "agentrouter":
-                    rem = (deadline - time.monotonic()) if deadline else 140.0
-                    if kind in summary_kinds:
-                        call_timeout = max(call_timeout, min(720.0, max(120.0, rem)))
-                    else:
-                        call_timeout = max(call_timeout, min(120.0, max(15.0, rem)))
+                            call_timeout = max(min_step, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
                 if deadline is not None:
                     rem = max(1.0, deadline - time.monotonic())
                     call_timeout = min(call_timeout, rem)
@@ -1304,7 +1279,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     ctx_max_tokens = status_context.get("max_tokens") if isinstance(status_context, dict) else None
                     if ctx_max_tokens:
                         create_kwargs["max_tokens"] = int(ctx_max_tokens)
-                    elif kind == "daemon_memory":
+                    if kind == "daemon_memory":
                         create_kwargs["max_tokens"] = 2048
 
                     # Лимит OTPM для Groq (особенно бесплатные квоты Qwen): потолок 1000 токенов/мин
@@ -1351,24 +1326,79 @@ def generate_text(prompt, status_context=None, timeout=None):
                                     "User-Agent": "opencode/1.18.25",
                                     "Content-Type": "application/json"
                                 }
-                                ar_input = adapted_prompt if "adapted_prompt" in locals() else _adapt_prompt_for_text_model(prompt, status_context)
+                                if image_urls:
+                                    content_items = [{"type": "input_text", "text": prompt}]
+                                    for iu in image_urls[:16]:
+                                        content_items.append({"type": "input_image", "image_url": iu})
+                                    ar_input = [
+                                        {
+                                            "type": "message",
+                                            "role": "user",
+                                            "content": content_items
+                                        }
+                                    ]
+                                else:
+                                    raw_text = adapted_prompt if "adapted_prompt" in locals() else _adapt_prompt_for_text_model(prompt, status_context)
+                                    ar_input = [
+                                        {
+                                            "type": "message",
+                                            "role": "user",
+                                            "content": [{"type": "input_text", "text": str(raw_text)}]
+                                        }
+                                    ]
                                 ar_payload = {
                                     "model": model_name,
-                                    "input": ar_input
+                                    "input": ar_input,
+                                    "stream": True,
+                                    "reasoning": {"effort": "high"}
                                 }
-                                ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=call_timeout)
+                                ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, stream=True, timeout=call_timeout)
                                 if ar_resp.status_code == 200:
-                                    ar_data = ar_resp.json()
-                                    extracted_txt = None
-                                    for out_item in ar_data.get("output", []):
-                                        if out_item.get("type") == "message":
-                                            msg_content = out_item.get("content", [])
-                                            if isinstance(msg_content, list) and msg_content:
-                                                extracted_txt = msg_content[0].get("text")
-                                            elif isinstance(msg_content, str):
-                                                extracted_txt = msg_content
+                                    stream_chunks = []
+                                    if hasattr(ar_resp, "iter_lines"):
+                                        try:
+                                            for raw_line in ar_resp.iter_lines():
+                                                if not raw_line:
+                                                    continue
+                                                line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+                                                line = line.strip()
+                                                if line.startswith("data:"):
+                                                    data_str = line[5:].strip()
+                                                    if data_str == "[DONE]":
+                                                        break
+                                                    try:
+                                                        chunk = json.loads(data_str)
+                                                    except Exception:
+                                                        continue
+                                                    ev_type = chunk.get("type", "")
+                                                    if "delta" in chunk:
+                                                        d = chunk["delta"]
+                                                        if isinstance(d, str):
+                                                            stream_chunks.append(d)
+                                                        elif isinstance(d, dict) and "text" in d:
+                                                            stream_chunks.append(d["text"])
+                                                    elif ev_type in ("response.output_text.delta", "response.text.delta"):
+                                                        txt = chunk.get("text") or chunk.get("delta") or ""
+                                                        if isinstance(txt, str):
+                                                            stream_chunks.append(txt)
+                                        except Exception as stream_err:
+                                            logger.warning("AgentRouter SSE stream read error: %s", stream_err)
+
+                                    extracted_txt = "".join(stream_chunks).strip() if stream_chunks else None
+                                    if not extracted_txt and hasattr(ar_resp, "json"):
+                                        try:
+                                            ar_data = ar_resp.json()
+                                            for out_item in ar_data.get("output", []):
+                                                if out_item.get("type") == "message":
+                                                    msg_content = out_item.get("content", [])
+                                                    if isinstance(msg_content, list) and msg_content:
+                                                        extracted_txt = msg_content[0].get("text")
+                                                    elif isinstance(msg_content, str):
+                                                        extracted_txt = msg_content
+                                        except Exception:
+                                            pass
                                     if not extracted_txt:
-                                        raise RuntimeError(f"AgentRouter empty message output: {ar_data}")
+                                        raise RuntimeError("AgentRouter SSE stream yielded empty output")
                                     response = type("DummyResp", (), {
                                         "choices": [type("Choice", (), {
                                             "message": type("Msg", (), {"content": extracted_txt})(),
@@ -1446,6 +1476,20 @@ def generate_text(prompt, status_context=None, timeout=None):
                 except Exception as exc:
                     err_msg = str(exc).lower()
                     logger.warning(f"{provider.capitalize()} failed attempt={attempt + 1}/{max_attempts} key={key_id}: {exc}")
+
+                    is_413 = (
+                        getattr(exc, "status_code", None) == 413
+                        or "413" in err_msg
+                        or "request too large" in err_msg
+                        or "payload too large" in err_msg
+                    )
+                    if is_413:
+                        logger.warning(
+                            f"{provider.capitalize()} 413 Payload Too Large for {model_name} ({err_msg[:120]}). "
+                            "Skipping remaining keys for this model and moving to next model in cascade."
+                        )
+                        _record_failure("model_invalid_request", str(exc), api_key)
+                        break
 
                     is_status_400 = (
                         getattr(exc, "status_code", None) == 400
@@ -2097,8 +2141,9 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             failure_reason = note_key_failure("groq", api_key, str(e))
             if failure_reason == "key_rate_limited":
                 # Пауза строго 2.5 сек по Iron Law, но ограничена остатком бюджета
-                left = (usable - (time.monotonic() - started)) if usable else 2.5
-                time.sleep(max(0.0, min(2.5, left)))
+                rate_delay = 2.5
+                left = (usable - (time.monotonic() - started)) if usable else rate_delay
+                time.sleep(max(0.0, min(rate_delay, left)))
             continue
 
     if actual_file_path != file_path and os.path.exists(actual_file_path):

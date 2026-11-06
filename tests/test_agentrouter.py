@@ -56,15 +56,19 @@ cascade_review = gc.cascade_for_context({"kind": "poll_clinical_review"})
 check(f"В poll_clinical_review {ar_model} идет первым", cascade_review[0] == (ar_model, "agentrouter"))
 
 cascade_media = gc.cascade_for_context({"kind": "assistant_media", "has_media": True})
-check("При наличии медиа (assistant_media) Gemini идет первым", cascade_media[0][1] == "gemini")
-check(f"При наличии медиа {ar_model} доступен как резерв", (ar_model, "agentrouter") in cascade_media)
+check(f"При наличии медиа (assistant_media) {ar_model} идет первым", cascade_media[0] == (ar_model, "agentrouter"))
+check("При наличии медиа Gemini доступен как надежный резерв", ("gemini-3.8-flash", "gemini") in cascade_media)
 
 cascade_prompt_media = gc.cascade_for_context({"kind": "pm_chat"}, prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: фото зуба 4.6]")
-check("Авто-детект медиа ставит Gemini первым", cascade_prompt_media[0][1] == "gemini")
-check(f"Авто-детект медиа сохраняет {ar_model} как резерв", (ar_model, "agentrouter") in cascade_prompt_media)
+check(f"Авто-детект медиа ставит {ar_model} первым", cascade_prompt_media[0] == (ar_model, "agentrouter"))
+check("Авто-детект медиа сохраняет Gemini как надежный резерв", ("gemini-3.8-flash", "gemini") in cascade_prompt_media)
 
 cascade_triage = gc.cascade_for_context({"kind": "llama_triage"})
-check(f"В triage {ar_model} присутствует как резерв", (ar_model, "agentrouter") in cascade_triage)
+check(f"В triage {ar_model} КАТЕГОРИЧЕСКИ отсутствует (только быстрые модели)", (ar_model, "agentrouter") not in cascade_triage)
+
+cascade_validator = gc.cascade_for_context({"kind": "response_validator"})
+check(f"В response_validator {ar_model} КАТЕГОРИЧЕСКИ отсутствует", (ar_model, "agentrouter") not in cascade_validator)
+check("В response_validator только быстрые модели (без heavy flash и без sol)", all(p in ("gemini", "groq") and "gemini-3.8" not in m and "sol" not in m for m, p in cascade_validator))
 
 # При отсутствии ключей каскад откатывается на Gemini
 config.AGENTROUTER_KEYS = []
@@ -120,7 +124,53 @@ requests.post = _orig_post
 
 check("Генерация завершилась успешно", res is not None and res.text == "Отличный ответ")
 check(f"Запрос был отправлен к {ar_model}", len(CAPTURED_REQUESTS) > 0 and CAPTURED_REQUESTS[0].get("json", {}).get("model") == ar_model)
-check("Таймаут запроса соответствует архитектурному запасу (>= 30с)", len(CAPTURED_REQUESTS) > 0 and (CAPTURED_REQUESTS[0].get("timeout") or 0) >= 30.0)
+check("Таймаут запроса соответствует архитектурному запасу (>= 180с)", len(CAPTURED_REQUESTS) > 0 and (CAPTURED_REQUESTS[0].get("timeout") or 0) >= 180.0)
+check("AgentRouter передает reasoning effort high", len(CAPTURED_REQUESTS) > 0 and CAPTURED_REQUESTS[0].get("json", {}).get("reasoning", {}).get("effort") == "high")
+
+print("\n[5] AgentRouter: Мультимодальность с image_urls (Responses API)")
+CAPTURED_REQUESTS.clear()
+requests.post = mock_post
+
+res_media = gc.generate_text(
+    "Опиши снимок",
+    status_context={"kind": "assistant_media", "image_urls": ["https://example.com/xray.jpg"]}
+)
+requests.post = _orig_post
+
+check("Мультимодальный запрос завершился успешно", res_media is not None and res_media.text == "Отличный ответ")
+media_payload = CAPTURED_REQUESTS[0].get("json", {}) if CAPTURED_REQUESTS else {}
+check(f"Мультимодальный запрос ушел к {ar_model}", media_payload.get("model") == ar_model)
+ar_inp = media_payload.get("input", [])
+check("Вход оформлен списком сообщений Responses API", isinstance(ar_inp, list) and len(ar_inp) > 0 and ar_inp[0].get("type") == "message")
+ar_content = ar_inp[0].get("content", []) if ar_inp else []
+check("Контент содержит input_text", any(c.get("type") == "input_text" for c in ar_content))
+check("Контент содержит input_image с переданным URL", any(c.get("type") == "input_image" and c.get("image_url") == "https://example.com/xray.jpg" for c in ar_content))
+check("Мультимодальный AgentRouter передает reasoning effort high", media_payload.get("reasoning", {}).get("effort") == "high")
+
+print("\n[6] AgentRouter: SSE стриминг (stream=True и парсинг дельт)")
+class MockStreamHttpResponse:
+    status_code = 200
+    text = ""
+    def iter_lines(self):
+        yield 'data: {"type": "response.output_text.delta", "delta": "Стриминговый "}'.encode("utf-8")
+        yield 'data: {"type": "response.output_text.delta", "delta": "клинический ответ"}'.encode("utf-8")
+        yield b'data: [DONE]'
+def mock_stream_post(url, headers=None, json=None, timeout=None, **kwargs):
+    CAPTURED_REQUESTS.append({"url": url, "headers": headers, "json": json, "timeout": timeout, "kwargs": kwargs})
+    return MockStreamHttpResponse()
+
+CAPTURED_REQUESTS.clear()
+requests.post = mock_stream_post
+res_stream = gc.generate_text("Разбор случая", status_context={"kind": "pm_chat"})
+requests.post = _orig_post
+
+check("Стриминговый запрос завершился успешно", res_stream is not None and res_stream.text == "Стриминговый клинический ответ")
+stream_payload = CAPTURED_REQUESTS[0].get("json", {}) if CAPTURED_REQUESTS else {}
+check("AgentRouter payload передает stream=True", stream_payload.get("stream") is True)
+check("requests.post вызывается с stream=True", CAPTURED_REQUESTS[0].get("kwargs", {}).get("stream") is True)
+
+def test_agentrouter_all_passed():
+    assert len(FAIL) == 0, f"FAILED: {FAIL}"
 
 if __name__ == "__main__":
     print("\n==============================================================")

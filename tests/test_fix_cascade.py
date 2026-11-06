@@ -43,6 +43,10 @@ import gemini_client as gc  # noqa: E402
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+_ORIG_BANNED = gc.BANNED_MODELS_FILE
+_ORIG_COOLDOWNS = gc.KEY_COOLDOWN_FILE
+_ORIG_STATUS = runtime_guard.SUMMARY_STATUS_PATH
+
 gc.BANNED_MODELS_FILE = os.path.join(_TMPDIR, "banned_models.json")
 gc.KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "key_cooldowns.json")
 # _write_generation_status пишет через runtime_guard в bot_summary_status.json.
@@ -205,7 +209,7 @@ for kind, budget in (("assistant", 90), ("pm_chat", 90), ("bot_mention_reply", 6
 print("\n[2] Резервный провайдер теперь достижим (за ним каскад и написан)")
 # Быстрый отказ: 429/400 приходят мгновенно, а не по таймауту.
 reset({m: Exception("400 invalid argument") for m in (
-    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")}, spend_full_timeout=False)
+    "openai/gpt-oss-120b", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")}, spend_full_timeout=False)
 _behaviour["qwen/qwen3.8-27b"] = "ответ резервного провайдера"
 res = gc.generate_text("вопрос", {"kind": "assistant", "thinking_level": "HIGH"}, timeout=90)
 check("ответ получен от groq после провала gemini",
@@ -241,8 +245,9 @@ check("виды работ найдены в вызывающих файлах",
 
 # Сводки — единственные, кому тяжёлый каскад положен: их ждут не в диалоге.
 HEAVY_ALLOWED = {"daily", "weekly", "group_summary"}
-TRIAGE_FIRST = "gemini-3.5-flash-lite"
-CHAT_FIRST = "gemini-3.8-flash"
+TRIAGE_FIRST = "gemini-3.1-flash-lite"
+CHAT_FIRST = "openai/gpt-oss-120b"
+VISION_FIRST = "gemini-3.5-flash-lite"
 
 
 def first_model_for(kind):
@@ -256,8 +261,10 @@ for kind in sorted(real_kinds):
     first = first_model_for(kind)
     if kind in HEAVY_ALLOWED:
         expected = config.GEMINI_MODEL
-    elif kind in gc.TRIAGE_KINDS:
+    elif kind in gc.TRIAGE_KINDS or kind == "response_validator":
         expected = TRIAGE_FIRST
+    elif kind in ("vision", "image_description", "chairside_vision"):
+        expected = VISION_FIRST
     else:
         expected = CHAT_FIRST
     check(f"«{kind}» начинает с {expected}", first == expected, f"got {first}")
@@ -282,23 +289,24 @@ print("\n[4] 429 с числом 500-класса в теле НЕ банит м
 # модель улетала в бан на 20 минут для ВСЕХ ключей и всех подпроцессов (файл
 # банов общий), а исчерпанный ключ кулдауна не получал: break уходил из цикла
 # раньше строки set_key_cooldown.
+GEMINI_TEST_MODEL = "gemini-3.6-flash"
 for label, text in (
     ("quota_limit_value: 500", "429 RESOURCE_EXHAUSTED: quota exceeded, quota_limit_value: 500 per day"),
     ("limit 500 requests", "429 Too Many Requests: rate limit reached, limit 500 requests per day"),
     ("503 в тексте 429", "429 rate limit; retry later (503 upstream note)"),
 ):
-    reset({CHAT_FIRST: Exception(text)}, spend_full_timeout=False)
+    reset({"openai/gpt-oss-120b": Exception("400 bad request"), GEMINI_TEST_MODEL: Exception(text)}, spend_full_timeout=False)
     gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
     banned = gc.get_banned_models()
     cooled = gc.get_key_cooldowns()
-    check(f"«{label}»: модель не забанена", CHAT_FIRST not in banned, f"got {banned}")
+    check(f"«{label}»: модель не забанена", GEMINI_TEST_MODEL not in banned, f"got {banned}")
     check(f"«{label}»: ключ отправлен на кулдаун",
           any(gc._key_fingerprint("gemini", k) in cooled for k in GOOGLE_KEYS), f"got {cooled}")
     check(f"«{label}»: причина названа исчерпанием ключа",
           (gc.get_last_failure() or {}).get("reason") != "model_overloaded",
           f"got {gc.get_last_failure()}")
 
-reset({CHAT_FIRST: Exception("429 quota exceeded, limit 500 per day")},
+reset({"openai/gpt-oss-120b": Exception("400 bad request"), GEMINI_TEST_MODEL: Exception("429 quota exceeded, limit 500 per day")},
       spend_full_timeout=False)
 gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
 cooled_keys = [k for k in GOOGLE_KEYS if gc._key_fingerprint("gemini", k) in gc.get_key_cooldowns()]
@@ -417,8 +425,94 @@ check("боевые файлы не тронуты",
       and not os.path.exists(os.path.join(REPO_DIR, "banned_models.json.tmp")),
       f"{gc.BANNED_MODELS_FILE} / {runtime_guard.SUMMARY_STATUS_PATH}")
 
+print("\n[9] AgentRouter (gpt-6.1-sol) и Response Validator: новая архитектура")
+config.AGENTROUTER_KEYS = ["ar-01-secretpart", "ar-02-secretpart"]
+ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+
+# 1. Валидатор ответов и триаж: ТОЛЬКО быстрые модели, AgentRouter и Gemini 3.8 строго запрещены
+val_cascade = gc.cascade_for_context({"kind": "response_validator"})
+check("«response_validator» содержит ровно 4 быстрых модели", len(val_cascade) == 4, f"got {val_cascade}")
+check("«response_validator» 1-я модель gemini-3.1-flash-lite", val_cascade[0] == ("gemini-3.1-flash-lite", "gemini"))
+check("«response_validator» 2-я модель gemini-3.5-flash-lite", val_cascade[1] == ("gemini-3.5-flash-lite", "gemini"))
+check("«response_validator» 3-я модель openai/gpt-oss-120b", val_cascade[2] == ("openai/gpt-oss-120b", "groq"))
+check("«response_validator» 4-я модель gemini-3.6-flash", val_cascade[3] == ("gemini-3.6-flash", "gemini"))
+check("«response_validator» НЕ содержит agentrouter", not any(p == "agentrouter" for _, p in val_cascade))
+check(f"«response_validator» НЕ содержит {ar_model}", not any(m == ar_model for m, _ in val_cascade))
+check("«response_validator» НЕ содержит gemini-3.8-flash", not any(m == "gemini-3.8-flash" for m, _ in val_cascade))
+
+triage_cascade = gc.cascade_for_context({"kind": "llama_triage"})
+check("«llama_triage» НЕ содержит agentrouter", not any(p == "agentrouter" for _, p in triage_cascade))
+check(f"«llama_triage» НЕ содержит {ar_model}", not any(m == ar_model for m, _ in triage_cascade))
+check("«llama_triage» НЕ содержит gemini-3.8-flash", not any(m == "gemini-3.8-flash" for m, _ in triage_cascade))
+
+# 2. Клинические ответы врачам (чат, ЛС, медиа): gpt-6.1-sol идёт ПЕРВЫМ
+chat_cascade = gc.cascade_for_context({"kind": "pm_chat", "thinking_level": "HIGH"})
+check(f"«pm_chat» начинает с {ar_model} (agentrouter)", chat_cascade[0] == (ar_model, "agentrouter"))
+check("«pm_chat» 2-я модель openai/gpt-oss-120b", chat_cascade[1] == ("openai/gpt-oss-120b", "groq"))
+check("«pm_chat» 3-я модель gemini-3.6-flash", chat_cascade[2] == ("gemini-3.6-flash", "gemini"))
+check("«pm_chat» 4-я модель gemini-3.8-flash", chat_cascade[3] == ("gemini-3.8-flash", "gemini"))
+check("«pm_chat» 5-я модель gemini-3.7-flash", chat_cascade[4] == ("gemini-3.7-flash", "gemini"))
+
+asst_cascade = gc.cascade_for_context({"kind": "assistant", "thinking_level": "HIGH"})
+check(f"«assistant» начинает с {ar_model} (agentrouter)", asst_cascade[0] == (ar_model, "agentrouter"))
+
+media_cascade = gc.cascade_for_context({"kind": "assistant_media", "has_media": True})
+check(f"«assistant_media» с has_media начинает с {ar_model} (agentrouter)", media_cascade[0] == (ar_model, "agentrouter"))
+check("«assistant_media» 2-я модель openai/gpt-oss-120b", media_cascade[1] == ("openai/gpt-oss-120b", "groq"))
+check("«assistant_media» 3-я модель gemini-3.6-flash", media_cascade[2] == ("gemini-3.6-flash", "gemini"))
+check("«assistant_media» 4-я модель gemini-3.8-flash", media_cascade[3] == ("gemini-3.8-flash", "gemini"))
+check("«assistant_media» 5-я модель gemini-3.7-flash", media_cascade[4] == ("gemini-3.7-flash", "gemini"))
+check("«assistant_media» 6-я модель qwen/qwen3.8-27b", media_cascade[5] == (config.GROQ_MODEL, "groq"))
+check("«assistant_media» 7-я модель gemini-3.5-flash-lite (в самый конец для медиа)", media_cascade[6] == ("gemini-3.5-flash-lite", "gemini"))
+
+prompt_media_cascade = gc.cascade_for_context({"kind": "pm_chat"}, prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: снимок зуба 3.6]")
+check(f"Авто-детект медиа начинает с {ar_model} (agentrouter)", prompt_media_cascade[0] == (ar_model, "agentrouter"))
+
+# 3. Фоновое распознавание картинок (vision): быстрые Flash-модели без gpt-6.1-sol
+vis_cascade = gc.cascade_for_context({"kind": "vision"})
+check("«vision» НЕ содержит agentrouter", not any(p == "agentrouter" for _, p in vis_cascade))
+check("«vision» 1-я модель gemini-3.5-flash-lite", vis_cascade[0] == ("gemini-3.5-flash-lite", "gemini"))
+check("«vision» 2-я модель gemini-3.1-flash-lite", vis_cascade[1] == ("gemini-3.1-flash-lite", "gemini"))
+check("«vision» 3-я модель gemini-3.6-flash", vis_cascade[2] == ("gemini-3.6-flash", "gemini"))
+
+# 4. Таймаут валидатора: максимум 15с на запрос
+reset({m: ANY_FAIL for m in ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "gemini-3.6-flash")}, spend_full_timeout=False)
+gc.generate_text("проверь черновик", {"kind": "response_validator"}, timeout=120)
+val_timeouts = timeouts_used()
+check("таймаут каждого запроса валидатора не превышает 15с", all(t <= 15.01 for t in val_timeouts), f"got {val_timeouts}")
+check("валидатор не делал запросов к agentrouter", not any(m == ar_model for m in models_used()))
+
+print("\n[5] Защита от лимита Groq 413 TPM и pre-flight промпта")
+class Err413(Exception):
+    status_code = 413
+    def __str__(self):
+        return "Error code: 413 - {'error': {'message': 'Request too large for model openai/gpt-oss-120b limit 8000'}}"
+
+# 5.1. 413 не крутит ключи, а сразу переходит к следующей модели
+reset({"openai/gpt-oss-120b": Err413()}, spend_full_timeout=False)
+gc.generate_text("клинический вопрос", {"kind": "pm_chat"}, timeout=90)
+groq_120b_reqs = [m for m in models_used() if m == "openai/gpt-oss-120b"]
+check("413 на Groq вызывает break сразу без ретрая по остальным ключам", len(groq_120b_reqs) == 1, f"got {len(groq_120b_reqs)} reqs")
+check("после 413 каскад перешел на fallback (gemini-3.6-flash)", "gemini-3.6-flash" in models_used())
+
+# 5.2. Сводка с промптом > 24k пропускает Groq-модели
+reset(spend_full_timeout=False)
+gc.generate_text("Сводка за день: " + "А" * 25000, {"kind": "daily"}, timeout=120)
+daily_groq_reqs = [m for m, p in [r for r in zip(models_used(), providers_used())] if p == "groq"]
+check("сводка с промптом > 24k символов пропускает Groq", len(daily_groq_reqs) == 0, f"got {daily_groq_reqs}")
+
+# Возвращаем исходное состояние
+config.AGENTROUTER_KEYS = []
+
+gc.BANNED_MODELS_FILE = _ORIG_BANNED
+gc.KEY_COOLDOWN_FILE = _ORIG_COOLDOWNS
+runtime_guard.SUMMARY_STATUS_PATH = _ORIG_STATUS
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 print(f"\n{'=' * 62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+def test_fix_cascade_all_passed():
+    assert len(FAIL) == 0, f"FAILED: {FAIL}"
+
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

@@ -35,12 +35,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("visiodent_enhancer")
 
-# Пути к системным TrueType шрифтам Windows с полной поддержкой кириллицы
+# Пути к системным TrueType шрифтам Windows и Linux с полной поддержкой кириллицы
 FONT_CANDIDATES = [
     r"C:\Windows\Fonts\segoeuib.ttf",
     r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\segoeui.ttf",
     r"C:\Windows\Fonts\arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 ]
 RESOLVED_FONT_PATH = next((f for f in FONT_CANDIDATES if os.path.exists(f)), None)
 
@@ -360,8 +364,8 @@ async def analyze_xray_context_and_doubt_async(
     has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t)
     target_tooth = meta.get("target_tooth")
     if not target_tooth:
-        tooth_match = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{user_t} {vis_desc}")
-        target_tooth = tooth_match.group(1) if tooth_match else None
+        tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', f"{user_t} {vis_desc}")
+        target_tooth = tooth_match.group(1).replace(".", "") if tooth_match else None
 
     rec_quad = meta.get("recommended_quadrant")
     if not rec_quad:

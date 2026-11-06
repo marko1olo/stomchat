@@ -18,6 +18,7 @@ from telethon import utils as telethon_utils
 import config
 import tg_safety
 import runtime_guard
+import html_safe
 
 runtime_guard.configure_logging()
 logger = logging.getLogger(__name__)
@@ -1241,25 +1242,33 @@ async def outbox_worker_task(bot_client):
                 text = item["text"]
                 pm = item.get("parse_mode") or "html"
                 try:
-                    outcome = await tg_safety.send_message(
-                        bot_client,
-                        chat_id,
-                        text,
-                        parse_mode=pm,
-                        timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
-                        op="outbox_worker:send",
-                    )
-                    if outcome.ok:
+                    chunks = list(html_safe.split_html(text, limit=4000)) if pm == "html" else [text[i:i+4000] for i in range(0, len(text), 4000)]
+                    delivery_ok = True
+                    for c_idx, chunk in enumerate(chunks):
+                        outcome = await tg_safety.send_message(
+                            bot_client,
+                            chat_id,
+                            chunk,
+                            parse_mode=pm,
+                            timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+                            op="outbox_worker:send",
+                        )
+                        if not outcome.ok:
+                            delivery_ok = False
+                            err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
+                            if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
+                                logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
+                            else:
+                                logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
+                                await database.mark_outbox_failed(oid, err_str)
+                            break
+                        if c_idx < len(chunks) - 1:
+                            await asyncio.sleep(0.5)
+
+                    if delivery_ok:
                         await database.mark_outbox_sent(oid)
                         await database.save_pm_message(chat_id, "Assistant", text)
-                        logger.info("Outbox worker successfully delivered msg %d to chat_id=%s", oid, chat_id)
-                    else:
-                        err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
-                        if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
-                            logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
-                        else:
-                            logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
-                            await database.mark_outbox_failed(oid, err_str)
+                        logger.info("Outbox worker successfully delivered msg %d (%d chunks) to chat_id=%s", oid, len(chunks), chat_id)
                 except Exception as send_err:
                     err_str = str(send_err)
                     logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
@@ -1589,8 +1598,12 @@ async def recover_pending_media_analysis():
         messages = [messages]
 
     queued = 0
-    for message in messages:
+    for idx, message in enumerate(messages):
+        target_id = ids[idx] if idx < len(ids) else None
         if not message:
+            if target_id:
+                logger.info("pending media recovery: msg_id=%s not found in Telegram (deleted), marking unavailable", target_id)
+                await database.update_media_description(target_id, MEDIA_UNAVAILABLE_MARK)
             continue
         msg_id = message.id
         media_type_hint = id_to_media_type.get(msg_id)
@@ -1598,7 +1611,8 @@ async def recover_pending_media_analysis():
         # выборку именно потому, что медиа у неё было. Но если Telegram отдал
         # сообщение, судим по нему тем же единым правилом, что и живой путь.
         if not (clinical_media_kind(message) or media_type_hint):
-            logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
+            logger.info("pending media recovery skipped msg_id=%s: telegram media missing, marking unavailable", msg_id)
+            await database.update_media_description(msg_id, MEDIA_UNAVAILABLE_MARK)
             continue
         # Проверяем свежесть сообщения: если оно пришло недавно (до 45 мин назад),
         # это живое клиническое обращение, отправленное прямо перед рестартом или во время него.
@@ -3402,7 +3416,7 @@ async def handle_private_message(event):
                         try:
                             await bot_client.send_message(
                                 entity=chat_id,
-                                message="⏱ <i>Обработка клинического запроса заняла больше обычного из-за высокой нагрузки на нейросетевой каскад. Пожалуйста, повторите запрос или уточните вопрос.</i>",
+                                message="⏱ <i>Коллега, клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
                                 parse_mode="html",
                             )
                         except Exception as notify_err:

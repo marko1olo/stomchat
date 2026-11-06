@@ -35,22 +35,26 @@ class TestLLMLoadBalanceInquisitor(unittest.TestCase):
             prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ] Оцени снимок зуба 1.2"
         )
         self.assertGreaterEqual(len(cascade), 3)
-        self.assertEqual(cascade[0][0], "gemini-3.8-flash")
-        self.assertEqual(cascade[1][0], "gemini-3.5-flash-lite")
-        # Если AgentRouter настроен, 3-й должна быть deepseek-v4-flash
         has_ar = bool(gemini_client.provider_pool("agentrouter"))
+        expected_ar = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
         if has_ar:
-            expected_ar = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
-            self.assertEqual(cascade[2], (expected_ar, "agentrouter"))
+            self.assertEqual(cascade[0], (expected_ar, "agentrouter"))
+            self.assertEqual(cascade[1][0], "openai/gpt-oss-120b")
+            self.assertEqual(cascade[2][0], "gemini-3.6-flash")
+            self.assertEqual(cascade[3][0], "gemini-3.8-flash")
+        else:
+            self.assertEqual(cascade[0][0], "openai/gpt-oss-120b")
+            self.assertEqual(cascade[1][0], "gemini-3.6-flash")
+            self.assertEqual(cascade[2][0], "gemini-3.8-flash")
 
     def test_chairside_chat_timeout_ceilings(self):
         """
         Инвариант 3: Потолок таймаута одного HTTP-запроса для интерактивного чата
-        не должен превышать 50с при HIGH и 35с при MEDIUM, предотвращая 110-секундные зависания.
+        составляет 120с при HIGH (для глубокого рассуждения) и 45с при MEDIUM.
         """
         src = inspect.getsource(gemini_client.generate_text)
-        self.assertIn("chat_max = 50.0 if thinking_level == \"HIGH\" else 35.0", src)
-        self.assertIn("chat_ceiling = 50.0 if thinking_level == \"HIGH\" else 35.0", src)
+        self.assertIn("chat_max = 120.0 if thinking_level == \"HIGH\" else 45.0", src)
+        self.assertIn("chat_ceiling = 120.0 if thinking_level == \"HIGH\" else 45.0", src)
         self.assertNotIn("chat_max = 240.0", src)
         self.assertNotIn("chat_ceiling = 240.0", src)
 

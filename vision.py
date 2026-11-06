@@ -244,10 +244,12 @@ def extract_vision_metadata(raw_text: str) -> dict:
         else:
             parsed["modality"] = classify_modality_fallback(sec_text)
 
-        tooth_m = re.search(r"(?:зуб[а-я]*|tooth|target_tooth)[\s:#*-]*([1-4][1-8])\b", sec_text, re.IGNORECASE)
+        tooth_m = re.search(r"(?:зуб[а-я]*|tooth|target_tooth)[\s:#*-]*([1-4]\.?[1-8])\b", sec_text, re.IGNORECASE)
+        if not tooth_m:
+            tooth_m = re.search(r"(?<!\d)([1-4]\.?[1-8])(?!\d)", sec_text)
         if tooth_m:
             try:
-                parsed["target_tooth"] = int(tooth_m.group(1))
+                parsed["target_tooth"] = int(tooth_m.group(1).replace(".", ""))
             except Exception:
                 parsed["target_tooth"] = None
 
@@ -632,7 +634,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
-                ("qwen/qwen3.8-27b", "groq"),
+                ("gemini-3.6-flash", "gemini"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()

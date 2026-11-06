@@ -3242,6 +3242,84 @@ def _safe_balance_history_line(line: str) -> str:
     return res
 
 
+def format_pm_history_timeline(history_rows, now_dt=None):
+    """
+    Форматирует историю диалога ЛС с разбивкой по временным окнам и явными маркерами:
+      - [ИСТОРИЯ ДИАЛОГА (более недели назад)]
+      - [ИСТОРИЯ ДИАЛОГА (более дня назад / DD.MM.YYYY)]
+      - [ИСТОРИЯ ДИАЛОГА (ранее сегодня, более 6 часов назад)]
+      - [НЕДАВНИЙ КОНТЕКСТ (в пределах 1–2 часов)]
+    Объединяет подряд идущие реплики врача, отправленные в одном временном слоте (<= 180с).
+    Поддерживает как словари из БД (с ключами 'sender_name', 'text', 'date'), так и готовые строки.
+    """
+    if not history_rows:
+        return []
+    if now_dt is None:
+        now_dt = datetime.utcnow()
+
+    normalized = []
+    for item in history_rows:
+        if isinstance(item, dict):
+            sender = item.get("sender_name") or "User"
+            text_val = (item.get("text") or "").strip()
+            date_val = _parse_db_date(item.get("date"))
+        elif isinstance(item, str):
+            if ": " in item:
+                sender, text_val = item.split(": ", 1)
+            else:
+                sender, text_val = "User", item
+            date_val = datetime(2000, 1, 1)
+        else:
+            continue
+        if text_val:
+            normalized.append({"sender_name": sender, "text": text_val, "date_dt": date_val})
+
+    if not normalized:
+        return []
+
+    merged = []
+    for item in normalized:
+        sender = item["sender_name"]
+        text_val = item["text"]
+        dt_val = item["date_dt"]
+        if merged and merged[-1]["sender_name"] == sender:
+            prev_dt = merged[-1]["date_dt"]
+            time_diff = abs((dt_val - prev_dt).total_seconds())
+            if time_diff <= 180:
+                merged[-1]["text"] += "\n" + text_val
+                merged[-1]["date_dt"] = dt_val
+                continue
+        merged.append({"sender_name": sender, "text": text_val, "date_dt": dt_val})
+
+    def _get_window(dt_val):
+        if dt_val.year <= 2000:
+            return ("older_week", "[ИСТОРИЯ ДИАЛОГА (более недели назад)]")
+        age_sec = (now_dt - dt_val).total_seconds()
+        if age_sec < 0:
+            age_sec = 0
+        if age_sec >= 7 * 86400:
+            return ("older_week", "[ИСТОРИЯ ДИАЛОГА (более недели назад)]")
+        elif age_sec >= 86400:
+            date_str = dt_val.strftime("%d.%m.%Y")
+            return ("older_day", f"[ИСТОРИЯ ДИАЛОГА (более дня назад / {date_str})]")
+        elif age_sec >= 6 * 3600:
+            return ("today_6h", "[ИСТОРИЯ ДИАЛОГА (ранее сегодня, более 6 часов назад)]")
+        else:
+            return ("recent", "[НЕДАВНИЙ КОНТЕКСТ (в пределах 1–2 часов)]")
+
+    result_lines = []
+    current_window = None
+    for item in merged:
+        win_key, header = _get_window(item["date_dt"])
+        if win_key != current_window:
+            current_window = win_key
+            result_lines.append(f"{header}:")
+        speaker = "Врач" if item["sender_name"] in ("User", "Врач") else "Бот-ассистент"
+        result_lines.append(f"{speaker}: {item['text']}")
+
+    return result_lines
+
+
 def _fit_pm_history(lines):
     """
     Укладывает историю ЛС в бюджет по символам, сохраняя САМЫЕ СВЕЖИЕ реплики.
@@ -3258,6 +3336,10 @@ def _fit_pm_history(lines):
     модель отвечала бы на усечённый вопрос, не зная об этом. Полная реплика
     (≤4096 + имя) укладывается в бюджет 6000 сама, остаток достаётся истории.
     """
+    if not lines:
+        return []
+    if isinstance(lines[0], dict):
+        lines = format_pm_history_timeline(lines)
     kept = []
     used = 0
     for position, line in enumerate(reversed(lines)):
@@ -3273,6 +3355,8 @@ def _fit_pm_history(lines):
         kept.append(line)
         used += cost
     kept.reverse()
+    while kept and kept[0].startswith("[ИСТОРИЯ ДИАЛОГА") and (len(kept) == 1 or kept[1].startswith("[ИСТОРИЯ ДИАЛОГА") or kept[1].startswith("[НЕДАВНИЙ КОНТЕКСТ")):
+        kept.pop(0)
     return kept
 
 
@@ -4270,8 +4354,8 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
             c_list = [str(m) for m in context_msgs if m]
             if len(c_list) > 12:
                 # Всегда сохраняем первое сообщение (корень клинического случая) + последние реплики
-                preserved = [c_list[0]] + c_list[-11:]
-                context_str = "\n".join(preserved)
+                preserved = [c_list[0]] + context_msgs[-10:]
+                context_str = "\n".join(str(m) for m in preserved if m)
             else:
                 context_str = "\n".join(c_list)
         else:
@@ -4302,12 +4386,13 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 
 1. УМЕСТНОСТЬ И ПРЯМОЙ ОТВЕТ В РАМКАХ КЛИНИЧЕСКОГО ТРЕДА:
    — Ответ обязан отвечать по существу клинической проблемы, обсуждаемой в ветке/диалоге.
-   — ВНИМАНИЕ К КОНТЕКСТУ ТРЕДА И КЛИНИЧЕСКИМ СЛУЧАЯМ: если в контексте диалога или ветки описан клинический случай (зуб, снимки, кровотечение, САП, отломок, перфорация), а текущая реплика врача — это краткий вопрос/призыв («выручай», «что делать?», «подскажи», «как быть?», «ботик видео не умеет смотреть?»), ответ ОБЯЗАН разбирать описанный клинический случай из контекста ветки! Использование данных случая из контекста ветки (номер зуба, анатомия, каналы, отломки) НЕ ЯВЛЯЕТСЯ галлюцинацией, подменой темы или топографической ошибкой. Это строго правильное, ожидаемое решение!
+   — ВНИМАНИЕ К КОНТЕКСТУ ТРЕДА И КЛИНИЧЕСКИМ СЛУЧАЯМ: если в контексте диалога или ветки описан клинический случай (зуб, снимки, кровотечение, САП, отломок, перфорация), а текущая реплика врача — это краткий вопрос/призыв БЕЗ самостоятельной клинической темы («выручай», «что делать?», «подскажи», «как быть?», «ботик видео не умеет смотреть?») — ответ ОБЯЗАН разбирать описанный клинический случай из недавнего контекста. ОДНАКО, если текущий вопрос врача содержит СОБСТВЕННУЮ САМОСТОЯТЕЛЬНУЮ КЛИНИЧЕСКУЮ ИЛИ ТЕХНОЛОГИЧЕСКУЮ ТЕМУ (например: пересушивание дентина, выбор бонда, адгезивный протокол, торк имплантата, выбор силера, ирригация), ответ ОБЯЗАН отвечать СТРОГО на этот новый вопрос врача, а НЕ возвращаться к старым зубам из истории! Использование данных случая из контекста ветки (номер зуба, анатомия, каналы, отломки) НЕ ЯВЛЯЕТСЯ галлюцинацией, подменой темы или топографической ошибкой. Это строго правильное, ожидаемое решение!
    — Если вопрос конкретный («какими клампами?», «какой файл?», «сколько мг?») — черновик обязан дать конкретные артикулы/инструменты/дозировки, а не общую лекцию по теме.
    — ПОДМЕНА ВОПРОСА И УХОД В СТОРОНУ: Если врач спросил про конкретный клинический этап (изоляция, кламп, силер, анестезия), а черновик уклонился от ответа и начал поучать врача по посторонней теме (скученность, окклюзия, общая гигиена) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — ОПЕЧАТКИ Т9: Если врач опечатался со смартфона («озонировать» вместо «изолировать», «кланы» вместо «клампы»), черновик обязан отвечать по реальному смыслу клинической процедуры (изоляция коффердамом). Если черновик воспринял опечатку буквально и выдумал озонотерапию или маргинальную чушь — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — Если бот влезает без приглашения (пассивный триггер) и ответ не добавляет ничего сверх того, что врач уже изложил сам в своём вопросе — ОТКЛОНИ. При прямом запросе (invited=True) не придирайся к отсутствию «новизны», если дан четкий профессиональный ответ.
    — ЗАПРЕТ ШАБЛОННЫХ ОТПИСОК: Запрещено отклонять ответ с требованием «запросить снимок/КТ», если снимок или подробное описание зуба уже есть в контексте переписки!
+   — ЗАПРЕТ ТРЕБОВАНИЯ СНИМКОВ И ЛОКАЛИЗАЦИИ НА ТЕХНОЛОГИЧЕСКИЕ ВОПРОСЫ: На вопросы по материалам, адгезивным системам (бонды, праймеры, травление), цементам, силерам, инструментам (файлы, клампы, гнатометры) и преодолению процедурных ошибок («пересушил дентин при бонде 5 поколения, что делать?», «какой торк...», «как замешивать...») — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО требовать рентген, КТ, снимок или локализацию зуба! На такие вопросы черновик ОБЯЗАН давать прямой EBM-протокол. Если черновик вместо технологического протокола требует рентген или пишет отписку «недостаточно данных» — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — Если тема чата — флуд, приветствия, оффтоп без клинического содержания — ОТКЛОНИ.
 
 2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И ДОКАЗАТЕЛЬНОСТЬ (EBM):
@@ -4339,7 +4424,7 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 Отвечай СТРОГО в формате JSON без дополнительного текста:
 {{"ok": true/false, "reason": "одна фраза на русском — конкретно ПОЧЕМУ одобрил или ЧТО именно отклонил"}}
 """
-        ctx = {"kind": "response_validator", "thinking_level": "HIGH"}
+        ctx = {"kind": "response_validator", "thinking_level": "LOW"}
         response, error = await generate_gemini_text_async(prompt, ctx, timeout=120)
         if error or not response:
             return _unavailable(error or "empty response")
@@ -6240,7 +6325,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - Запасной практический протокол.
 """
             async with _safe_typing_action(bot_client, event.chat_id):
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
             if error:
                 logger.error(f"Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -6986,7 +7071,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         if has_text_desc:
             status_ctx["media_description"] = str(media_description).strip()
         async with _safe_typing_action(bot_client, event.chat_id):
-            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
+            response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
         if error:
             logger.error(f"Media Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -9988,7 +10073,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
 
     status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
 
     if 'status_msg' in locals() and status_msg:
         try:
@@ -10360,7 +10445,7 @@ def detect_pm_emergency(text: str) -> Optional[str]:
     chem_disaster = re.search(
         r'\b(?:за\s+апекс\w*|за\s+верхушк\w*|в\s+периодонт\w*|в\s+кость\w*|раздут\w*|ожог\w*|'
         r'отек\w*\s+лиц\w*|отёк\w*\s+лиц\w*|гематом\w*|вывел\w*|выдавлен\w*|промыл\w*\s+за|'
-        r'вытек\w*\s+за|боль\s+при\s+ирригаци\w*)\b',
+        r'вытек\w*\s+за|боль\s+при\s+ирригаци\w*|глаз\w*|в\s+глаз\w*|брызн\w*|конъюнктив\w*|роговиц\w*)\b',
         norm
     )
     if chem_agent and chem_disaster:
@@ -10434,7 +10519,8 @@ def format_emergency_response(sos_category: str, is_group: bool = False) -> Tupl
 
     elif sos_category == "hypochlorite":
         text = (
-            "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ГИПОХЛОРИТОВАЯ АВАРИЯ (NaOCl ЗА АПЕКС)</b>\n"
+            "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ГИПОХЛОРИТОВАЯ АВАРИЯ (NaOCl)</b>\n"
+            "• <b>ПРИ ПОПАДАНИИ В ГЛАЗ:</b> Непрерывное промывание 0.9% NaCl/водой >= 15–20 мин, вызов 112 / офтальмолог! Кислоты ЗАПРЕЩЕНЫ!\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "1. <b>НЕМЕДЛЕННО ПРЕКРАТИТЬ</b> подачу NaOCl! Сохранять спокойствие, успокоить пациента.\n"
             "2. <b>ОБИЛЬНАЯ ПРОМЫВКА</b> стерильным <b>0.9% физраствором</b> (10–20 мл) через эндоиглу без давления для разбавления и эвакуации гипохлорита.\n"
@@ -11631,7 +11717,7 @@ async def handle_private_message(bot_client, event):
 """
             async with _safe_typing_action(bot_client, chat_id):
                 status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
                 try:
                     await bot_client.delete_messages(chat_id, status_msg.id)
                 except Exception as exc:
@@ -12289,7 +12375,7 @@ async def handle_private_message(bot_client, event):
 """
             status_ctx = {"kind": "pm_chat", "chat_id": chat_id, "thinking_level": "HIGH"}
             async with _safe_typing_action(bot_client, chat_id):
-                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=300.0)
             await bot_client.delete_messages(chat_id, status_msg.id)
             if error or not response or not getattr(response, "text", None):
                 await bot_client.send_message(entity=chat_id, message="❌ <i>Не удалось запустить симулятор. Попробуйте позже.</i>", parse_mode='html')
@@ -12351,39 +12437,57 @@ async def handle_private_message(bot_client, event):
         # 35. Ограничение теперь не по числу реплик, а по символам (_fit_pm_history):
         # 8 сообщений — это и 200 символов, и 32 000, а важен именно объём.
         history = await database.get_last_pm_messages(chat_id, limit=PM_HISTORY_LIMIT)
-        context_msgs = []
+        now_dt = datetime.utcnow()
+
+        # Выделяем текущее обращение врача и предшествующую историю.
+        # Входное сообщение врача уже сохранено в pm_messages в точке входа (user_pm_msg_id),
+        # поэтому последняя запись в history — это текущее сообщение.
+        prior_history = list(history[:-1]) if (history and user_pm_msg_id and history[-1].get("sender_name") in ("User", "Врач")) else list(history)
+
+        # Объединение недавних реплик врача (если врач написал несколько сообщений подряд за последние минуты):
+        # Если перед текущим сообщением врач отправил реплику в пределах 3 минут — объединяем её с текущим вопросом!
+        current_burst_texts = []
+        while prior_history and prior_history[-1].get("sender_name") in ("User", "Врач"):
+            prev_msg = prior_history[-1]
+            prev_dt = _parse_db_date(prev_msg.get("date"))
+            if abs((now_dt - prev_dt).total_seconds()) <= 180:
+                current_burst_texts.insert(0, prev_msg.get("text", "").strip())
+                prior_history.pop()
+            else:
+                break
+
+        if current_burst_texts and text:
+            combined_burst = "\n".join(t for t in current_burst_texts if t)
+            if combined_burst and combined_burst not in text:
+                text = f"{combined_burst}\n{text}".strip()
+        elif current_burst_texts and not text:
+            text = "\n".join(t for t in current_burst_texts if t).strip()
+
+        # ИЗОЛЯЦИЯ КЛИНИЧЕСКИХ СЕССИЙ:
+        # Для анализа снимков (vision) и RAG-поиска по follow-up вопросам используем
+        # ТОЛЬКО недавние реплики (в пределах 3 часов).
+        # Сообщения старше 3 часов принадлежат закрытым/предыдущим сессиям и НЕ должны
+        # подмешиваться к новому клиническому случаю (предотвращение винегрета тем и перекрещивания зубов).
+        recent_session_history = [
+            m for m in prior_history
+            if (now_dt - _parse_db_date(m.get("date"))).total_seconds() <= 3 * 3600
+        ]
+
+        recent_pm_texts = [m["text"] for m in recent_session_history[-6:] if m.get("text")]
         try:
-            recent_pm_texts = [m["text"] for m in history[-6:] if m["text"]]
-            length_guideline = calculate_context_length_guidelines(recent_pm_texts)
+            length_guideline = calculate_context_length_guidelines(recent_pm_texts) if recent_pm_texts else "Отвечай кратко, до 3-4 предложений."
         except Exception:
             length_guideline = "Отвечай кратко, до 3-4 предложений."
 
-        for msg in history:
-            context_msgs.append(f"{msg['sender_name']}: {msg['text']}")
+        history_context_text = " ".join([m['text'] for m in recent_session_history[-3:]]) if recent_session_history else ""
 
-        history_context_text = " ".join([msg['text'] for msg in history[-3:]]) if history else ""
+        # Ключевые слова для поиска справки берём ТОЛЬКО из недавних реплик врача (в пределах сессии)
+        doctor_msgs = [m['text'] for m in recent_session_history
+                       if m.get('text') and m.get('sender_name') != "Assistant"]
+        search_context_text = " ".join(doctor_msgs[-3:]) if doctor_msgs else ""
 
-        # Ключевые слова для поиска справки берём ТОЛЬКО из реплик врача.
-        #
-        # В групповом пути ответы бота из источника ключей исключены (фильтр по
-        # префиксу "Бот " перед extract_keywords), в ЛС фильтра не было вообще:
-        # history[-3:] почти всегда содержит предыдущий ответ бота целиком, а он
-        # в разы длиннее вопроса врача. Замер на живом сценарии — врач пишет
-        # «болит 36 при накусывании, лечен канал», бот отвечает абзацем про КТ,
-        # гипохлорит, распломбировку и резекцию, врач спрашивает «а сколько
-        # ждать?»: из 12 ключей, ушедших в поиск, ВСЕ 12 взяты из ответа бота, а
-        # от самого врача в поиск попало одно слово («канал»). Справка приходила
-        # по теме прошлой реплики бота, а не по вопросу собеседника.
-        #
-        # Хуже того, has_dental_topic на «а сколько ждать?» ложен, а вместе с
-        # текстом бота истинен: бот сам себе назначал клиническую тему и лез в
-        # базу за справкой по собственному предыдущему ответу.
-        #
-        # Берём последние 3 сообщения ВРАЧА, а не «те из последних 3, что не от
-        # бота»: иначе после длинного ответа бота контекста не остаётся вовсе.
-        doctor_msgs = [msg['text'] for msg in history
-                       if msg.get('text') and msg.get('sender_name') != "Assistant"]
-        search_context_text = " ".join(doctor_msgs[-3:])
+        # Форматируем историю для промпта с явными временными маркерами
+        context_msgs = format_pm_history_timeline(prior_history, now_dt=now_dt)
 
         # 3. Обработка медиафайлов (фото/видео) в ЛС
         media_description = None
@@ -12503,7 +12607,7 @@ async def handle_private_message(bot_client, event):
                         is_periapical_xray_confirmed = is_periapical
                         if is_periapical and has_doubt:
                             if files_to_analyze and os.path.exists(files_to_analyze[0]):
-                                auto_collage, _ = visiodent_enhancer.generate_visiodent_collage(files_to_analyze[0])
+                                auto_collage, _ = await asyncio.to_thread(visiodent_enhancer.generate_visiodent_collage, files_to_analyze[0])
                                 if auto_collage and os.path.exists(auto_collage):
                                     rec_q = meta.get("recommended_quadrant") or 2
                                     analysis_payload = {
@@ -12768,13 +12872,15 @@ async def handle_private_message(bot_client, event):
 [ДОСТОВЕРНОСТЬ: Машинное описание снимка может содержать артефакты и ложные достройки. Оценивай клиническую картину критически, опираясь на объективные анатомические и рентгенологические ориентиры.]
 {pm_multimodal_notice}
 
-Вопрос или подпись пользователя:
+[АКТУАЛЬНЫЙ НОВЫЙ ВОПРОС / ПОДПИСЬ ВРАЧА (СЕЙЧАС)]:
 {text or "(без подписи)"}
 {uncaptioned_clinical_directive}
 {rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
 {clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
 {clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE}
+ВНИМАНИЕ К ИСТОРИИ: История выше приведена для контекста врача и анамнеза. Старые сообщения помечены маркерами давности (более 6 часов / более дня / более недели назад).
+НЕ СМЕШИВАЙ клинические сущности из старых обсуждений (прошлые зубы, старые снимки, прошлые осложнения) с текущим вопросом врача и присланным снимком! Отвечай строго на текущий случай, не придумывая старые диагнозы.
 1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ПАЦИЕНТСКИХ ДИСКЛЕЙМЕРОВ:
    - Полностью исключи любые фразы вида: «обратитесь к врачу», «необходим очный осмотр», «я всего лишь ИИ», «диагноз ставит только очный врач».
    - [MED-06 SOS ИСКЛЮЧЕНИЕ] Если в тексте/снимке признаки: флегмоны, ангины Людвига, отёка дна полости рта, острого асфиксирующего отёка, профузного кровотечения, анафилаксии — ОБЯЗАТЕЛЬНО первой строкой: «🚨 ВЫЗОВИТЕ СКОРУЮ ПОМОЩЬ 112 НЕМЕДЛЕННО» и опиши неотложную тактику. В SOS-ситуации приоритет безопасности жизни > тональных правил.
@@ -12890,23 +12996,23 @@ async def handle_private_message(bot_client, event):
 9. ЗАПРЕТ ОТОЗВАННЫХ ПРЕПАРАТОВ (СОЛКОСЕРИЛ, АКТОВЕГИН):
    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО рекомендовать Солкосерил (дентальную пасту/мазь/желе) и Актовегин! Препарат отозван производителем с мирового рынка и из РФ еще в 2020 г., не продается и не имеет доказанной эффективности. При декубитальных язвах, афтах, травмах и ожогах слизистой (в т.ч. гипохлоритом NaOCl) назначай ТОЛЬКО современные доступные доказательные средства: Асепта бальзам адгезивный, Холисал гель, Винилин (бальзам Шостаковского), Афтофикс. Запрещено химическое прижигание спиртом/перекисью/марганцовкой."""
 
-            if len(context_msgs) > 1:
-                context_msgs = context_msgs[:-1]
             prompt = f"""
 {system_role}
 
 История предыдущего диалога (контекст):
 {chr(10).join(_fit_pm_history(context_msgs)) if context_msgs else "(ранее диалога не было)"}
 
-ТЕКУЩИЙ ВОПРОС ВРАЧА (ОТВЕЧАЙ СТРОГО НА НЕГО):
+[АКТУАЛЬНЫЙ НОВЫЙ ВОПРОС ВРАЧА (СЕЙЧАС)]:
 {text}
 
 {rag_prompt_section}
 {instructions}
 
 ВАЖНОЕ ПРАВИЛО ФОКУСА:
-Твой ответ должен быть направлен СТРОГО на ТЕКУЩИЙ ВОПРОС ВРАЧА выше!
-Предыдущая история дана исключительно для понимания клинического контекста. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО отвечать на старые вопросы из истории переписки.
+Твой ответ должен быть направлен СТРОГО на [АКТУАЛЬНЫЙ НОВЫЙ ВОПРОС ВРАЧА (СЕЙЧАС)] выше!
+ВНИМАНИЕ К ИСТОРИИ: История выше приведена для контекста врача и анамнеза. Старые сообщения помечены маркерами давности (более 6 часов / более дня / более недели назад).
+НЕ СМЕШИВАЙ клинические сущности из старых обсуждений (прошлые зубы, старые снимки, прошлые осложнения) с текущим вопросом врача! Отвечай строго на текущий вопрос, не придумывая старые диагнозы.
+Предыдущая история дана исключительно для понимания общего клинического бэкграунда. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО отвечать на старые вопросы из истории переписки.
 """
 
         if media_failed:
@@ -12985,7 +13091,7 @@ async def handle_private_message(bot_client, event):
 
 [КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ РЕЦЕНЗЕНТА К ПРЕДЫДУЩЕМУ ЧЕРНОВИКУ (ПОПЫТКА {attempt})]:{draft_snippet}
 Предыдущий вариант ответа отклонён рецензентом: "{last_pm_reason}".
-НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Отвечай строго по текущему клиническому вопросу врача. Не смешивай темы, не используй неподтвержденные утверждения, не выдумывай несуществующие методики и не упоминай посторонние системы/материалы.
+НЕ ДОПУСКАЙ ЭТОЙ ОШИБКИ! Отвечай строго по текущему клиническому вопросу врача. Не смешивай темы, не используй старые зубы/осложнения из давней истории, не используй неподтвержденные утверждения, не выдумывай несуществующие методики и не упоминай посторонние системы/материалы.
 Актуальный контекст текущего вопроса:
 {clean_history_str}
 """
@@ -13001,7 +13107,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
                 if error:
                     logger.warning("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -13025,9 +13131,12 @@ async def handle_private_message(bot_client, event):
                 candidate_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", candidate_text).strip()
                 last_pm_candidate = candidate_text
 
-                # Проверка качества ответа рецензентом
+                # Проверка качества ответа рецензентом: обязательно добавляем актуальный вопрос врача,
+                # чтобы валидатор при смене темы не считал ответ на новый вопрос ошибкой топографии
+                current_query_str = f"Врач (сейчас): {text}" if text else "Врач (сейчас): [прикреплены медиа/снимки]"
+                validator_context_msgs = list(current_context_msgs) + [current_query_str]
                 pm_ok, pm_reason = await check_response_quality(
-                    current_context_msgs, candidate_text, invited=True, reference=wiki_corpus
+                    validator_context_msgs, candidate_text, invited=True, reference=wiki_corpus
                 )
                 last_pm_reason = pm_reason or ""
 
@@ -13042,13 +13151,10 @@ async def handle_private_message(bot_client, event):
             if not reply_text:
                 logger.warning("PM reflection rejected chat_id=%s (%s attempts). Generating cautious LLM response.", chat_id, max_retries + 1)
                 cautious_prompt = (
-                    f"Ты — опытный стоматолог-эксперт доказательной стоматологии StomChat. Врач в ЛС спросил: {text}\n"
-                    f"Замечание рецензента к предыдущим черновикам: \"{last_pm_reason}\".\n"
-                    "Сформулируй краткий (2-4 предложения), прямой и безопасный ответ врачу по Золотому 3-шаговому стандарту:\n"
-                    "1. Базовый инструмент/материал/протокол первого выбора по сути вопроса.\n"
-                    "2. Практический нюанс выполнения у кресла.\n"
-                    "3. Биологический предел безопасности (чего не делать).\n"
-                    "Никаких отписок и канцелярита!"
+                    f"Ты — эксперт StomChat. Врач в ЛС спросил: {text}\n"
+                    f"Замечание рецензента: \"{last_pm_reason}\".\n"
+                    "Сформулируй краткий (2-4 предложения) прямой EBM-ответ по Золотому стандарту: 1. Базовый инструмент первого выбора. 2. Практический нюанс. 3. Предел безопасности.\n"
+                    "По материалам/технологиям (бонды, цементы, силеры) дай протокол без требования снимков! Без отписок."
                 )
                 c_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 c_ctx["kind"] = "pm_cautious_ebm"
@@ -13057,8 +13163,12 @@ async def handle_private_message(bot_client, event):
                     cand_fb = sanitize_clinical_pm_output(c_resp.text.strip())
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):
                         reply_text = cand_fb
+                if not reply_text and last_pm_candidate and not _TOXIC_PRACTICE_RE.search(last_pm_candidate):
+                    reply_text = last_pm_candidate
                 if not reply_text:
-                    err_msg = "<i>Коллега, в запросе недостаточно клинических данных для однозначного протокола. Уточните ключевые детали (локализацию, симптомы или снимок).</i>"
+                    is_mat = any(k in (text or "").lower() for k in ("бонд", "адгезив", "цемент", "силер", "пересуш"))
+                    err_msg = ("<i>Коллега, не удалось сформировать протокол по материалу. Повторите запрос.</i>" if is_mat
+                               else "<i>Коллега, в запросе недостаточно клинических данных для однозначного протокола. Уточните детали случая (локализацию, симптомы или снимок).</i>")
                     await bot_client.send_message(entity=chat_id, message=err_msg, parse_mode='html')
                     try:
                         await database.save_pm_message(chat_id, "Assistant", err_msg)
@@ -13642,7 +13752,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 """
         status_ctx = {"kind": "group_summary", "chat_id": chat_id, "thinking_level": "HIGH"}
         async with _safe_typing_action(bot_client, chat_id):
-            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+            response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
 
         if error or not response or not getattr(response, "text", None):
             await tg_safety.edit_message(
@@ -14262,7 +14372,7 @@ async def handle_group_direct_ask(bot_client, event, question):
 "{last_ask_reason}"
 Устрани указанные дефекты и перепиши ответ строго доказательно по Золотому 3-шаговому стандарту. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
 """
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=150)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
                 if error or not response or not getattr(response, "text", None):
                     logger.warning("Group direct ask generation error on attempt %s: %s", attempt, error)
@@ -14601,7 +14711,7 @@ async def handle_group_quiz(bot_client, event):
 """
     status_ctx = {"kind": "group_quiz_gen", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
     try:
         await bot_client.delete_messages(chat_id, status_msg.id)
     except Exception as exc:
@@ -15813,7 +15923,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     if generate_gemini_text_async:
         try:
             async with _safe_typing_action(bot_client, chat_id):
-                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
         except Exception as e:
             error = str(e)
 
@@ -17060,7 +17170,7 @@ async def handle_quiz_callback(bot_client, event):
 """
             status_ctx = {"kind": "pm_chat", "chat_id": event.sender_id, "thinking_level": "HIGH"}
             async with _safe_typing_action(bot_client, event.sender_id):
-                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=120)
+                response, error = await generate_gemini_text_async(case_prompt, status_ctx, timeout=300.0)
 
             if error or not response or not getattr(response, "text", None):
                 fallback_case = (
@@ -17844,7 +17954,7 @@ async def check_and_trigger_referee(bot_client, event, text) -> bool:
 
     status_ctx = {"kind": "group_referee", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
 
     if error or not response or not getattr(response, "text", None):
         return
@@ -17950,7 +18060,7 @@ async def handle_term_explainer(bot_client, event, term):
 """
     status_ctx = {"kind": "group_explainer", "chat_id": chat_id, "thinking_level": "HIGH"}
     async with _safe_typing_action(bot_client, chat_id):
-        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
+        response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=300.0)
 
     if error or not response or not getattr(response, "text", None):
         # Голый return оставлял врача, спросившего термин, вообще без ответа.

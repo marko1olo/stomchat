@@ -114,6 +114,7 @@ CAPTURED = {}
 def spy_stub(verdict='{"ok": true, "reason": "ок"}'):
     async def _fake(prompt, ctx, timeout=None):
         CAPTURED["prompt"] = prompt
+        CAPTURED["ctx"] = ctx
         return Resp(verdict), None
     A.generate_gemini_text_async = _fake
 
@@ -128,6 +129,10 @@ check("сказано, что справка не исчерпывающая",
       "НЕ исчерпывающая" in prompt, "нет оговорки — рецензент начнёт отклонять лишнее")
 check("есть правило про конкретные цифры",
       "КОНКРЕТНЫЕ ЦИФРЫ" in prompt, "правило о выдуманных числах не добавлено")
+check("валидатор вызывается с thinking_level LOW", CAPTURED.get("ctx", {}).get("thinking_level") == "LOW")
+check("валидатор имеет kind response_validator", CAPTURED.get("ctx", {}).get("kind") == "response_validator")
+check("есть запрет требования снимков на технологические вопросы",
+      "ЗАПРЕТ ТРЕБОВАНИЯ СНИМКОВ И ЛОКАЛИЗАЦИИ НА ТЕХНОЛОГИЧЕСКИЕ ВОПРОСЫ" in prompt)
 check("черновик по-прежнему в промпте", "45 Нсм" in prompt)
 check("контекст переписки на месте", CTX[0][:20] in prompt)
 
@@ -195,4 +200,8 @@ check("причина отказа доносится", "цифра" in why_num,
 print(f"\n{'='*60}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+def test_validator_policy_all_passed():
+    assert len(FAIL) == 0, f"FAILED: {FAIL}"
+
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
