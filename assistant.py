@@ -1563,13 +1563,6 @@ def calculate_endo_instant(text: str) -> str | None:
     """
     if not text:
         return None
-    try:
-        import chairside_clinical_routines
-        routine_proto = chairside_clinical_routines.get_routine_clinical_protocol(text)
-        if routine_proto:
-            return routine_proto
-    except Exception as e_routine:
-        logger.debug("calculate_endo_instant routine check error: %s", e_routine)
     lower = text.lower().strip()
 
     # 1. Запрос протокола ирригации / NaOCl / EDTA
@@ -12555,21 +12548,6 @@ async def handle_private_message(bot_client, event):
             )
             return
 
-        if not has_media and text:
-            try:
-                import chairside_clinical_routines
-                fast_routine = chairside_clinical_routines.get_routine_clinical_protocol(text)
-                if fast_routine:
-                    logger.info("Delivering instant chairside routine protocol in PM for chat_id=%s", chat_id)
-                    await send_message_chunks_async(bot_client, chat_id, fast_routine, parse_mode='html')
-                    try:
-                        await database.save_pm_message(chat_id, "Assistant", fast_routine)
-                    except Exception as s_err:
-                        logger.error(f"Failed to persist PM assistant reply: {s_err}")
-                    return
-            except Exception as e_cr:
-                logger.debug("Failed chairside_clinical_routines check in PM: %s", e_cr)
-
         status_msg = None
         ticker = None
         if has_media:
@@ -13209,6 +13187,15 @@ async def handle_private_message(bot_client, event):
                         reply_text = cand_fb
                 if not reply_text and last_pm_candidate and not _TOXIC_PRACTICE_RE.search(last_pm_candidate):
                     reply_text = last_pm_candidate
+                if not reply_text:
+                    try:
+                        import chairside_clinical_routines
+                        fallback_routine = chairside_clinical_routines.get_routine_clinical_protocol(text)
+                        if fallback_routine:
+                            logger.warning("LLM cascade failed in PM for chat_id=%s. Using emergency routine fallback.", chat_id)
+                            reply_text = fallback_routine
+                    except Exception as fb_err:
+                        logger.debug("Failed emergency routine fallback in PM: %s", fb_err)
                 if not reply_text:
                     is_mat = any(k in (text or "").lower() for k in ("бонд", "адгезив", "цемент", "силер", "пересуш"))
                     err_msg = ("<i>Коллега, не удалось сформировать протокол по материалу. Повторите запрос.</i>" if is_mat
@@ -14290,27 +14277,6 @@ async def handle_group_direct_ask(bot_client, event, question):
         else:
             effective_question = clean_q
 
-        try:
-            import chairside_clinical_routines
-            routine_proto = chairside_clinical_routines.get_routine_clinical_protocol(effective_question)
-            if routine_proto and not target_media_ids and not reply_to_msg_id:
-                logger.info("Delivering instant chairside routine protocol in group ask for msg_id=%s", msg_id)
-                sent_msg = await bot_client.send_message(
-                    entity=chat_id,
-                    message=routine_proto,
-                    reply_to=msg_id,
-                    parse_mode='html'
-                )
-                if sent_msg and hasattr(sent_msg, 'id'):
-                    REPLIED_MSG_IDS[msg_id] = True
-                    try:
-                        await database.save_bot_sent_message(sent_msg.id, chat_id)
-                    except Exception as save_err:
-                        logger.debug("Failed to save bot sent message in ask: %s", save_err)
-                return
-        except Exception as e_cr:
-            logger.debug("Failed chairside_clinical_routines in ask: %s", e_cr)
-
         session = await inflight_mgr.register_session(chat_id, sender_id, msg_id, effective_question)
         for cid in all_check_ids:
             session.add_trigger_msg_id(cid)
@@ -14494,7 +14460,18 @@ async def handle_group_direct_ask(bot_client, event, question):
                     if last_ask_candidate and not _TOXIC_PRACTICE_RE.search(last_ask_candidate):
                         logger.info("Delivering last_ask_candidate after validator reflection exhausted (msg_id=%s)", msg_id)
                         candidate_reply = last_ask_candidate
-                    elif not last_ask_candidate:
+                    else:
+                        try:
+                            import chairside_clinical_routines
+                            fallback_routine = chairside_clinical_routines.get_routine_clinical_protocol(effective_question)
+                            if fallback_routine:
+                                logger.warning("LLM cascade failed in group ask for msg_id=%s. Using emergency routine fallback.", msg_id)
+                                candidate_reply = fallback_routine
+                        except Exception as fb_err:
+                            logger.debug("Failed emergency routine fallback in group ask: %s", fb_err)
+
+                if not candidate_reply:
+                    if not last_ask_candidate:
                         await bot_client.send_message(
                             entity=chat_id,
                             message="⚠️ <i>Не удалось разобрать вопрос — модели сейчас недоступны. Попробуйте через пару минут.</i>",
