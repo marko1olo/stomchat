@@ -97,6 +97,12 @@ class TestInquisitorFixes72h(unittest.TestCase):
         self.assertIn(".mp4", src)
         self.assertIn("extract_first_frame_async", src)
 
+    def test_group_assistant_reflection_scope(self):
+        """run_assistant_safe and group reflection must not reference rem_pm_budget."""
+        import assistant
+        src = inspect.getsource(assistant.check_and_trigger_assistant)
+        self.assertNotIn("rem_pm_budget", src)
+
     def test_pm_deadline_enforcement_in_code(self):
         """handle_private_message must track pm_start_time and PM_MAX_TOTAL_BUDGET."""
         import assistant

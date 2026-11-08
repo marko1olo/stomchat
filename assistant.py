@@ -1550,9 +1550,7 @@ def calculate_anesthesia_instant(text: str) -> str | None:
             "• <b>Кардиологический лимит:</b> при сердечно-сосудистой патологии максимум <b>2 карпулы</b> (0.04 мг адреналина)!\n\n"
             "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
         )
-    # Если не указан ни конкретный препарат, ни вес, ни явная команда расчета — не перехватываем,
-    # возвращаем None для свободной передачи сообщения в диалоговый LLM-роутер
-    has_drug = bool(re.search(r'\b(?:мепивакаин|скандонест|лидокаин|ксилокаин|бупивакаин|маркаин|артикаин|ультракаин|убистезин|септонест|брилокаин)\w*\b', text, re.IGNORECASE))
+    has_drug = bool(re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|мепивакаин|скандонест|мепивастезин|мепидонт|изокаин|лидокаин|ксилокаин|ксилонор|бупивакаин|маркаин|анекаин)\w*\b', text, re.IGNORECASE))
     has_weight = anesthesia_calc.parse_weight_from_text(text) is not None
     has_command = bool(re.match(r'^\s*/(?:anes|anesthesia|calc|кальк)', text, re.IGNORECASE))
     if not (has_drug or has_weight or has_command):
@@ -6355,8 +6353,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - Запасной практический протокол.
 """
             async with _safe_typing_action(bot_client, event.chat_id):
-                attempt_timeout = max(10.0, min(rem_pm_budget - 15.0, 75.0))
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
             if error:
                 logger.error(f"Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -13145,7 +13142,8 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
+                attempt_timeout = max(10.0, min(rem_pm_budget - 15.0, 75.0))
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
 
                 if error:
                     logger.warning("PM Gemini generation error on attempt %s: %s", attempt, error)
