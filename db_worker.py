@@ -76,7 +76,11 @@ def connect_db(db_path: Optional[str] = None, timeout: float = 30.0) -> sqlite3.
     - journal_mode = WAL (выставляется один раз на процесс для каждого файла базы)
     """
     path = db_path or get_default_db_path()
-    parent_dir = Path(path).resolve().parent
+    path_obj = Path(path)
+    if not path_obj.is_absolute():
+        path_obj = Path(__file__).resolve().parent / path_obj
+    path = str(path_obj)
+    parent_dir = path_obj.parent
     if not parent_dir.exists():
         parent_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=timeout)
@@ -188,3 +192,4 @@ def shutdown_db_worker(wait: bool = True):
     global _DB_EXECUTOR
     if _DB_EXECUTOR and not getattr(_DB_EXECUTOR, "_shutdown", False):
         _DB_EXECUTOR.shutdown(wait=wait)
+    _DB_EXECUTOR = None
