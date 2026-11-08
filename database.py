@@ -13,7 +13,14 @@ import db_worker
 
 logger = logging.getLogger(__name__)
 # Экспортируем _DB_EXECUTOR из db_worker для обратной совместимости с внешними модулями и тестами
-_DB_EXECUTOR = db_worker._DB_EXECUTOR
+def __getattr__(name: str):
+    if name == "_DB_EXECUTOR":
+        return db_worker.get_db_executor()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + ["_DB_EXECUTOR"])
 
 SAVE_RETRY_ATTEMPTS = 3
 SAVE_RETRY_DELAY_SECONDS = 0.25
@@ -319,6 +326,8 @@ async def init_db():
                     text TEXT NOT NULL,
                     parse_mode TEXT DEFAULT 'html',
                     status TEXT DEFAULT 'pending',
+                    retry_count INTEGER DEFAULT 0,
+                    next_retry_at TIMESTAMP,
                     error_message TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     sent_at TIMESTAMP
@@ -398,6 +407,23 @@ async def init_db():
                 if "duplicate column" not in str(exc).lower():
                     logger.warning("database migration media_short_caption НЕ применена: "
                                    "%s: %s", type(exc).__name__, exc)
+
+                        # Автомиграция колонок для bot_outbox
+            for col_def in (
+                "retry_count INTEGER DEFAULT 0",
+                "next_retry_at TIMESTAMP",
+            ):
+                try:
+                    db.execute(f"ALTER TABLE bot_outbox ADD COLUMN {col_def}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        logger.warning("bot_outbox migration %s НЕ применена: %s: %s",
+                                       col_def, type(exc).__name__, exc)
+
+            try:
+                db.execute("CREATE INDEX IF NOT EXISTS idx_bot_outbox_pending ON bot_outbox(status, next_retry_at, id)")
+            except sqlite3.OperationalError as exc:
+                logger.warning("idx_bot_outbox_pending creation error: %s", exc)
 
             # Таблица автоматически извлеченных и проверенных клинических протоколов сообщества
             db.execute(
@@ -2023,14 +2049,15 @@ async def enqueue_outbox_message(chat_id: int, text: str, parse_mode: str = "htm
 
 
 async def get_pending_outbox_messages(limit: int = 5):
-    """Выбирает ожидающие отправки сообщения из bot_outbox."""
+    """Выбирает ожидающие отправки сообщения из bot_outbox с учетом таймера retry."""
     def operation():
         with _connection() as db:
             rows = db.execute(
                 """
-                SELECT id, chat_id, text, parse_mode, created_at
+                SELECT id, chat_id, text, parse_mode, retry_count, created_at
                 FROM bot_outbox
                 WHERE status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
                 ORDER BY id ASC
                 LIMIT ?
                 """,
@@ -2042,10 +2069,28 @@ async def get_pending_outbox_messages(limit: int = 5):
                     "chat_id": r[1],
                     "text": r[2],
                     "parse_mode": r[3] or "html",
-                    "created_at": r[4],
+                    "retry_count": r[4] or 0,
+                    "created_at": r[5],
                 }
                 for r in rows
             ]
+    return await _run_db(operation)
+
+
+async def mark_outbox_retry(outbox_id: int, retry_count: int, backoff_seconds: int, error_message: str):
+    """Обновляет счетчик повторов и время следующей попытки для сообщения outbox при транзиентном сбое."""
+    def operation():
+        with _connection() as db:
+            db.execute(
+                """
+                UPDATE bot_outbox
+                SET retry_count = ?,
+                    next_retry_at = datetime('now', '+' || ? || ' seconds'),
+                    error_message = ?
+                WHERE id = ?
+                """,
+                (retry_count, int(backoff_seconds), str(error_message)[:1000], outbox_id)
+            )
     return await _run_db(operation)
 
 

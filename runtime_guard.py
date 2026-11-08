@@ -32,12 +32,7 @@ def _default_log_path():
     override = os.getenv("STOMCHAT_LOG_PATH")
     if override:
         return override
-    try:
-        import sys
-        entry = os.path.basename(sys.argv[0] or "")
-    except Exception:
-        entry = ""
-    if entry.startswith("test_") and entry.endswith(".py"):
+    if _is_test_runner():
         return "bot_test.log"
     return "bot.log"
 
@@ -45,9 +40,11 @@ def _default_log_path():
 def _is_test_runner() -> bool:
     try:
         import sys
+        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+            return True
         for arg in sys.argv:
-            base = os.path.basename(arg or "")
-            if (base.startswith("test_") and base.endswith(".py")) or "run_all_tests" in base:
+            base = os.path.basename(arg or "").lower()
+            if (base.startswith("test_") and base.endswith(".py")) or "run_all_tests" in base or "run_all_suites" in base or "pytest" in base:
                 return True
     except Exception:
         pass
@@ -538,7 +535,7 @@ def read_summary_status():
 
 # Виды работ, которые сторож саммари обязан охранять: только у них зависание
 # означает потерянный отчёт всему чату врачей.
-SUMMARY_KINDS = frozenset({"daily", "weekly"})
+SUMMARY_KINDS = frozenset({"daily", "weekly", "group_summary"})
 
 
 def release_generation_status(kind=None, reason=None, extra=None):

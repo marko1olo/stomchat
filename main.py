@@ -511,6 +511,24 @@ async def summary_watchdog_task():
             if not status.get("active"):
                 continue
 
+            kind = status.get("kind")
+            summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
+
+            # Сторож саммари обязан охранять ТОЛЬКО сводки (daily, weekly, group_summary).
+            # Диалоговые и сервисные задачи (pm_chat, triage, poll_content_gen и т.д.)
+            # не должны валить бота при зависании или ретраях.
+            if kind not in summary_kinds:
+                updated_at = parse_status_utc(status.get("utc"))
+                if updated_at:
+                    age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                    if age > 600:
+                        logger.warning(
+                            "summary_watchdog: stale non-summary status cleared (kind=%s stage=%s age=%.1fs pid=%s)",
+                            kind, status.get("stage"), age, status.get("pid"),
+                        )
+                        runtime_guard.clear_summary_status(f"stale_{kind}")
+                continue
+
             updated_at = parse_status_utc(status.get("utc"))
             if not updated_at:
                 continue
@@ -518,6 +536,28 @@ async def summary_watchdog_task():
             age = (datetime.now(timezone.utc) - updated_at).total_seconds()
             if age <= SUMMARY_STALE_SECONDS:
                 continue
+
+            # Проверка живости процесса: если отметка оставлена мертвым PID от прошлого запуска
+            status_pid = status.get("pid")
+            current_pid = os.getpid()
+            if status_pid and status_pid != current_pid:
+                pid_alive = False
+                try:
+                    import psutil
+                    pid_alive = psutil.pid_exists(status_pid)
+                except Exception:
+                    try:
+                        os.kill(status_pid, 0)
+                        pid_alive = True
+                    except (OSError, ProcessLookupError):
+                        pid_alive = False
+                if not pid_alive:
+                    logger.warning(
+                        "summary_watchdog: stale summary status from dead process pid=%s cleared without restart (kind=%s age=%.1fs)",
+                        status_pid, kind, age,
+                    )
+                    runtime_guard.clear_summary_status("dead_pid_summary")
+                    continue
 
             logger.error(
                 "summary watchdog forcing restart: stage=%s kind=%s chat=%s age=%.1fs status=%s",
@@ -1230,6 +1270,9 @@ async def scheduler_task(bot_client):
 PING_PHASE_TIMEOUT_SECONDS = 1200
 
 
+OUTBOX_MAX_RETRIES = 5
+
+
 async def outbox_worker_task(bot_client):
     """Фоновый воркер отправки исходящих сообщений из bot_outbox через активный MTProto bot_client с защитой tg_safety."""
     logger.info("📤 Фоновый воркер bot_outbox активен.")
@@ -1241,6 +1284,7 @@ async def outbox_worker_task(bot_client):
                 chat_id = item["chat_id"]
                 text = item["text"]
                 pm = item.get("parse_mode") or "html"
+                current_retries = item.get("retry_count", 0)
                 try:
                     chunks = list(html_safe.split_html(text, limit=4000)) if pm == "html" else [text[i:i+4000] for i in range(0, len(text), 4000)]
                     delivery_ok = True
@@ -1257,8 +1301,32 @@ async def outbox_worker_task(bot_client):
                             delivery_ok = False
                             err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
                             if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
-                                logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
+                                next_retry = current_retries + 1
+                                if next_retry >= OUTBOX_MAX_RETRIES:
+                                    logger.warning(
+                                        "Outbox worker delivery failed permanently for msg %d to chat_id=%s after %d retries: %s",
+                                        oid, chat_id, next_retry, err_str
+                                    )
+                                    await database.mark_outbox_failed(
+                                        oid, f"max_retries_exceeded ({next_retry}/{OUTBOX_MAX_RETRIES}): {err_str}"
+                                    )
+                                else:
+                                    if outcome.kind == tg_safety.KIND_FLOOD and outcome.flood_seconds:
+                                        backoff = max(30, int(outcome.flood_seconds) + 5)
+                                    else:
+                                        backoff = min(300, 15 * (2 ** (next_retry - 1)))
+                                    logger.warning(
+                                        "Outbox worker transient backoff for msg %d to chat_id=%s (retry %d/%d, backoff %ds): %s",
+                                        oid, chat_id, next_retry, OUTBOX_MAX_RETRIES, backoff, err_str
+                                    )
+                                    await database.mark_outbox_retry(oid, next_retry, backoff, err_str)
                             else:
+                                if any(term in err_str.lower() for term in ("userisblocked", "userdeactivated", "bot was blocked", "user is deactivated")):
+                                    try:
+                                        assistant.set_ping_opt_out(chat_id, f"auto_opt_out: {err_str[:100]}")
+                                        logger.info("Auto opted out chat_id=%s from proactive pings due to: %s", chat_id, err_str)
+                                    except Exception as opt_err:
+                                        logger.warning("Failed to auto opt out chat_id=%s: %s", chat_id, opt_err)
                                 logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
                                 await database.mark_outbox_failed(oid, err_str)
                             break
@@ -2306,12 +2374,13 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                 if temp_path:
                     temp_paths.append(temp_path)
 
-                    if message.photo or image_document(message) is not None or media_type_hint == "photo":
-                        files_to_analyze.append(temp_path)
-                        analyzed_msg_ids.add(message.id)
-                        msg_file_map[message.id] = temp_path
-                    elif message.video or media_type_hint == "video":
-                        logger.info(f"🎞️ Извлечение первого кадра из видео {message.id}...")
+                    is_video_file = (
+                        bool(message.video)
+                        or media_type_hint == "video"
+                        or (temp_path and temp_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.m4v', '.wmv', '.3gp')))
+                    )
+                    if is_video_file:
+                        logger.info(f"🎞️ Извлечение первого кадра из видео {message.id} ({temp_path})...")
                         frame_path = await extract_first_frame_async(
                             temp_path,
                             timeout=MEDIA_FRAME_TIMEOUT_SECONDS,
@@ -2321,6 +2390,10 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                             temp_paths.append(frame_path)
                             analyzed_msg_ids.add(message.id)
                             msg_file_map[message.id] = frame_path
+                    elif message.photo or image_document(message) is not None or media_type_hint == "photo":
+                        files_to_analyze.append(temp_path)
+                        analyzed_msg_ids.add(message.id)
+                        msg_file_map[message.id] = temp_path
             except Exception as e:
                 logger.warning(f"Failed to process a media item in album {msg_id}: {type(e).__name__}: {e}")
 
@@ -2523,6 +2596,12 @@ async def forward_to_mirror(event_msg, target_chat_id):
     global _mirror_disabled
     if not target_chat_id or _mirror_disabled:
         return
+    try:
+        from telethon.tl.patched import MessageService
+        if isinstance(event_msg, MessageService):
+            return
+    except Exception:
+        pass
     grouped_id = getattr(event_msg, "grouped_id", None)
     if grouped_id:
         async with _mirror_album_lock:
@@ -3320,7 +3399,7 @@ async def handle_private_message(event):
     is_fast_cmd = raw_text.startswith("/") or text_lower in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
     if is_fast_cmd:
         # Если пришла команда отмены/сброса (/cancel, /wipe, /stop), немедленно снимаем зависший воркер
-        if raw_text.startswith(("/cancel", "/wipe", "/stop")):
+        if any(raw_text.startswith(pfx) for pfx in ("/cancel", "/wipe", "/stop")):
             worker = _PM_BURST_WORKERS.pop(chat_id, None)
             if worker and not worker.done():
                 logger.info("Cancelling active PM burst worker for chat_id=%s on abort command: %s", chat_id, raw_text)
@@ -3407,12 +3486,13 @@ async def handle_private_message(event):
                         break
 
                     try:
+                        pm_timeout = int(os.getenv("PM_BURST_ITEM_TIMEOUT_SECONDS", "650"))
                         if len(burst) == 1:
-                            await asyncio.wait_for(assistant.handle_private_message(bot_client, burst[0]), timeout=360)
+                            await asyncio.wait_for(assistant.handle_private_message(bot_client, burst[0]), timeout=pm_timeout)
                         else:
-                            await asyncio.wait_for(assistant.handle_private_message_bundle(bot_client, burst), timeout=360)
+                            await asyncio.wait_for(assistant.handle_private_message_bundle(bot_client, burst), timeout=pm_timeout)
                     except asyncio.TimeoutError:
-                        logger.error(f"PM burst item processing timed out (> 360s) for chat_id={chat_id}")
+                        logger.error(f"PM burst item processing timed out (> {pm_timeout}s) for chat_id={chat_id}")
                         try:
                             await bot_client.send_message(
                                 entity=chat_id,
@@ -4429,7 +4509,7 @@ async def start_bot():
         await runtime_guard.cancel_all_tasks(timeout=3.0)
 
 
-def acquire_single_instance_lock():
+def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
     """Гарантирует запуск только одного экземпляра бота (Single Instance Lock)."""
     if sys.platform == "win32":
         try:
@@ -4437,12 +4517,21 @@ def acquire_single_instance_lock():
             kernel32 = ctypes.windll.kernel32
             mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
             ERROR_ALREADY_EXISTS = 183
-            mutex = kernel32.CreateMutexW(None, False, mutex_name)
-            last_err = kernel32.GetLastError()
-            if last_err == ERROR_ALREADY_EXISTS:
-                logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
-                sys.exit(0)
-            return mutex
+            for attempt in range(max_retries):
+                mutex = kernel32.CreateMutexW(None, False, mutex_name)
+                last_err = kernel32.GetLastError()
+                if last_err != ERROR_ALREADY_EXISTS:
+                    return mutex
+                if mutex:
+                    kernel32.CloseHandle(mutex)
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "Another instance mutex exists (attempt %d/%d). Waiting %.1fs for previous instance to exit...",
+                        attempt + 1, max_retries, retry_interval,
+                    )
+                    time.sleep(retry_interval)
+            logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+            sys.exit(0)
         except Exception as e:
             logger.warning(f"Failed to create Windows named mutex: {e}. Falling back to lockfile.")
 

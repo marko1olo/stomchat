@@ -153,6 +153,7 @@ check("подделка сообщения правда пуста по умол
       "иначе проверки шли бы на входе, где выставлено всё сразу")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    sys.exit(1 if FAIL else 0)

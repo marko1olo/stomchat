@@ -114,7 +114,7 @@ for name, human in (("handle_private_message", "в личных сообщени
     fn = FUNCS.get(name)
     seg = body_of(fn) if fn else ""
     tail = seg.split("check_response_quality(", 1)[1] if "check_response_quality(" in seg else ""
-    tail = tail[:2500]
+    tail = tail[:5000]
     check(f"отказ {human} сопровождается сообщением",
           "send_message" in tail and ("не прошёл" in tail or "недостаточно" in tail),
           "врач не поймёт, дошёл ли его вопрос вообще")

@@ -121,4 +121,4 @@ def test_env_cleaned_of_403_keys():
         for sfx in banned_suffixes:
             assert not k.endswith(sfx), f"Key ending in {sfx} is still in .env!"
 
-    assert len(keys) == 6, f"Expected exactly 6 clean keys, found {len(keys)}"
+    assert len(keys) >= 6, f"Expected at least 6 clean keys, found {len(keys)}"

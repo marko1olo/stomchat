@@ -424,7 +424,10 @@ async def _save_bookmark(**kw):
 
 async def drain():
     for _ in range(60):
-        pending = [t for t in list(runtime_guard._ACTIVE_TASKS) if not t.done()]
+        pending = [
+            t for t in list(runtime_guard._ACTIVE_TASKS)
+            if not t.done() and not any(d in runtime_guard._ACTIVE_TASK_METADATA.get(t, {}).get("name", "") for d in runtime_guard._DAEMON_TASK_NAMES)
+        ]
         if not pending:
             return
         await asyncio.gather(*pending, return_exceptions=True)

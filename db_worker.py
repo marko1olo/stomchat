@@ -49,6 +49,14 @@ _WAL_READY_PATHS: Set[str] = set()
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-worker")
 
 
+def get_db_executor() -> ThreadPoolExecutor:
+    """Возвращает актуальный исполнитель транзакций SQLite, автоматически пересоздавая его при необходимости."""
+    global _DB_EXECUTOR
+    if _DB_EXECUTOR is None or getattr(_DB_EXECUTOR, "_shutdown", False):
+        _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-worker")
+    return _DB_EXECUTOR
+
+
 def get_default_db_path() -> str:
     """Возвращает актуальный путь к базе данных из config.py или дефолтное имя."""
     if config and hasattr(config, "DB_PATH"):
@@ -68,6 +76,9 @@ def connect_db(db_path: Optional[str] = None, timeout: float = 30.0) -> sqlite3.
     - journal_mode = WAL (выставляется один раз на процесс для каждого файла базы)
     """
     path = db_path or get_default_db_path()
+    parent_dir = Path(path).resolve().parent
+    if not parent_dir.exists():
+        parent_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=timeout)
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")
@@ -95,7 +106,7 @@ def db_connection(db_path: Optional[str] = None, timeout: float = 30.0):
 def get_worker_queue_depth() -> int:
     """Возвращает текущее количество задач, ожидающих выполнения в пуле БД."""
     try:
-        return _DB_EXECUTOR._work_queue.qsize()
+        return get_db_executor()._work_queue.qsize()
     except Exception:
         return 0
 
@@ -167,11 +178,13 @@ async def run_in_db_worker(
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _DB_EXECUTOR,
+        get_db_executor(),
         lambda: run_with_lock_retry(operation, max_retries=max_retries)
     )
 
 
 def shutdown_db_worker(wait: bool = True):
     """Корректно останавливает рабочий пул БД."""
-    _DB_EXECUTOR.shutdown(wait=wait)
+    global _DB_EXECUTOR
+    if _DB_EXECUTOR and not getattr(_DB_EXECUTOR, "_shutdown", False):
+        _DB_EXECUTOR.shutdown(wait=wait)

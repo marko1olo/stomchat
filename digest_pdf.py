@@ -1,5 +1,5 @@
 """
-digest_pdf.py — Генератор полиграфического PDF-вестника StomChat.
+digest_pdf.py — Генератор полиграфического PDF-вестника EndoChat.
 
 Преобразует аналитический лонгрид (HTML/Markdown) в сверстанный медицинский журнал
 формата A4 на базе Playwright Chromium Headless:
@@ -51,15 +51,15 @@ def _get_bot_username() -> str:
         pass
     try:
         import config
-        u = getattr(config, "BOT_USERNAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", None)
+        u = getattr(config, "BOT_USERNAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", None)
         if u:
             return str(u).lstrip("@")
     except Exception:
         pass
-    u = os.getenv("BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME")
+    u = os.getenv("BOT_USERNAME") or os.getenv("ENDOCHAT_BOT_USERNAME")
     if u:
         return u.lstrip("@")
-    return "stomchat_bot"
+    return "endohelp_bot"
 
 
 def cleanup_old_digests(output_dir: str = PDF_OUTPUT_DIR, max_age_days: int = 3, max_files: int = 15) -> int:
@@ -119,7 +119,7 @@ def _build_journal_html(
     now_date = date_str or datetime.now().strftime("%d.%m.%Y")
     clean_title = html.escape(title)
     bot_username = _get_bot_username()
-    clean_subtitle = html.escape(subtitle or f"Клинический дайджест сообщества «StomChat» (@{bot_username})")
+    clean_subtitle = html.escape(subtitle or f"Клинический дайджест сообщества «EndoChat» (@{bot_username})")
     logo_b64 = _get_logo_base64()
 
     # 1. Если во входящем HTML уже присутствует текстовый CTA ассистента (из Telegraph),
@@ -336,7 +336,7 @@ def _build_journal_html(
             size: A4 portrait;
             margin: 16mm 14mm 18mm 14mm;
             @bottom-left {{
-                content: "Docendo Discimus • Клинический вестник «Учимся вместе»";
+                content: "EndoChat • Клинический вестник эндодонтии";
                 font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "DejaVu Sans", "Liberation Sans", "Noto Sans", Arial, sans-serif;
                 font-size: 8pt;
                 color: #64748b;
@@ -803,7 +803,7 @@ def _build_journal_html(
         <div class="journal-header-left">
             {f'<img class="journal-emblem" src="data:image/png;base64,{logo_b64}" alt="Docendo Discimus">' if logo_b64 else ''}
             <div class="journal-brand">
-                <div class="journal-logo">DOCENDO <span>DISCIMUS</span> • КЛИНИЧЕСКИЙ ВЕСТНИК</div>
+                <div class="journal-logo">ENDOCHAT • КЛИНИЧЕСКИЙ ВЕСТНИК ЭНДОДОНТИИ</div>
                 <div class="journal-subtitle">{clean_subtitle}</div>
             </div>
         </div>
@@ -814,9 +814,9 @@ def _build_journal_html(
     </div>
 
     <div class="issue-summary-bar">
-        <div class="issue-summary-item">🔬 Стандарт: <strong>Evidence-Based Dentistry</strong></div>
-        <div class="issue-summary-item">🦷 Сообщество: <strong>«Учимся вместе» (Docendo Discimus)</strong></div>
-        <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи сообщества</strong></div>
+        <div class="issue-summary-item">🔬 Стандарт: <strong>Практическая клиническая эндодонтия</strong></div>
+        <div class="issue-summary-item">🦷 Сообщество: <strong>EndoChat (Эндодонтия под микроскопом)</strong></div>
+        <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи-эндодонтисты</strong></div>
     </div>
 
     <div class="journal-content">
@@ -825,36 +825,36 @@ def _build_journal_html(
 
     <div class="journal-closing-block">
         <div class="assistant-promo-card">
-            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @{bot_username.upper()} • ПОМОЩНИК НА ПРИЕМЕ</div>
+            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @{bot_username.upper()} • ПОМОЩНИК У МИКРОСКОПА</div>
             <div class="assistant-promo-desc">
-                Коллеги, бот сообщества — это ваш персональный клинический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
+                Коллеги, бот сообщества — это ваш персональный клинический эндодонтический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
             </div>
             <div class="assistant-promo-grid">
                 <div class="assistant-promo-item">
-                    <b>🔬 Мульти-анализ снимков и фото (Vision)</b>
-                    Присылайте в ЛС прицельные снимки, КЛКТ, ОПТГ и фотопротоколы (включая серии/альбомы). Бот оценивает краевое прилегание, периапикальные очаги, анатомию каналов и дефекты реставраций.
+                    <b>🔬 Мульти-анализ снимков и КЛКТ (Vision)</b>
+                    Присылайте в ЛС прицельные радиовизиограммы, срезы КЛКТ и фото эндодоступа. Бот оценивает анатомию каналов (MB2, C-shape), кривизну корней, апикальный периодонтит (PAI), качество обтурации и признаки трещин (VRF).
                 </div>
                 <div class="assistant-promo-item">
-                    <b>💊 Фармакология и анестезия</b>
-                    Точный расчет дозировок и карпул анестетиков по массе тела с учетом соматики (ASA, кардиоваскулярные патологии, беременность, дети), подбор антибиотикотерапии и премедикации.
+                    <b>💊 Эндодонтическая фармакология и анестезия</b>
+                    Точный расчет анестезии при горячем пульпите по весу и соматике (ASA), подбор схем купирования симптоматического апикального периодонтита (flare-up) и строгие показания к антибиотикам.
                 </div>
                 <div class="assistant-promo-item">
                     <b>📚 Клинические протоколы (/protocols)</b>
-                    Пошаговые алгоритмы доказательной стоматологии: BOPT, препарирование, протокол ирригации NaOCl/ЭДТА, закрытие перфораций МТА/Биодентин, адгезивная фиксация E.max.
+                    Пошаговые алгоритмы доказательной эндодонтии: протокол ультразвуковой активации PUI/EDDY, байпас отломка файла, закрытие перфораций МТА/Biodentine, гидравлическая биокерамика, билдап с сохранением феррула.
                 </div>
                 <div class="assistant-promo-item">
                     <b>👤 Клиническая память врача (/profile)</b>
-                    Бот помнит вашу специализацию, клинический почерк, стаж и арсенал оборудования, адаптируя все рекомендации под ваш стиль работы.
+                    Бот помнит вашу файловую систему, оптику (микроскоп/бинокуляры), используемые силеры и стаж, адаптируя рекомендации под ваш инструментарий.
                 </div>
             </div>
             <div class="assistant-promo-cta">
-                👉 <strong>Напишите боту в личные сообщения: @{bot_username}</strong> — разберите клинический кейс или снимок прямо сейчас.
+                👉 <strong>Напишите боту в личные сообщения: @{bot_username}</strong> — разберите клинический эндодонтический кейс или снимок прямо сейчас.
             </div>
         </div>
 
         <div class="journal-footer">
-            Материалы подготовлены на основе клинических обсуждений врачебного сообщества StomChat.
-            Предназначено исключительно для врачей-стоматологов в образовательных и профессиональных целях. Бот: @{bot_username}
+            Материалы подготовлены на основе клинических обсуждений врачебного сообщества EndoChat.
+            Предназначено для врачей-стоматологов и эндодонтов в образовательных и клинических целях. Бот: @{bot_username}
         </div>
     </div>
 </body>
@@ -865,7 +865,7 @@ def _build_journal_html(
 
 async def generate_digest_pdf(
     html_content: str,
-    title: str = "STOMCHAT • Клинический Вестник",
+    title: str = "ENDOCHAT • Клинический Вестник",
     subtitle: str = "",
     msg_count: int = 0,
     date_str: str = "",
@@ -886,7 +886,7 @@ async def generate_digest_pdf(
 
     timestamp = int(time.time())
     safe_date = re.sub(r'[^0-9a-zA-Z_\-]+', '_', date_str) if date_str else str(timestamp)
-    filename = f"StomChat_Digest_{safe_date}_{timestamp}.pdf"
+    filename = f"EndoChat_Digest_{safe_date}_{timestamp}.pdf"
     output_path = os.path.join(output_dir, filename)
 
     full_html = _build_journal_html(
@@ -904,19 +904,37 @@ async def generate_digest_pdf(
             from playwright.async_api import async_playwright
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-software-rasterizer",
-                        "--disable-extensions",
-                        "--disable-background-networking",
-                        "--js-flags=--max-old-space-size=256",
-                    ]
-                )
+                launch_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--js-flags=--max-old-space-size=256",
+                ]
+                launch_candidates = [
+                    {},
+                    {"channel": "chrome"},
+                    {"channel": "msedge"},
+                ]
+                browser = None
+                last_launch_err = None
+                for cand in launch_candidates:
+                    try:
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            args=launch_args,
+                            **cand
+                        )
+                        break
+                    except Exception as launch_err:
+                        last_launch_err = launch_err
+                        logger.warning("Chromium launch attempt with %s failed: %s", cand, launch_err)
+
+                if browser is None:
+                    raise RuntimeError(f"Could not launch any chromium browser: {last_launch_err}")
                 try:
                     page = await browser.new_page()
 

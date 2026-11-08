@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-reaction_engine.py — Батчевый нейросетевой движок реакций StomChat.
+reaction_engine.py — Батчевый нейросетевой движок реакций EndoChat.
 
 Архитектура:
 - Сообщения накапливаются батчами по 8-10 штук на чат (или по таймауту тишины 3 мин).
@@ -230,7 +230,7 @@ def build_batch_prompt(messages: List[BufferedMessage], allowed_emojis_str: str)
 """
 
 
-def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 5.5) -> List[Dict[str, Any]]:
+def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 15.0) -> List[Dict[str, Any]]:
     """Синхронный вызов нейросети на батч сообщений с детерминированной клинической валидацией."""
     import assistant
     try:

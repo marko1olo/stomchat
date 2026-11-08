@@ -168,7 +168,7 @@ KEY_COOLDOWN_SECONDS = 300
 
 
 def _load_expiry_map(path):
-    """Читает {ключ: unix_время_истечения}, отбрасывая протухшее."""
+    """Читает {ключ: unix_время_истечения}, отбрасывая протухшее и очищая файл."""
     if not os.path.exists(path):
         return {}
     try:
@@ -179,7 +179,10 @@ def _load_expiry_map(path):
     if not isinstance(data, dict):
         return {}
     now = time.time()
-    return {k: v for k, v in data.items() if isinstance(v, (int, float)) and v > now}
+    valid = {k: v for k, v in data.items() if isinstance(v, (int, float)) and v > now}
+    if len(valid) < len(data):
+        _save_expiry_map(path, valid)
+    return valid
 
 
 def _save_expiry_map(path, data):
@@ -298,8 +301,10 @@ def _record_model_server_failure(model_name: str) -> int:
         count = 0
 
     count += 1
-    history[model_name] = {"count": count, "last_time": now}
-    _save_expiry_map(MODEL_FAILURES_FILE, history)
+    # Очищаем устаревшие записи моделей (>15 мин) перед сохранением
+    clean_history = {k: v for k, v in history.items() if isinstance(v, dict) and now - v.get("last_time", 0) <= 900}
+    clean_history[model_name] = {"count": count, "last_time": now}
+    _save_expiry_map(MODEL_FAILURES_FILE, clean_history)
 
     if count == 1:
         return MODEL_BAN_INITIAL_503_SECONDS
@@ -562,18 +567,23 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
     ))
     if is_auth_error:
         if provider == "gemini":
-            is_api_permanent = any(m in err_msg for m in (
-                "api_key_invalid", "permission_denied", "consumer_invalid",
+            is_geo_or_proxy = any(m in err_msg for m in (
+                "location is not supported", "user location", "proxy", "unsupported location"
+            ))
+            is_api_permanent = not is_geo_or_proxy and any(m in err_msg for m in (
+                "api_key_invalid", "consumer_invalid",
                 "key has been revoked", "unregistered_callers", "not registered", "401",
-                "free tier is not available", "billing", "project-unavailable"
+                "free tier is not available", "billing", "project-unavailable",
+                "api key not valid", "account has been suspended", "deleted"
             ))
             if is_api_permanent:
-                ban_duration = 31536000  # 365 days for google
+                ban_duration = 86400  # 24 часа потолок (вместо 365 дней: дает восстановиться при продлении биллинга)
                 set_key_cooldown(provider, api_key, ban_duration)
-                logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
+                logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Placed on cooldown {ban_duration}s.")
             else:
-                set_key_cooldown(provider, api_key, 3600)
-                logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
+                cd_time = 1800 if is_geo_or_proxy else 3600
+                set_key_cooldown(provider, api_key, cd_time)
+                logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (geo/proxy/gateway: {err_msg[:120]}). Temporary cooldown {cd_time}s.")
         else:
             is_groq_permanent = any(m in err_msg for m in ("401", "invalid", "incorrect", "revoked", "unauthorized"))
             if is_groq_permanent:

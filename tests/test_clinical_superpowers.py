@@ -46,11 +46,15 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import config
+_ORIGINAL_DB_PATH = getattr(config, "DB_PATH", "stomat_bot.db")
 config.DB_PATH = os.path.join(_TMPDIR, "test_superpowers.db")
 
 import database
 import assistant
 
+_ORIGINAL_STATE_PATH = getattr(assistant, "STATE_PATH", "assistant_state.json")
+_ORIGINAL_STATE_TMP = getattr(assistant, "STATE_TMP_PATH", "assistant_state.json.tmp")
+_ORIGINAL_STATE_BAK = getattr(assistant, "STATE_BAK_PATH", "assistant_state.json.bak")
 assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
 assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
 assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
@@ -139,6 +143,10 @@ class TestClinicalSuperpowers(unittest.TestCase):
         except Exception:
             pass
         shutil.rmtree(_TMPDIR, ignore_errors=True)
+        config.DB_PATH = _ORIGINAL_DB_PATH
+        assistant.STATE_PATH = _ORIGINAL_STATE_PATH
+        assistant.STATE_TMP_PATH = _ORIGINAL_STATE_TMP
+        assistant.STATE_BAK_PATH = _ORIGINAL_STATE_BAK
 
     def test_01_commands_surface_registration(self):
         print("\n[1] Регистрация 6 суперсил в меню Telegram, /help и Rule 11")
