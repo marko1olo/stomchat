@@ -42,6 +42,9 @@ tests = [
     "tests/test_poll_antidup_inquisitor.py",
     "tests/test_zero_mirroring_redteam.py",
     "tests/test_emergency_group_fastpath.py",
+    "tests/test_audit_20h_deep_repair.py",
+    "tests/test_llm_cascade_budget_audit.py",
+    "tests/test_audit_fixes_20h.py",
     "tests/test_inquisitor_fixes_72h.py",
 ]
 

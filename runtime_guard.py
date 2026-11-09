@@ -389,7 +389,7 @@ def write_heartbeat(reason):
         "reason": reason,
         "stale_after_seconds": WATCHDOG_STALE_SECONDS,
     }
-    tmp_path = HEARTBEAT_PATH + ".tmp"
+    tmp_path = f"{HEARTBEAT_PATH}.{os.getpid()}_{threading.get_ident()}.tmp"
     for attempt in range(5):
         try:
             with open(tmp_path, "w", encoding="utf-8") as heartbeat_file:
@@ -406,7 +406,7 @@ def write_summary_status(status):
     payload = dict(status)
     payload["utc"] = utc_now_text()
     payload["pid"] = os.getpid()
-    tmp_path = SUMMARY_STATUS_PATH + ".tmp"
+    tmp_path = f"{SUMMARY_STATUS_PATH}.{os.getpid()}_{threading.get_ident()}.tmp"
     for attempt in range(5):
         try:
             with open(tmp_path, "w", encoding="utf-8") as status_file:
@@ -433,7 +433,7 @@ def write_startup_state(state: dict):
     payload = dict(state)
     payload["utc"] = utc_now_text()
     payload["pid"] = os.getpid()
-    tmp_path = STARTUP_STATE_PATH + ".tmp"
+    tmp_path = f"{STARTUP_STATE_PATH}.{os.getpid()}_{threading.get_ident()}.tmp"
     for attempt in range(5):
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:

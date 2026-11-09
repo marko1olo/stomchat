@@ -35,6 +35,10 @@ INTER_REACTION_SLEEP = 2.0         # Пауза между отправками 
 
 # ── Детерминированный негативный клинический фильтр ───────────────────────────
 COMPLICATION_PATTERNS = [
+    r"\bстриппинг\w*",
+    r"\bstrip\w*",
+    r"\bледж\w*",
+    r"\bledge\b",
     r"\bперфор\w*",
     r"\bпроби[лт]\w*(?:\s+(?:дно|корен\w*|апекс\w*|стенк\w*|бифуркац\w*|синус\w*))?",
     r"\bслома[нлс]\w*",
@@ -63,6 +67,16 @@ COMPLICATION_PATTERNS = [
     r"\bкровотечен\w*",
     r"\bвывих\w*",
     r"\bэмфизем\w*",
+    r"\bперф[аеуыои]\b",
+    r"\bступен\w*",
+    r"\bзаклини\w*",
+    r"\bпротолкн\w*",
+    r"\bпропихн\w*",
+    r"\bразрыв\w*",
+    r"\bобострен\w*",
+    r"\bпровалил\w*",
+    r"\bсвищ\w*",
+    r"\bэкссудат\w*",
 ]
 CLINICAL_COMPLICATION_RE = re.compile("|".join(COMPLICATION_PATTERNS), re.IGNORECASE)
 
@@ -97,6 +111,7 @@ _GLOBAL_REACTION_HISTORY: List[float] = []
 _CHAT_REACTION_HISTORY: Dict[int, List[float]] = {}
 _SENDER_REACTION_TIMESTAMPS: Dict[Tuple[int, int], float] = {}
 _FLUSHER_TASK: Optional[asyncio.Task] = None
+_DISABLED_CHAT_REACTIONS: Dict[int, Set[str]] = {}
 
 
 
@@ -239,7 +254,9 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 15.0) 
         logger.warning("gemini_client not available for batch reactions")
         return []
 
-    allowed_list = sorted({e.rstrip('\ufe0f') for e in assistant.ALLOWED_REACTIONS})
+    chat_id = messages[0].chat_id if messages else 0
+    chat_disabled = _DISABLED_CHAT_REACTIONS.get(chat_id, set())
+    allowed_list = sorted({e.rstrip('\ufe0f') for e in assistant.ALLOWED_REACTIONS if e not in chat_disabled and e.rstrip('\ufe0f') not in chat_disabled})
     allowed_str = " ".join(allowed_list)
 
     prompt = build_batch_prompt(messages, allowed_str)
@@ -427,6 +444,12 @@ async def flush_chat_batch(chat_id: int):
                 if exc_name in ("ChannelPrivateError", "ChatAdminRequiredError", "ChatWriteForbiddenError", "UserBannedInChannelError"):
                     logger.warning("[BatchReactions] Terminal permission error %s for chat=%s. Halting reaction batch.", exc_name, chat_id)
                     break
+
+                if exc_name == "ReactionInvalidError" or "invalid reaction" in str(exc).lower() or "only emoji are allowed" in str(exc).lower():
+                    _DISABLED_CHAT_REACTIONS.setdefault(chat_id, set()).add(emoji)
+                    _DISABLED_CHAT_REACTIONS[chat_id].add(emoji.rstrip('\ufe0f'))
+                    logger.warning("[BatchReactions] Reaction '%s' rejected by Telegram for chat=%s: %s. Added to chat blacklist.", emoji, chat_id, exc)
+                    continue
 
                 logger.warning("[BatchReactions] Failed to put reaction '%s' on msg_id=%s: %s", emoji, mid, exc)
 

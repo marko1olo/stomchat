@@ -473,7 +473,7 @@ async def generate_lifeline_response(
     )
 
     if llm_caller is None:
-        return fallback_text
+        return None
 
     media_context = f"\nОписание прикрепленного снимка/фото: {media_desc}\n" if media_desc else ""
 
@@ -511,9 +511,9 @@ NOT_CLINICAL_CASE
 
     try:
         status_ctx = {"kind": "lifeline_response", "thinking_level": "LOW", "temperature": 0.3}
-        resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=30.0)
+        resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=75.0)
         if err or not resp or not getattr(resp, "text", None):
-            return fallback_text
+            return None
         if "NOT_CLINICAL_CASE" in resp.text.strip().upper():
             logger.info("🛑 Lifeline model returned NOT_CLINICAL_CASE. Suppressing reply.")
             return None
@@ -526,7 +526,7 @@ NOT_CLINICAL_CASE
             logger.error("🛑 Lifeline model generated toxic practice taboo. Suppressing reply.")
             return None
 
-        return res_text or fallback_text
+        return res_text or None
     except Exception as exc:
         logger.warning("Error generating lifeline response via LLM: %s", exc)
-        return fallback_text
+        return None

@@ -198,7 +198,7 @@ def is_group_reply_in_flight(chat_id: int, msg_ids) -> bool:
 # ── Реакции (эмодзи на сообщения) ──────────────────────────────────────────
 # Разрешённый список — только уместные в профессиональном медицинском чате.
 # Чем меньше список, тем проще модели выбрать и меньше шансов получить мусор.
-ALLOWED_REACTIONS = {"👍", "🔥", "🤝", "💯", "❤", "❤️", "🧠", "👏", "💡", "⚡", "😂", "🤣", "🙏", "🫡", "👌"}
+ALLOWED_REACTIONS = {"👍", "🔥", "🤝", "💯", "❤", "❤️", "👏", "💡", "⚡", "😂", "🤣", "🙏", "🫡", "👌"}
 # Кулдаун реакций per-sender: не более 1 реакции на отправителя в 60 сек.
 # Цель — не спамить реакциями при всплеске сообщений от одного врача.
 _REACTION_COOLDOWNS = TTLCache(maxsize=5000, ttl=60)
@@ -1045,7 +1045,7 @@ YES — если вопрос содержит клинический интер
 NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), нецензурная брань/троллинг или оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=15)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
         if error or not response or not getattr(response, "text", None):
             last_msg = safe_chain[-1] if safe_chain else ""
             last_text = last_msg.split(": ", 1)[-1].strip().lower() if ": " in last_msg else last_msg.lower()
@@ -4559,7 +4559,7 @@ async def check_llm_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=15)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
 
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
@@ -5470,7 +5470,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             chain, _, _ = await fetch_dynamic_chat_context(
                 msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
             )
-            context_msgs = chain or [f"{sender_first_name or 'Коллега'}: {text}"]
+            context_msgs = chain or [f"{sender_first_name or 'Доктор'}: {text}"]
         else:
             # 0.1. Категорически игнорируем реплики, явно адресованные другим участникам или админам (@username)
             all_mentions = re.findall(r"@([a-zA-Z0-9_]{3,})", text or "")
@@ -7168,18 +7168,25 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             break
 
     if not reply_text:
-        if not is_passive:
+        # Если валидатор забраковал черновики из-за оффтопа, флуда или отсутствия клинической темы —
+        # категорически подавляем ответ, чтобы не читать лекций на бытовые темы (кубик Рубика, котики и т.д.)
+        is_offtopic_or_flood = any(
+            kw in (last_media_reason or "").lower()
+            for kw in ("оффтоп", "флуд", "не содержит клиническ", "нерелевантн", "нет клиническ", "бытов", "нарушает профессиональн")
+        )
+        if not is_passive and not is_offtopic_or_flood:
             logger.warning("Media direct query reflection rejected for msg_id=%s. Generating cautious LLM response.", msg_id)
             ebm_prompt = f"""
 Ты — опытный стоматолог-практик у кресла в чате StomChat.
 Врач прислал клинический снимок/рентген: {media_description}
 Вопрос врача: {text}
 Замечание клинического рецензента к черновикам: "{last_media_reason}".
-Сформулируй краткий (2-4 предложения), прямой и практически применимый ответ коллеге по Золотому 3-шаговому стандарту:
+Сформулируй краткий (2-4 предложения), прямой и практически применимый ответ врачу по Золотому 3-шаговому стандарту:
 1. Видимые ориентиры на снимке и прямой ответ на вопрос врача (конкретные клампы/материалы/протокол первого выбора).
 2. Практический нюанс выполнения у кресла.
 3. Биологические ограничения безопасности.
 Никаких общих фраз, увиливаний ("недостаточно данных") и бюрократии.
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО обращение «коллега». Обращайся сразу к сути клинической рекомендации.
 Разметка: строго только HTML (<b>жирный</b>). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые звёздочки (** или *) и Markdown.
 """
             ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
@@ -7190,7 +7197,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 if not _TOXIC_PRACTICE_RE.search(candidate_fb):
                     reply_text = candidate_fb
         if not reply_text:
-            logger.warning("Media assistant all %s attempts rejected or failed for msg_id=%s. Suppressing reply.", max_retries + 1, msg_id)
+            logger.warning("Media assistant all %s attempts rejected or failed for msg_id=%s (offtopic=%s). Suppressing reply.", max_retries + 1, msg_id, is_offtopic_or_flood)
             return
 
     # Гарантированная нормализация HTML и зачистка Markdown-звездочек
@@ -10231,9 +10238,9 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         supplement_text = re.sub(r'\n{3,}', '\n\n', supplement_text)
         # Коллегиальная подача обдуманного клинического нюанса от врача врачу
         collegial_intros = [
-            "Коллега, ещё раз проанализировал твой случай у кресла... Решил добавить важный клинический нюанс:",
-            "Коллега, перепроверил протокол по твоему кейсу — обрати внимание на ключевой момент:",
-            "Коллега, в продолжение разбора: ещё раз взвесил риски и хочу акцентировать:",
+            "Ещё раз проанализировал клинический случай у кресла... Решил добавить важный практический нюанс:",
+            "Перепроверил протокол по твоему кейсу — обрати внимание на ключевой момент:",
+            "В продолжение разбора: ещё раз взвесил риски и хочу акцентировать:",
         ]
         chosen_header = random.choice(collegial_intros)
         formatted_message = f"<b>{chosen_header}</b>\n\n{supplement_text}"
@@ -14497,7 +14504,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                     else:
                         await bot_client.send_message(
                             entity=chat_id,
-                            message="👨‍⚕️ <i>Коллега, для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
+                            message="👨‍⚕️ <i>Для однозначного разбора недостаточно клинических данных. Уточните детали случая (снимок/КТ, анамнез).</i>",
                             reply_to=msg_id,
                             parse_mode='html',
                         )
@@ -15597,7 +15604,7 @@ async def handle_onboarding_callback(bot_client, event, data_str):
         logger.error("Failed to save onboard memory: %s", save_err)
 
     conf_text = (
-        f"✅ <b>Отлично, коллега!</b>\n\n"
+        f"✅ <b>Специализация зафиксирована</b>\n\n"
         f"Ваша специализация зафиксирована: <b>{chosen_spec}</b>.\n"
         f"Теперь все клинические консультации, дозировки препаратов и разборы снимков "
         f"будут адаптированы под вашу врачебную практику.\n\n"
@@ -18543,6 +18550,13 @@ async def check_and_send_pm_pings(bot_client):
                     logger.info(f"PM ping cycle limit reached ({MAX_PINGS_PER_CYCLE}); rest will be handled next cycle.")
                     break
 
+                try:
+                    chat_id = int(chat_id_str)
+                    if chat_id <= 0:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
                 # Отписавшихся не трогаем никогда.
                 if info.get("pings_opted_out"):
                     continue
@@ -18668,13 +18682,14 @@ async def check_and_send_pm_pings(bot_client):
 2. Если контроль оправдан: сформулируй строго 1 точечную, коллегиальную реплику у кресла (1–2 предложения), адресованную врачу на равных.
    Задай конкретный вопрос по исходу (динамика боли при накусывании, состояние слизистой, результат прохождения или обтурации).
 3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
-   • Клиентский сервис и спам-фразы: «как дела», «как поживаете», «куда вы пропали», «я ждал ответа», «надеюсь у вас всё хорошо».
+   • Обращения «коллега», «коллеги», «дорогой коллега». Обращайся напрямую по существу ситуации, без шаблонных приветствий.
+   • Клиентский сервис и спам-фразы: «как дела», «куда вы пропали», «я ждал ответа», «надеюсь у вас всё хорошо».
    • Длинные поучения, лекции, общие рассуждения или пересказ кейса.
    • Смайлики и эмодзи.
    • Любые отозванные препараты (Солкосерил, Актовегин) и токсические методики (депофорез, мышьяк, народные средства).
 4. Тон: живой, профессиональный, коллегиальный («Врач — Врачу»).
 5. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
-Начинай сразу с сути обращения к коллеге (или выведи NO_PING)."""
+Начинай сразу с сути обращения к врачу (или выведи NO_PING)."""
 
                 status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(expert_prompt, status_ctx, timeout=90)
@@ -18697,6 +18712,9 @@ async def check_and_send_pm_pings(bot_client):
 
                     # Срезаем эмодзи и спам-клише
                     reply_text = re.sub(r"[\U00010000-\U0010ffff]|[\u2600-\u27ff]", "", reply_text).strip()
+                    # Срезаем запрещенное обращение "коллега"
+                    reply_text = re.sub(r"^(?:(?:уважаемый|дорогой)\s+)?коллег[аеиуом][,\s!.:]*", "", reply_text, flags=re.IGNORECASE).strip()
+                    reply_text = re.sub(r"\bколлег[аеиуом]\b", "доктор", reply_text, flags=re.IGNORECASE).strip()
                     reply_text = clean_html_formatting(reply_text)
 
                     banned_cliches = ("как дела", "куда пропал", "давно не общались", "я ждал", "как ваши дела")
@@ -18828,6 +18846,15 @@ async def check_and_send_group_activity_pings(bot_client):
                 continue
             if info.get("ping_failures", 0) >= MAX_PING_FAILURES:
                 continue
+            try:
+                uid_int = int(uid_str)
+                if uid_int <= 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            # АНТИСПАМ: если врач уже пропустил ЛС-пинг (unanswered_pings >= 1) или пинг уже отправлен — никогда не навязываться групповыми тизерами!
+            if info.get("unanswered_pings", 0) >= 1 or info.get("ping_sent", False):
+                continue
             last_gp_raw = info.get("last_group_ping")
             if last_gp_raw:
                 last_gp = _parse_state_dt(last_gp_raw)
@@ -18842,7 +18869,7 @@ async def check_and_send_group_activity_pings(bot_client):
             last_act = _parse_state_dt(info.get("last_activity"))
             if now - last_act < timedelta(days=GROUP_ACTIVITY_SILENCE_DAYS):
                 continue
-            candidates.append(int(uid_str))
+            candidates.append(uid_int)
 
         targets = select_ping_targets(candidates)
         if not targets:

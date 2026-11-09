@@ -201,8 +201,11 @@ for kind, budget in (("assistant", 90), ("pm_chat", 90), ("bot_mention_reply", 6
     check(f"«{kind}»: сумма таймаутов запросов {planned:.0f}s влезает в бюджет",
           planned <= budget + 0.01, f"{len(REQUESTS)} запросов на {planned:.1f}s")
     check(f"«{kind}»: хотя бы один запрос сделан", len(REQUESTS) >= 1, "каскад промолчал")
-    check(f"«{kind}»: ни один запрос не короче 7s",
-          all(t >= min(7.0, budget) - 0.01 for t in timeouts_used()),
+    check(f"«{kind}»: первый запрос получает полноценный таймаут (не короче 7s)",
+          timeouts_used()[0] >= min(7.0, budget) - 0.01,
+          f"таймауты {timeouts_used()}")
+    check(f"«{kind}»: адаптивные фоллбэк-запросы имеют жизнеспособный таймаут (>= 1.5s)",
+          all(t >= 1.5 - 0.01 for t in timeouts_used()),
           f"таймауты {timeouts_used()}")
     check(f"«{kind}»: провал вернул None", res is None, f"got {res}")
 

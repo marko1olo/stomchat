@@ -938,13 +938,18 @@ async def generate_digest_pdf(
                 try:
                     page = await browser.new_page()
 
-                    # Устанавливаем контент и ждем подгрузки изображений
+                    # Устанавливаем контент: штатно ждем события 'load' (DOM + синхронные ресурсы)
+                    # Избегаем 'networkidle', который искусственно сжигает 12 секунд из-за keep-alive соединений
                     try:
-                        await page.set_content(full_html, wait_until="networkidle", timeout=12000)
-                    except Exception:
-                        # Фоллбэк: если CDN-картинки грузятся медленно, рендерим по событию load
-                        logger.warning("networkidle timed out during PDF generation, falling back to load")
-                        await page.set_content(full_html, wait_until="load", timeout=15000)
+                        await page.set_content(full_html, wait_until="load", timeout=12000)
+                    except Exception as load_err:
+                        # Фоллбэк: если CDN-картинки зависли или недоступны, рендерим по domcontentloaded
+                        logger.warning("page.set_content(load) timed out or failed (%s), falling back to domcontentloaded", load_err)
+                        try:
+                            await page.set_content(full_html, wait_until="domcontentloaded", timeout=8000)
+                            await asyncio.sleep(0.8)
+                        except Exception as dcl_err:
+                            logger.warning("page.set_content(domcontentloaded) fallback error: %s", dcl_err)
 
                     # Рендерим в PDF с точными настройками печати
                     await page.pdf(
@@ -955,7 +960,12 @@ async def generate_digest_pdf(
                     )
                 finally:
                     if browser:
-                        await browser.close()
+                        try:
+                            # Экранируем закрытие браузера от asyncio.CancelledError,
+                            # чтобы исключить утечки зомби-процессов Chromium при отмене задачи
+                            await asyncio.shield(browser.close())
+                        except Exception as close_err:
+                            logger.warning("Error closing playwright browser: %s", close_err)
 
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 size_kb = os.path.getsize(output_path) / 1024

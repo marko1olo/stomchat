@@ -699,6 +699,96 @@ COMFORT_REQUEST_SECONDS = 92.0
 # чтобы успеть записать причину провала ДО того, как родитель убьёт процесс.
 BUDGET_RESERVE_SHARE = 0.85
 
+
+def model_min_budget_seconds(model_name: str, provider: str, is_triage: bool = False) -> float:
+    """Минимальный бюджет, необходимый модели для осмысленной попытки ответа."""
+    if provider == "groq":
+        return 1.5 if is_triage else 1.8
+    if provider == "gemini":
+        if "lite" in model_name.lower():
+            return 2.0 if is_triage else 2.5
+        return 2.5 if is_triage else 3.5
+    if provider == "agentrouter":
+        return 3.5 if is_triage else 5.0
+    return 2.0 if is_triage else 3.0
+
+
+def compute_call_timeout(
+    provider: str,
+    model_name: str,
+    model_index: int,
+    active_cascade: list,
+    remaining_time: float,
+    timeout,
+    is_triage: bool,
+    is_chatbot: bool,
+    thinking_level: str,
+    summary_kinds: frozenset,
+    kind,
+    attempt: int,
+    attempts_planned: int,
+) -> float:
+    """
+    Адаптивный расчет таймаута для текущего запроса модели (per-model adaptive slice).
+    Гарантирует, что последующие модели каскада (особенно быстрые Groq)
+    НЕ блокируются по budget_exhausted из-за того, что первая модель съела весь бюджет.
+    """
+    tail = active_cascade[model_index + 1:]
+    is_last_model = (len(tail) == 0)
+
+    # 1. Считаем резерв времени для последующих моделей в хвосте
+    if is_last_model:
+        fallback_reserve = 0.0
+    else:
+        fallback_reserve = sum(
+            model_min_budget_seconds(m, p, is_triage=is_triage)
+            for m, p in tail
+        )
+
+    # 2. Если времени в обрез, защищаем хотя бы одну самую быструю модель из хвоста
+    min_current = model_min_budget_seconds(model_name, provider, is_triage=is_triage)
+    if fallback_reserve > 0 and (remaining_time - fallback_reserve) < min_current:
+        fastest_tail = min(
+            model_min_budget_seconds(m, p, is_triage=is_triage)
+            for m, p in tail
+        )
+        fallback_reserve = fastest_tail
+
+    # 3. Доступное время текущей модели с защитой от голодания
+    model_available = max(
+        min_current,
+        remaining_time - fallback_reserve
+    )
+
+    # 4. Распределяем доступное время модели между оставшимися попытками (ключами)
+    attempts_left = max(1, attempts_planned - attempt)
+    attempt_share = model_available / attempts_left
+
+    # 5. Интерактивные потолки для предотвращения зависания
+    if provider == "agentrouter" and timeout is None:
+        ceiling = 240.0
+    elif is_triage:
+        # Для триажа и валидатора таймаут одного запроса не должен раздуваться,
+        # чтобы гарантировать возможность опроса резервных моделей
+        triage_ceiling = 7.0 if (timeout and timeout >= 14.0) else (min(15.0, timeout) if timeout else 15.0)
+        ceiling = triage_ceiling
+    elif is_chatbot:
+        ceiling = 120.0 if thinking_level == "HIGH" else (45.0 if thinking_level == "MEDIUM" else 25.0)
+        # Если общий бюджет запроса невелик (<= 45с) и это не последняя модель,
+        # первая модель не может съесть более 60% общего бюджета
+        if timeout and timeout <= 45.0 and not is_last_model:
+            ceiling = min(ceiling, max(7.0, timeout * 0.6))
+    elif kind in summary_kinds:
+        ceiling = 720.0 if provider == "agentrouter" else 240.0
+    else:
+        ceiling = 60.0
+
+    call_timeout = min(attempt_share, ceiling, remaining_time)
+
+    # Финальная защита: таймаут не может быть ниже минимального порога модели (если остаток позволяет)
+    call_timeout = max(min(min_current, remaining_time), call_timeout)
+    return round(call_timeout, 2)
+
 # Причина последнего провала каскада.
 #
 # generate_text возвращает None одинаково и на «все ключи остывают», и на
@@ -1093,40 +1183,25 @@ def generate_text(prompt, status_context=None, timeout=None):
         # (меньше 8 с такие вызывающие сейчас не передают) лучше один запрос на
         # весь бюджет, чем ноль запросов и гарантированный None.
         min_req_step = 2.0 if is_triage else 7.0
-        usable = max(min(budget, MIN_REQUEST_SECONDS), budget * BUDGET_RESERVE_SHARE)
+        # Запас на безопасный выход подпроцесса до убийства родителем через asyncio.wait_for:
+        guard_margin = min(3.0, max(0.5, budget * 0.05))
+        usable = max(min(budget, MIN_REQUEST_SECONDS), budget - guard_margin)
         models_fit = max(1, min(len(active_cascade), int(usable // min_req_step)))
-        # НЕ обрезаем каскад: быстрые резервные модели (Groq/Qwen) отвечают за 0.8-1.5с.
-        # Если ранние модели Google сбоят (503/400/timeout), Groq должен получить попытку.
-        # Дедлайн (deadline) динамически страхует от вылета за общий бюджет.
-        if models_fit < len(active_cascade):
-            logger.debug(
-                "Budget %.0fs nominally fits %s of %s cascade models; tail preserved for fast fallbacks.",
-                budget, models_fit, len(active_cascade)
-            )
         share_divisor = max(1, min(models_fit, len(active_cascade)))
         model_share = usable / share_divisor
         comfort_step = 4.0 if is_triage else 12.0
         max_attempts = max(1, min(max_attempts, int(model_share // comfort_step)))
         req_timeout = model_share / max_attempts
-        # Интерактивные потолки таймаута на один HTTP-запрос к провайдеру:
-        # Для triage/валидатора: максимум 15с (ответ классификатора нужен за секунды).
-        # Для живого чата: максимум 60с (даем reasoning-моделям Gemini/DeepSeek время
-        # на генерацию подробных клинических ответов без ложных срывов по ReadTimeout).
         if is_triage:
             req_timeout = max(7.0 if budget >= 7.0 else 2.5, min(req_timeout, 15.0))
         elif is_chatbot:
-            # Chairside потолок таймаута на один HTTP-запрос в живом чате у кресла:
-            # Не позволяем первичному вызову висеть 110+ секунд!
-            # Для HIGH: максимум 120с. Для MEDIUM: максимум 45с.
             chat_max = 120.0 if thinking_level == "HIGH" else 45.0
-            req_timeout = max(15.0, min(req_timeout, chat_max))
-        # Дедлайн считаем по usable, а не по budget: остановиться нужно ДО
-        # убийства родителем, иначе причину провала записать будет некому.
+            chat_ceiling = 120.0 if thinking_level == "HIGH" else 45.0
+            req_timeout = max(15.0, min(req_timeout, chat_max, chat_ceiling))
         deadline = time.monotonic() + usable
         logger.debug(
-            "Budget %.0fs: %s models x %s attempts x %.1fs = %.0fs planned.",
-            budget, len(active_cascade), max_attempts, req_timeout,
-            len(active_cascade) * max_attempts * req_timeout
+            "Budget %.0fs: usable=%.1fs (guard=%.1fs), %s models in cascade, max_attempts=%s",
+            budget, usable, guard_margin, len(active_cascade), max_attempts
         )
 
     out_of_budget = False
@@ -1190,63 +1265,51 @@ def generate_text(prompt, status_context=None, timeout=None):
                 # него влез, а ноль запросов — это гарантированное молчание бота.
                 if deadline is not None and requests_made:
                     remaining = deadline - time.monotonic()
-                    if is_triage:
-                        min_needed = min(7.0, float(timeout or 7.0))
-                    elif kind in summary_kinds:
-                        min_needed = 10.0
-                    else:
-                        min_needed = min(7.0, float(timeout or 7.0))
-                    if remaining < min_needed:
-                        logger.warning(
-                            "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
-                            max(0.0, remaining), min_needed, model_name
+                    min_needed = model_min_budget_seconds(model_name, provider, is_triage=is_triage)
+                    if (remaining + 0.05) < min_needed:
+                        # Проверяем наличие быстрых моделей (Groq) в хвосте каскада
+                        faster_fallback_available = any(
+                            remaining >= model_min_budget_seconds(sub_m, sub_p, is_triage=is_triage)
+                            for sub_m, sub_p in active_cascade[model_index + 1:]
                         )
-                        _record_failure(
-                            "budget_exhausted",
-                            f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
-                        )
-                        out_of_budget = True
-                        break
-                    # Последнему запросу отдаём ровно остаток бюджета, а не полную
-                    # долю: сумма таймаутов запросов не должна вылезать за timeout.
-                    req_timeout = min(req_timeout, remaining)
+                        if faster_fallback_available:
+                            logger.info(
+                                "Skipping slow model %s (%.1fs left < %.1fs needed); proceeding to faster fallback in cascade.",
+                                model_name, remaining, min_needed
+                            )
+                            break
+                        else:
+                            logger.warning(
+                                "Budget spent (%.1fs left, needed %.1fs) before %s; stopping cascade.",
+                                max(0.0, remaining), min_needed, model_name
+                            )
+                            _record_failure(
+                                "budget_exhausted",
+                                f"бюджет {float(timeout):.0f}с израсходован до модели {model_name}"
+                            )
+                            out_of_budget = True
+                            break
 
-                call_timeout = req_timeout
-                if provider == "agentrouter":
-                    rem = (deadline - time.monotonic()) if deadline else 240.0
-                    if kind in summary_kinds:
-                        call_timeout = max(180.0, min(720.0, rem))
-                    else:
-                        has_more_models = (model_index < len(active_cascade) - 1)
-                        remaining_models_count = len(active_cascade) - 1 - model_index
-                        fallback_reserve = min(24.0, max(12.0, remaining_models_count * 4.0)) if has_more_models else 0.0
-                        if deadline is not None and rem > fallback_reserve:
-                            max_allowed = max(MIN_REQUEST_SECONDS, rem - fallback_reserve)
-                            call_timeout = max(180.0, min(rem, max_allowed, 240.0))
-                        elif deadline is not None:
-                            call_timeout = max(MIN_REQUEST_SECONDS, rem)
-                        else:
-                            call_timeout = 240.0
-                elif is_chatbot:
-                    if provider == "gemini":
-                        rem = (deadline - time.monotonic()) if deadline else 120.0
-                        has_more_models = (model_index < len(active_cascade) - 1)
-                        remaining_models_count = len(active_cascade) - 1 - model_index
-                        fallback_reserve = min(35.0, max(14.0, remaining_models_count * 7.0)) if has_more_models else 0.0
-                        min_step = 2.0 if is_triage else min(7.0, float(timeout or 7.0))
-                        if has_more_models and rem > fallback_reserve:
-                            max_allowed_for_model = min(rem, max(min_step, rem - fallback_reserve))
-                        else:
-                            max_allowed_for_model = rem
-                        # Chairside потолок ожидания врача: не перебивать req_timeout гигантским числом!
-                        chat_ceiling = 120.0 if thinking_level == "HIGH" else 45.0
-                        if thinking_level == "HIGH":
-                            call_timeout = max(min_step, min(rem, chat_ceiling, max_allowed_for_model))
-                        else:
-                            call_timeout = max(min_step, min(req_timeout, rem, chat_ceiling, max_allowed_for_model))
-                if deadline is not None:
-                    rem = max(1.0, deadline - time.monotonic())
-                    call_timeout = min(call_timeout, rem)
+                if provider == "groq" and model_name == "openai/gpt-oss-120b" and len(prompt) > 24000:
+                    logger.info("Preemptively skipping %s on %s: prompt length %d chars exceeds ~8k TPM quota", model_name, provider, len(prompt))
+                    break
+
+                rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (240.0 if provider == 'agentrouter' else 120.0))
+                call_timeout = compute_call_timeout(
+                    provider=provider,
+                    model_name=model_name,
+                    model_index=model_index,
+                    active_cascade=active_cascade,
+                    remaining_time=rem_calc,
+                    timeout=timeout,
+                    is_triage=is_triage,
+                    is_chatbot=is_chatbot,
+                    thinking_level=thinking_level,
+                    summary_kinds=summary_kinds,
+                    kind=kind,
+                    attempt=attempt,
+                    attempts_planned=attempts_planned,
+                )
 
                 try:
                     client = get_provider_client(provider, api_key, timeout=call_timeout)
@@ -2262,7 +2325,8 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                             "model": model_name,
                             "input": ar_input
                         }
-                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=min(90.0, timeout or 90.0))
+                        ar_call_timeout = min(25.0, (timeout or 25.0) / 2 if timeout else 25.0)
+                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=ar_call_timeout)
                         if ar_resp.status_code == 200:
                             ar_data = ar_resp.json()
                             extracted_txt = None

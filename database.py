@@ -1629,6 +1629,7 @@ async def get_active_pm_users(days_limit=30):
                 """
                 SELECT DISTINCT user_id FROM pm_messages 
                 WHERE sender_name = 'User' AND date >= datetime('now', ?)
+                  AND user_id < 900000000 AND user_id NOT IN (777, 4242, 555111, 12345)
                 """,
                 (f"-{days_limit} days",)
             ).fetchall()

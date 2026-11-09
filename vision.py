@@ -737,7 +737,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         "content": content_arr
                                     }
                                 ],
-                                max_tokens=800 if provider == "groq" else 1200
+                                max_tokens=800 if provider == "groq" else 4096
                             )
                             choice = resp.choices[0] if resp.choices else None
                             finish_reason = getattr(choice, "finish_reason", None) if choice else None

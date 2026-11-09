@@ -3241,7 +3241,7 @@ async def handle_new_message(event):
                         msg_id=msg_id,
                         chat_id=event.chat_id,
                         sender_id=sender_id,
-                        sender_name=sender_name or "Коллега",
+                        sender_name=sender_name or "Доктор",
                         text=text or "",
                         has_media=has_media
                     ),
@@ -3496,7 +3496,7 @@ async def handle_private_message(event):
                         try:
                             await bot_client.send_message(
                                 entity=chat_id,
-                                message="⏱ <i>Коллега, клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
+                                message="⏱ <i>Клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
                                 parse_mode="html",
                             )
                         except Exception as notify_err:

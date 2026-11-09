@@ -125,6 +125,22 @@ def resolve_bot_id(bot_client=None) -> int:
     return 0
 
 
+def is_case_already_rescued(db_path: str, msg_id: int, chat_id: Optional[int] = None) -> bool:
+    """Проверяет, помечен ли кейс уже в таблице clinical_rescues."""
+    try:
+        with _open_rescue_db(db_path, timeout=10.0) as conn:
+            ensure_rescue_table(db_path)
+            cursor = conn.cursor()
+            cols = _get_table_columns(conn, "clinical_rescues")
+            if "chat_id" in cols and chat_id is not None:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? AND chat_id = ? LIMIT 1", (msg_id, chat_id))
+            else:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? LIMIT 1", (msg_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.debug("Error checking is_case_already_rescued: %s", e)
+        return False
+
 def ensure_rescue_table(db_path: str):
     """Гарантирует существование таблицы clinical_rescues в БД."""
     try:

@@ -25,6 +25,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import config
 import database
 import db_worker
 
@@ -36,7 +37,9 @@ class TestOutboxConcurrency(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = str(Path(self.temp_dir) / "test_outbox.db")
         
-        # Подменяем пути в database и db_worker
+        # Подменяем пути в config, database и db_worker
+        self.orig_db_path = getattr(config, "DB_PATH", None)
+        config.DB_PATH = self.db_path
         self.orig_connect = database._connect
         database._connect = lambda: db_worker.connect_db(self.db_path, timeout=10)
         
@@ -44,6 +47,8 @@ class TestOutboxConcurrency(unittest.IsolatedAsyncioTestCase):
         await database.init_db()
 
     async def asyncTearDown(self):
+        if self.orig_db_path:
+            config.DB_PATH = self.orig_db_path
         database._connect = self.orig_connect
         try:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
