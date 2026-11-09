@@ -675,6 +675,7 @@ CHAT_KINDS = frozenset({
     "media_ebm_fallback",
     "pm_cautious_ebm",
     "clinical_rescue",
+    "lifeline_response",
 })
 # Генерация контента опроса — только Gemini, без Qwen/GPT.
 # Qwen 3.8-27B при русских промптах выдаёт chinese thinking leaks:
@@ -765,21 +766,36 @@ def compute_call_timeout(
     attempt_share = model_available / attempts_left
 
     # 5. Интерактивные потолки для предотвращения зависания
-    if provider == "agentrouter" and timeout is None:
-        ceiling = 240.0
-    elif is_triage:
+    if is_triage:
         # Для триажа и валидатора таймаут одного запроса не должен раздуваться,
         # чтобы гарантировать возможность опроса резервных моделей
         triage_ceiling = 7.0 if (timeout and timeout >= 14.0) else (min(15.0, timeout) if timeout else 15.0)
         ceiling = triage_ceiling
+    elif kind in summary_kinds:
+        ceiling = 720.0 if provider == "agentrouter" else 240.0
+    elif provider == "agentrouter":
+        # Флагман gpt-6.1-sol (AgentRouter) — глубокая рассуждающая модель.
+        # Даем просторный потолок, чтобы не обрывать цепочку рассуждений (CoT).
+        if timeout is None or timeout >= 240.0:
+            ceiling = 180.0
+        elif timeout >= 120.0:
+            ceiling = 110.0
+        elif timeout >= 60.0:
+            ceiling = 55.0
+        else:
+            ceiling = max(15.0, timeout * 0.6)
     elif is_chatbot:
-        ceiling = 120.0 if thinking_level == "HIGH" else (45.0 if thinking_level == "MEDIUM" else 25.0)
+        # Для Gemini и Groq в интерактивном диалоге
+        if thinking_level == "HIGH":
+            ceiling = 150.0 if (timeout and timeout >= 240.0) else (90.0 if (timeout and timeout >= 120.0) else 45.0)
+        elif thinking_level == "MEDIUM":
+            ceiling = 60.0 if (timeout and timeout >= 120.0) else 35.0
+        else:
+            ceiling = 25.0
         # Если общий бюджет запроса невелик (<= 45с) и это не последняя модель,
         # первая модель не может съесть более 60% общего бюджета
         if timeout and timeout <= 45.0 and not is_last_model:
             ceiling = min(ceiling, max(7.0, timeout * 0.6))
-    elif kind in summary_kinds:
-        ceiling = 720.0 if provider == "agentrouter" else 240.0
     else:
         ceiling = 60.0
 
@@ -2241,7 +2257,7 @@ def sanitize_supplement_output(text):
     return text
 
 
-def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
+def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
     """
     Генерирует лаконичное клиническое дополнение (дельту) к первичному ответу через Groq (openai/gpt-oss-120b)
     с автоматическим фоллбеком на Gemini (gemini-3.5-flash).
@@ -2289,7 +2305,27 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         ("gemini-3.5-flash-lite", "gemini"),
     ])
 
-    for model_name, provider in cascade:
+    deadline = time.monotonic() + float(timeout or 160.0)
+    for model_index, (model_name, provider) in enumerate(cascade):
+        rem = deadline - time.monotonic()
+        if rem <= 2.0:
+            logger.info("PM supplement budget exhausted before %s (%.1fs left)", model_name, rem)
+            break
+        tail = cascade[model_index + 1:]
+        tail_reserve = 5.0 if tail else 0.0
+
+        if provider == "agentrouter":
+            # Не душим gpt-6.1-sol: даем до 85 секунд на глубокие рассуждения!
+            call_timeout = min(85.0, max(25.0, rem - tail_reserve)) if tail else rem
+        elif provider == "gemini" and "lite" not in model_name:
+            # Не душим умные Gemini с reasoning_effort="high": даем до 60 секунд!
+            call_timeout = min(60.0, max(20.0, rem - tail_reserve)) if tail else rem
+        elif provider == "groq":
+            call_timeout = min(25.0, rem)
+        else:
+            call_timeout = min(20.0, rem)
+        call_timeout = round(max(3.0, call_timeout), 2)
+
         keys = config.GROQ_KEYS if provider == "groq" else (config.AGENTROUTER_KEYS if provider == "agentrouter" else config.GOOGLE_KEYS)
         live_keys, cooldown_keys, _ = available_keys(provider, keys)
         candidates = live_keys or cooldown_keys
@@ -2299,7 +2335,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
         for api_key in candidates[:2]:
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
             try:
-                client = get_provider_client(provider, api_key, timeout=min(25.0, timeout or 25.0))
+                client = get_provider_client(provider, api_key, timeout=call_timeout)
                 supp_kwargs = {
                     "model": model_name,
                     "messages": [
@@ -2325,7 +2361,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
                             "model": model_name,
                             "input": ar_input
                         }
-                        ar_call_timeout = min(25.0, (timeout or 25.0) / 2 if timeout else 25.0)
+                        ar_call_timeout = call_timeout
                         ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=ar_call_timeout)
                         if ar_resp.status_code == 200:
                             ar_data = ar_resp.json()
@@ -2374,7 +2410,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=140.0):
     return None
 
 
-async def generate_pm_supplement_async(user_question, initial_answer, timeout=140.0):
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=160.0):
     """Асинхронная обертка для вызова генерации дополнения через изолированный подпроцесс."""
     import blocking_tools
     return await blocking_tools.generate_pm_supplement_async(user_question, initial_answer, timeout=timeout)

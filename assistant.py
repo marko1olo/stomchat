@@ -10211,7 +10211,7 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         supplement_text, error = await generate_pm_supplement_async(
             user_question=user_question,
             initial_answer=initial_answer,
-            timeout=90.0,
+            timeout=160.0,
         )
 
         if error or not supplement_text:
@@ -18757,11 +18757,32 @@ async def check_and_send_pm_pings(bot_client):
                                 chat_id, wait_seconds,
                             )
                             break
-                        failures = info.get("ping_failures", 0) + 1
+                        _err_str = str(send_err).lower()
+                        if any(term in _err_str for term in (
+                            "could not find the input entity",
+                            "user was deleted",
+                            "the specified user was deleted",
+                            "user is deleted",
+                            "inputuserdeactivated",
+                            "userdeactivated",
+                        )):
+                            logger.warning(
+                                f"DM ping: user {chat_id} entity not found or deleted ({send_err}). Removing from PM pings."
+                            )
+                            drop_pm_ping(chat_id_str)
+                            continue
+
+                        _permanent = any(term in _err_str for term in (
+                            "invalid peer", "peeridsinvalid", "user is blocked",
+                            "userblocked", "user_is_blocked", "bots can't", "bots cannot",
+                            "an invalid peer was used", "chat_write_forbidden", "channel_private",
+                            "userprivacyrestricted", "privacy",
+                        ))
+                        failures = MAX_PING_FAILURES if _permanent else info.get("ping_failures", 0) + 1
                         commit_pm_ping(chat_id_str, ping_failures=failures)
                         logger.warning(
                             f"Failed to deliver DM ping to {chat_id} "
-                            f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                            f"(failure {failures}/{MAX_PING_FAILURES}{' — PERMANENT BLACKLIST' if _permanent else ''}): {send_err}"
                         )
                         continue
 
@@ -18903,17 +18924,25 @@ async def check_and_send_group_activity_pings(bot_client):
                     break
                 _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
                 _err_str = str(send_err).lower()
-                # Entity not found — юзер совсем не резолвится. Удаляем из пула.
-                if "could not find the input entity" in _err_str:
-                    logger.warning("Group ping: user %s entity not found. Removing from PM pings.", chat_id)
+                # Entity not found / deleted user — юзер не резолвится или удален. Удаляем из пула.
+                if any(term in _err_str for term in (
+                    "could not find the input entity",
+                    "user was deleted",
+                    "the specified user was deleted",
+                    "user is deleted",
+                    "inputuserdeactivated",
+                    "userdeactivated",
+                )):
+                    logger.warning("Group ping: user %s entity not found or deleted (%s). Removing from PM pings.", chat_id, send_err)
                     drop_pm_ping(chat_id_str)
                     continue
                 # Постоянные ошибки: юзер никогда не открывал бота или заблокировал —
                 # сразу выставляем MAX_PING_FAILURES, чтобы исключить навсегда (1 попытка).
                 _permanent = any(x in _err_str for x in (
                     "invalid peer", "peeridsinvalid", "user is blocked",
-                    "userblocked", "bots can't", "bots cannot",
-                    "an invalid peer was used",
+                    "userblocked", "user_is_blocked", "bots can't", "bots cannot",
+                    "an invalid peer was used", "chat_write_forbidden", "channel_private",
+                    "userprivacyrestricted", "privacy",
                 ))
                 failures = MAX_PING_FAILURES if _permanent else _info.get("ping_failures", 0) + 1
                 commit_pm_ping(chat_id_str, ping_failures=failures)

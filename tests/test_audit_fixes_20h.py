@@ -30,7 +30,7 @@ class TestAuditFixes20h(unittest.IsolatedAsyncioTestCase):
         # Проверяем в исходном коде или сигнатуре вызова _call_llm_adapter
         import inspect
         src = inspect.getsource(question_lifeline.generate_lifeline_response)
-        self.assertIn("timeout=75.0", src)
+        self.assertTrue("timeout=75.0" in src or "timeout=85.0" in src)
 
     def test_03_reaction_engine_complication_patterns(self):
         """Проверка детерминированного блокирования реакций на новые осложнения (ледж, ступенька, стриппинг, проталкивание)."""

@@ -193,11 +193,12 @@ class TestAudit20hDeepRepair(unittest.IsolatedAsyncioTestCase):
         self.assertIn('provider == "groq" and model_name == "openai/gpt-oss-120b" and len(prompt) > 24000', gemini_code)
 
     def test_pm_supplement_timeout_capped(self):
-        """Verify generate_pm_supplement caps AgentRouter timeout to prevent starvation."""
+        """Verify generate_pm_supplement provides generous thinking time for gpt-6.1-sol without choking."""
         with open("gemini_client.py", "r", encoding="utf-8") as f:
             gemini_code = f.read()
 
-        self.assertIn("ar_call_timeout = min(25.0,", gemini_code)
+        self.assertIn("ar_call_timeout = call_timeout", gemini_code)
+        self.assertIn("min(85.0,", gemini_code)
 
 
 if __name__ == "__main__":

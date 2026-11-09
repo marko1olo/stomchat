@@ -1151,9 +1151,9 @@ async def generate_gemini_text_async(prompt, context, timeout=None):
             )
 
 
-async def generate_pm_supplement_async(user_question, initial_answer, timeout=140.0):
+async def generate_pm_supplement_async(user_question, initial_answer, timeout=160.0):
     """Асинхронный вызов генерации дополнения через изолированный подпроцесс gemini_client."""
-    effective_timeout = float(timeout) if timeout else 140.0
+    effective_timeout = float(timeout) if timeout else 160.0
     payload, error = await _run_json_tool(
         "pm-supplement",
         {"user_question": user_question, "initial_answer": initial_answer, "timeout": effective_timeout},

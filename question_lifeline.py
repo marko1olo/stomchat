@@ -510,8 +510,8 @@ NOT_CLINICAL_CASE
 """
 
     try:
-        status_ctx = {"kind": "lifeline_response", "thinking_level": "LOW", "temperature": 0.3}
-        resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=75.0)
+        status_ctx = {"kind": "lifeline_response", "thinking_level": "MEDIUM", "temperature": 0.3}
+        resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=85.0)
         if err or not resp or not getattr(resp, "text", None):
             return None
         if "NOT_CLINICAL_CASE" in resp.text.strip().upper():

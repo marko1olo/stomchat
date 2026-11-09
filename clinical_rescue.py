@@ -635,7 +635,7 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
             "media_description": clean_d if clean_d else None,
             "has_media": bool(has_media or multimodal_image_urls or clean_d),
         }
-        resp, err = await blocking_tools.generate_gemini_text_async(prompt, status_ctx, timeout=90.0)
+        resp, err = await blocking_tools.generate_gemini_text_async(prompt, status_ctx, timeout=140.0)
         raw_text = getattr(resp, "text", "") or ""
         if raw_text and raw_text.strip():
             clean_resp = raw_text.strip()
