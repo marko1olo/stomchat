@@ -941,13 +941,15 @@ async def generate_digest_pdf(
                     # Устанавливаем контент: штатно ждем события 'load' (DOM + синхронные ресурсы)
                     # Избегаем 'networkidle', который искусственно сжигает 12 секунд из-за keep-alive соединений
                     try:
-                        await page.set_content(full_html, wait_until="load", timeout=12000)
+                        await page.set_content(full_html, wait_until="load", timeout=15000)
                     except Exception as load_err:
-                        # Фоллбэк: если CDN-картинки зависли или недоступны, рендерим по domcontentloaded
+                        # Фоллбэк: если внешние CDN-картинки или шрифты зависли, рендерим по domcontentloaded
                         logger.warning("page.set_content(load) timed out or failed (%s), falling back to domcontentloaded", load_err)
                         try:
-                            await page.set_content(full_html, wait_until="domcontentloaded", timeout=8000)
-                            await asyncio.sleep(0.8)
+                            await page.close()
+                            page = await browser.new_page()
+                            await page.set_content(full_html, wait_until="domcontentloaded", timeout=10000)
+                            await asyncio.sleep(0.5)
                         except Exception as dcl_err:
                             logger.warning("page.set_content(domcontentloaded) fallback error: %s", dcl_err)
 

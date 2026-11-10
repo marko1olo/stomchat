@@ -13149,7 +13149,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                attempt_timeout = max(10.0, min(rem_pm_budget - 15.0, 75.0))
+                attempt_timeout = max(15.0, min(rem_pm_budget - 15.0, 120.0))
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
 
                 if error:
