@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 MAX_QUEUE_BACKLOG = 500
 
 # Параметры повторных попыток при блокировках БД
-DB_LOCK_RETRY_ATTEMPTS = 5
-DB_LOCK_RETRY_BASE_DELAY = 0.1  # секунды
-DB_LOCK_RETRY_MAX_DELAY = 2.0   # секунды
+DB_LOCK_RETRY_ATTEMPTS = 3
+DB_LOCK_RETRY_BASE_DELAY = 0.3  # секунды
+DB_LOCK_RETRY_MAX_DELAY = 1.5   # секунды
 
 # Пути баз данных, для которых режим журнала WAL уже активирован в текущем процессе
 _WAL_READY_PATHS: Set[str] = set()
@@ -70,7 +70,7 @@ def get_default_db_path() -> str:
 def connect_db(db_path: Optional[str] = None, timeout: float = 30.0) -> sqlite3.Connection:
     """
     Открывает соединение с базой данных SQLite с соблюдением всех инвариантов Micro-VPS:
-    - busy_timeout = 30000
+    - busy_timeout = 30000 (30 сек)
     - synchronous = NORMAL
     - cache_size = -4000 (4 МБ)
     - journal_mode = WAL (выставляется один раз на процесс для каждого файла базы)

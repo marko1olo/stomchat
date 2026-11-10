@@ -49,6 +49,7 @@ class AnesthesiaCalculationResult:
     error_message: Optional[str] = None
     is_pediatric: bool = False
     is_cardiac: bool = False
+    is_hypertensive_crisis: bool = False
     is_pregnant: bool = False
     is_weight_estimated: bool = False
     estimated_age_years: Optional[float] = None
@@ -258,6 +259,7 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
             "age": None,
             "is_weight_estimated": False,
             "is_cardiac": False,
+            "is_hypertensive_crisis": False,
             "is_pregnant": False
         }
 
@@ -266,21 +268,30 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
     # 1. Беременность и лактация
     is_pregnant = bool(re.search(r'\b(?:беременн\w*|лактаци\w*|гв\b|кормящ\w*|триместр\w*|плод\w*|роды)\b', cleaned))
 
-    # 2. Сердечно-сосудистый статус
+    # 2. Сердечно-сосудистый статус и гипертонический криз
     is_cardiac = bool(re.search(
         r'\b(?:кардио\w*|сердечн\w*|гипертон\w*|давлен\w*|ибс\b|аритми\w*|стенокарди\w*|инфаркт\w*|'
         r'стент\w*|тахикарди\w*|брадикарди\w*|бета-блокатор\w*|кардиопатолог\w*|сердц\w*|блокад\w*|'
         r'(?:электро)?кардиостимулятор\w*|экс\b|пейсмейкер\w*|порок\w*)\b',
         cleaned
     ))
+    is_hypertensive_crisis = bool(re.search(
+        r'\b(?:гипертоническ\w*\s+криз\w*|криз\w*|гипертензивн\w*\s+криз\w*)\b',
+        cleaned
+    ))
+    if is_hypertensive_crisis:
+        is_cardiac = True
 
-    # Маскирование АД (140/90, 120/80, 180/110)
+    # Маскирование АД (140/90, 120/80, 180/110, 190/110)
     def _mask_bp(m):
-        nonlocal is_cardiac
+        nonlocal is_cardiac, is_hypertensive_crisis
         try:
             s, d = int(m.group(1)), int(m.group(2))
             if 70 <= s <= 260 and 40 <= d <= 150:
                 if s >= 140 or d >= 90:
+                    is_cardiac = True
+                if s >= 180 or d >= 110:
+                    is_hypertensive_crisis = True
                     is_cardiac = True
                 return " [BP] "
         except Exception:
@@ -288,6 +299,19 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
         return m.group(0)
 
     sanitized = re.sub(r'\b(\d{2,3})\s*[/\\|\-]\s*(\d{2,3})\b', _mask_bp, cleaned)
+
+    # Детекция изолированного систолического АД >= 180 (давление 190, ад 180)
+    m_bp_single = re.search(r'\b(?:ад|давлен\w*)\s*(?:=|:|\s)\s*(\d{2,3})(?!\s*(?:кг|kg|кило))\b', sanitized)
+    if m_bp_single:
+        try:
+            val_bp = int(m_bp_single.group(1))
+            if val_bp >= 180:
+                is_hypertensive_crisis = True
+                is_cardiac = True
+            elif val_bp >= 140:
+                is_cardiac = True
+        except Exception:
+            pass
 
     # 3.0. Маскирование диапазонов зубов (16-17, 46-47, 16-18)
     sanitized = re.sub(r'\b(?:зуб[а-яё]*|fdi|#|област[ьи]|сегмент[а-яё]*)?\s*([1-8][1-8]\s*[-–—]\s*[1-8][1-8])\s*(?:зуб[а-яё]*|fdi|tooth)?\b', ' [TOOTH_RANGE] ', sanitized, flags=re.IGNORECASE)
@@ -298,6 +322,18 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
     sanitized = re.sub(r'\b(?:зуб[а-яё]*|#)\s*([1-8][\.,\-]?[1-8]|\d{1,2})\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r'(?<!\w)(?:#|fdi)\s*([1-8][\.,\-]?[1-8])\b', ' [TOOTH] ', sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r'(?<![\d\.])\b([1-8][\.,][1-8])\b(?![\d\.])', ' [TOOTH] ', sanitized)
+
+    # 3.1. Маскирование срока беременности и недель/месяцев (8 недель, 12 нед, 2 триместр, 5 месяцев)
+    sanitized = re.sub(r'\b\d+\s*(?:недел[а-яё]*|нед\b|месяц[а-яё]*|мес\b|триместр[а-яё]*)\b', ' [GESTATION] ', sanitized)
+
+    # 3.2. Маскирование линейных/угловых измерений, торка и оборотов (3 мм, 21 мм, 35 нсм, 30000 об/мин)
+    sanitized = re.sub(r'\b\d+(?:\.\d+)?\s*(?:мм|mm|см|cm|нсм|н\s*[\*·]?\s*см|нм|nm|об/?мин|rpm|кпа|квт|ватт)\b', ' [MEASURE] ', sanitized)
+
+    # 3.3. Маскирование клинических разведений и соотношений (1:100 000, 1:200 000, 1:100, 1:200, 1/100000)
+    sanitized = re.sub(r'\b1\s*[:/]\s*(?:100\s*000|200\s*000|100000|200000|100|200)\b', ' [DILUTION] ', sanitized)
+
+    # 3.4. Маскирование витальных показателей (давление 180, ад 160, пульс 90, чсс 100, spo2 98)
+    sanitized = re.sub(r'\b(?:ад|давлен[а-яё]*|чсс|пульс[а-яё]*|сатураци[а-яё]*|spo2)\s*(?:=|:|\s)\s*\d{2,3}(?!\s*(?:кг|kg|кило))\b', ' [VITALS] ', sanitized)
 
     # 4. Маскирование карпул, ампул, миллилитров, процентов, каналов
     sanitized = re.sub(r'\b\d+(?:\.\d+)?\s*(?:карпул[а-яё]*|карп[а-яё]*|ампул[а-яё]*|мл|ml|процент[а-яё]*|%)\b', ' [UNIT] ', sanitized)
@@ -373,6 +409,7 @@ def parse_clinical_query_params(text: str) -> Dict[str, Any]:
         "age": age_years,
         "is_weight_estimated": is_estimated,
         "is_cardiac": is_cardiac,
+        "is_hypertensive_crisis": is_hypertensive_crisis,
         "is_pregnant": is_pregnant
     }
 
@@ -414,11 +451,16 @@ def detect_pregnancy_context(text: str) -> bool:
 
 def detect_pediatric_context(text: str, weight: Optional[float] = None) -> bool:
     """Определяет, относится ли запрос к ребенку (по маркерам или весу < 40 кг)."""
-    if weight is not None and weight < 40.0:
-        return True
     if not text:
+        if weight is not None and weight < 40.0:
+            return True
         return False
     low = text.lower()
+    # Если контекст беременности/лактации, вес взрослой беременной не должен триггерить педиатрию по числу недель
+    if re.search(r'\b(?:беременн\w*|лактаци\w*|триместр\w*|гв\b)\b', low) and not re.search(r'\b(?:ребен\w*|ребёнк\w*|детям\w*|детск\w*|малыш\w*)\b', low):
+        return False
+    if weight is not None and weight < 40.0:
+        return True
     return bool(re.search(
         r'\b(?:ребен\w*|ребёнк\w*|детям\w*|детск\w*|малыш\w*|мальчик\w*|девочк\w*|педиатр\w*|года|лет)\b',
         low
@@ -481,10 +523,32 @@ def calculate_anesthesia_dose(
     cardiac = is_cardiac if is_cardiac is not None else parsed_params["is_cardiac"]
     pediatric = is_child if is_child is not None else detect_pediatric_context(raw_text, weight)
     pregnant = is_pregnant if is_pregnant is not None else parsed_params["is_pregnant"]
+    is_crisis = parsed_params.get("is_hypertensive_crisis", False)
 
     # Определение препарата
     selected_key = drug_key or detect_anesthetic_drug(raw_text)
     drug = DRUG_CATALOG.get(selected_key, DRUG_CATALOG["articaine_100"])
+
+    # ── КАРДИОЛОГИЧЕСКИЙ СТОП-ФАКТОР: ГИПЕРТОНИЧЕСКИЙ КРИЗ (АД >= 180/110) ──
+    if is_crisis and drug.mg_epinephrine_per_carpule > 0:
+        contra_msg = (
+            "⛔ <b>ПРОТИВОПОКАЗАНИЕ: ГИПЕРТОНИЧЕСКИЙ КРИЗ / АД ≥ 180/110 ММ РТ. СТ.!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "• <b>Вазоконстрикторы (адреналин/эпинефрин) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ!</b> Риск ОНМК (инсульта) и инфаркта миокарда.\n"
+            "• Плановое стоматологическое вмешательство немедленно отменяется.\n"
+            "• <b>Неотложная помощь:</b> гипотензивная терапия (Каптоприл 25 мг сублингвально или Моксонидин 0.2–0.4 мг), контроль АД каждые 10–15 минут. При кризе — вызов СМП (103/112).\n"
+            "• При экстренной боли после стабилизации АД: <b>Мепивакаин 3% без вазоконстриктора</b> (максимум до 2–3 карпул) или инфильтрация без адреналина."
+        )
+        return AnesthesiaCalculationResult(
+            is_valid=True,
+            contraindicated=True,
+            contraindication_reason="Гипертонический криз (АД ≥ 180/110): адреналин строго противопоказан",
+            is_cardiac=True,
+            is_hypertensive_crisis=True,
+            weight_kg=weight,
+            drug=drug,
+            html_report=contra_msg
+        )
 
     # ── ПЕДИАТРИЧЕСКИЙ СТОП-ФАКТОР (МЗ РФ) ──
     # Артикаин строго противопоказан детям < 4 лет / < 15 кг

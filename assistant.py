@@ -2791,7 +2791,7 @@ _CORPUS_ENTRY_MAX_CHARS = 2500
 
 
 _TOXIC_PRACTICE_RE = re.compile(
-    r'(?:\b(?:мышьяк(?:овист\w*|ом|а|у|е)?|депулпин\w*|форедент\w*|резорцин\w*|депофорез\w*|трикрезол\w*|крезофен\w*|формокрезол\w*)\b'
+    r'(?:\b(?:мышьяк(?:овист\w*|ом|а|у|е)?|депулпин\w*|девит[- ]?(?:арс|с|п)\w*|пульпарсен\w*|pulparsen|caustinerf|параформальдегид\w*|антрилон\w*|форедент\w*|резорцин\w*|депофорез\w*|трикрезол\w*|крезофен\w*|формокрезол\w*)\b'
     r'|содов\w+[\s\S]{0,25}полоскан\w*|полоскан\w+[\s\S]{0,25}сод\w*'
     r'|(?:висфат\w*|фосфат[- ]цемент\w*|серебрян\w+\s+штифт\w*)[\s\S]{0,50}(?:обтурац\w*|пломбирован\w+.*канал\w*|в\s+канал\w*|эндодонти\w*)'
     r'|(?:обтурац\w*|пломбирован\w+.*канал\w*|в\s+канал\w*|эндодонти\w*)[\s\S]{0,50}(?:висфат\w*|фосфат[- ]цемент\w*|серебрян\w+\s+штифт\w*)'
@@ -4424,10 +4424,10 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
    — Если тема чата — флуд, приветствия, оффтоп без клинического содержания — ОТКЛОНИ.
 
 2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И ДОКАЗАТЕЛЬНОСТЬ (EBM):
-   — ТОКСИЧЕСКИЕ И ЯТРОГЕННЫЕ ПРАКТИКИ: Запрещённые препараты (Солкосерил, Актовегин, мышьяк, резорцин-формалин, депофорез) или опасные процедуры (химическое прижигание слизистой спиртом/перекисью/марганцовкой, промывание NaOCl под давлением, адреналиновые тампоны в гайморову пазуху) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — ТОКСИЧЕСКИЕ И ЯТРОГЕННЫЕ ПРАКТИКИ: Запрещённые препараты (мышьяк, девит-АРС, параформальдегид, пульпарсен, депулпин, резорцин-формалин, форедент, крезофен, Солкосерил, Актовегин, депофорез) или опасные процедуры (адреналин/эпинефрин при гипертоническом кризе/АД ≥ 180/110, химическое прижигание слизистой спиртом/перекисью/марганцовкой, промывание NaOCl под давлением, адреналиновые тампоны в гайморову пазуху) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Выдуманные дозировки, выдуманные артикулы/системы, выдуманные значения торков, либо грубые ошибки, противоречащие доказательной медицине — ОТКЛОНИ.
    — Педиатрия: артикаин >5 мг/кг у ребёнка <12 лет / <40 кг — токсическая передозировка, ОТКЛОНИ.
-   — Топографические ошибки: перепутал зуб, орган, сторону, поверхность — ОТКЛОНИ.
+   — Топографические ошибки и анатомический бред: перепутал зуб, орган, сторону, поверхность, либо нарушил анатомический порядок зубной дуги (резцы [1,2] -> клык [3] -> премоляры [4,5] -> моляры [6,7,8]; премоляров мезиальнее клыков НЕ СУЩЕСТВУЕТ; в молочном прикусе премоляров нет — только резцы [1,2], клык [3] и моляры [4,5]) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
 
 3. ПРОФЕССИОНАЛЬНЫЙ ТОН И КОЛЛЕГИАЛЬНОСТЬ:
    — Аудитория — дипломированные врачи. Общение строго на равных: оперирующий врач — оперирующему врачу.
@@ -5104,12 +5104,15 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
     ]
 
     # Проверяем детские индикаторы в тексте
+    _is_preg = bool(re.search(r"\b(?:беременн\w*|лактаци\w*|триместр\w*|гв\b)\b", lower))
     _is_ped_context = bool(re.search(
         r"\b(?:ребен\w*|ребёнк\w*|детям\w*|детск\w*|малыш\w*|мальчик\w*|девочк\w*|"
-        r"педиатр\w*|грудн\w*|младенц\w*|новорожд\w*|месяц\w*)\b",
+        r"педиатр\w*|грудн\w*|младенц\w*|новорожд\w*)\b",
         lower
     ))
-    if _is_ped_context:
+    if not _is_ped_context and not _is_preg:
+        _is_ped_context = bool(re.search(r"\b(?:месяц\w*)\b", lower))
+    if _is_ped_context and not (_is_preg and not re.search(r"\b(?:ребен\w*|ребёнк\w*|детям\w*|детск\w*|малыш\w*)\b", lower)):
         # Также реагируем на вес < 40 кг
         _w_match = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b", lower)
         if _w_match:
@@ -5119,6 +5122,8 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
                     _is_ped_context = True
             except ValueError:
                 pass
+    else:
+        _is_ped_context = False
 
     if _is_ped_context:
         for _pat, _warning in _PEDIATRIC_STOPWORDS:
@@ -5193,7 +5198,9 @@ def check_pediatric_anesthesia_safety(text: str) -> PediatricSafetyResult | None
             except ValueError:
                 weight = None
 
-    if weight is not None and weight < 40:
+    # Контекст беременности не должен превращать взрослую беременную женщину в ребенка
+    is_pregnancy = bool(re.search(r'\b(?:беременн\w*|лактаци\w*|триместр\w*|гв\b)\b', lower))
+    if weight is not None and weight < 40 and not (is_pregnancy and not is_pediatric):
         is_pediatric = True
 
     if not is_pediatric:
@@ -10453,14 +10460,24 @@ def detect_pm_emergency(text: str) -> Optional[str]:
         return None
     norm = text.lower()
 
-    # 1. Анафилаксия / острый коллапс / шок / потеря сознания
+    # 1. Анафилаксия / острый коллапс / шок / потеря сознания / витальная катастрофа
     if re.search(r'\b(?:анафилак\w*|anaphylaxis)\b', norm):
+        return "anaphylaxis"
+
+    # Витальные экстренные состояния у кресла — срабатывают СРАЗУ, без обязательного контекста анестезии
+    vital_immediate = re.search(
+        r'\b(?:потер(?:ял|яла|яли|явш\w*)\s+сознани\w*|без\s+сознани\w*|перестал\w*\s+дышать|'
+        r'остановк\w*\s+дыхани\w*|остановк\w*\s+сердц\w*|отек\w*\s+квинке|отёк\w*\s+квинке|'
+        r'ласт-синдром|last)\b',
+        norm
+    )
+    if vital_immediate:
         return "anaphylaxis"
 
     acute_cond = re.search(
         r'\b(?:шок\w*|коллапс\w*|удуш[ьяе]\w*|отек\w*\s+квинке|отёк\w*\s+квинке|'
-        r'потер[ял|яла|яли]\s+сознани\w*|без\s+сознани\w*|перестал\w*\s+дышать|'
-        r'остановк\w*\s+дыхани\w*|ласт-синдром|last)\b',
+        r'потер(?:ял|яла|яли|явш\w*)\s+сознани\w*|без\s+сознани\w*|перестал\w*\s+дышать|'
+        r'остановк\w*\s+дыхани\w*|остановк\w*\s+сердц\w*|ласт-синдром|last)\b',
         norm
     )
     dental_context = re.search(
@@ -10518,7 +10535,7 @@ def detect_pm_emergency(text: str) -> Optional[str]:
 
     airway_edema = re.search(r'\b(?:отек\w*|отёк\w*|инфильтрат\w*|припухлост\w*)\b', norm)
     airway_loc = re.search(r'\b(?:дна\s+полости\s+рта|дна\s+рта|шеи|подчелюстн\w*)\b', norm)
-    airway_danger = re.search(r'\b(?:асфикси\w*|задыха\w*|трудно\s+дышать|тяжело\s+дышать|стридор\w*|стеноз\w*)\b', norm)
+    airway_danger = re.search(r'\b(?:асфикси\w*|задыха\w*|трудно\s+дышать|тяжело\s+дышать|затруднен\w*\s+дыхани\w*|нехват\w*\s+воздух\w*|тризм\s*(?:2|3|ii|iii|\d)\b|стридор\w*|стеноз\w*)\b', norm)
     if airway_edema and airway_loc and airway_danger:
         return "phlegmon_airway"
 
@@ -10686,13 +10703,76 @@ def sanitize_clinical_pm_output(reply_text: str) -> str:
     if solcoseryl_pat.search(text):
         text = solcoseryl_pat.sub("Асепта (адгезивный бальзам) или Холисал (гель)", text)
 
+    # 4. Удаление паразитного и менторского «Коллега»
+    text = re.sub(r'(?i)\bуважаемые\s+коллеги,?\s*', '', text)
+    text = re.sub(r'(?i)\bколлег[аи],?\s*', '', text)
+
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
+
+
+def resolve_menu_text_command(raw_text: str):
+    """Мгновенно сопоставляет текст кнопки меню с командой, устойчив к emoji variation selectors \ufe0f/\ufe0e."""
+    if not raw_text:
+        return None
+    low = raw_text.strip().lower()
+    res = TEXT_MENU_COMMAND_MAP.get(low)
+    if res:
+        return res
+    norm = low.replace("\ufe0f", "").replace("\ufe0e", "").strip()
+    return TEXT_MENU_COMMAND_MAP.get(norm)
 
 
 TEXT_MENU_COMMAND_MAP = {
     # Постоянная нижняя панель быстрого доступа (ReplyKeyboardMarkup)
     "🛠 chairside инструменты": "/chairside",
+    "🛠️ chairside инструменты": "/chairside",
+    "chairside инструменты": "/chairside",
+    "🛠 chairside": "/chairside",
+    "🛠️ chairside": "/chairside",
+    "🪑 chairside": "/chairside",
+    "chairside": "/chairside",
+    "у кресла": "/chairside",
+    "🦷 зубная формула fdi": "/fdi",
+    "🦷️ зубная формула fdi": "/fdi",
+    "зубная формула fdi": "/fdi",
+    "зубная формула": "/fdi",
+    "формула fdi": "/fdi",
+    "fdi": "/fdi",
+    "📐 сложность aae": "/aae",
+    "сложность aae": "/aae",
+    "aae": "/aae",
+
+    "💊 препараты и дозы": "/calc",
+    "💊️ препараты и дозы": "/calc",
+    "препараты и дозы": "/calc",
+    "💊 препараты": "/calc",
+    "💊️ препараты": "/calc",
+    "препараты": "/calc",
+    "дозы препаратов": "/calc",
+    "дозы": "/calc",
+    "дозировки": "/calc",
+    "🧮 калькулятор": "/calc",
+    "калькулятор": "/calc",
+    "калькулятор анестезии": "/calc",
+    "расчет анестезии": "/calc",
+    "расчёт анестезии": "/calc",
+
+    "⭐ закладки": "/bookmarks",
+    "⭐️ закладки": "/bookmarks",
+    "мои закладки": "/bookmarks",
+    "закладки": "/bookmarks",
+    "сохраненки": "/bookmarks",
+    "сохранёнки": "/bookmarks",
+
+    "⌨️ меню": "/menu",
+    "⌨ меню": "/menu",
+    "меню": "/menu",
+    "⌨️ главное меню": "/menu",
+    "⌨ главное меню": "/menu",
+    "главное меню": "/menu",
+    "кнопка меню": "/menu",
+    "навигация": "/menu",
     "chairside инструменты": "/chairside",
     "🛠 chairside": "/chairside",
     "🪑 chairside": "/chairside",
@@ -10788,7 +10868,7 @@ async def handle_private_message(bot_client, event):
         _ACTIVE_PM_REQUESTS[chat_id] = time.time()
 
         # 0. Мгновенное распознавание текстовых кнопок меню ДО rate limit (Zero Delay Navigation)
-        mapped_cmd = TEXT_MENU_COMMAND_MAP.get(text.lower())
+        mapped_cmd = resolve_menu_text_command(text)
         if mapped_cmd:
             text = mapped_cmd
 
@@ -13110,7 +13190,7 @@ async def handle_private_message(bot_client, event):
         async with _safe_typing_action(bot_client, chat_id):
             last_pm_candidate = ""
             pm_start_time = time.time()
-            PM_MAX_TOTAL_BUDGET = 270.0
+            PM_MAX_TOTAL_BUDGET = 360.0
             for attempt in range(max_retries + 1):
                 elapsed_pm = time.time() - pm_start_time
                 rem_pm_budget = max(10.0, PM_MAX_TOTAL_BUDGET - elapsed_pm)
@@ -13149,7 +13229,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                attempt_timeout = max(15.0, min(rem_pm_budget - 15.0, 120.0))
+                attempt_timeout = max(30.0, min(rem_pm_budget - 15.0, 240.0))
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
 
                 if error:
@@ -13220,8 +13300,8 @@ async def handle_private_message(bot_client, event):
                         logger.debug("Failed emergency routine fallback in PM: %s", fb_err)
                 if not reply_text:
                     is_mat = any(k in (text or "").lower() for k in ("бонд", "адгезив", "цемент", "силер", "пересуш"))
-                    err_msg = ("<i>Коллега, не удалось сформировать протокол по материалу. Повторите запрос.</i>" if is_mat
-                               else "<i>Коллега, в запросе недостаточно клинических данных для однозначного протокола. Уточните детали случая (локализацию, симптомы или снимок).</i>")
+                    err_msg = ("<i>Не удалось сформировать протокол по материалу. Повторите запрос с уточнением торгового наименования.</i>" if is_mat
+                               else "<i>В запросе недостаточно клинических данных для однозначного протокола. Уточните детали случая (локализацию, симптомы или снимок).</i>")
                     await bot_client.send_message(entity=chat_id, message=err_msg, parse_mode='html')
                     try:
                         await database.save_pm_message(chat_id, "Assistant", err_msg)
@@ -17115,6 +17195,9 @@ async def handle_quiz_callback(bot_client, event):
 
         elif quiz_sub.startswith("ans:"):
             parts = data_str.split(":")
+            if len(parts) < 5 or not parts[2].isdigit() or not parts[3].isdigit() or not parts[4].lstrip('-').isdigit():
+                await event.answer("⚠️ Некорректный запрос квиза.", alert=False)
+                return
             correct_idx = int(parts[2])
             clicked_idx = int(parts[3])
             quiz_id = int(parts[4])
@@ -17574,6 +17657,9 @@ async def handle_quiz_callback(bot_client, event):
     # WIKI FACT PAGE AND PAGINATION
     if data_str.startswith("wiki_page:"):
         parts = data_str.split(":")
+        if len(parts) < 3 or not parts[2].lstrip('-').isdigit():
+            await event.answer("⚠️ Некорректная страница статьи.", alert=False)
+            return
         subtopic_id = parts[1]
         page_idx = int(parts[2])
 
@@ -17638,6 +17724,9 @@ async def handle_quiz_callback(bot_client, event):
     # WIKI BOOKMARK SAVE CALLBACK
     if data_str.startswith("wiki_save:"):
         parts = data_str.split(":")
+        if len(parts) < 3 or not parts[2].lstrip('-').isdigit():
+            await event.answer("⚠️ Некорректный запрос сохранения.", alert=False)
+            return
         subtopic_id = parts[1]
         page_idx = int(parts[2])
 
@@ -17679,6 +17768,9 @@ async def handle_quiz_callback(bot_client, event):
         return
 
     parts = data_str.split(":")
+    if len(parts) < 4 or not parts[1].isdigit() or not parts[2].isdigit() or not parts[3].lstrip('-').isdigit():
+        await event.answer("⚠️ Некорректный опрос.", alert=False)
+        return
     correct_idx = int(parts[1])
     clicked_idx = int(parts[2])
     quiz_id = int(parts[3])

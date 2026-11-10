@@ -488,7 +488,7 @@ async def run_inflight_followup_triage(
     if generate_gemini_fn:
         try:
             context = {"kind": "inflight_triage", "thinking_level": "LOW"}
-            resp, err = await generate_gemini_fn(triage_prompt, context, timeout=7.0)
+            resp, err = await generate_gemini_fn(triage_prompt, context, timeout=25.0)
             if not err and resp:
                 raw_text = getattr(resp, "text", "") or ""
                 clean_json = raw_text.strip()

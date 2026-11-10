@@ -3407,7 +3407,13 @@ async def handle_private_message(event):
 
     # Команды (/start, /case, /quiz, /calc, /help, /wipe, /chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve и текстовые кнопки нижнего меню) исполняются сразу, без задержки очереди
     text_lower = raw_text.lower()
-    is_fast_cmd = raw_text.startswith("/") or text_lower in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
+    text_norm = text_lower.replace("\ufe0f", "").replace("\ufe0e", "").strip()
+    is_menu_cmd = (
+        text_lower in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
+        or text_norm in getattr(assistant, "TEXT_MENU_COMMAND_MAP", {})
+        or getattr(assistant, "resolve_menu_text_command", lambda t: None)(raw_text) is not None
+    )
+    is_fast_cmd = raw_text.startswith("/") or is_menu_cmd
     if is_fast_cmd:
         # Если пришла команда отмены/сброса (/cancel, /wipe, /stop), немедленно снимаем зависший воркер
         if any(raw_text.startswith(pfx) for pfx in ("/cancel", "/wipe", "/stop")):
