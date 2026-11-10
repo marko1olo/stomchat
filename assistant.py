@@ -1045,7 +1045,7 @@ YES — если вопрос содержит клинический интер
 NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), нецензурная брань/троллинг или оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=50.0)
         if error or not response or not getattr(response, "text", None):
             last_msg = safe_chain[-1] if safe_chain else ""
             last_text = last_msg.split(": ", 1)[-1].strip().lower() if ": " in last_msg else last_msg.lower()
@@ -4559,7 +4559,7 @@ async def check_llm_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=50.0)
 
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
@@ -17849,7 +17849,7 @@ async def check_referee_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=30)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=50.0)
 
         if error or not response:
             logger.warning(f"Llama referee triage failed: {error}. Defaulting to False to avoid spam.")

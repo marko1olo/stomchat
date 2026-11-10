@@ -33,35 +33,41 @@ def _connect():
     return db_worker.connect_db(config.DB_PATH, timeout=30)
 
 
-def checkpoint_wal(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
-    """Сбрасывает WAL-журнал в основной файл базы данных (TRUNCATE) перед синхронизацией/бекапом.
+def checkpoint_wal(mode: str = "TRUNCATE", max_retries: int = 5, retry_delay: float = 0.25) -> bool:
+    """Сбрасывает WAL-журнал в основной файл базы данных (TRUNCATE или PASSIVE).
     
-    Проверяет статус возврата: PRAGMA wal_checkpoint(TRUNCATE) возвращает (busy, log, checkpointed).
-    Если busy == 1 (блокировка активными читателями), выполняет повторные попытки с паузой.
+    Для ручного бекапа/синхронизации узлов используется TRUNCATE.
+    Для периодического фонового сброса во время работы используется PASSIVE,
+    чтобы не блокировать активные читающие и пишущие транзакции Telegram-сообщений.
     """
+    valid_modes = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
+    mode_upper = mode.upper() if mode and mode.upper() in valid_modes else "TRUNCATE"
     for attempt in range(max_retries):
         with _connection() as db:
-            row = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            row = db.execute(f"PRAGMA wal_checkpoint({mode_upper})").fetchone()
             if row:
                 busy, log_pages, ckpt_pages = row[0], row[1], row[2]
                 if busy == 0:
-                    logger.debug("WAL checkpoint (TRUNCATE) успешен: log=%d, checkpointed=%d", log_pages, ckpt_pages)
+                    logger.debug("WAL checkpoint (%s) успешен: log=%d, checkpointed=%d", mode_upper, log_pages, ckpt_pages)
                     return True
                 logger.warning(
-                    "WAL checkpoint busy (попытка %d/%d): log=%d, checkpointed=%d. Ожидание...",
-                    attempt + 1, max_retries, log_pages, ckpt_pages
+                    "WAL checkpoint (%s) busy (попытка %d/%d): log=%d, checkpointed=%d. Ожидание...",
+                    mode_upper, attempt + 1, max_retries, log_pages, ckpt_pages
                 )
             else:
                 return True
         if attempt + 1 < max_retries:
             time.sleep(retry_delay * (attempt + 1))
-    logger.error("WAL checkpoint (TRUNCATE) не завершился после %d попыток из-за блокировок", max_retries)
+    if mode_upper == "PASSIVE":
+        logger.debug("WAL checkpoint (PASSIVE) отложен из-за активных читателей")
+        return False
+    logger.error("WAL checkpoint (%s) не завершился после %d попыток из-за блокировок", mode_upper, max_retries)
     return False
 
 
-async def checkpoint_wal_async(max_retries: int = 5, retry_delay: float = 0.25) -> bool:
+async def checkpoint_wal_async(mode: str = "TRUNCATE", max_retries: int = 5, retry_delay: float = 0.25) -> bool:
     """Асинхронный сброс WAL через рабочий поток базы данных с контролем статуса busy."""
-    return await _run_db(lambda: checkpoint_wal(max_retries=max_retries, retry_delay=retry_delay))
+    return await _run_db(lambda: checkpoint_wal(mode=mode, max_retries=max_retries, retry_delay=retry_delay))
 
 def shrink_memory_sync() -> bool:
     """Выполняет PRAGMA shrink_memory для освобождения неиспользуемых страниц кэша SQLite в ОС."""

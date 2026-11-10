@@ -1633,8 +1633,8 @@ async def recover_pending_media_analysis():
             database.get_pending_media_message_ids(MEDIA_RECOVERY_LIMIT),
             timeout=30,
         )
-    except Exception:
-        logger.exception("pending media recovery lookup failed")
+    except Exception as rec_err:
+        logger.warning("pending media recovery lookup postponed: %s", rec_err)
         return
 
     if not pending:
@@ -2756,20 +2756,31 @@ async def handle_new_message(event):
 
         # Строка в базе появляется НЕМЕДЛЕННО, до любой тяжёлой обработки.
         if event.chat_id == config.SOURCE_CHAT_ID:
-            saved = await asyncio.wait_for(
-                database.save_message(
-                    msg_id=msg_id,
-                    reply_to_msg_id=reply_to_msg_id,
-                    sender_id=sender_id,
-                    sender_name=sender_name,
-                    sender_username=sender_username,
-                    text=text,
-                    date=date,
-                    has_media=has_media,
-                    media_type=media_type
-                ),
-                timeout=30,
-            )
+            saved = False
+            for save_attempt in range(2):
+                try:
+                    saved = await asyncio.wait_for(
+                        database.save_message(
+                            msg_id=msg_id,
+                            reply_to_msg_id=reply_to_msg_id,
+                            sender_id=sender_id,
+                            sender_name=sender_name,
+                            sender_username=sender_username,
+                            text=text,
+                            date=date,
+                            has_media=has_media,
+                            media_type=media_type
+                        ),
+                        timeout=30,
+                    )
+                    if saved:
+                        break
+                except (asyncio.TimeoutError, TimeoutError):
+                    if save_attempt == 0:
+                        logger.warning("save_message timed out on attempt 0 for msg_id=%s, retrying once...", msg_id)
+                        await asyncio.sleep(0.5)
+                        continue
+                    logger.error("save_message timed out twice for msg_id=%s", msg_id)
             # Раньше отказ записи был неотличим от успеха: save_message молча
             # возвращала None, и обработчик шёл дальше как ни в чём не бывало.
             # Сообщение при этом выпадало из дайджестов, из контекста ассистента
@@ -4473,7 +4484,7 @@ async def start_bot():
         while True:
             try:
                 await asyncio.sleep(1800)
-                await database.checkpoint_wal_async()
+                await database.checkpoint_wal_async(mode="PASSIVE")
                 logger.info("Periodic SQLite WAL checkpoint completed")
             except asyncio.CancelledError:
                 break
