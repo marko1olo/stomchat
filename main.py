@@ -4528,11 +4528,14 @@ async def start_bot():
 
 def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
     """Гарантирует запуск только одного экземпляра бота (Single Instance Lock)."""
+    bot_display_name = getattr(config, "BOT_DISPLAY_NAME", "StomChat")
+    bot_id = getattr(config, "BOT_ID", "")
+    ident = f"{bot_display_name}_{bot_id}".strip("_")
     if sys.platform == "win32":
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
+            mutex_name = f"Global\\{ident}_Instance_Mutex"
             ERROR_ALREADY_EXISTS = 183
             for attempt in range(max_retries):
                 mutex = kernel32.CreateMutexW(None, False, mutex_name)
@@ -4543,22 +4546,22 @@ def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
                     kernel32.CloseHandle(mutex)
                 if attempt < max_retries - 1:
                     logger.warning(
-                        "Another instance mutex exists (attempt %d/%d). Waiting %.1fs for previous instance to exit...",
-                        attempt + 1, max_retries, retry_interval,
+                        "Another instance mutex exists for %s (attempt %d/%d). Waiting %.1fs for previous instance to exit...",
+                        ident, attempt + 1, max_retries, retry_interval,
                     )
                     time.sleep(retry_interval)
-            logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+            logger.warning(f"Another instance of {bot_display_name} bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
             sys.exit(0)
         except Exception as e:
             logger.warning(f"Failed to create Windows named mutex: {e}. Falling back to lockfile.")
 
     try:
         import fcntl
-        lock_file = open("bot_instance.lock", "w")
+        lock_file = open(f"bot_instance_{ident}.lock", "w")
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_file
     except (BlockingIOError, IOError, OSError) as e:
-        logger.warning(f"Another instance of StomChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
+        logger.warning(f"Another instance of {bot_display_name} bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
         sys.exit(0)
     except Exception:
         pass
