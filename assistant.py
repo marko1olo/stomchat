@@ -1145,8 +1145,13 @@ async def resolve_bot_identity(bot_client):
     "@stomchat_bot", зашитый в main.py.
     """
     global BOT_ID, BOT_USERNAME
+    import inspect
     try:
-        me = await bot_client.get_me()
+        res = bot_client.get_me()
+        if inspect.isawaitable(res):
+            me = await res
+        else:
+            me = res
     except Exception as e:
         logger.error(f"Failed to resolve bot identity: {e}")
         return False
@@ -4170,11 +4175,6 @@ _BOT_BREAKDOWN_RE = re.compile(
 )
 
 
-_CLINICAL_COMPLAINT_RE = re.compile(
-    r'(?i)\b(?:хрень\s+ии\w*|ненужн\w*\s+треп|иишк\w*|отредактируйте\s+этот\s+парафин|не\s+отвечай\w*|хватит\s+спамить|замолчи\w*|в\s+каждой\s+бочке\s+затычка|убрать\s+бота|бот\s+излишне\s+активен)\b'
-)
-
-
 def is_negative_feedback(text):
     """
     Требует ли сообщение, чтобы бот замолчал, либо содержит жалобу на сбой/галлюцинацию бота.
@@ -4182,8 +4182,6 @@ def is_negative_feedback(text):
     if not text:
         return False
     text_lower = text.strip().lower()
-    if _CLINICAL_COMPLAINT_RE.search(text_lower):
-        return True
     if any(phrase in text_lower for phrase in _SILENCE_PHRASES):
         return True
     if _SILENCE_EXACT_RE.search(text_lower):
@@ -4292,7 +4290,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     # это глушило бота на четыре часа от обычного клинического поста. Замер по
     # архиву: из 68 срабатываний 66 были ложными, среди них «Моя
     # ортопедическая работа. Спустя 4 года обострился хронический Pt».
-    if _BOT_REFERENCE_RE.search(text_lower) or _CLINICAL_COMPLAINT_RE.search(text_lower):
+    if _BOT_REFERENCE_RE.search(text_lower):
         is_about_bot = True
     resolved_username = (BOT_USERNAME or "").lower()
     if resolved_username and f"@{resolved_username}" in text_lower:
@@ -5783,6 +5781,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             except Exception as e:
                 logger.error(f"Error checking dialogue chain: {e}")
 
+
+
         # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button or replies to own message)
         # In public groups (event.chat_id < 0): DO NOT hijack unreplied messages from the same author
         # unless they explicitly click "Reply" to the bot's message or @mention the bot.
@@ -6246,7 +6246,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
 6. КУЛЬТУРА КЛИНИЧЕСКОГО МЫШЛЕНИЯ И EBM (FIRST PRINCIPLES НА ПАЛЬЦАХ):
    - Опирайся на фундаментальные законы: биомеханику, физиологию, физико-химию материалов и современную доказательную медицину. Объясняй суть просто, наглядно и применимо к креслу — так, как опытный врач объясняет коллеге в ординаторской, без лекторской зауми.
-   - СКВОЗНОЙ КЛИНИЧЕСКИЙ WORKFLOW И РИСКИ: Прослеживай цепочку от препарирования/хирургии до лаборатории и службы конструкции под нагрузкой. Показывай механику на пальцах: почему именно это сломается, потечет, воспалится или заболит под жеванием, и где слабое звено протокола.
+   - СКВОЗНОЙ КЛИНИЧЕСКИЙ WORKFLOW И РИСКИ: Прослеживай цепочку от препарирования/хирургии до лаборатории и службы конструкции под нагрузкой. Показывай механику на пальцах: почему именно это сломается, потечет, воспалится или заболит под жеванием, и пределы биомеханической надежности протокола.
    - ЗАПРЕТ ШАБЛОННЫХ ОТПИСОК И ПРАКТИЧЕСКИЙ ВЫХОД: Категорически запрещено отделываться формальными отписками («всё индивидуально», «обратитесь к инструкции», «используйте только оригинал»). Всегда давай коллеге конкретный клинический критерий (что проверить зондом, тестом или на снимке) и безопасный рабочий алгоритм действий.
 7. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ЗЕРКАЛИРОВАНИЯ И ПЕРЕСКАЗА (ZERO MIRRORING & DEEP SYNTHESIS):
    - Категорически запрещено пересказывать сообщение, клинический кейс или вопрос собеседника «просто с другого ракурса» («Вы описываете случай...», «Итак, перед нами пациент...», «Коллега спрашивает о...»). Не будь кривым зеркалом! Врач сам прекрасно знает, что он написал.
@@ -6353,7 +6353,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
 6. КУЛЬТУРА КЛИНИЧЕСКОГО МЫШЛЕНИЯ И ФУНДАМЕНТАЛЬНЫЕ ЗАКОНЫ (FIRST PRINCIPLES НА ПАЛЬЦАХ):
    - Опирайся на фундаментальные законы: биомеханику, физиологию, физико-химию материалов и современную доказательную медицину. Объясняй суть просто, наглядно и применимо к креслу — так, как опытный врач объясняет коллеге в ординаторской, без лекторской зауми.
-   - СКВОЗНОЙ КЛИНИЧЕСКИЙ WORKFLOW И РИСКИ: Прослеживай цепочку от препарирования/хирургии до лаборатории и службы конструкции под нагрузкой. Показывай механику на пальцах: почему именно это сломается, потечет, воспалится или заболит под жеванием, и где слабое звено протокола.
+   - СКВОЗНОЙ КЛИНИЧЕСКИЙ WORKFLOW И РИСКИ: Прослеживай цепочку от препарирования/хирургии до лаборатории и службы конструкции под нагрузкой. Показывай механику на пальцах: почему именно это сломается, потечет, воспалится или заболит под жеванием, и пределы биомеханической надежности протокола.
    - ЗАПРЕТ ШАБЛОННЫХ ОТПИСОК И ПРАКТИЧЕСКИЙ ВЫХОД: Категорически запрещено отделываться формальными отписками («всё индивидуально», «обратитесь к инструкции», «используйте только оригинал»). Всегда давай коллеге конкретный клинический критерий (что проверить зондом, тестом или на снимке) и безопасный рабочий алгоритм действий.
 7. Не повторяй то что уже сказали. Принеси что-то новое — нюанс, уточнение, факт из базы.
 8. СМАЙЛИКИ: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать глупые, несерьёзные, панибратские или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄). В профессиональном клиническом ответе смайлики НЕ НУЖНЫ.
@@ -6518,12 +6518,17 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 break
 
         if not reply_text:
+            is_group = bool(event.chat_id and event.chat_id < 0)
+            if is_group:
+                logger.info("All %s attempts rejected or failed for msg_id=%s in public group %s. Staying silent (zero fallback in public group).", max_retries + 1, msg_id, event.chat_id)
+                return False
+
             is_offtopic_or_meta = any(
                 kw in (last_quality_reason or "").lower()
                 for kw in ("chad_sanitizer", "meta_leak", "silence", "оффтоп", "флуд", "не содержит клиническ", "нерелевантн", "нет клиническ", "бытов")
             )
             if (is_dialogue or is_direct_mention) and not is_offtopic_or_meta:
-                logger.warning("Active dialogue reflection rejected for msg_id=%s. Generating cautious LLM response.", msg_id)
+                logger.warning("Active dialogue reflection rejected for msg_id=%s in PM. Generating cautious LLM response.", msg_id)
                 ebm_prompt = f"""
 Ты — опытный стоматолог-практик у кресла в чате StomChat.
 Врач спросил в диалоге: {text}
@@ -6665,7 +6670,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # сообщение реально ушло. Тред помечается обработанным тоже здесь.
                 if not is_dialogue:
                     record_passive_success(pending_thread_id, author_id=event.sender_id, msg_id=bot_msg_id)
-                elif event.sender_id:
+                elif event.sender_id and not is_group:
                     try:
                         st = load_state()
                         if not st.get("last_case_author_id") or not is_dialogue:
@@ -6757,7 +6762,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 logger.warning("Local DB bot check failed for media reply: %s", db_err)
 
     is_mentioned = False
-    if text and BOT_USERNAME:
+    if text and isinstance(BOT_USERNAME, str) and BOT_USERNAME:
         # Имя ищем с «@» и с границей слова, как strip_bot_mention в main.py.
         # Без «@» за обращение сходила любая подстрока, а без границы слова
         # «@stomchat_bot_old» — это ДРУГОЙ аккаунт, и принимать его за обращение
@@ -6809,8 +6814,10 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         else:
             delta_time_sec = abs((datetime.now() - last_case_time).total_seconds())
 
+        is_group_chat = bool(getattr(message, 'chat_id', None) and getattr(message, 'chat_id') < 0)
         is_same_author_window = bool(
-            last_case_author
+            not is_group_chat
+            and last_case_author
             and str(sender_id) == str(last_case_author)
             and delta_time_sec < 30 * 60
         )
@@ -6822,6 +6829,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             )
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply, mention or dialogue continuation
+    is_group = bool(getattr(message, 'chat_id', None) and getattr(message, 'chat_id') < 0)
+
     is_passive = not (is_direct_reply or is_mentioned or is_dialogue_continuation)
     if not isinstance(age_minutes, (int, float)):
         age_minutes = 0.0
@@ -7286,6 +7295,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             break
 
     if not reply_text:
+        is_group = bool(getattr(message, 'chat_id', None) and getattr(message, 'chat_id') < 0)
+        if is_group:
+            logger.info("Media assistant: all attempts rejected for msg_id=%s in public group %s. Staying silent (zero fallback in public group).", msg_id, getattr(message, 'chat_id', None))
+            return False
+
         # Если валидатор забраковал черновики из-за оффтопа, флуда, meta-leak или отсутствия клинической темы —
         # категорически подавляем ответ, чтобы не читать лекций на бытовые темы
         is_offtopic_or_flood = any(
@@ -7431,7 +7445,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 record_author_group_reply(author_sender_id)
             try:
                 state = load_state()
-                state["last_case_author_id"] = author_sender_id
+                if not is_group:
+                    state["last_case_author_id"] = author_sender_id
                 state["last_case_bot_msg_id"] = bot_msg_id
                 if not state.get("last_case_time") or is_passive:
                     state["last_case_time"] = datetime.now().isoformat()
@@ -14878,7 +14893,7 @@ async def handle_group_direct_ask(bot_client, event, question):
                 state = load_state()
                 req_sender_id = getattr(event, "sender_id", None) or getattr(getattr(event, "message", None), "sender_id", None)
                 chosen_author = target_sender_id if target_sender_id else req_sender_id
-                if chosen_author:
+                if chosen_author and not is_group:
                     state["last_case_author_id"] = chosen_author
                     state["last_case_bot_msg_id"] = sent_msg.id
                     state["last_case_time"] = datetime.now().isoformat()

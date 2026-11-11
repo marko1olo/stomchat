@@ -2464,12 +2464,8 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
 
                 # Early silent drop for non-dental images in media queue worker
                 modality = getattr(media_description, "modality", None) or (getattr(media_description, "metadata", None) or {}).get("modality")
-                is_non_dental = (modality == "NON_DENTAL")
-                is_explicit_non_dental = False
-                try:
-                    is_explicit_non_dental = assistant.is_explicitly_non_dental_media(media_description)
-                except Exception:
-                    pass
+                desc_str = str(media_description) if media_description else ""
+                is_non_dental = (modality == "NON_DENTAL") or bool(desc_str and assistant.is_explicitly_non_dental_media(desc_str))
 
                 texts_to_check = [text] if text else []
                 for m in (messages or []):
@@ -2477,25 +2473,35 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                     if m_txt and m_txt not in texts_to_check:
                         texts_to_check.append(m_txt)
 
-                is_mentioned = any(getattr(m, "mentioned", False) for m in (messages or []))
-                if not is_mentioned:
-                    for t in texts_to_check:
-                        m_found, _ = strip_bot_mention(t)
-                        if m_found:
-                            is_mentioned = True
-                            break
-                        t_low = t.lower()
-                        if any(f"@{name.lower()}" in t_low for name in bot_mention_names()):
-                            is_mentioned = True
-                            break
+                is_mentioned = any(getattr(m, "mentioned", False) for m in (messages or [])) or any(
+                    strip_bot_mention(t)[0] for t in texts_to_check
+                )
 
-                starts_with_ask = any(t.strip().lower().startswith("/ask") for t in texts_to_check)
-
-                if (is_non_dental or is_explicit_non_dental) and not is_mentioned and not starts_with_ask:
+                if is_non_dental and not is_mentioned:
                     logger.info(
-                        "Media worker: non-dental image detected (%s) without direct bot mention. Dropping silently to prevent chat spam.",
+                        "Media worker: non-dental image detected (%s) without explicit @ mention. Dropping silently to prevent chat spam.",
                         modality or "non_dental",
                     )
+                    try:
+                        import clinical_rescue
+                        first_m = messages[0] if messages else None
+                        c_id = getattr(first_m, "chat_id", None) if first_m else None
+                        s_id = getattr(first_m, "sender_id", None) if first_m else None
+                        dt = getattr(first_m, "date", None) if first_m else None
+                        if c_id:
+                            clinical_rescue.mark_case_and_album_rescued(
+                                config.DB_PATH, msg_id, c_id, sender_id=s_id, timestamp=dt
+                            )
+                            for m in (messages or []):
+                                m_id = getattr(m, "id", None)
+                                if m_id:
+                                    lifeline_manager.cancel_question(m_id, reason="non_dental_media")
+                                    if m_id != msg_id:
+                                        clinical_rescue.mark_case_and_album_rescued(
+                                            config.DB_PATH, m_id, c_id, sender_id=s_id, timestamp=dt
+                                        )
+                    except Exception as rescue_err:
+                        logger.debug("Failed to mark non-dental media as rescued: %s", rescue_err)
                 elif trigger_assistant and not already_replied:
                     async def run_media_assistant_safe():
                         try:
@@ -2979,7 +2985,7 @@ async def handle_new_message(event):
                     or cmd_mentioned
                 )
 
-            if (event.photo or event.video or snapshot_document is not None) and not is_media_command:
+            if event.photo or event.video or snapshot_document is not None:
                 should_trigger_media = not is_media_command
                 if getattr(event, "grouped_id", None):
                     # [SYS-03 FIX] Guard against late-arriving frames after album was already processed.

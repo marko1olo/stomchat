@@ -142,7 +142,8 @@ media_payload = CAPTURED_REQUESTS[0].get("json", {}) if CAPTURED_REQUESTS else {
 check(f"Мультимодальный запрос ушел к {ar_model}", media_payload.get("model") == ar_model)
 ar_inp = media_payload.get("input", [])
 check("Вход оформлен списком сообщений Responses API", isinstance(ar_inp, list) and len(ar_inp) > 0 and ar_inp[0].get("type") == "message")
-ar_content = ar_inp[0].get("content", []) if ar_inp else []
+user_msg = next((m for m in ar_inp if m.get("role") == "user"), ar_inp[0] if ar_inp else {})
+ar_content = user_msg.get("content", []) if user_msg else []
 check("Контент содержит input_text", any(c.get("type") == "input_text" for c in ar_content))
 check("Контент содержит input_image с переданным URL", any(c.get("type") == "input_image" and c.get("image_url") == "https://example.com/xray.jpg" for c in ar_content))
 check("Мультимодальный AgentRouter передает reasoning effort high", media_payload.get("reasoning", {}).get("effort") == "high")

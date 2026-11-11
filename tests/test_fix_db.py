@@ -538,12 +538,17 @@ async def section_production_copy():
     before_pending = db.execute(
         "SELECT COUNT(*) FROM messages WHERE has_media = 1 "
         "AND (media_description IS NULL OR media_description = '')").fetchone()[0]
-    if before_pending == 0:
+    before_pending_win = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE has_media = 1 "
+        "AND (media_description IS NULL OR media_description = '') "
+        "AND date >= datetime('now', '-3 days')").fetchone()[0]
+    if before_pending == 0 or before_pending == before_pending_win:
         now = datetime.now()
         db.execute("INSERT OR REPLACE INTO messages (msg_id, sender_id, sender_name, text, date, has_media, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
                    (999901, 1, "Врач", "старый снимок", (now - timedelta(days=60)).isoformat(), 1, "photo"))
-        db.execute("INSERT OR REPLACE INTO messages (msg_id, sender_id, sender_name, text, date, has_media, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                   (999902, 1, "Врач", "свежий снимок", (now - timedelta(hours=2)).isoformat(), 1, "photo"))
+        if before_pending == 0:
+            db.execute("INSERT OR REPLACE INTO messages (msg_id, sender_id, sender_name, text, date, has_media, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (999902, 1, "Врач", "свежий снимок", (now - timedelta(hours=2)).isoformat(), 1, "photo"))
         db.commit()
 
     before_rows = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
