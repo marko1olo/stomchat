@@ -4170,6 +4170,11 @@ _BOT_BREAKDOWN_RE = re.compile(
 )
 
 
+_CLINICAL_COMPLAINT_RE = re.compile(
+    r'(?i)\b(?:хрень\s+ии\w*|ненужн\w*\s+треп|иишк\w*|отредактируйте\s+этот\s+парафин|не\s+отвечай\w*|хватит\s+спамить|замолчи\w*|в\s+каждой\s+бочке\s+затычка|убрать\s+бота|бот\s+излишне\s+активен)\b'
+)
+
+
 def is_negative_feedback(text):
     """
     Требует ли сообщение, чтобы бот замолчал, либо содержит жалобу на сбой/галлюцинацию бота.
@@ -4177,6 +4182,8 @@ def is_negative_feedback(text):
     if not text:
         return False
     text_lower = text.strip().lower()
+    if _CLINICAL_COMPLAINT_RE.search(text_lower):
+        return True
     if any(phrase in text_lower for phrase in _SILENCE_PHRASES):
         return True
     if _SILENCE_EXACT_RE.search(text_lower):
@@ -4285,7 +4292,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     # это глушило бота на четыре часа от обычного клинического поста. Замер по
     # архиву: из 68 срабатываний 66 были ложными, среди них «Моя
     # ортопедическая работа. Спустя 4 года обострился хронический Pt».
-    if _BOT_REFERENCE_RE.search(text_lower):
+    if _BOT_REFERENCE_RE.search(text_lower) or _CLINICAL_COMPLAINT_RE.search(text_lower):
         is_about_bot = True
     resolved_username = (BOT_USERNAME or "").lower()
     if resolved_username and f"@{resolved_username}" in text_lower:
@@ -4294,7 +4301,7 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
     if is_about_bot and is_negative_feedback(text):
         logger.warning(f"Global negative feedback detected: '{text}'. Silencing bot.")
         state = load_state()
-        state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+        state["silenced_until"] = (datetime.now() + timedelta(hours=6)).isoformat()
         save_state(state)
         apology = "Понял, умолкаю. Если понадоблюсь - позовите."
         try:
@@ -4326,6 +4333,73 @@ async def check_and_apply_silence(event, text, reply_to_msg_id):
 # на LOW с таймаутом 15 с, и это заведомо в пределах. Замера задержки на живом
 # API здесь нет, это расчёт, а не проверенный факт.
 VALIDATOR_REFERENCE_MAX_CHARS = _CORPUS_MAX_CHARS
+
+
+_META_DROP_RE = re.compile(r"""(?ix)
+    \b(?:как\s+указано|согласно|в\s+соответствии\s+с|следуя)\s+(?:в\s+)?(?:мо[емё]\w*|системн\w+|мастер[- ]|\s+)*(?:промпт\w*|системн\w+\s+инструкци\w*|правил\w*\s+(?:бота|чата|систем\w+|промпт\w*))\b|
+    \b(?:мой|данный|системный|исходный)\s+промпт\b|
+    \bмастер[- ]промпт\w*\b|
+    \bв\s+(?:(?:мо[емё]м|этом|системном)\s*)+промпте\b|
+    \b(?:не\s+отвечаю|не\s+могу\s+отвечать|не\s+имею\s+права\s+отвечать)\s+на\s+(?:посты|сообщения|фотограф\w*|картинк\w*|снимк\w*|запросы)|
+    \b(?:фотограф\w*|картинк\w*|изображени\w*|снимок|пост|сообщение)\s+не\s+относится\s+к\s+(?:клиническ\w*|стоматологическ\w*)?\s*кейсу|
+    \bданн(?:ое|ая|ый)\s+(?:фотограф\w*|картинк\w*|изображени\w*|снимок)\s+является\s+(?:бытов\w+|немедицинск\w+|неклиническ\w+)|
+    \bя\s+(?:как\s+)?(?:языковая\s+модель|искусственный\s+интеллект|ии|нейросеть|виртуальный\s+ассистент|чат[- ]?бот)\b
+""")
+
+_ANALOGY_RE = re.compile(r"""(?ix)
+    \bэто\s+(?:всё\s+равно\s+что|все\s+равно\s+что|подобно|точно\s+как|как)\s+(?:чинить|ремонтировать|строить|ехать|фундамент|мотор\w*|автомобил\w*|машин\w*|дом\w*|башн\w*|пирог\w*|кулинар\w*|кашевар\w*|самол[её]т\w*)|
+    \bпредставьте,?\s+что\s+[^.\n]+?[-—–\s]+это\s+(?:фундамент|мотор|двигатель|дом|каркас|кирпич\w*|здани\w*)|
+    \bаналоги(?:я|ей|чно)\s+с\s+(?:автомобил|ремонтом\s+машины|строительств|фундамент)|
+    \bкак\s+(?:в\s+автомобиле|в\s+моторе|на\s+стройке|в\s+фундаменте)\b
+""")
+
+_THROAT_CLEARING_RE = re.compile(r"""(?ix)
+    ^\s*(?:давайте\s+(?:разбер[её]м|вспомним|обратимся\s+к|посмотрим\s+на)\s+[^.\n]+?[.:!]\s*)|
+    ^\s*(?:важно\s+(?:помнить|понимать|учитывать|подчеркнуть),\s+что\s+[^.\n]+?[.:!]\s*)|
+    ^\s*(?:в\s+данной\s+клинической\s+ситуации\s+(?:следует|необходимо|важно)\s+[^.\n]+?[.:!]\s*)
+""")
+
+_SILENCE_OUTPUT_TOKENS = frozenset({"[SILENCE]", "SILENCE", "NOT_CLINICAL_CASE", "IGNORE"})
+
+
+def sanitize_and_validate_chad_output(candidate_text: str) -> tuple[bool, str, str]:
+    """
+    Sanitizes and validates clinician/chad output from LLM:
+    - Intercepts and drops [SILENCE], SILENCE, NOT_CLINICAL_CASE, IGNORE.
+    - Strips bureaucratic throat-clearing openings.
+    - Rejects meta-instruction leaks and AI self-identification (_META_DROP_RE).
+    - Rejects non-clinical childish analogies (_ANALOGY_RE).
+    Returns: (is_valid: bool, cleaned_text: str, reason: str)
+    """
+    if not candidate_text or not candidate_text.strip():
+        return False, "", "empty_text"
+
+    raw = candidate_text.strip()
+    upper_token = re.sub(r'[^A-Z_\[\]]', '', raw.upper())
+    if raw.upper() in _SILENCE_OUTPUT_TOKENS or upper_token in _SILENCE_OUTPUT_TOKENS:
+        return False, "", "silence_token"
+
+    if _META_DROP_RE.search(raw):
+        return False, "", "meta_leak"
+
+    if _ANALOGY_RE.search(raw):
+        return False, "", "cheap_analogy"
+
+    cleaned = raw
+    for _ in range(3):
+        m = _THROAT_CLEARING_RE.search(cleaned)
+        if m:
+            cleaned = cleaned[m.end():].strip()
+        else:
+            break
+
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    if not cleaned:
+        return False, "", "empty_after_sanitization"
+
+    return True, cleaned, "ok"
 
 
 async def check_response_quality(context_msgs: list, draft_reply: str, invited: bool = False,
@@ -4509,6 +4583,11 @@ async def generate_dialogue_fallback_async(
         fb_text = getattr(response, "text", "") if response else ""
         fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
         if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
+            fb_ok, fb_clean, fb_reason = sanitize_and_validate_chad_output(fb_text)
+            if not fb_ok:
+                logger.warning("Dialogue fallback rejected by chad sanitizer (%s): %s", fb_reason, fb_text[:80])
+                return "", f"chad_sanitizer_{fb_reason}"
+            fb_text = fb_clean
             if _TOXIC_PRACTICE_RE.search(fb_text):
                 logger.error("🛑 Toxic practice in dialogue fallback rejected: %s", fb_text[:80])
                 return "", "toxic_practice_in_fallback"
@@ -5464,7 +5543,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         if is_direct_mention:
             if is_negative_feedback(text):
                 logger.warning(f"Negative feedback detected in direct mention: '{text}'. Silencing bot.")
-                state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                state["silenced_until"] = (datetime.now() + timedelta(hours=6)).isoformat()
                 save_state(state)
                 apology = "Понял, умолкаю. Если понадоблюсь — позовите."
                 await event.reply(apology)
@@ -5500,31 +5579,22 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
                 is_parent_bot = False
                 parent_sender_id = getattr(direct_parent, 'sender_id', None)
-                if direct_parent and (parent_sender_id == BOT_ID or (parent_sender_id in known_bots)):
+                sender_id = getattr(event, "sender_id", None)
+                if direct_parent and parent_sender_id == sender_id:
+                    # NEVER set is_parent_bot = True when parent_sender_id == sender_id
+                    is_parent_bot = False
+                elif direct_parent and (parent_sender_id == BOT_ID or (parent_sender_id in known_bots)):
                     is_parent_bot = True
                 else:
                     try:
                         check_ids = known_bots | ({BOT_ID} if BOT_ID else set())
                         if await database.is_bot_message_or_sender(reply_to_msg_id, check_ids, event.chat_id):
-                            is_parent_bot = True
+                            if direct_parent and parent_sender_id == sender_id:
+                                is_parent_bot = False
+                            else:
+                                is_parent_bot = True
                     except Exception:
                         pass
-
-                # Если прямой родитель не бот, проверяем, не отвечает ли автор кейса на собственную реплику/команду в активном диалоге
-                if not is_parent_bot and direct_parent:
-                    sender_id = getattr(event, "sender_id", None)
-                    last_case_author = state.get("last_case_author_id")
-                    last_case_bot_msg = state.get("last_case_bot_msg_id")
-                    last_case_time = _parse_state_dt(state.get("last_case_time"))
-                    parent_text = (getattr(direct_parent, "message", "") or "").strip().lower()
-                    is_parent_command = parent_text.startswith(("/ask", "/calc", "/итог", "/quiz", "/case"))
-
-                    if (parent_sender_id == sender_id or is_parent_command) and (
-                        (last_case_author and sender_id == last_case_author and (datetime.now() - last_case_time) < timedelta(minutes=30))
-                        or bool(last_case_bot_msg)
-                    ):
-                        logger.info("Doctor %s replied to own message/command #%s in active case thread. Treating as dialogue continuation.", sender_id, reply_to_msg_id)
-                        is_parent_bot = True
 
                 # Используем DB-based fetch вместо Telegram API walk (было: range(6) x get_messages).
                 # fetch_dynamic_chat_context возвращает до max_limit=40 реплик по reply-цепочке.
@@ -5545,7 +5615,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     # не порождать ложные 'Dialogue reply is stale' и не перехватывать треды.
                     found_bot_in_chain = False
 
-                effective_bot_limit = 20 if is_parent_bot else MAX_DIALOGUE_BOT_REPLIES
+                is_group = bool(event.chat_id and event.chat_id < 0)
+                effective_bot_limit = 2 if is_group else (20 if is_parent_bot else MAX_DIALOGUE_BOT_REPLIES)
                 if found_bot_in_chain and bot_msg_count < effective_bot_limit:
                     ref_id = nearest_bot_msg_id or reply_to_msg_id
                     resolved_thread_id = ref_id
@@ -5590,7 +5661,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     # Check for criticism / negative feedback from user
                     if is_negative_feedback(text):
                         logger.warning(f"Negative feedback detected in dialogue reply: '{text}'. Silencing bot.")
-                        state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                        state["silenced_until"] = (datetime.now() + timedelta(hours=6)).isoformat()
                         save_state(state)
                         apology = "Понял, умолкаю. Если понадоблюсь — позовите."
                         await event.reply(apology)
@@ -5713,13 +5784,19 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 logger.error(f"Error checking dialogue chain: {e}")
 
         # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button or replies to own message)
+        # In public groups (event.chat_id < 0): DO NOT hijack unreplied messages from the same author
+        # unless they explicitly click "Reply" to the bot's message or @mention the bot.
+        is_group = bool(event.chat_id and event.chat_id < 0)
         sender_id = getattr(event, "sender_id", None)
         is_valid_followup_target = (
-            not reply_to_msg_id
-            or (direct_parent and getattr(direct_parent, 'sender_id', None) == sender_id)
-            or (reply_to_msg_id == state.get("last_case_bot_msg_id"))
+            not is_group
+            and (
+                not reply_to_msg_id
+                or (direct_parent and getattr(direct_parent, 'sender_id', None) == sender_id)
+                or (reply_to_msg_id == state.get("last_case_bot_msg_id"))
+            )
         )
-        if not is_dialogue and is_valid_followup_target:
+        if not is_group and not is_dialogue and is_valid_followup_target:
             last_case_author = state.get("last_case_author_id")
             last_case_bot_msg = state.get("last_case_bot_msg_id")
             last_case_time = _parse_state_dt(state.get("last_case_time"))
@@ -5738,7 +5815,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 # Проверяем критику / негативный фидбек от автора кейса
                 if is_negative_feedback(text):
                     logger.warning(f"Negative feedback detected in sequential follow-up: '{text}'. Silencing bot.")
-                    state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                    state["silenced_until"] = (datetime.now() + timedelta(hours=6)).isoformat()
                     save_state(state)
                     apology = "Понял, умолкаю. Если понадоблюсь — позовите."
                     await event.reply(apology)
@@ -5807,11 +5884,18 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                             trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
                             context_msgs = recent_chain
 
+        is_group = bool(event.chat_id and event.chat_id < 0)
+        sender_id = getattr(event, "sender_id", None)
+        # In public groups, enforce author group cooldown even if is_dialogue is True, unless explicitly @mentioned
+        if is_group and not is_direct_mention:
+            if sender_id and is_author_group_cooldown_active(sender_id):
+                logger.info("Author group cooldown active for sender %s in public group (< 10 min). Suppressing reply.", sender_id)
+                return False
+
         # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
         # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
         # ронял весь обработчик сообщения.
         if not is_dialogue:
-            sender_id = getattr(event, "sender_id", None)
             if sender_id and is_author_group_cooldown_active(sender_id):
                 logger.info("Passive text trigger suppressed: author group cooldown active for sender %s (< 10 min)", sender_id)
                 return False
@@ -6392,10 +6476,21 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     logger.debug("reaction %r rejected (not in ALLOWED_REACTIONS)", _react_emoji)
             candidate_text = re.sub(r'(?i)(?:^|\n|\s+)REACTION:\s*\S+', '', candidate_text).rstrip()
 
+            # Chad sanitizer & anti-meta check
+            chad_ok, chad_clean, chad_reason = sanitize_and_validate_chad_output(candidate_text)
+            if not chad_ok:
+                if chad_reason in ("silence_token", "meta_leak"):
+                    logger.info("Assistant text output dropped by chad sanitizer (%s) for msg_id=%s. Staying silent.", chad_reason, msg_id)
+                    return False
+                logger.warning("Assistant text draft rejected by chad sanitizer (%s) on attempt %s: %s", chad_reason, attempt, candidate_text[:80])
+                last_quality_reason = f"chad_sanitizer_{chad_reason}"
+                continue
+            candidate_text = chad_clean
+
             if not is_dialogue:
-                reply_clean = re.sub(r'[^A-Z]', '', candidate_text.strip().upper())
-                if reply_clean == "IGNORE":
-                    logger.info("Assistant: Query was classified as off-topic or chitchat. Ignoring.")
+                reply_clean = re.sub(r'[^A-Z_\[\]]', '', candidate_text.strip().upper())
+                if reply_clean in _SILENCE_OUTPUT_TOKENS:
+                    logger.info("Assistant: Query was classified as off-topic or chitchat (%s). Ignoring.", reply_clean)
                     return False
 
             if pediatric_safety:
@@ -6423,7 +6518,11 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 break
 
         if not reply_text:
-            if is_dialogue or is_direct_mention:
+            is_offtopic_or_meta = any(
+                kw in (last_quality_reason or "").lower()
+                for kw in ("chad_sanitizer", "meta_leak", "silence", "оффтоп", "флуд", "не содержит клиническ", "нерелевантн", "нет клиническ", "бытов")
+            )
+            if (is_dialogue or is_direct_mention) and not is_offtopic_or_meta:
                 logger.warning("Active dialogue reflection rejected for msg_id=%s. Generating cautious LLM response.", msg_id)
                 ebm_prompt = f"""
 Ты — опытный стоматолог-практик у кресла в чате StomChat.
@@ -6440,9 +6539,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 ebm_ctx["kind"] = "dialogue_ebm_fallback"
                 ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
                 if ebm_resp and getattr(ebm_resp, "text", None):
-                    reply_text = clean_html_formatting(ebm_resp.text.strip())
+                    fb_candidate = clean_html_formatting(ebm_resp.text.strip())
+                    fb_ok, fb_clean, fb_reason = sanitize_and_validate_chad_output(fb_candidate)
+                    if fb_ok and not _TOXIC_PRACTICE_RE.search(fb_clean):
+                        reply_text = fb_clean
+                    else:
+                        logger.warning("Dialogue fallback rejected by chad sanitizer (%s): %s", fb_reason, fb_candidate[:80])
             if not reply_text:
-                logger.warning("All %s attempts rejected or failed in check_and_trigger_assistant msg_id=%s. Suppressing reply.", max_retries + 1, msg_id)
+                logger.warning("All %s attempts rejected or failed in check_and_trigger_assistant msg_id=%s (offtopic_or_meta=%s). Suppressing reply.", max_retries + 1, msg_id, is_offtopic_or_meta)
                 return False
 
         # Гарантированная нормализация HTML и зачистка Markdown-звездочек
@@ -6567,7 +6671,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         if not st.get("last_case_author_id") or not is_dialogue:
                             st["last_case_author_id"] = event.sender_id
                         st["last_case_bot_msg_id"] = bot_msg_id
-                        st["last_case_time"] = datetime.now().isoformat()
+                        # Do NOT reset st["last_case_time"] indefinitely on every reply.
+                        # Only set if not already present.
+                        if not st.get("last_case_time"):
+                            st["last_case_time"] = datetime.now().isoformat()
                         save_state(st)
                     except Exception:
                         pass
@@ -6807,20 +6914,12 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # 1. Parse keywords
     caption_text = text or ""
-    # Если зрение прямо установило, что изображение не медицинское (скриншот соцсети, мем и т.д.),
-    # описание снимка полностью исключается из поиска клинической темы.
-    is_non_dental_img = is_explicitly_non_dental_media(media_description)
+    modality = getattr(media_description, "modality", None) or (getattr(media_description, "metadata", None) or {}).get("modality")
+    is_non_dental_img = (modality == "NON_DENTAL") or is_explicitly_non_dental_media(media_description)
 
-    # 1. Защита от незваного вмешательства (Passive Guard):
-    # Если изображение НЕ является клиническим снимком (скриншот соцсети/приложения, профиль,
-    # карточка спикера, мем, открытка, бытовой предмет), бот КАТЕГОРИЧЕСКИ НЕ ИМЕЕТ ПРАВА
-    # встревать в чат пассивно! Даже если в подписи врача есть слово «ортодонт» или «стоматолог».
-    # На немедицинские картинки бот отвечает ТОЛЬКО если к нему прямо обратились (reply к боту или @mention).
-    if is_passive and is_non_dental_img:
-        logger.info(
-            "Media Assistant: image is non-dental/screenshot (%s) and trigger is passive. Skipping unrequested reply.",
-            media_description[:80]
-        )
+    # 1. Защита от незваного вмешательства:
+    if is_non_dental_img and not is_mentioned and not is_direct_reply:
+        logger.info("Media Assistant: non-dental image detected without explicit @mention. Staying silent.")
         try:
             import clinical_rescue
             author_id = getattr(message, "sender_id", None)
@@ -6843,7 +6942,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                     )
         except Exception as rescue_err:
             logger.warning("Failed to mark non-dental media as rescued: %s", rescue_err)
-        return
+        return False
 
     # Проверяем, не написал ли автор снимка уточняющие реплики/вопросы, пока снимок обрабатывался
     # Выполняем ДО извлечения ключевых слов и поиска в RAG, чтобы вопрос вдогонку попал в поиск
@@ -6937,9 +7036,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     context_str = f"<user_dialogue>\n{'\n'.join(context_msgs)}\n</user_dialogue>" if context_msgs else "Нет предыдущего контекста."
 
     is_dialogue = is_direct_reply or is_mentioned
-    ignore_instruction = "ЕСЛИ тема чата — чистый флуд, приветствия, погода, политика, оффтоп без связи со стоматологией или медициной — верни ровно одно слово: IGNORE"
+    ignore_instruction = "ЕСЛИ тема чата или изображение — чистый флуд, приветствия, погода, политика, бытовые фото или оффтоп без связи со стоматологией/медициной — верни ровно одно слово: [SILENCE]"
     if is_dialogue:
-        ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а сухо и профессионально зафиксируй закрытие темы ('Принято.', 'На связи.'). Никакой дежурной слизи («Всегда пожалуйста», «Обращайтесь»). Отвечать IGNORE при прямом обращении запрещено."
+        ignore_instruction = "ЕСЛИ изображение явно не относится к клиническому случаю или оффтоп — верни ровно одно слово: [SILENCE]. ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши [SILENCE]), а сухо и профессионально зафиксируй закрытие темы ('Принято.', 'На связи.'). Никакой дежурной слизи («Всегда пожалуйста», «Обращайтесь»). Отвечать [SILENCE] при прямом медицинском вопросе запрещено."
 
     # BUILD PROMPT
     has_text_desc = bool(media_description and str(media_description).strip())
@@ -7017,7 +7116,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
    - Категорически запрещено пересказывать подпись автора снимка или перефразировать его реплику с другого ракурса.
    - Сразу давай новый вдумчивый синтез: реальный клинический маршрут, объективный рентгенологический/морфологический разбор от первопричин, скрытые риски и четкие развилки решений. Никаких шаблонных пересказов чужих вводных.
 7. ЗАПРЕТ ДЕЖУРНЫХ ВОПРОСОВ В КОНЦЕ: Категорически запрещено придумывать искусственные вопросы ради диалога («А что вы думаете?», «А какой инструмент брали?»). Задавай прицельный клинический вопрос ТОЛЬКО если картина объективно неоднозначна и без этого нельзя поставить дифдиагноз (симптоматика, тест витальности, другая проекция). Если данных на снимке достаточно или разбор дан — завершай разбор утверждением, без вопросов в конце!
-8. НЕМЕДИЦИНСКИЙ КОНТЕНТ: если изображение явно не клиническое (не снимок зубов, не рентген, не лабораторный скан) — не выдумывай патологию. Коротко опиши что видишь, при желании — свяжи с врачебными буднями.
+8. НЕМЕДИЦИНСКИЙ / НЕКЛИНИЧЕСКИЙ КОНТЕНТ: Если изображение явно не клиническое (не снимок зубов, не рентген, не лабораторный скан, бытовой предмет, мем, скриншот чата/приложения) или оффтоп — выведи ТОЛЬКО [SILENCE].
 9. ПРАВИЛО СОМНЕНИЯ: незнакомый термин или концепция — честно признай, что не встречал, и спроси что имеется в виду. Не гадай и не объявляй бредом.
 10. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — зафиксируй сухой репликой («Понял, молчу.») без извинений и умолкни.
 11. КРИТИЧЕСКАЯ ФИЛЬТРАЦИЯ МАШИННОГО ЗРЕНИЯ:
@@ -7043,8 +7142,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 """
     else:
         prompt = f"""
-Ты — участник стоматологического чата "StomChat" с чёрным юмором. Коллега кинул мем или бытовую картинку.
-Одна острая реплика в духе «врач в конце рабочего дня».
+Ты — участник стоматологического чата "StomChat".
+Если изображение не связано со стоматологией, клиникой или профессиональными буднями врачей — выведи ТОЛЬКО `[SILENCE]`.
+Иначе — одна краткая острая реплика в духе «врач в конце рабочего дня».
 
 Описание изображения:
 {media_description}
@@ -7152,11 +7252,22 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 logger.debug("media reaction %r rejected (not in ALLOWED_REACTIONS)", _media_react_emoji)
         candidate_text = re.sub(r'(?i)(?:^|\n|\s+)REACTION:\s*\S+', '', candidate_text).rstrip()
 
+        # Chad sanitizer & anti-meta check
+        m_chad_ok, m_chad_clean, m_chad_reason = sanitize_and_validate_chad_output(candidate_text)
+        if not m_chad_ok:
+            if m_chad_reason in ("silence_token", "meta_leak"):
+                logger.info("Media assistant output dropped by chad sanitizer (%s) for msg_id=%s. Staying silent.", m_chad_reason, msg_id)
+                return False
+            logger.warning("Media assistant draft rejected by chad sanitizer (%s) on attempt %s: %s", m_chad_reason, attempt, candidate_text[:80])
+            last_media_reason = f"chad_sanitizer_{m_chad_reason}"
+            continue
+        candidate_text = m_chad_clean
+
         if is_dental:
-            reply_clean = re.sub(r'[^A-Z]', '', candidate_text.strip().upper())
-            if reply_clean == "IGNORE":
-                logger.info("Media Assistant: Query was classified as off-topic. Ignoring.")
-                return
+            reply_clean = re.sub(r'[^A-Z_\[\]]', '', candidate_text.strip().upper())
+            if reply_clean in _SILENCE_OUTPUT_TOKENS:
+                logger.info("Media Assistant: Query was classified as off-topic (%s). Ignoring.", reply_clean)
+                return False
 
         quality_ok, quality_reason = await check_response_quality(
             context_msgs, candidate_text, invited=not is_passive, reference=wiki_corpus
@@ -7175,11 +7286,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             break
 
     if not reply_text:
-        # Если валидатор забраковал черновики из-за оффтопа, флуда или отсутствия клинической темы —
-        # категорически подавляем ответ, чтобы не читать лекций на бытовые темы (кубик Рубика, котики и т.д.)
+        # Если валидатор забраковал черновики из-за оффтопа, флуда, meta-leak или отсутствия клинической темы —
+        # категорически подавляем ответ, чтобы не читать лекций на бытовые темы
         is_offtopic_or_flood = any(
             kw in (last_media_reason or "").lower()
-            for kw in ("оффтоп", "флуд", "не содержит клиническ", "нерелевантн", "нет клиническ", "бытов", "нарушает профессиональн")
+            for kw in ("chad_sanitizer", "meta_leak", "silence", "оффтоп", "флуд", "не содержит клиническ", "нерелевантн", "нет клиническ", "бытов", "нарушает профессиональн")
         )
         if not is_passive and not is_offtopic_or_flood:
             logger.warning("Media direct query reflection rejected for msg_id=%s. Generating cautious LLM response.", msg_id)
@@ -7201,11 +7312,14 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
             if ebm_resp and getattr(ebm_resp, "text", None):
                 candidate_fb = clean_html_formatting(ebm_resp.text.strip())
-                if not _TOXIC_PRACTICE_RE.search(candidate_fb):
-                    reply_text = candidate_fb
+                fb_ok, fb_clean, fb_reason = sanitize_and_validate_chad_output(candidate_fb)
+                if fb_ok and not _TOXIC_PRACTICE_RE.search(fb_clean):
+                    reply_text = fb_clean
+                else:
+                    logger.warning("Media fallback rejected by chad sanitizer (%s): %s", fb_reason, candidate_fb[:80])
         if not reply_text:
             logger.warning("Media assistant all %s attempts rejected or failed for msg_id=%s (offtopic=%s). Suppressing reply.", max_retries + 1, msg_id, is_offtopic_or_flood)
-            return
+            return False
 
     # Гарантированная нормализация HTML и зачистка Markdown-звездочек
     reply_text = clean_html_formatting(reply_text)
@@ -7319,7 +7433,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 state = load_state()
                 state["last_case_author_id"] = author_sender_id
                 state["last_case_bot_msg_id"] = bot_msg_id
-                state["last_case_time"] = datetime.now().isoformat()
+                if not state.get("last_case_time") or is_passive:
+                    state["last_case_time"] = datetime.now().isoformat()
                 save_state(state)
             except Exception:
                 pass

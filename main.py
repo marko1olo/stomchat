@@ -2461,7 +2461,42 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None, tr
                 # Запуск медиа-ассистента (только для свежих живых сообщений)
                 # [RACE-01 FIX]: Если на сообщения альбома или на реплай уже ответил /ask или прямой ассистент, не отвечаем повторно!
                 already_replied = any(getattr(m, "id", None) in assistant.REPLIED_MSG_IDS for m in messages)
-                if trigger_assistant and not already_replied:
+
+                # Early silent drop for non-dental images in media queue worker
+                modality = getattr(media_description, "modality", None) or (getattr(media_description, "metadata", None) or {}).get("modality")
+                is_non_dental = (modality == "NON_DENTAL")
+                is_explicit_non_dental = False
+                try:
+                    is_explicit_non_dental = assistant.is_explicitly_non_dental_media(media_description)
+                except Exception:
+                    pass
+
+                texts_to_check = [text] if text else []
+                for m in (messages or []):
+                    m_txt = getattr(m, "message", None)
+                    if m_txt and m_txt not in texts_to_check:
+                        texts_to_check.append(m_txt)
+
+                is_mentioned = any(getattr(m, "mentioned", False) for m in (messages or []))
+                if not is_mentioned:
+                    for t in texts_to_check:
+                        m_found, _ = strip_bot_mention(t)
+                        if m_found:
+                            is_mentioned = True
+                            break
+                        t_low = t.lower()
+                        if any(f"@{name.lower()}" in t_low for name in bot_mention_names()):
+                            is_mentioned = True
+                            break
+
+                starts_with_ask = any(t.strip().lower().startswith("/ask") for t in texts_to_check)
+
+                if (is_non_dental or is_explicit_non_dental) and not is_mentioned and not starts_with_ask:
+                    logger.info(
+                        "Media worker: non-dental image detected (%s) without direct bot mention. Dropping silently to prevent chat spam.",
+                        modality or "non_dental",
+                    )
+                elif trigger_assistant and not already_replied:
                     async def run_media_assistant_safe():
                         try:
                             media_replied = await assistant.check_and_trigger_assistant_media(
