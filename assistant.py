@@ -2605,8 +2605,11 @@ def record_passive_success(thread_id=None, author_id=None, msg_id=None):
     save_state(state)
 
 
-def calculate_context_length_guidelines(history_msgs, is_clinical_case=False, query_text=""):
+def calculate_context_length_guidelines(history_msgs, is_clinical_case=False, query_text="", is_group=False):
     """Вычисляет объем ответа: для разбора клинических кейсов — исчерпывающий разбор, для чата — адаптивный темп."""
+    if is_group:
+        return "ВНИМАНИЕ: Ответ в публичный групповой чат. Будь предельно краток: 1-2 емких абзаца (строго до 500-800 знаков). Только суть и кресельные ориентиры. Никаких лекций, учебников и простыней текста. Если коллеге нужен развернутый пошаговый протокол — в конце одной строкой предложи написать боту в ЛС."
+
     if is_clinical_case:
         return "Это разбор клинического случая. Чувствуй объем самостоятельно: дай структурированный, глубокий и профессиональный разбор по существу без искусственного сжатия, но без пустой воды."
 
@@ -5511,7 +5514,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     recent_texts.append(m.get("text", "") or "")
                 else:
                     recent_texts.append(getattr(m, "text", "") or "")
-        length_guideline = calculate_context_length_guidelines(recent_texts)
+        is_group_chat = bool(event.chat_id and event.chat_id < 0)
+        length_guideline = calculate_context_length_guidelines(recent_texts, is_group=is_group_chat)
     except Exception as calc_err:
         logger.error(f"Error calculating length guideline: {calc_err}")
         length_guideline = "Отвечай кратко, до 3-4 предложений."
@@ -6728,7 +6732,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                     recent_texts.append(m.get("text", "") or "")
                 else:
                     recent_texts.append(getattr(m, "text", "") or "")
-        length_guideline = calculate_context_length_guidelines(recent_texts, is_clinical_case=False, query_text=text or "")
+        is_group_media = bool(getattr(message, 'chat_id', None) and getattr(message, 'chat_id') < 0)
+        length_guideline = calculate_context_length_guidelines(recent_texts, is_clinical_case=False, query_text=text or "", is_group=is_group_media)
     except Exception as calc_err:
         logger.error(f"Error calculating length guideline for media: {calc_err}")
         length_guideline = "Отвечай кратко, до 3-4 предложений."
@@ -7066,7 +7071,8 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 """
 
     if is_dental:
-        length_guideline = calculate_context_length_guidelines(recent_texts, is_clinical_case=True, query_text=caption_text)
+        is_group_media = bool(getattr(message, 'chat_id', None) and getattr(message, 'chat_id') < 0)
+        length_guideline = calculate_context_length_guidelines(recent_texts, is_clinical_case=True, query_text=caption_text, is_group=is_group_media)
         rag_prompt_section = format_rag_prompt_block(wiki_corpus, archive_corpus)
 
         if caption_text and caption_text.strip():
@@ -13724,7 +13730,8 @@ NO — если это:
 
         # Calculate context-based length guidelines
         recent_texts = [r[2] for r in context_rows if r[2]]
-        length_guideline = calculate_context_length_guidelines(recent_texts)
+        is_group_mention = bool(event.chat_id and event.chat_id < 0)
+        length_guideline = calculate_context_length_guidelines(recent_texts, is_group=is_group_mention)
 
         # Подгружаем накопленную память беседы об участниках диалога с Priority Ranking
         sender_ids = [r[0] for r in context_rows if r[0]]
@@ -15108,7 +15115,23 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
     import config
     import tg_safety
     is_prod = tg_safety.is_prod_chat(chat_id)
-    if is_prod and not getattr(config, "POLL_PROD_ENABLED", False):
+
+    # Админ-обход и ручной вызов (/poll, /quiz)
+    is_admin = False
+    sender_id = getattr(event, "sender_id", None)
+    if sender_id and sender_id in get_admin_user_ids():
+        is_admin = True
+    else:
+        try:
+            perms = await bot_client.get_permissions(chat_id, sender_id)
+            if perms and perms.is_admin:
+                is_admin = True
+        except Exception:
+            pass
+
+    # Авто-опросы планировщика подчиняются POLL_PROD_ENABLED.
+    # Ручной вызов админом (is_admin или force_type is not None) разрешён всегда!
+    if is_prod and not getattr(config, "POLL_PROD_ENABLED", False) and not (is_admin or force_type is not None):
         await bot_client.send_message(
             entity=chat_id,
             message="🛡️ Опросы в основном канале отключены (POLL_PROD_ENABLED=False). Тестирование доступно в тест-канале.",

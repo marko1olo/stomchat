@@ -144,8 +144,26 @@ DAILY_POLL_MINUTE = 0
 DAILY_POLL_CUTOFF_HOUR = 0
 DAILY_POLL_RESOLUTION_HOUR = 0
 DAILY_POLL_RESOLUTION_CUTOFF_HOUR = 0
+# --- МАСТЕР-ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА ГРУППЫ: «ТОЛЬКО ПО ВЫЗОВУ» (SUMMON-ONLY) ---
+# True (по умолчанию): бот в группе молчит, если к нему не обратились явно (@bot, реплай, "бот помоги", /команда).
+# Непрошеные пассивные ответы, спасение кейсов и утренние авто-опросы отключены.
+# False: старый полный режим со случайными пассивными репликами и авто-опросами.
+SUMMON_ONLY_GROUP_MODE = True
+
+# Модульные переключатели:
+ENABLE_PASSIVE_TEXT = False
+ENABLE_PASSIVE_MEDIA = False
+ENABLE_CLINICAL_RESCUE = False
+ENABLE_QUESTION_LIFELINE = False
 POLL_PROD_ENABLED = False
 ENABLE_DAILY_POLLS = True
+
+PASSIVE_TEXT_PROBABILITY = 0.0
+PASSIVE_MEDIA_PROBABILITY = 0.0
+
+# Ограничение размера ответа при вызове в публичной группе (Group Brevity Guard)
+GROUP_MAX_RESPONSE_CHARS = 800
+GROUP_BREVITY_STRICT = True
 MIN_DAILY_SUMMARY_MESSAGES = 5
 
 MAX_DIALOGUE_BOT_REPLIES = 6
@@ -156,8 +174,6 @@ PASSIVE_COOLDOWN_MAX_MINUTES = 180
 PASSIVE_COOLDOWN_ACTIVE_MINUTES = 20
 PASSIVE_COOLDOWN_ACTIVE_FLOOR_MINUTES = 20
 PASSIVE_VOLUME_GATE_MSGS = 20
-PASSIVE_TEXT_PROBABILITY = 0.66
-PASSIVE_MEDIA_PROBABILITY = 0.66
 CLINICAL_RESCUE_MIN_AGE_MINUTES = 33
 CLINICAL_RESCUE_MAX_AGE_MINUTES = 180
 DIALOGUE_THREAD_DEBOUNCE_SECONDS = 35
