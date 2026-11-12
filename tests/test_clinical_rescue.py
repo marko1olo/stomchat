@@ -60,6 +60,10 @@ def run_tests():
           not cr.is_clinical_rescue_candidate("/torque soco", False))
     check("слишком короткий текст отклонен",
           not cr.is_clinical_rescue_candidate("зуб болит?", False))
+    check("клиническое утверждение/совет без вопроса отклонено",
+          not cr.is_clinical_rescue_candidate("В данном случае всё, что вышло за апекс извлекается с помощью апикальной хирургии", False))
+    check("клинический опыт без вопроса отклонен",
+          not cr.is_clinical_rescue_candidate("Я всегда закрываю перфорацию прорутом и ставлю временную пломбу", False))
 
     print("\n[2] Запросы к SQLite: поиск повисших кейсов без ответов")
     tmp_dir = tempfile.mkdtemp()

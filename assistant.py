@@ -570,7 +570,7 @@ class PmStatusTicker:
                 try:
                     msg_id = getattr(self.status_msg, "id", None)
                     if msg_id:
-                        await tg_safety.edit_message(
+                        outcome = await tg_safety.edit_message(
                             self.bot_client,
                             self.chat_id,
                             msg_id,
@@ -580,6 +580,12 @@ class PmStatusTicker:
                             logger=self.logger,
                             parse_mode='html',
                         )
+                        if outcome and not getattr(outcome, "ok", True) and getattr(outcome, "reason", None) == tg_safety.REASON_TERMINAL:
+                            if self.logger:
+                                self.logger.info("PmStatusTicker terminal error (%s), terminating ticker loop immediately", getattr(outcome, "error", None))
+                            self.status_msg = None
+                            self._stop_event.set()
+                            break
                 except Exception as edit_err:
                     if self.logger:
                         self.logger.debug("PmStatusTicker carousel edit error: %s", edit_err)
@@ -603,7 +609,7 @@ class PmStatusTicker:
                 msg_id = getattr(self.status_msg, "id", None)
                 if msg_id:
                     try:
-                        await tg_safety.edit_message(
+                        outcome = await tg_safety.edit_message(
                             self.bot_client,
                             self.chat_id,
                             msg_id,
@@ -613,6 +619,8 @@ class PmStatusTicker:
                             logger=self.logger,
                             parse_mode='html',
                         )
+                        if outcome and not getattr(outcome, "ok", True) and getattr(outcome, "reason", None) == tg_safety.REASON_TERMINAL:
+                            self.status_msg = None
                     except Exception as e:
                         if self.logger:
                             self.logger.debug("PmStatusTicker: update_stage edit failed: %s", e)
@@ -13478,13 +13486,17 @@ async def handle_private_message(bot_client, event):
                     logger.debug("Failed to delete completed PM status_msg: %s", del_err)
 
             # Отправка развернутого ответа (Этап 1: Быстрый ответ с кнопками NBA)
-            await send_message_chunks_async(
+            send_res = await send_message_chunks_async(
                 bot_client,
                 chat_id,
                 reply_text,
                 buttons=nba_markup,
                 parse_mode='html'
             )
+            if send_res and not getattr(send_res, "ok", True):
+                logger.warning("Failed to deliver PM response to chat_id=%s: %s (reason=%s)",
+                               chat_id, getattr(send_res, "error", None), getattr(send_res, "reason", None))
+                return
             await database.save_pm_message(chat_id, "Assistant", reply_text)
             logger.info(f"Successfully sent deep PM response to chat_id={chat_id}")
 
