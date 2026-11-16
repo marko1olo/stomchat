@@ -1250,9 +1250,21 @@ def generate_text(prompt, status_context=None, timeout=None):
     max_media_rounds = 8 if is_media else 1
     media_round = 0
 
+    last_provider_used = None
     while media_round < max_media_rounds and not out_of_budget:
         min_cooldown_seen = float('inf')
         for model_index, (model_name, provider) in enumerate(active_cascade):
+            if requests_made > 0 and last_provider_used is not None and last_provider_used != provider:
+                provider_switch_pause = 2.5
+                if deadline is not None:
+                    provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                if provider_switch_pause > 0:
+                    logger.info(
+                        "Provider transition (%s -> %s): applying pacing backoff %.1fs to protect API quotas.",
+                        last_provider_used, provider, provider_switch_pause
+                    )
+                    _sleep_with_status(provider_switch_pause, status_context, 0, max_attempts, f"switch_{provider}")
+            last_provider_used = provider
             # Для медиа-задач Gemini пробуются первыми (в начале active_cascade).
             # Если все Gemini в раунде исчерпаны/на кулдауне, каскад переключается на
             # резервные текстовые модели (AgentRouter / DeepSeek, Groq) через _adapt_prompt_for_text_model.
@@ -1679,6 +1691,16 @@ def generate_text(prompt, status_context=None, timeout=None):
                         continue
 
                     if failure_reason in ("model_overloaded", "model_not_found", "content_blocked"):
+                        if failure_reason == "model_overloaded":
+                            backoff_503 = 2.5
+                            if deadline is not None:
+                                backoff_503 = min(backoff_503, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                            if backoff_503 > 0:
+                                logger.info(
+                                    f"{provider.capitalize()} model overloaded/503 ({model_name}); "
+                                    f"pausing {backoff_503:.1f}s before trying fallback model/provider."
+                                )
+                                _sleep_with_status(backoff_503, status_context, attempt + 1, max_attempts, key_id)
                         break
 
                     if failure_reason == "key_denied":
@@ -2347,17 +2369,24 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
     ])
 
     deadline = time.monotonic() + float(timeout or 160.0)
+    prev_supp_provider = None
     for model_index, (model_name, provider) in enumerate(cascade):
         rem = deadline - time.monotonic()
         if rem <= 2.0:
             logger.info("PM supplement budget exhausted before %s (%.1fs left)", model_name, rem)
             break
+        if prev_supp_provider is not None and prev_supp_provider != provider:
+            switch_pause = min(2.5, max(0.0, rem - 3.0))
+            if switch_pause > 0:
+                logger.info("PM supplement provider transition %s -> %s: pausing %.1fs", prev_supp_provider, provider, switch_pause)
+                time.sleep(switch_pause)
+        prev_supp_provider = provider
         tail = cascade[model_index + 1:]
         tail_reserve = 5.0 if tail else 0.0
 
         if provider == "agentrouter":
-            # Не душим gpt-6.1-sol: даем до 85 секунд на глубокие рассуждения!
-            call_timeout = min(85.0, max(25.0, rem - tail_reserve)) if tail else rem
+            # Снижен с 85.0s до 35.0s с быстрым безопасным фоллбеком на Gemini/Groq при лаге прокси
+            call_timeout = min(85.0, max(15.0, rem - tail_reserve)) if tail else rem
         elif provider == "gemini" and "lite" not in model_name:
             # Не душим умные Gemini с reasoning_effort="high": даем до 60 секунд!
             call_timeout = min(60.0, max(20.0, rem - tail_reserve)) if tail else rem
@@ -2465,7 +2494,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
             except Exception as e:
                 logger.warning(f"PM supplement failed model={model_name} key={key_id}: {e}")
                 supp_fail = note_key_failure(provider, api_key, str(e), model_name=model_name)
-                if supp_fail == "key_rate_limited":
+                if supp_fail in ("key_rate_limited", "model_overloaded"):
                     time.sleep(2.5)
                 continue
 

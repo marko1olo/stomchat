@@ -32,6 +32,7 @@ MAX_REACTIONS_PER_HOUR = 12        # Защита от спама и FloodWait: 
 SENDER_COOLDOWN_SECONDS = 180.0    # Не чаще 1 реакции одному врачу раз в 3 минуты
 RPC_TIMEOUT_SECONDS = 10.0         # Таймаут на сетевой RPC-запрос реакции в Telegram
 INTER_REACTION_SLEEP = 2.0         # Пауза между отправками реакций в Telegram
+LLM_CALL_PACING_SECONDS = 3.0      # Обязательный пейсинг между вызовами LLM для защиты ключей
 
 # ── Детерминированный негативный клинический фильтр ───────────────────────────
 COMPLICATION_PATTERNS = [
@@ -141,6 +142,25 @@ _CHAT_REACTION_HISTORY: Dict[int, List[float]] = {}
 _SENDER_REACTION_TIMESTAMPS: Dict[Tuple[int, int], float] = {}
 _FLUSHER_TASK: Optional[asyncio.Task] = None
 _DISABLED_CHAT_REACTIONS: Dict[int, Set[str]] = {}
+_LAST_BATCH_LLM_CALL_TIME: float = 0.0
+
+
+def is_passive_mode_enabled() -> bool:
+    """
+    Проверяет, разрешен ли пассивный нейросетевой анализ в группах.
+    Если включен SUMMON_ONLY_GROUP_MODE или отключены пассивные режимы — вернет False.
+    """
+    try:
+        import config
+        if getattr(config, "SUMMON_ONLY_GROUP_MODE", False):
+            return False
+        return bool(
+            getattr(config, "ENABLE_PASSIVE_TEXT", False)
+            or getattr(config, "ENABLE_PASSIVE_MEDIA", False)
+            or getattr(config, "ENABLE_PASSIVE_REACTIONS", False)
+        )
+    except Exception:
+        return False
 
 
 
@@ -274,8 +294,12 @@ def build_batch_prompt(messages: List[BufferedMessage], allowed_emojis_str: str)
 """
 
 
-def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 15.0) -> List[Dict[str, Any]]:
-    """Синхронный вызов нейросети на батч сообщений с детерминированной клинической валидацией."""
+def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 30.0, check_mode: bool = False) -> List[Dict[str, Any]]:
+    """Синхронный вызов нейросети на батч сообщений с детерминированной клинической валидацией и пейсингом."""
+    if check_mode and not is_passive_mode_enabled():
+        logger.debug("[BatchReactions] evaluate_batch_sync skipped: passive mode disabled or SUMMON_ONLY_GROUP_MODE is True")
+        return []
+
     import assistant
     try:
         import gemini_client
@@ -294,6 +318,16 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 15.0) 
         "thinking_level": "LOW",
         "max_tokens": 200
     }
+
+    # Строгий пейсинг не менее 3.0 секунд перед вызовом LLM для защиты API-ключей
+    global _LAST_BATCH_LLM_CALL_TIME
+    now = time.time()
+    elapsed = now - _LAST_BATCH_LLM_CALL_TIME
+    if elapsed < LLM_CALL_PACING_SECONDS:
+        sleep_needed = LLM_CALL_PACING_SECONDS - elapsed
+        logger.debug("[BatchReactions] Pacing LLM call: sleeping %.2fs (elapsed %.2fs < %.2fs)", sleep_needed, elapsed, LLM_CALL_PACING_SECONDS)
+        time.sleep(sleep_needed)
+    _LAST_BATCH_LLM_CALL_TIME = time.time()
 
     try:
         response = gemini_client.generate_text(prompt, status_context=status_context, timeout=timeout)
@@ -351,6 +385,14 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 15.0) 
 
 async def flush_chat_batch(chat_id: int):
     """Сброс и нейросетевая обработка накопившегося батча сообщений чата."""
+    # 0. Проверка пассивного режима и SUMMON_ONLY_GROUP_MODE (полное глушение вызовов LLM ради смайликов)
+    if not is_passive_mode_enabled():
+        logger.debug("[BatchReactions] Skipping batch flush: SUMMON_ONLY_GROUP_MODE is True or passive mode disabled.")
+        lock = _get_lock(chat_id)
+        async with lock:
+            _CHAT_BUFFERS.pop(chat_id, None)
+        return
+
     import assistant
 
     # 1. Проверка глобальной паузы реакций (FloodWait) и кулдауна чата
@@ -391,8 +433,8 @@ async def flush_chat_batch(chat_id: int):
 
         logger.info("[BatchReactions] Evaluating batch of %d messages for chat_id=%s...", len(batch_to_eval), chat_id)
 
-        # Запуск LLM в отдельном потоке
-        chosen_reactions = await asyncio.to_thread(evaluate_batch_sync, batch_to_eval)
+        # Запуск LLM в отдельном потоке с таймаутом 30с и пейсингом
+        chosen_reactions = await asyncio.to_thread(evaluate_batch_sync, batch_to_eval, 30.0, True)
 
         if not chosen_reactions:
             logger.info("[BatchReactions] Evaluated %d messages for chat_id=%s: 0 reactions needed.", len(batch_to_eval), chat_id)
@@ -515,6 +557,11 @@ async def _flusher_loop():
                     continue
 
                 if len(buf) >= 2 and (now - buf[-1].timestamp) >= IDLE_FLUSH_INTERVAL:
+                    if not is_passive_mode_enabled():
+                        lock = _get_lock(cid)
+                        async with lock:
+                            _CHAT_BUFFERS.pop(cid, None)
+                        continue
                     logger.info("[BatchReactions] Triggering idle flush for chat %s (buffer size: %d, idle: %.1fs)", cid, len(buf), now - buf[-1].timestamp)
                     _safe_create_task(flush_chat_batch(cid), name=f"reaction_idle_flush_{cid}")
 
@@ -648,6 +695,11 @@ async def process_incoming_event(
             should_flush = True
 
     if should_flush:
+        if not is_passive_mode_enabled():
+            logger.debug("[BatchReactions] Buffer reached threshold but passive mode is disabled. Discarding buffer without LLM.")
+            async with lock:
+                _CHAT_BUFFERS.pop(chat_id, None)
+            return True
         logger.info("[BatchReactions] Buffer reached threshold %d for chat %s. Flushing...", BATCH_SIZE_THRESHOLD, chat_id)
         _safe_create_task(flush_chat_batch(chat_id), name=f"reaction_batch_flush_{chat_id}")
 

@@ -10359,11 +10359,18 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
             logger.info(f"PM supplement discarded before generation: context changed for chat_id={chat_id}")
             return
 
-        supplement_text, error = await generate_pm_supplement_async(
-            user_question=user_question,
-            initial_answer=initial_answer,
-            timeout=160.0,
-        )
+        try:
+            supplement_text, error = await asyncio.wait_for(
+                generate_pm_supplement_async(
+                    user_question=user_question,
+                    initial_answer=initial_answer,
+                    timeout=35.0,
+                ),
+                timeout=35.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"PM supplement generation timed out (>35.0s) for chat_id={chat_id}: fast safe fallback")
+            return
 
         if error or not supplement_text:
             logger.info(f"PM supplement empty/error for chat_id={chat_id}: {error}")
@@ -18778,12 +18785,50 @@ def set_ping_opt_out(chat_id, reason=""):
     logger.info(f"User {chat_id} opted out of proactive pings. Reason: {reason[:80]!r}")
 
 
+_LAST_PM_PING_RUN_TIME: float = 0.0
+PM_PING_RUN_INTERVAL_SECONDS: float = 4.0 * 3600.0  # Проверка не чаще 1 раза в 4 часа
+
+
+def is_polite_dialog_closure(text: str) -> bool:
+    """Определяет, закончился ли диалог в ЛС естественным вежливым закрытием (не требует пинга)."""
+    if not text:
+        return False
+    t = text.strip().lower()
+    t_clean = re.sub(r"[^\w\s]", "", t).strip()
+    closure_markers = (
+        "спасибо", "благодарю", "принято", "на связи", "ок", "ok", "до свидания",
+        "понял", "поняла", "хорошо", "отлично", "договорились", "будем на связи",
+        "всего доброго", "ясненько", "ясно", "супер", "благодарствую", "рад помочь"
+    )
+    if len(t_clean) <= 40 and any(p in t_clean for p in closure_markers):
+        return True
+    return False
+
+
 async def check_and_send_pm_pings(bot_client):
     """Проверяет неактивных пользователей в ЛС и отправляет им персонализированный пинг."""
     if not getattr(config, "ENABLE_PM_PROACTIVE_PINGS", False):
         logger.debug("check_and_send_pm_pings skipped: PM proactive broadcast disabled in config.")
         return
+
+    global _LAST_PM_PING_RUN_TIME
+    now_ts = time.time()
+    if (now_ts - _LAST_PM_PING_RUN_TIME) < PM_PING_RUN_INTERVAL_SECONDS:
+        logger.debug(
+            "check_and_send_pm_pings skipped: pacing interval active (%.1f h remaining of 4h)",
+            (PM_PING_RUN_INTERVAL_SECONDS - (now_ts - _LAST_PM_PING_RUN_TIME)) / 3600.0
+        )
+        return
+    _LAST_PM_PING_RUN_TIME = now_ts
+
     try:
+        now = get_msk_now()
+        # Защита от ночного беспокойства врачей (разрешено строго с 10:00 до 20:00 MSK)
+        msk_hour = now.hour
+        if msk_hour < 10 or msk_hour >= 20:
+            logger.debug("PM pings skipped: outside allowed window 10:00-20:00 MSK (now: %02d:00 MSK).", msk_hour)
+            return
+
         # Строгая защита: тихие часы 22:00-09:00 MSK и рабочее клиническое окно 11:00-17:00 MSK
         if is_ping_quiet_hours():
             logger.debug("PM pings skipped: quiet hours (Europe/Moscow 22:00-09:00).")
@@ -18831,14 +18876,21 @@ async def check_and_send_pm_pings(bot_client):
 
                 hours_since = (now - last_activity).total_seconds() / 3600.0
 
-                # Если прошло больше 7 дней — клинический момент упущен, архивируем кейс без спама
-                if hours_since > MAX_CLINICAL_PING_DELAY_HOURS:
+                # 1. Пинговать ТОЛЬКО активных врачей: от 12 до 72 часов с последнего сообщения
+                # (не трогать древние аккаунты, писавшие недели/месяцы назад)
+                if hours_since < 12.0:
+                    continue
+                if hours_since > 72.0:
                     commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
                     continue
 
-                # Клиническое окно: от 18 ч (для острых клинических ситуаций) до 7 дней
-                if hours_since < ACUTE_CLINICAL_PING_MIN_HOURS:
-                    continue
+                # 2. Не чаще 1 пинга в 48 часов
+                last_ping_dt = _parse_state_dt(info.get("last_ping_time"))
+                if last_ping_dt:
+                    hours_since_last_ping = (now - last_ping_dt).total_seconds() / 3600.0
+                    if hours_since_last_ping < 48.0:
+                        logger.debug("PM ping skipped for chat_id=%s: already pinged %.1fh ago (<48h)", chat_id, hours_since_last_ping)
+                        continue
 
                 chat_id = int(chat_id_str)
                 time_hint = "вчера" if hours_since < 36 else f"{max(1, int(hours_since // 24))} дн. назад"
@@ -18850,6 +18902,24 @@ async def check_and_send_pm_pings(bot_client):
                 # Загружаем последние 10 сообщений для полного клинического контекста
                 history = await database.get_last_pm_messages(chat_id, limit=10)
                 if not history:
+                    commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    continue
+
+                # 3. Детерминированный фильтр вежливого закрытия ДО вызова LLM
+                last_msg = history[-1].get("text", "") or ""
+                last_doctor_msg = next((m.get("text", "") for m in reversed(history) if m.get("sender_name") != "Assistant"), "")
+                if is_polite_dialog_closure(last_msg) or is_polite_dialog_closure(last_doctor_msg):
+                    logger.debug("PM ping skipped for chat_id=%s: dialog ended with polite closure (%r)", chat_id, last_msg[:40])
+                    commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    continue
+
+                # 4. Проверка наличия клинического контекста (зубные термины / медиа)
+                has_clinical_context = any(
+                    has_dental_term(m.get("text", "")) or m.get("has_media")
+                    for m in history
+                )
+                if not has_clinical_context:
+                    logger.debug("PM ping skipped for chat_id=%s: no clinical dental topics in history", chat_id)
                     commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
                     continue
 
@@ -18920,6 +18990,10 @@ async def check_and_send_pm_pings(bot_client):
                     else:
                         commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
                     continue
+
+                if not getattr(config, "ENABLE_PM_PROACTIVE_PINGS", False):
+                    logger.debug("check_and_send_pm_pings Stage 2 skipped: ENABLE_PM_PROACTIVE_PINGS disabled.")
+                    return
 
                 # ЭТАП 2: Экспертный синтез через флагманскую модель (HIGH thinking, flagship cascade)
                 logger.info(
