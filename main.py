@@ -3303,17 +3303,18 @@ async def handle_new_message(event):
             # Unanswered Question Lifeline (Протокол «Первый ответ») для неактивных чатов:
             # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг
             if text and not is_direct_bot_call:
-                if question_lifeline.is_clinical_question_candidate(text=text, has_media=has_media, sender_is_bot=is_any_bot):
-                    lifeline_manager.track_question(
-                        msg_id=msg_id,
-                        chat_id=event.chat_id,
-                        sender_id=sender_id,
-                        sender_name=sender_name,
-                        text=text,
-                        has_media=has_media,
-                        media_description=media_description,
-                        msg_date=getattr(event.message, 'date', None)
-                    )
+                if getattr(config, "ENABLE_QUESTION_LIFELINE", False) and not getattr(config, "SUMMON_ONLY_GROUP_MODE", False):
+                    if question_lifeline.is_clinical_question_candidate(text=text, has_media=has_media, sender_is_bot=is_any_bot):
+                        lifeline_manager.track_question(
+                            msg_id=msg_id,
+                            chat_id=event.chat_id,
+                            sender_id=sender_id,
+                            sender_name=sender_name,
+                            text=text,
+                            has_media=has_media,
+                            media_description=media_description,
+                            msg_date=getattr(event.message, 'date', None)
+                        )
         # --- НАЧАЛО НОВОГО БЛОКА ЛОГИРОВАНИЯ ---
         log_msg = f"📥 [Чат: {event.chat_id}] MSG_{msg_id} от {sender_name}"
         if sender_username:
@@ -4522,8 +4523,15 @@ async def start_bot():
     runtime_guard.create_task(health_watchdog_task(), "health_watchdog")
     runtime_guard.create_task(media_recovery_task(), "media_recovery")
     runtime_guard.create_task(user_memory.group_memory_daemon_loop(), "group_memory_daemon")
-    import clinical_rescue
-    runtime_guard.create_task(clinical_rescue.clinical_rescue_daemon(bot_client), "clinical_rescue_daemon")
+    if getattr(config, "ENABLE_CLINICAL_RESCUE", False) and not getattr(config, "SUMMON_ONLY_GROUP_MODE", False):
+        import clinical_rescue
+        runtime_guard.create_task(clinical_rescue.clinical_rescue_daemon(bot_client), "clinical_rescue_daemon")
+    else:
+        logger.info(
+            "Clinical rescue daemon is disabled (ENABLE_CLINICAL_RESCUE=%s, SUMMON_ONLY_GROUP_MODE=%s)",
+            getattr(config, "ENABLE_CLINICAL_RESCUE", False),
+            getattr(config, "SUMMON_ONLY_GROUP_MODE", False)
+        )
     reaction_engine.start_engine_worker()
 
     async def periodic_wal_checkpoint_loop():

@@ -789,6 +789,11 @@ async def run_clinical_rescue_cycle(bot_client, db_path: str, chat_id: int, bot_
     Один цикл проверки и спасения.
     Возвращает число спасенных кейсов (0 или 1).
     """
+    import config
+    if getattr(config, "SUMMON_ONLY_GROUP_MODE", False) or not getattr(config, "ENABLE_CLINICAL_RESCUE", False):
+        logger.debug("Clinical rescue is disabled by SUMMON_ONLY_GROUP_MODE/ENABLE_CLINICAL_RESCUE.")
+        return 0
+
     now = datetime.datetime.now(datetime.timezone.utc)
     last_rescue = _LAST_RESCUE_TIME.get(chat_id)
     if last_rescue and (now - last_rescue).total_seconds() < RESCUE_COOLDOWN_SECONDS:
@@ -857,6 +862,11 @@ async def clinical_rescue_daemon(
 
     while True:
         try:
+            if getattr(config, "SUMMON_ONLY_GROUP_MODE", False) or not getattr(config, "ENABLE_CLINICAL_RESCUE", False):
+                logger.debug("Clinical rescue is disabled by SUMMON_ONLY_GROUP_MODE/ENABLE_CLINICAL_RESCUE.")
+                await asyncio.sleep(check_interval_sec)
+                continue
+
             if bot_id == 0:
                 bot_id = resolve_bot_id(bot_client)
                 if bot_id == 0 and bot_client:
