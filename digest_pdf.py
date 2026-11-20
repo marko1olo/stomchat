@@ -431,13 +431,85 @@ def _build_journal_html(
         flags=re.IGNORECASE,
     )
 
-    # 3.1 Стилизуем клинический вывод кейса в акцентный неразрывный блок
-    processed_body = re.sub(
-        r'<p>\s*(?:<b>|<strong>)\s*(ВЫВОД:[^<]*)(?:</b>|</strong>)([\s\S]*?)</p>',
-        r'<div class="case-conclusion"><strong>\1</strong>\2</div>',
-        processed_body,
-        flags=re.IGNORECASE,
+    # 3.1 Стилизуем клинический вывод кейса (EBM-вердикт эксперта и вариации) в акцентный контейнер .case-conclusion
+    VERDICT_KEYWORDS = (
+        r'EBM[-\s]*вердикт(?:\s+эксперта)?|'
+        r'Вердикт(?:\s+эксперта)?(?:\s*\(EBM\))?|'
+        r'EBM[-\s]*вывод(?:\s+эксперта)?|'
+        r'Клинический\s+(?:вердикт|вывод)(?:\s+эксперта)?|'
+        r'ВЫВОД(?:Ы)?(?:\s+ЭКСПЕРТА)?|'
+        r'ИТОГ(?:ОВЫЙ\s+ВЕРДИКТ)?'
     )
+    emoji_pat = r'[\U00010000-\U0010ffff\u2000-\u32ff\ufe00-\ufe0f🎯⚖️💡📌✅🔬🦷]'
+
+    verdict_header_pat = (
+        rf'(?:{emoji_pat}\s*)?'
+        rf'(?:<b>|<strong>|\*\*)\s*(?:{emoji_pat}\s*)?(?:{VERDICT_KEYWORDS})[^<*]*?(?:</b>|</strong>|\*\*)\s*:?|'
+        rf'(?:{emoji_pat}\s*)?(?:{VERDICT_KEYWORDS})[^<:\n]*:'
+    )
+
+    # 3.1.1 Если вердикт идет внутри <p> после переноса строки <br>
+    def _verdict_inline_replacer(m):
+        before = m.group(1).rstrip()
+        raw_header = m.group(2).strip()
+        body = m.group(3).strip()
+        header_text = re.sub(r'</?(?:b|strong)>|\*\*', '', raw_header).strip()
+        header_text = re.sub(r':\s*$', '', header_text).strip() + ':'
+        body = re.sub(r'^(?:</?(?:b|strong|span)>|\s+|:\s*)+', '', body).strip()
+        return f'{before}</p>\n<div class="case-conclusion"><strong>{header_text}</strong> {body}</div>'
+
+    pat_verdict_inline = re.compile(
+        rf'(<p[^>]*>[\s\S]*?)(?:<br\s*/?>\s*)+'
+        rf'({verdict_header_pat})\s*'
+        rf'([\s\S]*?)</p>',
+        re.IGNORECASE,
+    )
+    processed_body = pat_verdict_inline.sub(_verdict_inline_replacer, processed_body)
+
+    # 3.1.2 Если вердикт занимает отдельный тег <p> или <li>
+    def _verdict_block_replacer(m):
+        raw_header = m.group(1).strip()
+        body = m.group(2).strip()
+        header_text = re.sub(r'</?(?:b|strong)>|\*\*', '', raw_header).strip()
+        header_text = re.sub(r':\s*$', '', header_text).strip() + ':'
+        body = re.sub(r'^(?:</?(?:b|strong|span)>|\s+|:\s*)+', '', body).strip()
+        return f'<div class="case-conclusion"><strong>{header_text}</strong> {body}</div>'
+
+    pat_verdict_block = re.compile(
+        rf'<(?:p|li)[^>]*>\s*'
+        rf'({verdict_header_pat})\s*'
+        rf'([\s\S]*?)</(?:p|li)>',
+        re.IGNORECASE,
+    )
+    processed_body = pat_verdict_block.sub(_verdict_block_replacer, processed_body)
+
+    # 3.2 Стилизуем клинические алерты и предостережения в блок .clinical-alert-box
+    ALERT_KEYWORDS = (
+        r'КЛИНИЧЕСКИЙ\s+АЛЕРТ|КЛИНИЧЕСКОЕ\s+ПРЕДОСТЕРЕЖЕНИЕ|ПРЕДОСТЕРЕЖЕНИЕ|'
+        r'ОСТОРОЖНО|ВНИМАНИЕ|ВАЖНО|КРАСНЫЕ\s+ФЛАГИ|RED\s*FLAGS?'
+    )
+    alert_emoji = r'[\U00010000-\U0010ffff\u2000-\u32ff\ufe00-\ufe0f⚠️🚨🛑⚡️❗]'
+    alert_header_pat = (
+        rf'(?:{alert_emoji}\s*)?'
+        rf'(?:<b>|<strong>|\*\*)\s*(?:{alert_emoji}\s*)?(?:{ALERT_KEYWORDS})[^<*]*?(?:</b>|</strong>|\*\*)\s*:?|'
+        rf'(?:{alert_emoji}\s*)?(?:{ALERT_KEYWORDS})[^<:\n]*:'
+    )
+
+    def _alert_replacer(m):
+        raw_header = m.group(1).strip()
+        body = m.group(2).strip()
+        header_text = re.sub(r'</?(?:b|strong)>|\*\*', '', raw_header).strip()
+        header_text = re.sub(r':\s*$', '', header_text).strip() + ':'
+        body = re.sub(r'^(?:</?(?:b|strong|span)>|\s+|:\s*)+', '', body).strip()
+        return f'<div class="clinical-alert-box"><strong>{header_text}</strong> {body}</div>'
+
+    pat_alert_block = re.compile(
+        rf'<(?:p|li)[^>]*>\s*'
+        rf'({alert_header_pat})\s*'
+        rf'([\s\S]*?)</(?:p|li)>',
+        re.IGNORECASE,
+    )
+    processed_body = pat_alert_block.sub(_alert_replacer, processed_body)
 
     # 4. Сквозная академическая нумерация иллюстраций (Рис. 1, Рис. 2...)
     fig_idx = 0
@@ -515,6 +587,8 @@ def _build_journal_html(
             background-color: #ffffff;
             margin: 0;
             padding: 0;
+            orphans: 3;
+            widows: 3;
         }}
 
         /* Шапка журнала */
@@ -624,6 +698,15 @@ def _build_journal_html(
             color: #0f172a;
         }}
 
+        /* Защита критических клинических блоков от разрыва страниц */
+        .clinical-alert-box,
+        .case-card,
+        .case-conclusion,
+        .summary-section {{
+            break-inside: avoid;
+            page-break-inside: avoid;
+        }}
+
         /* Карточки клинических кейсов */
         .case-card {{
             background: #ffffff;
@@ -632,17 +715,19 @@ def _build_journal_html(
             border-radius: 6px;
             padding: 8px 12px 6px 12px;
             margin: 10px 0;
-            page-break-inside: auto;
-            break-inside: auto;
+            page-break-inside: avoid;
+            break-inside: avoid;
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
             clear: both;
         }}
 
+        /* Акцентный контейнер клинического вывода / EBM-вердикта */
         .case-conclusion {{
             background: #f0fdf4;
-            border-left: 3.5px solid #16a34a;
-            border-radius: 0 4px 4px 0;
-            padding: 6px 10px;
+            border: 1px solid #bbf7d0;
+            border-left: 4px solid #16a34a;
+            border-radius: 4px;
+            padding: 7px 11px;
             margin: 8px 0;
             font-size: 9pt;
             color: #14532d;
@@ -650,11 +735,40 @@ def _build_journal_html(
             break-inside: avoid;
             page-break-before: avoid;
             break-before: avoid;
+            box-shadow: 0 1px 3px rgba(22, 163, 74, 0.08);
         }}
 
-        .case-conclusion strong {{
+        .case-conclusion strong, .case-conclusion b {{
             color: #15803d;
             font-weight: 700;
+        }}
+
+        /* Клинические алерты и предостережения */
+        .clinical-alert-box {{
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+            border-left: 4px solid #f59e0b;
+            border-radius: 4px;
+            padding: 7px 11px;
+            margin: 8px 0;
+            font-size: 9pt;
+            color: #92400e;
+            page-break-inside: avoid;
+            break-inside: avoid;
+            box-shadow: 0 1px 3px rgba(245, 158, 11, 0.06);
+        }}
+
+        .clinical-alert-box strong, .clinical-alert-box b {{
+            color: #b45309;
+            font-weight: 700;
+        }}
+
+        /* Контейнер раздела сводки / дайджеста */
+        .summary-section {{
+            margin: 12px 0;
+            page-break-inside: avoid;
+            break-inside: avoid;
+            clear: both;
         }}
 
         /* Карточка доски почета / героев недели */
@@ -721,14 +835,22 @@ def _build_journal_html(
             line-height: 1.3;
         }}
 
-        /* Основной текст */
+        /* Основной текст и полиграфическая гигиена */
         p {{
             margin: 0 0 8px 0;
             text-align: justify;
             text-justify: inter-word;
             text-align-last: left;
+            orphans: 3;
+            widows: 3;
             hyphens: auto;
             -webkit-hyphens: auto;
+            hyphenate-limit-chars: 6 3 3;
+            hyphenate-limit-lines: 2;
+            hyphenate-limit-last: page;
+            -webkit-hyphenate-limit-last: page;
+            word-break: normal;
+            overflow-wrap: break-word;
         }}
 
         b, strong {{
@@ -748,6 +870,8 @@ def _build_journal_html(
 
         li {{
             margin-bottom: 4px;
+            orphans: 3;
+            widows: 3;
         }}
 
         /* Клинические таблицы и сравнительные матрицы */
@@ -860,6 +984,8 @@ def _build_journal_html(
             break-inside: avoid;
             font-size: 9pt;
             line-height: 1.5;
+            orphans: 3;
+            widows: 3;
         }}
 
         blockquote b, blockquote strong {{

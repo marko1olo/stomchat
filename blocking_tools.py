@@ -472,7 +472,6 @@ _ROUTINE_CHILD_LOG_PATTERNS = (
     "https connection",
     "http/1.1 200",
     "http/2 200",
-    "request attempt",
     "allocated timeout",
     "loaded api keys",
     "starting new https connection",
