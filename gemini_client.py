@@ -1004,8 +1004,8 @@ def cascade_for_context(status_context=None, prompt=None):
     # Строго быстрые модели с таймаутом <= 7-15с. НИКАКИХ gpt-6.1-sol и НИКАКИХ gemini-3.8-flash!
     if is_triage or kind == "response_validator":
         return [
-            ("gemini-3.1-flash-lite", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.6-flash", "gemini"),
         ]
@@ -1254,17 +1254,6 @@ def generate_text(prompt, status_context=None, timeout=None):
     while media_round < max_media_rounds and not out_of_budget:
         min_cooldown_seen = float('inf')
         for model_index, (model_name, provider) in enumerate(active_cascade):
-            if requests_made > 0 and last_provider_used is not None and last_provider_used != provider:
-                provider_switch_pause = 2.5
-                if deadline is not None:
-                    provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
-                if provider_switch_pause > 0:
-                    logger.info(
-                        "Provider transition (%s -> %s): applying pacing backoff %.1fs to protect API quotas.",
-                        last_provider_used, provider, provider_switch_pause
-                    )
-                    _sleep_with_status(provider_switch_pause, status_context, 0, max_attempts, f"switch_{provider}")
-            last_provider_used = provider
             # Для медиа-задач Gemini пробуются первыми (в начале active_cascade).
             # Если все Gemini в раунде исчерпаны/на кулдауне, каскад переключается на
             # резервные текстовые модели (AgentRouter / DeepSeek, Groq) через _adapt_prompt_for_text_model.
@@ -1347,6 +1336,17 @@ def generate_text(prompt, status_context=None, timeout=None):
                     logger.info("Preemptively skipping %s on %s: prompt length %d chars exceeds ~8k TPM quota", model_name, provider, len(prompt))
                     break
 
+                if requests_made > 0 and last_provider_used is not None and last_provider_used != provider:
+                    provider_switch_pause = 2.5
+                    if deadline is not None:
+                        provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                    if provider_switch_pause > 0:
+                        logger.info(
+                            "Provider transition (%s -> %s): applying pacing backoff %.1fs to protect API quotas.",
+                            last_provider_used, provider, provider_switch_pause
+                        )
+                        _sleep_with_status(provider_switch_pause, status_context, attempt + 1, max_attempts, f"switch_{provider}")
+
                 rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (240.0 if provider == 'agentrouter' else 120.0))
                 call_timeout = compute_call_timeout(
                     provider=provider,
@@ -1374,6 +1374,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     logger.info(f"{provider.capitalize()} request attempt={attempt + 1}/{max_attempts} key={key_id} model={model_name}")
 
                     requests_made += 1
+                    last_provider_used = provider
                     # Поддержка мультимодальности: если переданы image_urls, прикрепляем их для Gemini
                     image_urls = status_context.get("image_urls") if isinstance(status_context, dict) else None
                     can_vision = (provider == "gemini") or ("vision" in model_name.lower())
@@ -2076,6 +2077,7 @@ async def transcribe_audio_gemini_multimodal(
 
     gemini_timeout = max(120.0, min(480.0, duration_secs * 0.6 + 80.0))
     models_to_try = [
+        "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemini-3.8-flash",
         "gemini-3.5-flash",
