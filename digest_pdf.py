@@ -1,5 +1,5 @@
 """
-digest_pdf.py — Генератор полиграфического PDF-вестника EndoChat.
+digest_pdf.py — Генератор полиграфического PDF-вестника (EndoChat / StomChat).
 
 Преобразует аналитический лонгрид (HTML/Markdown) в сверстанный медицинский журнал
 формата A4 на базе Playwright Chromium Headless:
@@ -7,6 +7,7 @@ digest_pdf.py — Генератор полиграфического PDF-вес
 - Медицинская верстка с разделителями разделов, бейджами и карточками кейсов.
 - Колонтитулы со сквозной нумерацией страниц (@page CSS Paged Media).
 - Изоляция ошибок: сбой рендера PDF не ломает публикацию в Telegraph.
+- Динамический брендинг: 100% байтовый паритет между репозиториями EndoChat и StomChat.
 """
 
 import asyncio
@@ -17,7 +18,7 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,145 @@ def _get_pdf_semaphore():
         _PDF_SEMAPHORE = asyncio.Semaphore(1)
     return _PDF_SEMAPHORE
 
+
+def _is_endo_environment() -> bool:
+    """
+    Динамически определяет принадлежность к проекту EndoChat или StomChat
+    на основе параметров config (DB_PATH, BOT_USERNAME, SOURCE_CHAT_ID),
+    переменных окружения и структуры директорий.
+    """
+    try:
+        import config
+        db_path = str(getattr(config, "DB_PATH", "") or "").lower()
+        if "endo" in db_path:
+            return True
+        if "stomat" in db_path or "stomchat" in db_path:
+            return False
+
+        bot_name = str(
+            getattr(config, "BOT_USERNAME", "")
+            or getattr(config, "ENDOCHAT_BOT_USERNAME", "")
+            or getattr(config, "BOT_DISPLAY_NAME", "")
+            or ""
+        ).lower()
+        if "endo" in bot_name:
+            return True
+        if "stom" in bot_name:
+            return False
+    except Exception:
+        pass
+
+    # Переменные окружения
+    env_db = str(os.getenv("DB_PATH", "")).lower()
+    if "endo" in env_db:
+        return True
+    if "stomat" in env_db or "stomchat" in env_db:
+        return False
+
+    env_bot = str(
+        os.getenv("BOT_USERNAME", "")
+        or os.getenv("ENDOCHAT_BOT_USERNAME", "")
+        or os.getenv("STOMCHAT_BOT_USERNAME", "")
+        or ""
+    ).lower()
+    if "endo" in env_bot:
+        return True
+    if "stom" in env_bot:
+        return False
+
+    # Имя директории проекта
+    cur_dir = os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+    if "endo" in cur_dir:
+        return True
+
+    return False
+
+
+def _get_branding_info() -> Dict[str, str]:
+    """Возвращает контекстно-зависимый комплект брендинга и типографики для PDF."""
+    if _is_endo_environment():
+        return {
+            "journal_title": "EndoChat • Клинический вестник эндодонтии",
+            "journal_title_upper": "ENDOCHAT • КЛИНИЧЕСКИЙ ВЕСТНИК ЭНДОДОНТИИ",
+            "community_name": "EndoChat (Эндодонтия под микроскопом)",
+            "subtitle_default": "Клинический дайджест сообщества «EndoChat»",
+            "standard_name": "Практическая клиническая эндодонтия",
+            "source_name": "Практикующие врачи-эндодонтисты",
+            "file_prefix": "EndoChat_Digest_",
+            "promo_title": "ПОМОЩНИК У МИКРОСКОПА",
+            "promo_desc": (
+                "Коллеги, бот сообщества — это ваш персональный клинический эндодонтический ассистент прямо в Telegram. "
+                "Напишите ему в личные сообщения для мгновенного разбора кейса:"
+            ),
+            "promo_vision_title": "🔬 Мульти-анализ снимков и КЛКТ (Vision)",
+            "promo_vision_desc": (
+                "Присылайте в ЛС прицельные радиовизиограммы, срезы КЛКТ и фото эндодоступа. "
+                "Бот оценивает анатомию каналов (MB2, C-shape), кривизну корней, апикальный периодонтит (PAI), "
+                "качество обтурации и признаки трещин (VRF)."
+            ),
+            "promo_pharma_title": "💊 Эндодонтическая фармакология и анестезия",
+            "promo_pharma_desc": (
+                "Точный расчет анестезии при горячем пульпите по весу и соматике (ASA), "
+                "подбор схем купирования симптоматического апикального периодонтита (flare-up) и строгие показания к антибиотикам."
+            ),
+            "promo_protocols_title": "📚 Клинические протоколы (/protocols)",
+            "promo_protocols_desc": (
+                "Пошаговые алгоритмы доказательной эндодонтии: протокол ультразвуковой активации PUI/EDDY, "
+                "байпас отломка файла, закрытие перфораций МТА/Biodentine, гидравлическая биокерамика, билдап с сохранением феррула."
+            ),
+            "promo_profile_title": "👤 Клиническая память врача (/profile)",
+            "promo_profile_desc": (
+                "Бот помнит вашу файловую систему, оптику (микроскоп/бинокуляры), "
+                "используемые силеры и стаж, адаптируя рекомендации под ваш инструментарий."
+            ),
+            "promo_cta": "разберите клинический эндодонтический кейс или снимок прямо сейчас.",
+            "footer_text": (
+                "Материалы подготовлены на основе клинических обсуждений врачебного сообщества EndoChat. "
+                "Предназначено для врачей-стоматологов и эндодонтов в образовательных и клинических целях."
+            ),
+        }
+    else:
+        return {
+            "journal_title": "StomChat • Клинический вестник стоматологии",
+            "journal_title_upper": "STOMCHAT • КЛИНИЧЕСКИЙ ВЕСТНИК СТОМАТОЛОГИИ",
+            "community_name": "«Учимся Вместе» (Стоматология и реконструкция)",
+            "subtitle_default": "Клинический дайджест сообщества «Учимся Вместе»",
+            "standard_name": "Доказательная клиническая стоматология",
+            "source_name": "Практикующие врачи-стоматологи",
+            "file_prefix": "StomChat_Digest_",
+            "promo_title": "КЛИНИЧЕСКИЙ АССИСТЕНТ НА ПРИЕМЕ",
+            "promo_desc": (
+                "Коллеги, бот сообщества — это ваш персональный клинический ассистент врача-стоматолога прямо в Telegram. "
+                "Напишите ему в личные сообщения для мгновенного разбора кейса:"
+            ),
+            "promo_vision_title": "🔬 Мульти-анализ снимков и КЛКТ (Vision)",
+            "promo_vision_desc": (
+                "Присылайте в ЛС прицельные рентгенограммы, ОПТГ, срезы КЛКТ и клинические фото. "
+                "Бот анализирует краевое прилегание, периапикальные изменения, дефекты реставраций и костные карманы."
+            ),
+            "promo_pharma_title": "💊 Стоматологическая фармакология и анестезия",
+            "promo_pharma_desc": (
+                "Точный расчет карпул анестетиков по весу и соматике (ASA), "
+                "дифференцированный выбор вазоконстриктора, схемы премедикации и рациональная антибиотикотерапия."
+            ),
+            "promo_protocols_title": "📚 Клинические протоколы (/protocols)",
+            "promo_protocols_desc": (
+                "Пошаговые алгоритмы доказательной стоматологии: адгезивные протоколы (Total-Etch vs Self-Etch), "
+                "изоляция коффердамом, препарирование под микроскопом, прямая и непрямая реставрация."
+            ),
+            "promo_profile_title": "👤 Клиническая память врача (/profile)",
+            "promo_profile_desc": (
+                "Бот помнит ваши предпочтения по композитам, бондинговым системам, "
+                "анестетикам и оптике, персонализируя клинические ответы под вашу практику."
+            ),
+            "promo_cta": "разберите клинический случай, снимок или фармакологию прямо сейчас.",
+            "footer_text": (
+                "Материалы подготовлены на основе клинических обсуждений профессионального стоматологического сообщества. "
+                "Предназначено для врачей-стоматологов в образовательных и клинических целях."
+            ),
+        }
+
+
 def _get_bot_username() -> str:
     """Возвращает актуальный username бота для колонтитулов и промо-блоков PDF."""
     try:
@@ -51,15 +191,23 @@ def _get_bot_username() -> str:
         pass
     try:
         import config
-        u = getattr(config, "BOT_USERNAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", None)
+        u = (
+            getattr(config, "BOT_USERNAME", None)
+            or getattr(config, "ENDOCHAT_BOT_USERNAME", None)
+            or getattr(config, "STOMCHAT_BOT_USERNAME", None)
+        )
         if u:
             return str(u).lstrip("@")
     except Exception:
         pass
-    u = os.getenv("BOT_USERNAME") or os.getenv("ENDOCHAT_BOT_USERNAME")
+    u = (
+        os.getenv("BOT_USERNAME")
+        or os.getenv("ENDOCHAT_BOT_USERNAME")
+        or os.getenv("STOMCHAT_BOT_USERNAME")
+    )
     if u:
         return u.lstrip("@")
-    return "endohelp_bot"
+    return "endohelp_bot" if _is_endo_environment() else "stomchat_bot"
 
 
 def cleanup_old_digests(output_dir: str = PDF_OUTPUT_DIR, max_age_days: int = 3, max_files: int = 15) -> int:
@@ -98,13 +246,15 @@ def cleanup_old_digests(output_dir: str = PDF_OUTPUT_DIR, max_age_days: int = 3,
 
 
 def _get_logo_base64() -> str:
-    """Возвращает base64-строку официального логотипа Docendo Discimus, если файл существует."""
-    if os.path.exists(LOGO_PATH):
-        try:
-            with open(LOGO_PATH, "rb") as f:
-                return base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            logger.warning("Could not read logo image: %s", e)
+    """Возвращает base64-строку официального логотипа, если файл существует."""
+    for cand in ("docendo_logo.png", "docendo_bot_avatar.png"):
+        p = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", cand))
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as f:
+                    return base64.b64encode(f.read()).decode("utf-8")
+            except Exception as e:
+                logger.warning("Could not read logo image %s: %s", p, e)
     return ""
 
 
@@ -116,10 +266,11 @@ def _build_journal_html(
     date_str: str = "",
 ) -> str:
     """Оборачивает фрагменты разбора в полноценный HTML-документ журнальной верстки."""
+    branding = _get_branding_info()
     now_date = date_str or datetime.now().strftime("%d.%m.%Y")
-    clean_title = html.escape(title)
+    clean_title = html.escape(title or branding["journal_title"])
     bot_username = _get_bot_username()
-    clean_subtitle = html.escape(subtitle or f"Клинический дайджест сообщества «EndoChat» (@{bot_username})")
+    clean_subtitle = html.escape(subtitle or f"{branding['subtitle_default']} (@{bot_username})")
     logo_b64 = _get_logo_base64()
 
     # 1. Если во входящем HTML уже присутствует текстовый CTA ассистента (из Telegraph),
@@ -336,7 +487,7 @@ def _build_journal_html(
             size: A4 portrait;
             margin: 16mm 14mm 18mm 14mm;
             @bottom-left {{
-                content: "EndoChat • Клинический вестник эндодонтии";
+                content: "{branding['journal_title']}";
                 font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "DejaVu Sans", "Liberation Sans", "Noto Sans", Arial, sans-serif;
                 font-size: 8pt;
                 color: #64748b;
@@ -803,7 +954,7 @@ def _build_journal_html(
         <div class="journal-header-left">
             {f'<img class="journal-emblem" src="data:image/png;base64,{logo_b64}" alt="Docendo Discimus">' if logo_b64 else ''}
             <div class="journal-brand">
-                <div class="journal-logo">ENDOCHAT • КЛИНИЧЕСКИЙ ВЕСТНИК ЭНДОДОНТИИ</div>
+                <div class="journal-logo">{branding["journal_title_upper"]}</div>
                 <div class="journal-subtitle">{clean_subtitle}</div>
             </div>
         </div>
@@ -814,9 +965,9 @@ def _build_journal_html(
     </div>
 
     <div class="issue-summary-bar">
-        <div class="issue-summary-item">🔬 Стандарт: <strong>Практическая клиническая эндодонтия</strong></div>
-        <div class="issue-summary-item">🦷 Сообщество: <strong>EndoChat (Эндодонтия под микроскопом)</strong></div>
-        <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи-эндодонтисты</strong></div>
+        <div class="issue-summary-item">🔬 Стандарт: <strong>{branding["standard_name"]}</strong></div>
+        <div class="issue-summary-item">🦷 Сообщество: <strong>{branding["community_name"]}</strong></div>
+        <div class="issue-summary-item">📍 Источник: <strong>{branding["source_name"]}</strong></div>
     </div>
 
     <div class="journal-content">
@@ -825,36 +976,35 @@ def _build_journal_html(
 
     <div class="journal-closing-block">
         <div class="assistant-promo-card">
-            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @{bot_username.upper()} • ПОМОЩНИК У МИКРОСКОПА</div>
+            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @{bot_username.upper()} • {branding["promo_title"]}</div>
             <div class="assistant-promo-desc">
-                Коллеги, бот сообщества — это ваш персональный клинический эндодонтический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
+                {branding["promo_desc"]}
             </div>
             <div class="assistant-promo-grid">
                 <div class="assistant-promo-item">
-                    <b>🔬 Мульти-анализ снимков и КЛКТ (Vision)</b>
-                    Присылайте в ЛС прицельные радиовизиограммы, срезы КЛКТ и фото эндодоступа. Бот оценивает анатомию каналов (MB2, C-shape), кривизну корней, апикальный периодонтит (PAI), качество обтурации и признаки трещин (VRF).
+                    <b>{branding["promo_vision_title"]}</b>
+                    {branding["promo_vision_desc"]}
                 </div>
                 <div class="assistant-promo-item">
-                    <b>💊 Эндодонтическая фармакология и анестезия</b>
-                    Точный расчет анестезии при горячем пульпите по весу и соматике (ASA), подбор схем купирования симптоматического апикального периодонтита (flare-up) и строгие показания к антибиотикам.
+                    <b>{branding["promo_pharma_title"]}</b>
+                    {branding["promo_pharma_desc"]}
                 </div>
                 <div class="assistant-promo-item">
-                    <b>📚 Клинические протоколы (/protocols)</b>
-                    Пошаговые алгоритмы доказательной эндодонтии: протокол ультразвуковой активации PUI/EDDY, байпас отломка файла, закрытие перфораций МТА/Biodentine, гидравлическая биокерамика, билдап с сохранением феррула.
+                    <b>{branding["promo_protocols_title"]}</b>
+                    {branding["promo_protocols_desc"]}
                 </div>
                 <div class="assistant-promo-item">
-                    <b>👤 Клиническая память врача (/profile)</b>
-                    Бот помнит вашу файловую систему, оптику (микроскоп/бинокуляры), используемые силеры и стаж, адаптируя рекомендации под ваш инструментарий.
+                    <b>{branding["promo_profile_title"]}</b>
+                    {branding["promo_profile_desc"]}
                 </div>
             </div>
             <div class="assistant-promo-cta">
-                👉 <strong>Напишите боту в личные сообщения: @{bot_username}</strong> — разберите клинический эндодонтический кейс или снимок прямо сейчас.
+                👉 <strong>Напишите боту в личные сообщения: @{bot_username}</strong> — {branding["promo_cta"]}
             </div>
         </div>
 
         <div class="journal-footer">
-            Материалы подготовлены на основе клинических обсуждений врачебного сообщества EndoChat.
-            Предназначено для врачей-стоматологов и эндодонтов в образовательных и клинических целях. Бот: @{bot_username}
+            {branding["footer_text"]} Бот: @{bot_username}
         </div>
     </div>
 </body>
@@ -865,7 +1015,7 @@ def _build_journal_html(
 
 async def generate_digest_pdf(
     html_content: str,
-    title: str = "ENDOCHAT • Клинический Вестник",
+    title: str = "",
     subtitle: str = "",
     msg_count: int = 0,
     date_str: str = "",
@@ -881,17 +1031,23 @@ async def generate_digest_pdf(
         logger.warning("generate_digest_pdf called with empty html_content")
         return None
 
+    branding = _get_branding_info()
+    resolved_title = title or branding["journal_title"]
+    # Фоллбэк нормализации, если из старого кода или вызова без контекста пришел эндодонтический заголовок
+    if not _is_endo_environment() and resolved_title == "ENDOCHAT • Клинический Вестник":
+        resolved_title = branding["journal_title"]
+
     os.makedirs(output_dir, exist_ok=True)
     cleanup_old_digests(output_dir, max_age_days=3, max_files=15)
 
     timestamp = int(time.time())
     safe_date = re.sub(r'[^0-9a-zA-Z_\-]+', '_', date_str) if date_str else str(timestamp)
-    filename = f"EndoChat_Digest_{safe_date}_{timestamp}.pdf"
+    filename = f"{branding['file_prefix']}{safe_date}_{timestamp}.pdf"
     output_path = os.path.join(output_dir, filename)
 
     full_html = _build_journal_html(
         html_body=html_content,
-        title=title,
+        title=resolved_title,
         subtitle=subtitle,
         msg_count=msg_count,
         date_str=date_str,
