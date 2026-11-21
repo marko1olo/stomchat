@@ -13406,7 +13406,7 @@ async def handle_private_message(bot_client, event):
             except Exception as pm_save_err:
                 logger.error(f"Failed to enrich PM media user message for chat_id={chat_id}: {pm_save_err}")
 
-        # Проверка намерения записи на консультацию / связи с куратором (Адиля / администрация)
+        # Проверка намерения записи на консультацию / связи с куратором / техподдержки
         text_lower = (text or "").lower()
         booking_keywords = (
             "куратор", "адиля", "адиле", "адилю",
@@ -13414,25 +13414,52 @@ async def handle_private_message(bot_client, event):
             "записаться на прием", "запись на приём", "записаться на очный",
             "очная консультация", "очный разбор", "хочу на консультацию",
             "как записаться", "как попасть на прием", "как попасть на консультацию",
-            "связаться с администратором", "контакты администратора"
+            "связаться с администратором", "контакты администратора", "администратор чата"
         )
-        if any(k in text_lower for k in booking_keywords) and not (event.photo or event.video):
-            booking_reply = (
-                "👋 <b>Запись на консультацию и связь с куратором StomChat</b>\n\n"
-                "Доктор, по вопросам очных консультаций, разборов сложных случаев, участия в курсах "
-                "и записи в клинику вы можете напрямую связаться с нашим куратором:\n\n"
-                "👩‍⚕️ <b>Куратор сообщества:</b> Адиля (@adilyastom)\n"
-                "💬 <b>Формат:</b> напишите в ЛС куратору, чтобы согласовать дату, время и формат разбора.\n\n"
-                "<i>Если вам требуется разобрать снимок или получить EBM-протокол онлайн прямо сейчас — "
-                "просто пришлите рентген или опишите клиническую картину зуба сюда в чат.</i>"
-            )
+        support_keywords = (
+            "поддержка", "техподдержка", "служба поддержки", "тех поддержка",
+            "связаться с поддержкой", "связаться с техподдержкой", "написать в поддержку",
+            "позови админа", "позвать админа", "связь с админом", "написать админу",
+            "сообщить об ошибке", "сообщить о баге", "баг-репорт", "бот сломался", "бот завис",
+            "/support", "/feedback"
+        )
+
+        is_booking_request = any(k in text_lower for k in booking_keywords)
+        is_support_request = any(k in text_lower for k in support_keywords)
+
+        if (is_booking_request or is_support_request) and not (event.photo or event.video):
+            community_title = "EndoChat" if ("endo" in os.getcwd().lower() or "endo" in str(getattr(config, "BOT_USERNAME", "")).lower()) else "StomChat"
             from telethon import Button
-            booking_buttons = [
-                [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("💬 Клинический вопрос", data="nav:chat")],
-                [Button.inline("🏠 Главное меню", data="nav:main")]
-            ]
-            await bot_client.send_message(entity=chat_id, message=booking_reply, buttons=booking_buttons, parse_mode='html')
-            return
+            if is_support_request:
+                support_reply = (
+                    f"🛠 <b>Служба поддержки и куратор сообщества {community_title}</b>\n\n"
+                    "Доктор, если вы столкнулись с технической неполадкой, сбоем в работе бота или хотите передать обратную связь команде разработки:\n\n"
+                    "👩‍⚕️ <b>Куратор и техническая поддержка:</b> Адиля (@adilyastom)\n"
+                    "💬 <b>Формат обращения:</b> опишите суть проблемы, перешлите проблемное сообщение или прикрепите скриншот.\n\n"
+                    "<i>По клиническим вопросам (разбор снимков, протоколы лечения, эндодонтия, реставрация) бот функционирует 24/7 в автоматическом режиме — просто задайте вопрос или отправьте снимок.</i>"
+                )
+                support_buttons = [
+                    [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("💬 Задать клинический вопрос", data="nav:chat")],
+                    [Button.inline("🏠 Главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(entity=chat_id, message=support_reply, buttons=support_buttons, parse_mode='html')
+                return
+            else:
+                booking_reply = (
+                    f"👋 <b>Запись на консультацию и связь с куратором {community_title}</b>\n\n"
+                    "Доктор, по вопросам очных консультаций, разборов сложных случаев, участия в курсах "
+                    "и записи в клинику вы можете напрямую связаться с нашим куратором:\n\n"
+                    "👩‍⚕️ <b>Куратор сообщества:</b> Адиля (@adilyastom)\n"
+                    "💬 <b>Формат:</b> напишите в ЛС куратору, чтобы согласовать дату, время и формат разбора.\n\n"
+                    "<i>Если вам требуется разобрать снимок или получить EBM-протокол онлайн прямо сейчас — "
+                    "просто пришлите рентген или опишите клиническую картину зуба сюда в чат.</i>"
+                )
+                booking_buttons = [
+                    [Button.inline("📚 Клинические протоколы", data="proto:list"), Button.inline("💬 Клинический вопрос", data="nav:chat")],
+                    [Button.inline("🏠 Главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(entity=chat_id, message=booking_reply, buttons=booking_buttons, parse_mode='html')
+                return
 
         # Получаем стиль и долговременную клиническую память пользователя из БД (до 64 КБ)
         user_profile = await database.get_user_profile(chat_id)
