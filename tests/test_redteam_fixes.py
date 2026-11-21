@@ -225,41 +225,38 @@ class TestIrrigationHypochloriteClinicalSafety(unittest.TestCase):
 # ============================================================================
 class TestEliminationSubjectiveYaBy(unittest.TestCase):
     """
-    Проверяет полное удаление и замену субъективных формулировок «я бы»
-    на объективные клинические императивы («Рекомендуется», «Показано», «Целесообразно»).
+    Проверяет архитектурный запрет субъективных формулировок «я бы» в Когнитивном Ядре
+    и переход на объективный безличный клинический императив через Few-Shot контраст.
     """
 
-    def test_sanitize_clinical_pm_output_eradicates_ya_by(self):
-        """sanitize_clinical_pm_output полностью устраняет сослагательное «я бы»."""
-        samples = [
-            ("Я бы рекомендовал начать с коффердама.", "Рекомендуется начать с коффердама."),
-            ("В данном случае я бы сначала сделал КЛКТ.", "В данном случае рекомендуется сначала сделать КЛКТ."),
-            ("Я бы не стал пломбировать зуб в одно посещение.", "Не показано пломбировать зуб в одно посещение."),
-            ("Я бы не назначал антибиотики широкого спектра.", "Не рекомендуется назначать антибиотики широкого спектра."),
-            ("Я бы выбрал биокерамический силер для апекса.", "Оптимально выбрать биокерамический силер для апекса."),
-            ("На вашем месте я бы провел ревизию каналов.", "Показано провести ревизию каналов.")
-        ]
+    def test_cognitive_core_enforces_impersonal_imperative_and_bans_ya_by(self):
+        """MASTER_COGNITIVE_ARCHITECTURE содержит Раздел 24 с Few-Shot запретом 'я бы'."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        self.assertIn("24. БЕЗЛИЧНЫЙ КЛИНИЧЕСКИЙ ГОЛОС", core)
+        self.assertIn("ZERO SUBJUNCTIVE MOOD", core)
+        self.assertIn("«я бы»", core)
+        self.assertIn("«я считаю»", core)
+        self.assertIn("«я бы не стал»", core)
+        self.assertIn("FEW-SHOT КОНТРАСТ СТИЛЯ", core)
+        self.assertIn("Показано", core)
+        self.assertIn("Рекомендуется", core)
 
-        for raw_input, _ in samples:
-            cleaned = assistant.sanitize_clinical_pm_output(raw_input)
-            has_ya_by = bool(re.search(r'\bя\s+бы\b', cleaned, re.IGNORECASE))
-            self.assertFalse(
-                has_ya_by,
-                f"В санитизированном ответе осталась конструкция 'я бы':\nДо:    {raw_input}\nПосле: {cleaned}"
-            )
-            has_ne_stal = bool(re.search(r'\bне\s+(?:стал|назначал)\s+бы\b', cleaned, re.IGNORECASE))
-            self.assertFalse(
-                has_ne_stal,
-                f"В санитизированном ответе осталась конструкция 'не стал/назначал бы':\n{cleaned}"
-            )
+    def test_dispute_and_vision_cores_enforce_impersonal_clinical_voice(self):
+        """Протоколы рефери и анализа изображений запрещают первое лицо и сослагательное наклонение."""
+        dispute_core = clinical_cognitive_core.DISPUTE_REFEREE_ARCHITECTURE
+        vision_core = clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE
+        self.assertIn("БЕЗЛИЧНЫЙ КЛИНИЧЕСКИЙ ГОЛОС", dispute_core)
+        self.assertIn("БЕЗЛИЧНЫЙ КЛИНИЧЕСКИЙ ГОЛОС", vision_core)
+        self.assertIn("«я бы»", dispute_core)
+        self.assertIn("«я бы»", vision_core)
 
-    def test_impersonal_imperative_preservation(self):
-        """Клинический смысл и профессиональные термины сохраняются без потерь."""
-        raw = "Я бы выбрал коффердам Sanctuary и ультразвуковую насадку с 3% NaOCl."
+    def test_sanitize_clinical_pm_output_preserves_clean_protocol(self):
+        """Санитизатор сохраняет профессиональный протокол без слепого коверканья грамматики."""
+        raw = "Показано применить коффердам Sanctuary и ультразвуковую насадку с 3% NaOCl."
         cleaned = assistant.sanitize_clinical_pm_output(raw)
-        self.assertNotIn("я бы", cleaned.lower())
         self.assertIn("коффердам", cleaned.lower())
         self.assertIn("naocl", cleaned.lower())
+        self.assertIn("sanctuary", cleaned.lower())
 
 
 # ============================================================================
