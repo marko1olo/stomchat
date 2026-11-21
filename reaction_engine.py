@@ -19,10 +19,12 @@ from dataclasses import dataclass
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("reaction_engine")
+_PACING_LOCK = threading.Lock()
 
 # ── Параметры батчинга и лимитов ──────────────────────────────────────────────
 BATCH_SIZE_THRESHOLD = 10          # Количество сообщений для немедленного сброса батча
@@ -119,6 +121,58 @@ def is_clinical_complication(text: str) -> bool:
     if not text:
         return False
     return bool(CLINICAL_COMPLICATION_RE.search(text))
+
+
+# ── Детерминированный фильтр вопросов, жалоб на бота и шума ───────────────────
+QUESTION_PATTERNS = [
+    r"\?+$",
+    r"^(?:как|почему|чем|какой|какая|какое|какие|куда|сколько|зачем|где|кто)\b",
+    r"\b(?:подскажите|посоветуйте|поделитесь|что\s+думаете|ваше\s+мнение|кто\s+сталкивался|было\s+у\s+кого)\b",
+]
+QUESTION_RE = re.compile("|".join(QUESTION_PATTERNS), re.IGNORECASE)
+
+META_COMPLAINT_PATTERNS = [
+    r"\b(?:бот|нейросет\w*|ассистент|гпт|gpt)\b.*\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)",
+    r"\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)\b.*\b(?:бот|нейросет\w*|ассистент|гпт|gpt)",
+    r"\b(?:он|ты)\s+(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошибся|гонишь|надоел\w*)",
+    r"\b(?:хватит|перестань|отстань|не\s+пиши|без\s+спама|стоп)\b",
+]
+META_COMPLAINT_RE = re.compile("|".join(META_COMPLAINT_PATTERNS), re.IGNORECASE)
+
+TRIVIAL_NOISE_PATTERNS = [
+    r"^(?:ок|ок[ее]й|ладно|ясно|понял|понятно|спс|спасибо|благодарю|привет|хай|ку|добрый\s+день|доброе\s+утро|добрый\s+вечер|здравствуйте|здравствуй)$",
+    r"^(?:да|нет|ага|угу|неа|плюс|\+|\+1|согласен|поддерживаю|точно|факт|правда)$",
+    r"^(?:лол|хах\w*|хех\w*|хихи\w*|кек|ахах\w*|ппц|хм+|ну+|ой)$",
+    r"^[\W\d_]+$",
+]
+TRIVIAL_NOISE_RE = re.compile("|".join(TRIVIAL_NOISE_PATTERNS), re.IGNORECASE)
+
+
+def is_question_or_doubt(text: str) -> bool:
+    """Определяет, содержит ли сообщение прямой вопрос, сомнение или запрос консультации."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if stripped.endswith("?"):
+        return True
+    return bool(QUESTION_RE.search(stripped))
+
+
+def is_meta_or_bot_complaint(text: str) -> bool:
+    """Определяет наличие жалоб на бота, сбои, зависания или требования замолчать."""
+    if not text:
+        return False
+    return bool(META_COMPLAINT_RE.search(text))
+
+
+def is_trivial_noise_message(text: str) -> bool:
+    """Определяет тривиальные реплики, шум и бытовые междометия без клинической ценности."""
+    if not text:
+        return True
+    stripped = text.strip()
+    if len(stripped) > 25:
+        return False
+    return bool(TRIVIAL_NOISE_RE.match(stripped.lower()))
 
 
 @dataclass
@@ -280,11 +334,18 @@ def build_batch_prompt(messages: List[BufferedMessage], allowed_emojis_str: str)
 КЛИНИЧЕСКИЕ ПРАВИЛА И ЭТИКА:
 1. НИКОГДА не ставить легкомысленные или радостные реакции (😂, 🤣, 🔥, 👍, 👏, ⚡, 🎉, 👌, 💡, 💯, ❤️) на врачебную беду, сломанные инструменты, переломы корня, перфорации, кровотечения, ожоги, эмфиземы, боль, отеки, гной или осложнения! Если врач в отчаянии или жалуется на беду/ошибку — СТРОГО НОЛЬ РЕАКЦИЙ.
 2. На прямые вопросы коллег, просьбы о помощи, сомнения и жалобы на работу бота — СТРОГО НОЛЬ РЕАКЦИЙ (пустой список). Не ставь реакции на вопросы.
-3. Реакций достойны только:
+3. Категорически ЗАПРЕЩЕНЫ токсичные, саркастичные и насмешливые реакции (🤔, 👀, 💩, 🤡, 👎).
+4. Реакций достойны только:
    - Реально классные клинические результаты, КЛКТ, прицельные снимки с плотной обтурацией, красивая реставрация -> 🔥, 👏, 👍
    - Остроумный профессиональный юмор коллег, жизненная самоирония -> 😂, 🤣
    - Ценный клинический совет, коллегиальная взаимовыручка, слова благодарности -> 🤝, ❤️, 🙏, 🫡
-4. Если подходящих сообщений меньше 2, верни меньше. Если ни одно не заслуживает, верни пустой список []. По умолчанию предпочитай пустой список [].
+5. Если подходящих сообщений меньше 2, верни меньше. Если ни одно не заслуживает, верни пустой список []. По умолчанию предпочитай пустой список [].
+
+КОНТРАСТНЫЕ ПРИМЕРЫ (КАК НАДО И КАК НЕЛЬЗЯ):
+- ПЛОХО: [#101] Врач: «А какой протокол ирригации в 46?» -> Реакция: 🤔 (ОШИБКА: на вопросы реакции запрещены!)
+- ПЛОХО: [#102] Врач: «Сломал 25.04 в апикальной трети 36» -> Реакция: 😂 (ОШИБКА: над осложнениями смеяться нельзя!)
+- ХОРОШО: [#103] Врач (МЕДИА/СНИМОК): «Обтурация МТА при широком апексе 21» -> Реакция: 🔥 (обоснование: плотная апикальная пробка МТА)
+- ХОРОШО: [#104] Врач: «Если NaOCl греть до 50°C, экспозицию держи 15 минут» -> Реакция: 🤝 (обоснование: ценный коллегиальный совет)
 
 ФОРМАТ ОТВЕТА СТРОГО JSON-МАССИВ (не более 1-2 элементов):
 [
@@ -319,15 +380,16 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 30.0, 
         "max_tokens": 200
     }
 
-    # Строгий пейсинг не менее 3.0 секунд перед вызовом LLM для защиты API-ключей
+    # Строгий пейсинг не менее 3.0 секунд перед вызовом LLM для защиты API-ключей (thread-safe)
     global _LAST_BATCH_LLM_CALL_TIME
-    now = time.time()
-    elapsed = now - _LAST_BATCH_LLM_CALL_TIME
-    if elapsed < LLM_CALL_PACING_SECONDS:
-        sleep_needed = LLM_CALL_PACING_SECONDS - elapsed
-        logger.debug("[BatchReactions] Pacing LLM call: sleeping %.2fs (elapsed %.2fs < %.2fs)", sleep_needed, elapsed, LLM_CALL_PACING_SECONDS)
-        time.sleep(sleep_needed)
-    _LAST_BATCH_LLM_CALL_TIME = time.time()
+    with _PACING_LOCK:
+        now = time.time()
+        elapsed = now - _LAST_BATCH_LLM_CALL_TIME
+        if elapsed < LLM_CALL_PACING_SECONDS:
+            sleep_needed = LLM_CALL_PACING_SECONDS - elapsed
+            logger.debug("[BatchReactions] Pacing LLM call: sleeping %.2fs (elapsed %.2fs < %.2fs)", sleep_needed, elapsed, LLM_CALL_PACING_SECONDS)
+            time.sleep(sleep_needed)
+        _LAST_BATCH_LLM_CALL_TIME = time.time()
 
     try:
         response = gemini_client.generate_text(prompt, status_context=status_context, timeout=timeout)
@@ -352,9 +414,17 @@ def evaluate_batch_sync(messages: List[BufferedMessage], timeout: float = 30.0, 
                 logger.debug("[BatchReactions] Rejected emoji %r not in ALLOWED_REACTIONS", emoji)
                 continue
 
-            # 2. ЖЕЛЕЗНЫЙ КЛИНИЧЕСКИЙ ГАРД: запрет реакций на осложнения
+            # 2. ЖЕЛЕЗНЫЙ КЛИНИЧЕСКИЙ ГАРД: запрет реакций на осложнения, вопросы и мета-жалобы
             if is_clinical_complication(msg_obj.text):
                 logger.info("[BatchReactions] Hard blocked reaction %r on clinical complication msg_id=%s: %r", emoji, mid, msg_obj.text[:80])
+                continue
+
+            if not msg_obj.has_media and is_question_or_doubt(msg_obj.text):
+                logger.info("[BatchReactions] Hard blocked reaction %r on text-only question msg_id=%s: %r", emoji, mid, msg_obj.text[:80])
+                continue
+
+            if is_meta_or_bot_complaint(msg_obj.text):
+                logger.info("[BatchReactions] Hard blocked reaction %r on meta/bot complaint msg_id=%s: %r", emoji, mid, msg_obj.text[:80])
                 continue
 
             # 3. Защита от дублирования реакций одному врачу в одном батче
@@ -412,22 +482,23 @@ async def flush_chat_batch(chat_id: int):
     except Exception as e:
         logger.debug("[BatchReactions] tg_safety cooldown check failed for chat %s: %s", chat_id, e)
 
-    # 2. Защита от параллельного сброса батчей одного чата
-    if chat_id in _CHATS_BEING_FLUSHED:
-        logger.debug("[BatchReactions] Chat %s is already being flushed. Skipping parallel flush.", chat_id)
-        return
-    _CHATS_BEING_FLUSHED.add(chat_id)
+    # 2. Защита от параллельного сброса батчей одного чата (строго под блокировкой)
+    lock = _get_lock(chat_id)
+    async with lock:
+        if chat_id in _CHATS_BEING_FLUSHED:
+            logger.debug("[BatchReactions] Chat %s is already being flushed. Skipping parallel flush.", chat_id)
+            return
+        _CHATS_BEING_FLUSHED.add(chat_id)
+
+        buffer = _CHAT_BUFFERS.get(chat_id, [])
+        if not buffer:
+            _CHATS_BEING_FLUSHED.discard(chat_id)
+            return
+
+        batch_to_eval = list(buffer[:BATCH_SIZE_THRESHOLD])
+        _CHAT_BUFFERS[chat_id] = buffer[len(batch_to_eval):]
 
     try:
-        lock = _get_lock(chat_id)
-        async with lock:
-            buffer = _CHAT_BUFFERS.get(chat_id, [])
-            if not buffer:
-                return
-
-            batch_to_eval = list(buffer[:BATCH_SIZE_THRESHOLD])
-            _CHAT_BUFFERS[chat_id] = buffer[len(batch_to_eval):]
-
         if not batch_to_eval:
             return
 
@@ -526,7 +597,8 @@ async def flush_chat_batch(chat_id: int):
 
         logger.info("[BatchReactions] Batch completed: set %d reactions out of %d messages.", applied_count, len(batch_to_eval))
     finally:
-        _CHATS_BEING_FLUSHED.discard(chat_id)
+        async with lock:
+            _CHATS_BEING_FLUSHED.discard(chat_id)
 
 
 async def _flusher_loop():
@@ -656,6 +728,10 @@ async def process_incoming_event(
         has_media = bool(getattr(event, "media", None) or getattr(event, "photo", None) or getattr(event, "document", None))
 
     if not text and not has_media:
+        return False
+
+    # Не накапливаем в батче короткий бытовой шум и смайлики без клинического контента
+    if not has_media and is_trivial_noise_message(text):
         return False
 
     if not msg_id and event is not None:

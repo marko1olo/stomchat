@@ -198,5 +198,73 @@ class TestBatchReactionEngine(unittest.TestCase):
             results = reaction_engine.evaluate_batch_sync([m_bad])
             self.assertEqual(len(results), 0, "Celebratory reaction on clinical tragedy was NOT blocked!")
 
+    def test_question_guard_blocks_reactions_on_questions_and_doubts(self):
+        """Questions and doubts must never receive sarcastic or celebratory emoji reactions."""
+        questions = [
+            "какой протокол ирригации в 46?",
+            "чем пломбировать широкий апекс?",
+            "почему болит зуб после лечения?",
+            "подскажите тактику при перелечивании",
+            "ваше мнение по поводу биокерамики"
+        ]
+        for q in questions:
+            self.assertTrue(reaction_engine.is_question_or_doubt(q), f"Failed to detect question in: {q}")
+
+        m_q = reaction_engine.BufferedMessage(
+            msg_id=802, chat_id=-1001, sender_id=888, sender_name="Д-р Вопрос",
+            text="Какой силер лучше выбрать для латеральной конденсации?", has_media=False,
+            timestamp=100.0, event=MagicMock()
+        )
+        mock_json = '[{"msg_id": 802, "reaction": "🤔", "reason": "Вопрос"}]'
+        with patch("gemini_client.generate_text") as mock_gen:
+            mock_gen.return_value = MagicMock(text=mock_json)
+            results = reaction_engine.evaluate_batch_sync([m_q])
+            self.assertEqual(len(results), 0, "Reaction on clinical question was NOT blocked!")
+
+    def test_meta_and_bot_complaints_blocked(self):
+        """Complaints about bot or tech glitches must never receive emoji reactions."""
+        complaints = [
+            "он сломался",
+            "бот завис",
+            "глючит бот",
+            "хватит спамить",
+            "ты ошибся"
+        ]
+        for c in complaints:
+            self.assertTrue(reaction_engine.is_meta_or_bot_complaint(c), f"Failed to detect meta complaint in: {c}")
+
+        m_c = reaction_engine.BufferedMessage(
+            msg_id=803, chat_id=-1001, sender_id=555, sender_name="Д-р Злой",
+            text="бот сломался опять", has_media=False,
+            timestamp=100.0, event=MagicMock()
+        )
+        mock_json = '[{"msg_id": 803, "reaction": "😂", "reason": "Глюк"}]'
+        with patch("gemini_client.generate_text") as mock_gen:
+            mock_gen.return_value = MagicMock(text=mock_json)
+            results = reaction_engine.evaluate_batch_sync([m_c])
+            self.assertEqual(len(results), 0, "Reaction on bot complaint was NOT blocked!")
+
+    def test_trivial_noise_filtered_from_batch_buffering(self):
+        """Short chit-chat and trivial noise without media must not be buffered."""
+        event = MagicMock()
+        event.is_group = True
+        event.chat_id = -1001999
+        event.media = None
+        event.photo = None
+        event.document = None
+
+        noise_samples = ["ок", "лол", "+", "да", "привет", "ясно", "хаха"]
+        for noise in noise_samples:
+            res = asyncio.run(reaction_engine.process_incoming_event(
+                event=event,
+                msg_id=900,
+                chat_id=event.chat_id,
+                sender_id=111,
+                sender_name="Доктор",
+                text=noise,
+                has_media=False
+            ))
+            self.assertFalse(res, f"Trivial noise '{noise}' was mistakenly accepted into buffer!")
+
 if __name__ == "__main__":
     unittest.main()

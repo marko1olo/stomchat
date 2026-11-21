@@ -1,3 +1,4 @@
+import asyncio
 """
 Unit tests for Natural Language Intent Router (Zero-Slash Routing)
 and instant anesthesia calculation in StomChat (assistant.py).
@@ -401,6 +402,118 @@ class TestPrivateMessageRoutingIntegration(unittest.IsolatedAsyncioTestCase):
         mock_bot.send_message.assert_called()
         sent_messages = [call.kwargs.get("message", "") for call in mock_bot.send_message.call_args_list]
         self.assertTrue(any("StomChat AI" in m or "База Знаний" in m or "клинический ассистент" in m for m in sent_messages))
+
+
+
+
+class TestIntentRouterGroupTriageAndParity(unittest.TestCase):
+    """Verify intent_router.py parity, group triage, dispute referee, and lock manager."""
+
+    def test_intent_router_zero_slash_parity(self):
+        import intent_router
+        phrases = [
+            ("погугли биодентин", intent_router.INTENT_WEB_SEARCH, "биодентин"),
+            ("посчитай анестезию", intent_router.INTENT_CALCULATOR, "посчитай анестезию"),
+            ("хочу квиз", intent_router.INTENT_QUIZ, ""),
+            ("давай кейс", intent_router.INTENT_CASE, ""),
+            ("мои закладки", intent_router.INTENT_BOOKMARKS, ""),
+            ("смени стиль", intent_router.INTENT_STYLE, ""),
+            ("главное меню", intent_router.INTENT_MENU, ""),
+        ]
+        for t, exp_intent, exp_query in phrases:
+            res = intent_router.detect_user_intent(t)
+            self.assertEqual(res.name, exp_intent, f"Failed for {t}")
+            if exp_query:
+                self.assertEqual(res.query.lower(), exp_query.lower())
+
+    def test_intent_router_anesthesia_calculator(self):
+        import intent_router
+        res = intent_router.calculate_anesthesia_instant("сколько карпул артикаина на 70 кг")
+        self.assertIsNotNone(res)
+        self.assertIn("Артикаин 4%", res)
+        self.assertIn("до 7 карпул", res)
+
+    def test_should_passively_engage_filters_noise_and_respects_config(self):
+        import intent_router
+        import config
+        # 1. Trivial noise is filtered
+        noise_samples = ["ок", "привет", "лол", "+", "да", "спасибо"]
+        for noise in noise_samples:
+            should_engage, reason = intent_router.should_passively_engage(
+                text=noise, has_media=False, is_group=True, chat_id=-100, sender_id=123
+            )
+            self.assertFalse(should_engage)
+
+        # 2. Addressed to other user (@username) is filtered (with active passive mode)
+        with patch.object(config, "SUMMON_ONLY_GROUP_MODE", False),              patch.object(config, "ENABLE_PASSIVE_TEXT", True):
+            should_engage, reason = intent_router.should_passively_engage(
+                text="@doctor_ivanov посмотри этот клинический снимок",
+                has_media=False, is_group=True, chat_id=-100, sender_id=123
+            )
+            self.assertFalse(should_engage)
+            self.assertEqual(reason, "addressed_to_other_user")
+
+        # 3. Not in group
+        should_engage, reason = intent_router.should_passively_engage(
+            text="Клинический разбор зуба 46", has_media=False, is_group=False
+        )
+        self.assertFalse(should_engage)
+        self.assertEqual(reason, "not_a_group")
+
+    def test_detect_clinical_dispute_distinguishes_healthy_debate_from_toxic_conflict(self):
+        import intent_router
+        # 1. Toxic conflict
+        toxic_text = "Вы вообще стоматолог? Руки оторвать за такую препаровку, полная лажа и бракодел!"
+        res_toxic = intent_router.detect_clinical_dispute(toxic_text)
+        self.assertTrue(res_toxic.is_dispute)
+        self.assertTrue(res_toxic.should_intervene)
+        self.assertEqual(res_toxic.dispute_type, "TOXIC_CONFLICT")
+
+        # 2. Dangerous pseudoscience
+        quack_text = "Коллеги, закладывайте резорцин-формалин в каналы, проверенный метод"
+        res_quack = intent_router.detect_clinical_dispute(quack_text)
+        self.assertTrue(res_quack.is_dispute)
+        self.assertTrue(res_quack.should_intervene)
+        self.assertEqual(res_quack.dispute_type, "DANGEROUS_PSEUDOSCIENCE")
+
+        # 3. Healthy debate
+        healthy_chain = [
+            "Доктор 1: Я считаю, здесь показана культевая вкладка и коронка",
+            "Доктор 2: А я бы рекомендовал стекловолоконный штифт и композитный билдап",
+            "Доктор 1: При ферруле меньше 1.5 мм штифт даст расклинивающий эффект",
+            "Доктор 2: Но современные адгезивы 8 поколения компенсируют нагрузку"
+        ]
+        res_healthy = intent_router.detect_clinical_dispute("Что думаете?", context_msgs=healthy_chain)
+        self.assertTrue(res_healthy.is_dispute)
+        self.assertFalse(res_healthy.should_intervene, "Bot mistakenly intervened in healthy, respectful peer debate!")
+        self.assertEqual(res_healthy.dispute_type, "HEALTHY_DEBATE")
+
+    def test_dispute_referee_system_instructions_bans_mentor_tone_and_stamps(self):
+        import intent_router
+        instructions = intent_router.DISPUTE_REFEREE_SYSTEM_INSTRUCTIONS
+        self.assertIn("ЗАПРЕТ МЕНТОРСТВА", instructions)
+        self.assertIn("Вердикт", instructions)
+        self.assertIn("EBM-Арбитраж", instructions)
+        self.assertIn("КОНТРАСТНЫЕ ПРИМЕРЫ", instructions)
+        self.assertIn("ПЛОХО", instructions)
+        self.assertIn("ХОРОШО", instructions)
+
+    def test_group_triage_lock_manager_prevents_race_conditions(self):
+        import intent_router
+        async def _test():
+            mgr = intent_router.GroupTriageLockManager()
+            chat_id = -100777
+            slot1 = await mgr.acquire_triage_slot(chat_id, sender_id=1, cooldown_seconds=10.0)
+            self.assertTrue(slot1)
+            # Parallel request in same chat while slot1 is in-flight must be rejected
+            slot2 = await mgr.acquire_triage_slot(chat_id, sender_id=2, cooldown_seconds=10.0)
+            self.assertFalse(slot2)
+            # Release slot
+            await mgr.release_triage_slot(chat_id, mark_success=True)
+            # Immediate next request must be blocked by cooldown
+            slot3 = await mgr.acquire_triage_slot(chat_id, sender_id=3, cooldown_seconds=10.0)
+            self.assertFalse(slot3)
+        asyncio.run(_test())
 
 
 if __name__ == "__main__":
