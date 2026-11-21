@@ -658,9 +658,11 @@ async def _send_message_once(client, chat_id, topic_id, text, send_params, label
         )
         return existing
 
-    # ХАРД-ГАРД: Защита от случайной отправки неструктурированных простыней текста (>1800 символов)
-    # Ни при каких сбоях бот не должен спамить в чат сырыми кусками HTML-статьи.
-    if len(text) > 1800 and not text.startswith(("<pre>", "```")):
+    # ХАРД-ГАРД: Защита от случайной отправки неструктурированных простыней текста
+    # Ни при каких сбоях бот не должен спамить в чат сырыми кусками HTML-статьи в тизере.
+    is_authorized_long = any(tag in label for tag in ("fallback", "direct", "long_article"))
+    max_allowed = 3900 if is_authorized_long else 1800
+    if len(text) > max_allowed and not text.startswith(("<pre>", "```")):
         logger.error(
             "CRITICAL SAFEGUARD TRIGGERED: Attempted to send raw long text (%d chars) to chat=%s label=%s! "
             "Truncating to emergency teaser format to protect chat from text dump.",
@@ -1602,6 +1604,31 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 "daily_teaser",
             )
 
+            # Резервный канал доставки: если Telegraph недоступен, публикуем полную статью в чат частями
+            if not page_url:
+                logger.warning(
+                    "Telegraph daily page unavailable (err=%s); sending full digest as direct chat messages fallback",
+                    telegraph_error,
+                )
+                from html_safe import split_html, convert_all_tables_in_html_to_telegraph
+                direct_html = convert_all_tables_in_html_to_telegraph(full_html)
+                chunks = split_html(direct_html, limit=1700)
+                fallback_params = dict(send_params)
+                fallback_params['link_preview'] = False
+                fallback_params.pop('buttons', None)
+                for c_idx, chunk in enumerate(chunks):
+                    prefix = f"📖 <b>Часть {c_idx + 1}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
+                    part_text = prefix + chunk
+                    await _send_message_once(
+                        client,
+                        chat_id,
+                        topic_id,
+                        part_text,
+                        fallback_params,
+                        f"daily_direct_fallback_{c_idx+1}",
+                    )
+                    await asyncio.sleep(0.5)
+
         # 9. ЗАКРЕП И ГЕНЕРАЦИЯ PDF
         if sent_msg:
             await _notify_delivery(delivery_hook, sent_msg)
@@ -2069,6 +2096,31 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             send_params,
             "weekly_teaser",
         )
+
+        # Резервный канал доставки: если Telegraph недоступен, публикуем полную газету в чат частями
+        if not page_url:
+            logger.warning(
+                "Telegraph weekly page unavailable (err=%s); sending full weekly newspaper as direct chat messages fallback",
+                telegraph_error,
+            )
+            from html_safe import split_html, convert_all_tables_in_html_to_telegraph
+            direct_html = convert_all_tables_in_html_to_telegraph(full_html)
+            chunks = split_html(direct_html, limit=1700)
+            fallback_params = dict(send_params)
+            fallback_params['link_preview'] = False
+            fallback_params.pop('buttons', None)
+            for c_idx, chunk in enumerate(chunks):
+                prefix = f"🗞 <b>Часть {c_idx + 1}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
+                part_text = prefix + chunk
+                await _send_message_once(
+                    client,
+                    chat_id,
+                    topic_id,
+                    part_text,
+                    fallback_params,
+                    f"weekly_direct_fallback_{c_idx+1}",
+                )
+                await asyncio.sleep(0.5)
 
         # Закреп. Проверка на sent_msg тут была пропущена, хотя в дневной ветке
         # она есть: обращение к sent_msg.id у None бросало AttributeError уже

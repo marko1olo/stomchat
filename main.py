@@ -794,12 +794,23 @@ async def scheduler_task(bot_client):
 
                     min_daily_msgs = getattr(config, "MIN_DAILY_SUMMARY_MESSAGES", 5)
                     allow_backfill = getattr(config, "ALLOW_DAILY_SUMMARY_BACKFILL", False)
-                    messages = await asyncio.wait_for(
-                        database.get_messages_for_daily_summary(
-                            start_time, end_time, min_count=100, allow_backfill=allow_backfill
-                        ),
-                        timeout=30,
-                    )
+                    try:
+                        messages = await asyncio.wait_for(
+                            database.get_messages_for_daily_summary(
+                                start_time, end_time, min_count=100, allow_backfill=allow_backfill
+                            ),
+                            timeout=30,
+                        )
+                    except TypeError as te:
+                        if "allow_backfill" in str(te):
+                            messages = await asyncio.wait_for(
+                                database.get_messages_for_daily_summary(
+                                    start_time, end_time, min_count=100
+                                ),
+                                timeout=30,
+                            )
+                        else:
+                            raise
 
                     if len(messages) < min_daily_msgs:
                         logger.info(
@@ -3439,6 +3450,8 @@ def _pm_user_lock(user_id):
 
 _PM_PENDING_QUEUES = {}  # chat_id -> list of Telethon events
 _PM_BURST_WORKERS = {}   # chat_id -> asyncio.Task
+_PM_LAST_ARRIVAL = {}    # chat_id -> float timestamp of latest incoming message
+_PM_ACTIVE_GENERATION = set()  # set of chat_ids currently generating LLM response
 
 
 @bot_client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
@@ -3446,6 +3459,7 @@ async def handle_private_message(event):
     """Обработчик входящих личных сообщений (ЛС) бота с debouncing-бандлингом быстрых реплик."""
     chat_id = event.chat_id
     raw_text = (event.message.message or "").strip()
+    _PM_LAST_ARRIVAL[chat_id] = time.time()
 
     # Команды (/start, /case, /quiz, /calc, /help, /wipe, /chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve и текстовые кнопки нижнего меню) исполняются сразу, без задержки очереди
     text_lower = raw_text.lower()
@@ -3464,6 +3478,8 @@ async def handle_private_message(event):
                 logger.info("Cancelling active PM burst worker for chat_id=%s on abort command: %s", chat_id, raw_text)
                 worker.cancel()
             _PM_PENDING_QUEUES.pop(chat_id, None)
+            _PM_LAST_ARRIVAL.pop(chat_id, None)
+            _PM_ACTIVE_GENERATION.discard(chat_id)
 
         if await chairside_tools.handle_if_chairside_command(bot_client, event, raw_text):
             return
@@ -3489,12 +3505,14 @@ async def handle_private_message(event):
 
     existing_worker = _PM_BURST_WORKERS.get(chat_id)
     if existing_worker and not existing_worker.done():
-        # Воркер уже ожидает или обрабатывает этот чат — он заберет новое сообщение из очереди
-        if not assistant.check_user_cooldown(chat_id, chat_id, "pm_busy_status", seconds=15):
+        # Воркер уже ожидает или обрабатывает этот чат — он заберет новое сообщение из очереди.
+        # Статус «обрабатываю ваш предыдущий запрос» шлём ТОЛЬКО если бот уже генерирует ответ LLM,
+        # но НЕ во время начального ожидания debouncing-бандлинга (пока врач прикрепляет фото/голосовое).
+        if chat_id in _PM_ACTIVE_GENERATION and not assistant.check_user_cooldown(chat_id, chat_id, "pm_busy_status", seconds=15):
             async def send_busy_hint():
                 try:
                     await asyncio.sleep(1.0)
-                    if not _PM_BURST_WORKERS.get(chat_id):
+                    if not _PM_BURST_WORKERS.get(chat_id) or chat_id not in _PM_ACTIVE_GENERATION:
                         return
                     await tg_safety.send_message(
                         bot_client, chat_id,
@@ -3510,30 +3528,37 @@ async def handle_private_message(event):
     async def run_burst_worker():
         try:
             async with _pm_user_lock(chat_id):
-                # Debounce loop: wait until no new messages/photos arrive for 1.2s (or 2.0s if media), max 6.0s
+                # Интеллектуальный debounce-сборщик сообщений ЛС:
+                # - Если в очереди есть снимок без текста или реплика, ожидающая снимок
+                #   («Оцени пломбировку», «Посмотри снимок», «Вот фото», «Скинул КТ»),
+                #   даем врачу 3.5 секунды тишины с момента ПОСЛЕДНЕГО сообщения на прикрепление медиафайла.
+                # - Если идет пачка быстрых сообщений от врача — ждем 2.5 секунды.
+                # - Одиночный текстовый вопрос — 2.0 секунды.
+                # Верхняя граница окна — 7.0 секунд от начала ожидания.
                 start_wait = time.time()
-                last_len = len(_PM_PENDING_QUEUES.get(chat_id, []))
-                while (time.time() - start_wait) < 6.0:
-                    first_ev = _PM_PENDING_QUEUES.get(chat_id, [None])[0]
-                    has_media_no_text = False
-                    if first_ev:
-                        msg = getattr(first_ev, "message", None)
-                        has_media = (
-                            getattr(msg, "photo", None) is not None
-                            or getattr(msg, "video", None) is not None
-                            or getattr(msg, "voice", None) is not None
-                            or getattr(msg, "audio", None) is not None
-                            or getattr(msg, "video_note", None) is not None
-                        )
-                        has_text = bool((getattr(msg, "message", None) or "").strip())
-                        has_media_no_text = has_media and not has_text
-
-                    wait_time = 2.0 if has_media_no_text else 1.2
-                    await asyncio.sleep(wait_time)
-                    current_len = len(_PM_PENDING_QUEUES.get(chat_id, []))
-                    if current_len == last_len:
+                max_debounce = 7.0
+                while (time.time() - start_wait) < max_debounce:
+                    current_queue = _PM_PENDING_QUEUES.get(chat_id, [])
+                    if not current_queue:
                         break
-                    last_len = current_len
+
+                    has_media_without_text = any(getattr(assistant, "has_pm_media_no_text", lambda e: False)(ev) for ev in current_queue)
+                    has_media_anticipating = any(getattr(assistant, "is_pm_media_anticipating_event", lambda e: False)(ev) for ev in current_queue)
+
+                    if has_media_anticipating or has_media_without_text:
+                        quiet_target = 3.5
+                    elif len(current_queue) > 1:
+                        quiet_target = 2.5
+                    else:
+                        quiet_target = 2.0
+
+                    last_arr = _PM_LAST_ARRIVAL.get(chat_id, start_wait)
+                    elapsed_since_last = time.time() - last_arr
+                    if elapsed_since_last >= quiet_target:
+                        break
+
+                    remaining_quiet = max(0.2, min(quiet_target - elapsed_since_last, 1.0))
+                    await asyncio.sleep(remaining_quiet)
 
                 # [SYS-01 FIX] Loop drains queue after each generation.
                 # Previously: worker popped queue once, then started LLM (5-15s).
@@ -3544,6 +3569,7 @@ async def handle_private_message(event):
                     if not burst:
                         break
 
+                    _PM_ACTIVE_GENERATION.add(chat_id)
                     try:
                         pm_timeout = int(os.getenv("PM_BURST_ITEM_TIMEOUT_SECONDS", "650"))
                         if len(burst) == 1:
@@ -3562,6 +3588,8 @@ async def handle_private_message(event):
                             logger.warning(f"Failed to notify user about timeout in chat_id={chat_id}: {notify_err}")
                     except Exception as item_err:
                         logger.exception(f"Error processing PM burst item for chat_id={chat_id}: {item_err}")
+                    finally:
+                        _PM_ACTIVE_GENERATION.discard(chat_id)
 
                     # Check if new messages arrived during generation
                     if not _PM_PENDING_QUEUES.get(chat_id):
@@ -3571,6 +3599,8 @@ async def handle_private_message(event):
         except Exception as e:
             logger.exception(f"Unexpected error in PM burst worker: {e}")
         finally:
+            _PM_ACTIVE_GENERATION.discard(chat_id)
+            _PM_LAST_ARRIVAL.pop(chat_id, None)
             _PM_BURST_WORKERS.pop(chat_id, None)
             # Race guard: rearm worker only if task was not cancelled and process is still running
             current_t = asyncio.current_task()

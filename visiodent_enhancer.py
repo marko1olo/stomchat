@@ -76,12 +76,17 @@ def draw_hud_pill_badge(
     text: str,
     xy: Tuple[int, int],
     tag_color: Tuple[int, int, int] = (0, 200, 255),
-    font_size: int = 22
+    font_size: int = 22,
+    max_badge_w: Optional[int] = None
 ) -> None:
     """Отрисовывает медицинский полупрозрачный темный HUD-бейдж с цветным тегом и шрифтом UTF-8."""
+    effective_font_size = font_size
+    if max_badge_w and max_badge_w > 0:
+        effective_font_size = max(12, min(font_size, int(font_size * (max_badge_w / 650))))
+
     draw = ImageDraw.Draw(pil_img, "RGBA")
     try:
-        font = ImageFont.truetype(RESOLVED_FONT_PATH, font_size) if RESOLVED_FONT_PATH else ImageFont.load_default()
+        font = ImageFont.truetype(RESOLVED_FONT_PATH, effective_font_size) if RESOLVED_FONT_PATH else ImageFont.load_default()
     except Exception:
         font = ImageFont.load_default()
 
@@ -89,8 +94,8 @@ def draw_hud_pill_badge(
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
 
-    pad_x = 16
-    pad_y = 10
+    pad_x = max(8, int(16 * (effective_font_size / 22)))
+    pad_y = max(5, int(10 * (effective_font_size / 22)))
     x, y = xy
     w = tw + pad_x * 2 + 18
     h = th + pad_y * 2
@@ -98,15 +103,15 @@ def draw_hud_pill_badge(
     # Полупрозрачная подложка цвета темного сланца
     draw.rounded_rectangle(
         [x, y, x + w, y + h],
-        radius=8,
+        radius=max(4, int(8 * (effective_font_size / 22))),
         fill=(15, 18, 22, 225),
         outline=(60, 68, 76, 255),
         width=1
     )
 
     # Круглый цветовой индикатор квадранта
-    dot_r = 5
-    dot_x = x + 14
+    dot_r = max(3, int(5 * (effective_font_size / 22)))
+    dot_x = x + pad_x
     dot_y = y + h // 2
     draw.ellipse(
         [dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r],
@@ -114,7 +119,7 @@ def draw_hud_pill_badge(
     )
 
     # Четкий белый текст
-    text_x = dot_x + dot_r + 10
+    text_x = dot_x + dot_r + 8
     text_y = y + pad_y - 2
     draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
 
@@ -195,11 +200,23 @@ def generate_visiodent_collage(
         blurred = cv2.GaussianBlur(q2, (0, 0), sigmaX=1.8)
         q4 = cv2.addWeighted(q2, 1.45, blurred, -0.45, 0)
 
-        # Масштабирование в HD размер с сохранением оригинальных пропорций
-        target_w = target_quadrant_width
-        target_h = int(orig_h * (target_w / orig_w))
+        # Сборка 2x2 с темными разделителями
+        divider_thickness = 6
+        divider_color = (25, 28, 32)
 
-        interp = cv2.INTER_AREA if target_w < orig_w else cv2.INTER_LANCZOS4
+        # Telegram photo bounds & Telethon threshold: 2560px.
+        # Ограничиваем общие размеры 2x2 коллажа в пределах 2048px (HD стандарт Telegram),
+        # гарантируя, что Telethon никогда не запустит внутренний resize c progressive=True JPEG.
+        MAX_COLLAGE_EDGE = 2048
+        max_q_w = (MAX_COLLAGE_EDGE - divider_thickness) // 2
+        max_q_h = (MAX_COLLAGE_EDGE - divider_thickness) // 2
+
+        desired_w = min(target_quadrant_width, max_q_w)
+        scale = min(desired_w / orig_w, max_q_h / orig_h)
+        target_w = max(40, int(orig_w * scale))
+        target_h = max(40, int(orig_h * scale))
+
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
         q1_res = cv2.resize(q1, (target_w, target_h), interpolation=interp)
         q2_res = cv2.resize(q2, (target_w, target_h), interpolation=interp)
         q3_res = cv2.resize(q3, (target_w, target_h), interpolation=interp)
@@ -209,10 +226,6 @@ def generate_visiodent_collage(
         q2_bgr = cv2.cvtColor(q2_res, cv2.COLOR_GRAY2BGR)
         q3_bgr = cv2.cvtColor(q3_res, cv2.COLOR_GRAY2BGR)
         q4_bgr = cv2.cvtColor(q4_res, cv2.COLOR_GRAY2BGR)
-
-        # Сборка 2x2 с темными разделителями
-        divider_thickness = 6
-        divider_color = (25, 28, 32)
 
         divider_v = np.full((target_h, divider_thickness, 3), divider_color, dtype=np.uint8)
         top_row = np.hstack([q1_bgr, divider_v, q2_bgr])
@@ -226,11 +239,14 @@ def generate_visiodent_collage(
         collage_rgb = cv2.cvtColor(collage_bgr, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(collage_rgb)
 
-        margin_x, margin_y = 24, 24
-        draw_pill_badge(pil_img, "1. ОРИГИНАЛ (GRAYSCALE)", (margin_x, margin_y), tag_color=(180, 190, 205), font_size=22)
-        draw_pill_badge(pil_img, "2. АДАПТИВНЫЙ КОНТРАСТ (CLAHE)", (target_w + divider_thickness + margin_x, margin_y), tag_color=(0, 215, 255), font_size=22)
-        draw_pill_badge(pil_img, "3. НЕГАТИВ (РЕЗОРБЦИЯ & ТРЕЩИНЫ)", (margin_x, target_h + divider_thickness + margin_y), tag_color=(255, 90, 90), font_size=22)
-        draw_pill_badge(pil_img, "4. КОНТУРНЫЙ ФИЛЬТР (PDL & ОБЛОМКИ)", (target_w + divider_thickness + margin_x, target_h + divider_thickness + margin_y), tag_color=(75, 225, 120), font_size=22)
+        margin_x = max(10, min(24, int(target_w * 0.03)))
+        margin_y = max(10, min(24, int(target_h * 0.03)))
+        max_badge_w = target_w - margin_x * 2
+
+        draw_pill_badge(pil_img, "1. ОРИГИНАЛ (GRAYSCALE)", (margin_x, margin_y), tag_color=(180, 190, 205), font_size=22, max_badge_w=max_badge_w)
+        draw_pill_badge(pil_img, "2. АДАПТИВНЫЙ КОНТРАСТ (CLAHE)", (target_w + divider_thickness + margin_x, margin_y), tag_color=(0, 215, 255), font_size=22, max_badge_w=max_badge_w)
+        draw_pill_badge(pil_img, "3. НЕГАТИВ (РЕЗОРБЦИЯ & ТРЕЩИНЫ)", (margin_x, target_h + divider_thickness + margin_y), tag_color=(255, 90, 90), font_size=22, max_badge_w=max_badge_w)
+        draw_pill_badge(pil_img, "4. КОНТУРНЫЙ ФИЛЬТР (PDL & ОБЛОМКИ)", (target_w + divider_thickness + margin_x, target_h + divider_thickness + margin_y), tag_color=(75, 225, 120), font_size=22, max_badge_w=max_badge_w)
 
         # Определение пути сохранения
         if not output_path:
@@ -239,7 +255,16 @@ def generate_visiodent_collage(
             output_path = os.path.join(MEDIA_TEMP_DIR, f"visio_collage_{os.getpid()}_{np.random.randint(1000, 9999)}.jpg")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        pil_img.save(output_path, "JPEG", quality=95)
+        # Гарантированное сохранение стандартного baseline JPEG с принудительным сбросом буферов на диск (fsync)
+        with open(output_path, "wb") as f:
+            pil_img.save(f, format="JPEG", quality=95, progressive=False, optimize=False)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+            logger.error("generate_visiodent_collage: результирующий файл пуст или не сохранен: %s", output_path)
+            return None, None
+
         return output_path, pil_img.size
     except Exception as exc:
         logger.exception("Ошибка при генерации визиографического коллажа: %s", exc)
@@ -422,3 +447,94 @@ def format_xray_collage_caption(analysis: Dict[str, Any]) -> str:
         "<i>Сетка: 1 — Исходный | 2 — CLAHE | 3 — Негатив | 4 — Контурный шарп</i>"
     )
     return caption
+
+
+async def send_visiodent_collage_safe(
+    bot_client: Any,
+    chat_id: Any,
+    collage_path: str,
+    caption: str = "",
+    reply_to: Optional[int] = None,
+    parse_mode: str = "html",
+    timeout: float = 35.0,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    """
+    100% надежная отправка 2х2 HD рентген-коллажа в Telegram.
+
+    Гарантии:
+    1. Предварительная валидация: файл существует, ненулевой размер (>1024 байт), валидный заголовок JPEG.
+    2. Первичная отправка как фото (force_document=False) через tg_safety с дедлайном.
+    3. Автоматический fallback: при ошибке 'Failure while processing image' / IMAGE_PROCESS_FAILED
+       или любой ошибке декодера Telegram — автоматическая повторная отправка с force_document=True.
+    4. Защита дескрипторов и ресурсов.
+    """
+    log = logger or logging.getLogger("visiodent_enhancer")
+
+    if not collage_path or not os.path.exists(collage_path):
+        log.error("send_visiodent_collage_safe: файл коллажа не существует: %s", collage_path)
+        return False
+
+    try:
+        f_size = os.path.getsize(collage_path)
+        if f_size < 1024:
+            log.error("send_visiodent_collage_safe: файл коллажа пуст или поврежден (%d байт): %s", f_size, collage_path)
+            return False
+    except OSError as err:
+        log.error("send_visiodent_collage_safe: ошибка доступа к файлу %s: %s", collage_path, err)
+        return False
+
+    try:
+        with Image.open(collage_path) as test_img:
+            test_img.verify()
+    except Exception as img_err:
+        log.error("send_visiodent_collage_safe: Pillow verify failed для %s: %s", collage_path, img_err)
+        return False
+
+    import tg_safety
+
+    # Попытка 1: Отправка как фото
+    outcome = await tg_safety.send_file(
+        bot_client,
+        chat_id,
+        collage_path,
+        caption=caption,
+        reply_to=reply_to,
+        parse_mode=parse_mode,
+        force_document=False,
+        timeout=timeout,
+        op="send_file:visiodent_collage_photo",
+        logger=log,
+    )
+    if outcome.ok:
+        return True
+
+    err_str = str(outcome.error or "")
+    err_name = type(outcome.error).__name__ if outcome.error else ""
+    log.warning(
+        "send_visiodent_collage_safe: отправка как фото не удалась (err=%s: %s), запускаем fallback force_document=True для chat_id=%s",
+        err_name, err_str, chat_id
+    )
+
+    # Попытка 2 (Fallback): Отправка как документ (гарантированный обход IMAGE_PROCESS_FAILED)
+    fallback_outcome = await tg_safety.send_file(
+        bot_client,
+        chat_id,
+        collage_path,
+        caption=caption,
+        reply_to=reply_to,
+        parse_mode=parse_mode,
+        force_document=True,
+        timeout=timeout,
+        op="send_file:visiodent_collage_document_fallback",
+        logger=log,
+    )
+    if fallback_outcome.ok:
+        log.info("send_visiodent_collage_safe: fallback force_document=True успешно доставлен в chat_id=%s", chat_id)
+        return True
+
+    log.error(
+        "send_visiodent_collage_safe: критическая ошибка отправки даже через document для chat_id=%s: %s",
+        chat_id, fallback_outcome.error
+    )
+    return False

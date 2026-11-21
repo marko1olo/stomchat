@@ -210,6 +210,108 @@ class TestVisiodentEnhancer(unittest.TestCase):
         self.assertIn("Квадрант 4 (Контурный фильтр / Шарп)", caption)
         self.assertIn("<b>", caption)
 
+    def test_generate_visiodent_collage_tall_bounded_to_2048(self):
+        """Инвариант: коллаж для высокого снимка (зуб с корнем) никогда не превышает 2048px (порог Telethon 2560)."""
+        tall_img = np.zeros((2000, 1000, 3), dtype=np.uint8)
+        tall_img[:, :] = 90
+        _, buf = cv2.imencode(".jpg", tall_img)
+
+        collage_path, dimensions = visiodent_enhancer.generate_visiodent_collage(buf.tobytes())
+        self.assertIsNotNone(collage_path)
+        self.assertIsNotNone(dimensions)
+        w, h = dimensions
+        self.assertLessEqual(w, 2048, f"Width {w} exceeds 2048")
+        self.assertLessEqual(h, 2048, f"Height {h} exceeds 2048")
+        if collage_path and os.path.exists(collage_path):
+            os.remove(collage_path)
+
+    def test_send_visiodent_collage_safe_photo_and_fallback(self):
+        """Проверяет отправку как фото и fallback на force_document=True при ImageProcessFailedError."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from telethon.errors.rpcerrorlist import ImageProcessFailedError
+        from PIL import Image
+
+        temp_test_jpg = os.path.join(os.path.dirname(__file__), "temp_audit_collage.jpg")
+        try:
+            im = Image.new("RGB", (300, 300), (80, 80, 80))
+            im.save(temp_test_jpg, "JPEG")
+
+            loop = asyncio.new_event_loop()
+            try:
+                # 1. Штатная отправка как фото
+                mock_client = MagicMock()
+                mock_client.send_file = AsyncMock(return_value=MagicMock())
+
+                ok = loop.run_until_complete(
+                    visiodent_enhancer.send_visiodent_collage_safe(
+                        bot_client=mock_client,
+                        chat_id=999,
+                        collage_path=temp_test_jpg,
+                        caption="Test Caption"
+                    )
+                )
+                self.assertTrue(ok)
+                self.assertEqual(mock_client.send_file.call_count, 1)
+                self.assertFalse(mock_client.send_file.call_args[1].get("force_document"))
+
+                # 2. ImageProcessFailedError -> fallback force_document=True
+                mock_fail_client = MagicMock()
+                mock_fail_client.send_file = AsyncMock(
+                    side_effect=[ImageProcessFailedError(request=None), MagicMock()]
+                )
+
+                ok_fb = loop.run_until_complete(
+                    visiodent_enhancer.send_visiodent_collage_safe(
+                        bot_client=mock_fail_client,
+                        chat_id=999,
+                        collage_path=temp_test_jpg,
+                        caption="Test Caption"
+                    )
+                )
+                self.assertTrue(ok_fb)
+                self.assertEqual(mock_fail_client.send_file.call_count, 2)
+                self.assertTrue(mock_fail_client.send_file.call_args_list[1][1].get("force_document"))
+            finally:
+                loop.close()
+        finally:
+            if os.path.exists(temp_test_jpg):
+                os.remove(temp_test_jpg)
+
+    def test_send_visiodent_collage_safe_rejects_empty_or_missing(self):
+        """Проверяет защиту от пустых, поврежденных или отсутствующих файлов."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        loop = asyncio.new_event_loop()
+        try:
+            ok1 = loop.run_until_complete(
+                visiodent_enhancer.send_visiodent_collage_safe(
+                    bot_client=MagicMock(),
+                    chat_id=999,
+                    collage_path="totally_missing_file.jpg"
+                )
+            )
+            self.assertFalse(ok1)
+
+            dummy_empty = os.path.join(os.path.dirname(__file__), "temp_empty.jpg")
+            with open(dummy_empty, "wb") as f:
+                f.write(b"")
+            try:
+                ok2 = loop.run_until_complete(
+                    visiodent_enhancer.send_visiodent_collage_safe(
+                        bot_client=MagicMock(),
+                        chat_id=999,
+                        collage_path=dummy_empty
+                    )
+                )
+                self.assertFalse(ok2)
+            finally:
+                if os.path.exists(dummy_empty):
+                    os.remove(dummy_empty)
+        finally:
+            loop.close()
+
     def test_is_xray_command(self):
         """Проверяет триггеры команд /xray и /рентген."""
         self.assertTrue(assistant.is_xray_command("/xray"))

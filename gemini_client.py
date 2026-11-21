@@ -1251,6 +1251,7 @@ def generate_text(prompt, status_context=None, timeout=None):
     media_round = 0
 
     last_provider_used = None
+    last_failure_reason = None
     while media_round < max_media_rounds and not out_of_budget:
         min_cooldown_seen = float('inf')
         for model_index, (model_name, provider) in enumerate(active_cascade):
@@ -1337,15 +1338,21 @@ def generate_text(prompt, status_context=None, timeout=None):
                     break
 
                 if requests_made > 0 and last_provider_used is not None and last_provider_used != provider:
-                    provider_switch_pause = 2.5
-                    if deadline is not None:
-                        provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
-                    if provider_switch_pause > 0:
+                    if last_failure_reason == "content_blocked":
                         logger.info(
-                            "Provider transition (%s -> %s): applying pacing backoff %.1fs to protect API quotas.",
-                            last_provider_used, provider, provider_switch_pause
+                            "Provider transition (%s -> %s): skipping pacing backoff after content-blocked for instant fallback.",
+                            last_provider_used, provider
                         )
-                        _sleep_with_status(provider_switch_pause, status_context, attempt + 1, max_attempts, f"switch_{provider}")
+                    else:
+                        provider_switch_pause = 2.5
+                        if deadline is not None:
+                            provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                        if provider_switch_pause > 0:
+                            logger.info(
+                                "Provider transition (%s -> %s): applying pacing backoff %.1fs to protect API quotas.",
+                                last_provider_used, provider, provider_switch_pause
+                            )
+                            _sleep_with_status(provider_switch_pause, status_context, attempt + 1, max_attempts, f"switch_{provider}")
 
                 rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (240.0 if provider == 'agentrouter' else 120.0))
                 call_timeout = compute_call_timeout(
@@ -1549,9 +1556,13 @@ def generate_text(prompt, status_context=None, timeout=None):
                                         })()]
                                     })()
                                     break
-                                elif ar_resp.status_code in (400, 404) and "not support" not in ar_resp.text.lower():
-                                    response = client.chat.completions.create(**create_kwargs)
-                                    break
+                                elif ar_resp.status_code in (400, 404):
+                                    if "content-blocked" in ar_resp.text.lower():
+                                        raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:300]}")
+                                    if "not support" not in ar_resp.text.lower():
+                                        response = client.chat.completions.create(**create_kwargs)
+                                        break
+                                    raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
                                 else:
                                     raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
                             response = client.chat.completions.create(**create_kwargs)
@@ -1674,6 +1685,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     failure_reason = note_key_failure(
                         provider, api_key, str(exc), model_name=model_name
                     )
+                    last_failure_reason = failure_reason
                     if failure_reason == "key_rate_limited":
                         if provider == "gemini" and is_gcp_project_quota_error(err_msg):
                             logger.warning(
@@ -2473,8 +2485,13 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
                                 })()
                             else:
                                 raise RuntimeError(f"AgentRouter empty supplement output: {ar_data}")
-                        elif ar_resp.status_code in (400, 404) and "not support" not in ar_resp.text.lower():
-                            response = client.chat.completions.create(**supp_kwargs)
+                        elif ar_resp.status_code in (400, 404):
+                            if "content-blocked" in ar_resp.text.lower():
+                                raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:200]}")
+                            if "not support" not in ar_resp.text.lower():
+                                response = client.chat.completions.create(**supp_kwargs)
+                            else:
+                                raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
                         else:
                             raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
                     else:
@@ -2496,7 +2513,9 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
             except Exception as e:
                 logger.warning(f"PM supplement failed model={model_name} key={key_id}: {e}")
                 supp_fail = note_key_failure(provider, api_key, str(e), model_name=model_name)
-                if supp_fail in ("key_rate_limited", "model_overloaded"):
+                if supp_fail in ("model_overloaded", "model_not_found", "content_blocked"):
+                    break
+                if supp_fail == "key_rate_limited":
                     time.sleep(2.5)
                 continue
 

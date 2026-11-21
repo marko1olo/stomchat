@@ -317,7 +317,7 @@ async def run():
     marked = []
     cycles = {"n": 0}
 
-    async def fake_daily_query(start_time, end_time, min_count=100):
+    async def fake_daily_query(start_time, end_time, min_count=100, allow_backfill=True, **kwargs):
         return [(i, "Врач", None, f"Реплика {i}", None, "2026-07-01 10:00:00", None, None)
                 for i in range(120)]
 

@@ -286,17 +286,21 @@ def _create_telegraph_page_sync(title, html_content):
         nodes = convert_html_to_telegraph_format(formatted_body, clean_html=True, output_format=OutputFormat.PYTHON_LIST)
         nodes = _sanitize_telegraph_nodes(nodes)
         content_str = json.dumps(nodes, ensure_ascii=False)
-        resp = requests.post(
-            "https://api.telegra.ph/createPage",
-            data={
-                "access_token": token,
-                "title": title[:256],
-                "author_name": bot_author,
-                "content": content_str,
-                "return_content": False,
-            },
-            timeout=30,
-        ).json()
+        try:
+            resp = requests.post(
+                "https://api.telegra.ph/createPage",
+                data={
+                    "access_token": token,
+                    "title": title[:256],
+                    "author_name": bot_author,
+                    "content": content_str,
+                    "return_content": False,
+                },
+                timeout=25,
+            ).json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+            raise RuntimeError(f"Telegraph network unreachable or timed out: {net_err}")
+
         if resp.get("ok"):
             return resp["result"]["url"]
 
@@ -311,17 +315,20 @@ def _create_telegraph_page_sync(title, html_content):
             if wait_s <= 10:
                 logger.warning("Telegraph %s: спим %d сек перед повторной попыткой", api_err, wait_s + 1)
                 time.sleep(wait_s + 1)
-                resp = requests.post(
-                    "https://api.telegra.ph/createPage",
-                    data={
-                        "access_token": token,
-                        "title": title[:256],
-                        "author_name": bot_author,
-                        "content": content_str,
-                        "return_content": False,
-                    },
-                    timeout=30,
-                ).json()
+                try:
+                    resp = requests.post(
+                        "https://api.telegra.ph/createPage",
+                        data={
+                            "access_token": token,
+                            "title": title[:256],
+                            "author_name": bot_author,
+                            "content": content_str,
+                            "return_content": False,
+                        },
+                        timeout=25,
+                    ).json()
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+                    raise RuntimeError(f"Telegraph network unreachable or timed out: {net_err}")
                 if resp.get("ok"):
                     return resp["result"]["url"]
                 api_err = str(resp.get("error", "Unknown"))
@@ -331,9 +338,17 @@ def _create_telegraph_page_sync(title, html_content):
                 raise RuntimeError(f"Telegraph flood wait too long: {api_err}")
 
         # При других ошибках API (например, сериализации узлов) делаем 1 попытку через библиотечный poster
-        poster = TelegraphPoster(use_api=True, access_token=token)
-        page = poster.post(title=title, author=bot_author, text=formatted_body)
-        return page["url"]
+        orig_post = requests.post
+        def timed_post(*a, **kw):
+            kw.setdefault("timeout", 25)
+            return orig_post(*a, **kw)
+        try:
+            requests.post = timed_post
+            poster = TelegraphPoster(use_api=True, access_token=token)
+            page = poster.post(title=title, author=bot_author, text=formatted_body)
+            return page["url"]
+        finally:
+            requests.post = orig_post
     except Exception as e:
         if "CONTENT_TOO_BIG" in str(e) or "FLOOD_WAIT" in str(e):
             raise
