@@ -1724,7 +1724,6 @@ def build_main_menu_markup():
         [Button.inline("🎲 Клинический квиз", data="nav:quiz"),         Button.inline("🎮 Симулятор кейса", data="nav:case")],
         [Button.inline("👤 Мой профиль", data="nav:profile"),          Button.inline("⭐ Мои закладки", data="nav:bookmarks")],
         [Button.inline("💬 Клинический вопрос", data="nav:chat"),      Button.inline("⚙️ Настройки", data="nav:settings")],
-        [Button.inline("🛠 Техподдержка / Разработчик", data="nav:support")],
     ]
 
 
