@@ -816,9 +816,14 @@ async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
     )
 
 
-async def edit_message(client, chat_id, message_id, text,
+async def edit_message(client, chat_id, message_id, text=None,
                        timeout=DEFAULT_TIMEOUT_SECONDS, op="edit_message",
                        logger=None, **kwargs):
+    if text is None and ("buttons" in kwargs):
+        return await guard(
+            lambda: client.edit_message(chat_id, message_id, buttons=kwargs.get("buttons")),
+            op=op, chat_id=chat_id, timeout=timeout, logger=logger,
+        )
     if not text or not (str(text) if text is not None else "").strip():
         log = logger or _LOG
         log.warning("tg_safety.edit_message: aborted editing empty message for chat_id=%s msg_id=%s op=%s", chat_id, message_id, op)

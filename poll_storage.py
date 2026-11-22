@@ -225,6 +225,32 @@ async def init_poll_tables(db_path: Optional[str] = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_poll_votes_user_id ON poll_votes(user_id)"
         )
 
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interactive_quizzes (
+                id INTEGER PRIMARY KEY,
+                chat_id INTEGER,
+                user_id INTEGER,
+                quiz_type TEXT NOT NULL DEFAULT 'pm',
+                topic TEXT NOT NULL,
+                question TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                correct_option_id INTEGER NOT NULL,
+                explanation TEXT NOT NULL,
+                history_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_completed BOOLEAN DEFAULT 0,
+                completed_at TIMESTAMP
+            )
+            """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactive_quizzes_created ON interactive_quizzes(created_at)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactive_quizzes_user ON interactive_quizzes(user_id, is_completed)"
+        )
+
         await db.commit()
     logger.debug("Таблицы и индексы опросов успешно инициализированы в %s", _resolve_db_path(db_path))
 
@@ -525,6 +551,117 @@ async def get_user_vote(poll_id: int, user_id: int, db_path: Optional[str] = Non
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+
+async def has_user_voted(poll_id: int, user_id: int, db_path: Optional[str] = None) -> bool:
+    """Проверяет, голосовал ли уже врач в данном опросе/квизе."""
+    vote = await get_user_vote(poll_id, user_id, db_path=db_path)
+    return vote is not None
+
+
+async def save_interactive_quiz(
+    quiz_id: int,
+    chat_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    quiz_type: str = "pm",
+    topic: str = "Стоматология",
+    question: str = "",
+    options: Optional[Union[List[str], str]] = None,
+    correct_option_id: int = 0,
+    explanation: str = "",
+    history: Optional[Dict[str, Any]] = None,
+    is_completed: bool = False,
+    db_path: Optional[str] = None,
+) -> bool:
+    """
+    Сохраняет метаданные интерактивного квиза в таблицу interactive_quizzes.
+    Позволяет восстанавливать формулировку вопроса, варианты и EBM-обоснование
+    при обработке ответов и подсветке кнопок без засорения user_interactive_states.
+    """
+    target_id = int(quiz_id)
+    opts_json = "[]"
+    if isinstance(options, list):
+        opts_json = json.dumps(options, ensure_ascii=False)
+    elif isinstance(options, str):
+        opts_json = options
+    hist_json = json.dumps(history or {}, ensure_ascii=False) if isinstance(history, dict) else (history or "{}")
+
+    async with get_db_connection(db_path) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO interactive_quizzes (
+                id, chat_id, user_id, quiz_type, topic, question, options_json,
+                correct_option_id, explanation, history_json, is_completed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_id, chat_id, user_id, quiz_type, topic, question,
+                opts_json, int(correct_option_id), explanation, hist_json,
+                1 if is_completed else 0
+            )
+        )
+        await db.commit()
+    return True
+
+
+async def get_interactive_quiz(quiz_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Получает интерактивный квиз по ID из interactive_quizzes."""
+    async with get_db_connection(db_path) as db:
+        async with db.execute(
+            "SELECT * FROM interactive_quizzes WHERE id = ?", (int(quiz_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            try:
+                d["options"] = json.loads(d.get("options_json") or "[]")
+            except Exception:
+                d["options"] = []
+            try:
+                d["history"] = json.loads(d.get("history_json") or "{}")
+            except Exception:
+                d["history"] = {}
+            d["is_completed"] = bool(d.get("is_completed", 0))
+            return d
+
+
+async def mark_interactive_quiz_completed(quiz_id: int, db_path: Optional[str] = None) -> bool:
+    """Помечает интерактивный квиз как завершенный."""
+    async with get_db_connection(db_path) as db:
+        cursor = await db.execute(
+            """
+            UPDATE interactive_quizzes
+            SET is_completed = 1,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(quiz_id),)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def cleanup_stale_interactive_quizzes(
+    max_pm_age_seconds: int = 7200,
+    max_group_age_seconds: int = 86400,
+    db_path: Optional[str] = None
+) -> int:
+    """Удаляет устаревшие интерактивные квизы."""
+    async with get_db_connection(db_path) as db:
+        cursor = await db.execute(
+            """
+            DELETE FROM interactive_quizzes
+            WHERE (quiz_type = 'pm' AND (
+                (is_completed = 1 AND (strftime('%s', 'now') - strftime('%s', COALESCE(completed_at, created_at)) > 600))
+                OR (strftime('%s', 'now') - strftime('%s', created_at) > ?)
+            ))
+            OR (quiz_type != 'pm' AND (strftime('%s', 'now') - strftime('%s', created_at) > ?))
+            """,
+            (int(max_pm_age_seconds), int(max_group_age_seconds))
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 async def update_poll_aggregate_results(
@@ -871,10 +1008,11 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
                 v.poll_id,
                 v.selected_option,
                 v.is_correct,
-                p.topic,
-                p.poll_type
+                COALESCE(p.topic, iq.topic, 'general') as topic,
+                COALESCE(p.poll_type, iq.quiz_type, 'quiz') as poll_type
             FROM poll_votes v
             LEFT JOIN daily_polls p ON v.poll_id = p.id
+            LEFT JOIN interactive_quizzes iq ON v.poll_id = iq.id
             WHERE v.user_id = ?
         """
         async with db.execute(query, (target_user_id,)) as cursor:
@@ -885,9 +1023,14 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
             SELECT DISTINCT date(v.voted_at, '+3 hours') as vote_date
             FROM poll_votes v
             LEFT JOIN daily_polls p ON v.poll_id = p.id
+            LEFT JOIN interactive_quizzes iq ON v.poll_id = iq.id
             WHERE v.user_id = ?
               AND v.is_correct IN (1, 1.0)
-              AND (p.poll_type = 'quiz' OR p.poll_type IS NULL)
+              AND (
+                  p.poll_type = 'quiz'
+                  OR iq.quiz_type IN ('quiz', 'pm')
+                  OR (p.poll_type IS NULL AND iq.quiz_type IS NULL)
+              )
             ORDER BY vote_date DESC
         """
         async with db.execute(streak_query, (target_user_id,)) as cursor:
@@ -903,8 +1046,8 @@ async def get_user_quiz_stats(user_id: int, db_path: Optional[str] = None) -> Di
         poll_type = str(row["poll_type"] or "quiz").lower()
         is_correct = row["is_correct"]
 
-        # Квизом СТРОГО считается опрос типа 'quiz'
-        if poll_type != "quiz":
+        # Квизом считается опрос типа 'quiz' или 'pm' (персональный клинический квиз)
+        if poll_type not in ("quiz", "pm"):
             continue
 
         total_quiz_answers += 1

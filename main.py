@@ -1209,10 +1209,19 @@ async def scheduler_task(bot_client):
                             except Exception as stats_err:
                                 logger.warning("Не удалось собрать статистику опроса #%s: %s", poll_id, stats_err)
                                 vote_stats = {}
+
+                            opts = poll_data.get("options") or []
+                            corr_idx = poll_data.get("correct_option_id")
+                            corr_opt = opts[corr_idx] if corr_idx is not None and 0 <= corr_idx < len(opts) else None
+
                             res_text = poll_engine.generate_evening_poll_debrief(
                                 explanation_deep=deep_exp,
                                 discussion_seed_question=seed_q,
-                                vote_stats=vote_stats
+                                vote_stats=vote_stats,
+                                question=poll_data.get("question"),
+                                correct_option=corr_opt,
+                                topic=poll_data.get("topic"),
+                                poll_type=poll_data.get("poll_type")
                             )
                             res_reply_to = poll_msg_id if poll_msg_id else tgt_topic
                             try:
@@ -3793,6 +3802,36 @@ async def handle_poll_update(event):
         if getattr(event.poll, "closed", False):
             await poll_storage.close_poll(poll_id)
             logger.info("🔒 Опрос %s закрыт в Telegram", poll_id)
+            try:
+                poll_data = await poll_storage.get_poll(poll_id)
+                if poll_data and not poll_data.get("resolution_msg_id") and poll_data.get("explanation_deep"):
+                    import poll_engine
+                    deep_exp = poll_data.get("explanation_deep")
+                    seed_q = poll_data.get("discussion_seed_question")
+                    vote_stats = await poll_storage.get_poll_summary_stats(poll_id)
+                    opts = poll_data.get("options") or []
+                    corr_idx = poll_data.get("correct_option_id")
+                    corr_opt = opts[corr_idx] if corr_idx is not None and 0 <= corr_idx < len(opts) else None
+                    debrief_text = poll_engine.generate_evening_poll_debrief(
+                        explanation_deep=deep_exp,
+                        discussion_seed_question=seed_q,
+                        vote_stats=vote_stats,
+                        question=poll_data.get("question"),
+                        correct_option=corr_opt,
+                        topic=poll_data.get("topic"),
+                        poll_type=poll_data.get("poll_type")
+                    )
+                    reply_to = poll_data.get("poll_msg_id") or poll_data.get("case_msg_id")
+                    res_msg = await bot_client.send_message(
+                        entity=poll_data["chat_id"],
+                        message=debrief_text,
+                        reply_to=reply_to,
+                        parse_mode='html'
+                    )
+                    if res_msg and hasattr(res_msg, 'id'):
+                        await poll_storage.save_poll_resolution(poll_id, res_msg.id)
+            except Exception as debrief_err:
+                logger.warning("Не удалось отправить дебрифинг при ручном закрытии опроса #%s: %s", poll_id, debrief_err)
     except Exception as e:
         logger.error("Ошибка при обновлении статуса опроса: %s", e, exc_info=True)
 

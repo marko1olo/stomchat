@@ -997,7 +997,8 @@ def build_fdi_quadrant_selector_markup():
             Button.inline("⚡ Топ-моляры: 16 | 26 | 36 | 46", data="fdi:top_molars"),
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1021,21 +1022,25 @@ def build_fdi_quadrant_teeth_markup(quad: int):
         row1 = [Button.inline(f"🦷 {t}", data=f"fdi:tooth:{t}") for t in (48, 47, 46, 45)]
         row2 = [Button.inline(f"🦷 {t}", data=f"fdi:tooth:{t}") for t in (44, 43, 42, 41)]
         buttons.extend([row1, row2])
+    else:
+        row1 = [Button.inline(f"🦷 {t}", data=f"fdi:tooth:{t}") for t in (18, 17, 16, 15)]
+        row2 = [Button.inline(f"🦷 {t}", data=f"fdi:tooth:{t}") for t in (14, 13, 12, 11)]
+        buttons.extend([row1, row2])
 
     buttons.append([
-        Button.inline("🔄 Другой квадрант", data="fdi:menu"),
-        Button.inline("🏠 Меню", data="chairside:hub")
+        Button.inline("⬅️ К квадрантам", data="fdi:menu"),
+        Button.inline("🏠 Chairside Hub", data="chairside:hub")
     ])
     return buttons
 
 
 def build_fdi_tooth_actions_markup(tooth_fdi: int):
     """Кнопки быстрых действий под выбранным зубом."""
-    quad = tooth_fdi // 10
+    quad = tooth_fdi // 10 if 1 <= (tooth_fdi // 10) <= 4 else 1
     return [
         [
             Button.inline("⚡ Файлы и торк", data="files:menu"),
-            Button.inline("🚨 Не берет анестезия!", data="sos:anesthesia_buffering")
+            Button.inline("🚨 Не берет анестезия!", data="anes_sos:buffering")
         ],
         [
             Button.inline("💔 Сломался файл", data="sos:file_matrix"),
@@ -1072,7 +1077,8 @@ def build_files_catalog_markup():
             Button.inline("📷 Фото пачки (Vision)", data="files:photo_prompt")
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1120,7 +1126,7 @@ def build_preservation_calc_markup(state: Dict[str, Any]):
         ],
         [
             Button.inline("🎯 РАССЧИТАТЬ ПРОГНОЗ", data=f"pres_eval:{ferrule}:{1 if fracture else 0}:{bone}:{1 if perio else 0}"),
-            Button.inline("⬅️ Меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
         ]
     ]
 
@@ -1146,7 +1152,10 @@ def build_resuscitation_sos_markup():
         ],
         [
             Button.inline("🤰 Беременность и анестезия", data="sos:pregnancy"),
+        ],
+        [
             Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1166,7 +1175,8 @@ def build_anesthesia_sos_markup():
             Button.inline("💉 Интралигаментарная (PDL)", data="anes_sos:pdl"),
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1187,7 +1197,8 @@ def build_broken_file_matrix_markup():
             Button.inline("4️⃣ Выход за апекс в кость", data="file_frag:apical_beyond"),
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1216,7 +1227,8 @@ def build_pharma_quick_markup():
             Button.inline("🧪 Дезинфекция каналов (PCA)", data="chairside:irrigation"),
         ],
         [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1235,47 +1247,97 @@ def build_aae_markup(step: int, s1: int = 0, s2: int = 0, tooth_str: str = "Зу
             [Button.inline("🟢 A. Прямой канал (<10°), закрытый апекс", data=f"aae:s1:1:{tooth_str}")],
             [Button.inline("🟡 B. Умеренный изгиб (10°-30°)", data=f"aae:s1:2:{tooth_str}")],
             [Button.inline("🔴 C. Изгиб >30°, S-изгиб, C-shape, несформирован", data=f"aae:s1:3:{tooth_str}")],
-            [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            [
+                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                Button.inline("🏠 Главное меню", data="nav:main")
+            ]
         ]
     elif step == 2:
         return [
             [Button.inline("🟢 A. Открывание >40 мм, наклон <10°", data=f"aae:s2:{s1}:1:{tooth_str}")],
             [Button.inline("🟡 B. Открывание 25-35 мм, наклон 15°-25°", data=f"aae:s2:{s1}:2:{tooth_str}")],
             [Button.inline("🔴 C. Тризм (<25 мм), наклон >30°, глубокий поддесневой дефект", data=f"aae:s2:{s1}:3:{tooth_str}")],
-            [Button.inline("🔄 Начать заново", data=f"aae:start:{tooth_str}")]
+            [
+                Button.inline("⬅️ Назад (Шаг 1)", data=f"aae:start:{tooth_str}"),
+                Button.inline("🏠 Chairside Hub", data="chairside:hub")
+            ]
         ]
     elif step == 3:
         return [
             [Button.inline("🟢 A. Первичное эндо (интактные каналы)", data=f"aae:s3:{s1}:{s2}:1:{tooth_str}")],
             [Button.inline("🟡 B. Повторное эндо: гуттаперча/AH Plus без ступенек", data=f"aae:s3:{s1}:{s2}:2:{tooth_str}")],
             [Button.inline("🔴 C. Осложнения: отломок, ступенька, резорцин, перфорация", data=f"aae:s3:{s1}:{s2}:3:{tooth_str}")],
-            [Button.inline("🔄 Начать заново", data=f"aae:start:{tooth_str}")]
+            [
+                Button.inline("⬅️ Назад (Шаг 2)", data=f"aae:s1:{s1}:{tooth_str}"),
+                Button.inline("🏠 Chairside Hub", data="chairside:hub")
+            ]
         ]
     return []
 
 
 # ==============================================================================
-# 9. ЦЕНТРАЛЬНЫЙ ДИСПЕТЧЕР КОЛБЭКОВ И КОМАНД
+# 9. ЦЕНТРАЛЬНЫЙ ДИСПЕТЧЕР КОЛБЭКОВ И ВАЛИДАТОР ПРЕФИКСОВ
 # ==============================================================================
+
+def is_chairside_callback(data_str: str) -> bool:
+    """
+    Определяет, относится ли callback_data к Chairside инструментам прямого действия.
+    Предотвращает перехват чужих колбэков и исключает ложные срабатывания.
+    """
+    if not data_str:
+        return False
+    if data_str == "noop":
+        return True
+    if data_str.startswith((
+        "chairside:", "fdi:", "files:", "file_sys:", "pres_st:",
+        "pres_eval:", "preserve:", "anes_sos:", "file_frag:", "pharma:", "aae:"
+    )):
+        return True
+    if data_str.startswith("sos:"):
+        parts = data_str.split(":")
+        sos_k = parts[1] if len(parts) > 1 else ""
+        chairside_sos_keys = {
+            "resuscitation_menu", "resuscitation", "menu", "file_matrix",
+            "naocl", "irrigation", "anesthesia_buffering", "buffering",
+            "gow_gates", "vazirani_akinosi", "intraosseous", "pdl",
+            # Протоколы экстренной помощи
+            "anaphylaxis", "last", "collapse", "syncope", "hypoglycemia",
+            "hypertension", "crisis", "hypertensive", "needle", "needle_break",
+            "needle_breakage", "adrenaline", "adrenaline_vs_allergy",
+            "adrenaline_reaction", "pregnancy", "pregnancy_protocol"
+        }
+        return sos_k in chairside_sos_keys
+    return False
+
+
+async def _safe_edit_chairside(event, text: str, buttons=None, parse_mode="html") -> bool:
+    """Безопасное редактирование сообщения у кресла с защитой от MessageNotModifiedError."""
+    try:
+        await event.edit(text, buttons=buttons, parse_mode=parse_mode)
+        return True
+    except Exception as e:
+        err_str = str(e)
+        if "MessageNotModifiedError" in type(e).__name__ or "Content of the message was not modified" in err_str:
+            logger.debug("MessageNotModifiedError ignored in chairside callback")
+            return True
+        logger.warning(f"Error editing chairside callback message: {e}")
+        return False
+
 
 async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
     """
     Центральный обработчик Chairside интерактивных действий.
     Возвращает True, если callback был обработан, иначе False.
+    Гарантирует отсутствие зависающих спиннеров и тупиковых экранов.
     """
-    if not data_str:
-        return False
-
-    chairside_prefixes = (
-        "chairside:", "fdi:", "files:", "file_sys:", "pres_st:",
-        "pres_eval:", "preserve:", "anes_sos:", "sos:",
-        "file_frag:", "pharma:", "aae:"
-    )
-    if not any(data_str.startswith(p) or data_str == p for p in chairside_prefixes):
+    if not is_chairside_callback(data_str):
         return False
 
     # Немедленное подтверждение получения Telegram-колбэка для мгновенного снятия спиннера
     try:
+        if data_str == "noop":
+            await event.answer("ℹ️ Выберите клинический параметр в строке", alert=False)
+            return True
         await event.answer()
     except Exception as e:
         logger.debug("Failed to answer chairside callback query: %s", e)
@@ -1294,8 +1356,7 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             "• Калькулятор эндодонтической сложности AAE"
         )
         buttons = build_chairside_hub_markup()
-        await event.edit(text, buttons=buttons, parse_mode="html")
-        await event.answer()
+        await _safe_edit_chairside(event, text, buttons=buttons)
         return True
 
     # 1. ЗУБНАЯ ФОРМУЛА FDI 11-48 (fdi:*)
@@ -1313,8 +1374,7 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "• Средняя рабочая длина и форма окклюзионного доступа"
             )
             buttons = build_fdi_quadrant_selector_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif action == "top_molars":
@@ -1324,14 +1384,19 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                  Button.inline("🦷 26 (Верхний левый)", data="fdi:tooth:26")],
                 [Button.inline("🦷 46 (Нижний правый)", data="fdi:tooth:46"),
                  Button.inline("🦷 36 (Нижний левый)", data="fdi:tooth:36")],
-                [Button.inline("⬅️ Ко всем квадрантам", data="fdi:menu")]
+                [Button.inline("⬅️ К выбору квадрантов", data="fdi:menu"),
+                 Button.inline("🏠 Chairside Hub", data="chairside:hub")]
             ]
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif action == "quad":
-            quad_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            try:
+                quad_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            except Exception:
+                quad_num = 1
+            if quad_num not in (1, 2, 3, 4):
+                quad_num = 1
             quad_names = {
                 1: "Верхний правый квадрант (18–11)",
                 2: "Верхний левый квадрант (21–28)",
@@ -1340,20 +1405,34 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             }
             text = f"📍 <b>Выберите зуб: {quad_names.get(quad_num, '')}</b>\nНажмите номер зуба для мгновенного lookup:"
             buttons = build_fdi_quadrant_teeth_markup(quad_num)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif action == "tooth":
-            tooth_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 46
+            try:
+                tooth_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 46
+            except Exception:
+                tooth_num = 46
             anat = get_tooth_anatomy(tooth_num)
             if not anat:
-                await event.answer(f"Анатомия зуба {tooth_num} формируется...", alert=True)
+                try:
+                    await event.answer(f"Анатомия зуба {tooth_num} не найдена в базе", alert=True)
+                except Exception:
+                    pass
+                text = "📍 <b>Зуб не найден. Выберите квадрант:</b>"
+                buttons = build_fdi_quadrant_selector_markup()
+                await _safe_edit_chairside(event, text, buttons=buttons)
                 return True
             card_text = format_tooth_card(anat)
             buttons = build_fdi_tooth_actions_markup(tooth_num)
-            await event.edit(card_text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, card_text, buttons=buttons)
+            return True
+
+        else:
+            # Fallback for unknown fdi action
+            text = "🦷 <b>Интерактивная зубная формула FDI (11–48)</b>\nВыберите квадрант:"
+            buttons = build_fdi_quadrant_selector_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     # 2. КАТАЛОГ СИСТЕМ ФАЙЛОВ И ТОРКА (files:* / file_sys:*)
@@ -1366,21 +1445,34 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Мгновенные проверенные параметры эндомотора, последовательность и углы реципрока."
             )
             buttons = build_files_catalog_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif data_str.startswith("file_sys:"):
-            sys_key = data_str.split(":", 1)[1]
+            sys_key = data_str.split(":", 1)[1] if ":" in data_str else ""
             data = ENDO_FILE_CATALOG.get(sys_key)
             if data:
                 card = format_file_system_card(data)
                 buttons = [
-                    [Button.inline("🔄 Другая система файлов", data="files:menu")],
-                    [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                    [
+                        Button.inline("⬅️ К списку систем", data="files:menu"),
+                        Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                    ]
                 ]
-                await event.edit(card, buttons=buttons, parse_mode="html")
-                await event.answer()
+                await _safe_edit_chairside(event, card, buttons=buttons)
+                return True
+            else:
+                try:
+                    await event.answer("⚠️ Система файлов не найдена, открываю каталог", alert=True)
+                except Exception:
+                    pass
+                text = (
+                    "⚙️ <b>Эндо-шпаргалка по торку и оборотам (RPM / N·cm)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Выберите систему файлов из доступных в базе:"
+                )
+                buttons = build_files_catalog_markup()
+                await _safe_edit_chairside(event, text, buttons=buttons)
                 return True
 
         elif data_str == "files:photo_prompt":
@@ -1389,15 +1481,27 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Сфотографируйте блистер или упаковку файлов прямо сейчас и отправьте фото в чат.\n"
                 "Бот распознает бренд, линейку, размеры инструментов и выдаст точные RPM и торк для вашего эндомотора."
             )
-            buttons = [[Button.inline("⬅️ К списку систем", data="files:menu")]]
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К списку систем", data="files:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+        else:
+            # Fallback for unknown files action
+            text = "⚙️ <b>Эндодонтические ротационные системы: Каталог</b>\nВыберите систему файлов:"
+            buttons = build_files_catalog_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     # 3. ЭКСПРЕСС-КОНСИЛИУМ: «СПАСАТЬ ИЛИ УДАЛЯТЬ?» (pres_st:* / pres_eval:*)
     if data_str.startswith("pres_st:") or data_str.startswith("pres_eval:") or data_str.startswith("preserve:tooth:"):
         if data_str.startswith("preserve:tooth:"):
-            t_num = data_str.split(":")[2]
+            parts = data_str.split(":")
+            t_num = parts[2] if len(parts) > 2 else "зуб"
             text = (
                 f"⚖️ <b>Экспресс-консилиум: Спасать или удалять зуб {t_num}?</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1409,16 +1513,18 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             )
             state = {"ferrule": 2.0, "fracture": False, "bone": 80, "perio": False}
             buttons = build_preservation_calc_markup(state)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif data_str.startswith("pres_st:"):
-            _, f_str, fr_str, b_str, p_str = data_str.split(":")
-            ferrule = float(f_str)
-            fracture = bool(int(fr_str))
-            bone = int(b_str)
-            perio = bool(int(p_str))
+            try:
+                parts = data_str.split(":")
+                ferrule = float(parts[1]) if len(parts) > 1 else 2.0
+                fracture = bool(int(parts[2])) if len(parts) > 2 else False
+                bone = int(parts[3]) if len(parts) > 3 else 80
+                perio = bool(int(parts[4])) if len(parts) > 4 else False
+            except Exception:
+                ferrule, fracture, bone, perio = 2.0, False, 80, False
             state = {"ferrule": ferrule, "fracture": fracture, "bone": bone, "perio": perio}
 
             text = (
@@ -1429,18 +1535,25 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "<i>Нажмите «Рассчитать прогноз» для формирования итогового отчета:</i>"
             )
             buttons = build_preservation_calc_markup(state)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif data_str.startswith("pres_eval:"):
-            _, f_str, fr_str, b_str, p_str = data_str.split(":")
+            try:
+                parts = data_str.split(":")
+                f_val = float(parts[1]) if len(parts) > 1 else 2.0
+                fr_val = bool(int(parts[2])) if len(parts) > 2 else False
+                b_val = int(parts[3]) if len(parts) > 3 else 80
+                p_val = bool(int(parts[4])) if len(parts) > 4 else False
+            except Exception:
+                f_val, fr_val, b_val, p_val = 2.0, False, 80, False
+
             res = evaluate_tooth_preservation(
-                ferrule_mm=float(f_str),
+                ferrule_mm=f_val,
                 wall_thickness_mm=1.5,
-                root_fracture_suspected=bool(int(fr_str)),
-                bone_support_percent=int(b_str),
-                endo_perio_combined=bool(int(p_str)),
+                root_fracture_suspected=fr_val,
+                bone_support_percent=b_val,
+                endo_perio_combined=p_val,
                 furcation_involved=False
             )
             reasons_block = "\n".join(res.reasons)
@@ -1453,40 +1566,76 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"<i>{res.patient_explanation}</i>"
             )
             buttons = [
-                [Button.inline("🔄 Пересчитать с другими параметрами", data="pres_st:2.0:0:80:0")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                [
+                    Button.inline("🔄 Изменить параметры", data=f"pres_st:{f_val}:{1 if fr_val else 0}:{b_val}:{1 if p_val else 0}"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(report, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, report, buttons=buttons)
             return True
 
     # 4.0 ЭКСТРЕННАЯ РЕАНИМАЦИЯ И ШОК (sos:anaphylaxis, sos:last, etc.)
     if data_str.startswith("sos:"):
-        sos_key = data_str.split(":")[1] if ":" in data_str else ""
-        if sos_key in ("resuscitation_menu", "resuscitation", "menu"):
+        parts = data_str.split(":")
+        sos_key = parts[1] if len(parts) > 1 else ""
+
+        if sos_key in ("resuscitation_menu", "resuscitation", "menu", ""):
             text = (
                 "🚨 <b>Экстренная реанимация и неотложные состояния у кресла</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
                 "Выберите клинический протокол неотложной помощи:"
             )
             buttons = build_resuscitation_sos_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+        if sos_key == "naocl":
+            card = format_naocl_accident_card()
+            buttons = [
+                [
+                    Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+
+        if sos_key in ("irrigation",):
+            card = format_irrigation_protocol_card()
+            buttons = [
+                [Button.inline("🚨 При аварии NaOCl", data="sos:naocl")],
+                [
+                    Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                    Button.inline("🏠 Главное меню", data="nav:main")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
             return True
 
         if sos_key != "file_matrix":
             proto = ac.get_emergency_protocol(sos_key)
             if proto:
                 buttons = [
-                    [Button.inline("🔄 Другой протокол реанимации", data="sos:resuscitation_menu")],
-                    [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                    [
+                        Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                        Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                    ]
                 ]
-                await event.edit(proto.card_text, buttons=buttons, parse_mode="html")
-                await event.answer()
+                await _safe_edit_chairside(event, proto.card_text, buttons=buttons)
+                return True
+            else:
+                # Fallback to resuscitation menu with toast
+                try:
+                    await event.answer("⚠️ Протокол не найден, открываю меню реанимации", alert=True)
+                except Exception:
+                    pass
+                text = "🚨 <b>Экстренная реанимация у кресла</b>\nВыберите протокол:"
+                buttons = build_resuscitation_sos_markup()
+                await _safe_edit_chairside(event, text, buttons=buttons)
                 return True
 
     # 4. ЭКСТРЕННЫЕ ПРОТОКОЛЫ АНЕСТЕЗИИ (anes_sos:*)
-    if data_str.startswith("anes_sos:") or data_str == "sos:anesthesia_buffering":
+    if data_str.startswith("anes_sos:") or data_str in ("sos:anesthesia_buffering", "sos:buffering", "sos:gow_gates", "sos:vazirani_akinosi", "sos:intraosseous", "sos:pdl"):
         if data_str in ("anes_sos:menu", "anes_sos:"):
             text = (
                 "⚡️ <b>Скорая помощь: Не берет анестезия у кресла!</b>\n"
@@ -1494,22 +1643,28 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Выберите экстренный протокол преодоления резистентности:"
             )
             buttons = build_anesthesia_sos_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
-        kind = "buffering" if data_str == "sos:anesthesia_buffering" else data_str.split(":")[1]
+        if data_str in ("sos:anesthesia_buffering", "sos:buffering"):
+            kind = "buffering"
+        elif data_str.startswith("sos:"):
+            kind = data_str.split(":")[1]
+        else:
+            kind = data_str.split(":")[1] if ":" in data_str else "buffering"
+
         card_info = CHAIRSIDE_ANESTHESIA_RESCUE.get(kind)
         if card_info:
             content = card_info.get("recipe") or card_info.get("protocol", "")
             title = card_info.get("title", "")
             msg = f"{title}\n━━━━━━━━━━━━━━━━━━━━━\n\n{content}"
             buttons = [
-                [Button.inline("🔄 Другая техника анестезии", data="anes_sos:menu")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                [
+                    Button.inline("⬅️ К протоколам анестезии", data="anes_sos:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif kind == "pdl":
@@ -1521,9 +1676,20 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "4. ⚠️ <i>Если раствор легко вытекает в полость рта — анестезия НЕ наступит! Переставьте иглу глубже.</i>\n"
                 "5. Действует через 30 секунд. Идеально для пульпитов моляров."
             )
-            buttons = [[Button.inline("⬅️ К протоколам анестезии", data="anes_sos:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К протоколам анестезии", data="anes_sos:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
+            return True
+
+        else:
+            # Fallback for unknown anesthesia action
+            text = "⚡️ <b>Экстренная анестезия: Выберите технику:</b>"
+            buttons = build_anesthesia_sos_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     # 5. СКОРАЯ ПОМОЩЬ ПО ОБЛОМКАМ ИНСТРУМЕНТОВ (file_frag:* / sos:file_matrix)
@@ -1536,50 +1702,49 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Выберите точный уровень сепарации по рентген-снимку:"
             )
             buttons = build_broken_file_matrix_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
-        frag_key = data_str.split(":")[1]
+        frag_key = data_str.split(":")[1] if ":" in data_str else ""
         if frag_key == "naocl":
             card = format_naocl_accident_card()
             buttons = [
-                [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                [
+                    Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(card, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, card, buttons=buttons)
             return True
 
         proto = get_fragment_protocol(frag_key)
         if proto:
             card = format_fragment_card(proto)
             buttons = [
-                [Button.inline("🔄 Другой уровень отломка", data="sos:file_matrix")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                [
+                    Button.inline("⬅️ К выбору отломка", data="sos:file_matrix"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(card, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            # Fallback to broken file matrix
+            text = "💔 <b>Скорая помощь по обломкам: Выберите уровень сепарации:</b>"
+            buttons = build_broken_file_matrix_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     if data_str in ("chairside:irrigation", "sos:irrigation"):
         card = format_irrigation_protocol_card()
         buttons = [
-            [Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl")],
-            [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            [Button.inline("🚨 При аварии NaOCl", data="sos:naocl")],
+            [
+                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                Button.inline("🏠 Главное меню", data="nav:main")
+            ]
         ]
-        await event.edit(card, buttons=buttons, parse_mode="html")
-        await event.answer()
-        return True
-
-    if data_str == "sos:naocl":
-        card = format_naocl_accident_card()
-        buttons = [
-            [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
-            [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
-        ]
-        await event.edit(card, buttons=buttons, parse_mode="html")
-        await event.answer()
+        await _safe_edit_chairside(event, card, buttons=buttons)
         return True
 
     # 6. ФАРМАКОТЕРАПИЯ В 1 ТАП (pharma:*)
@@ -1595,12 +1760,14 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "и сформирует готовый текст памятки для копирования в мессенджер пациенту:"
             )
             buttons = build_pharma_quick_markup()
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif sub in ("kid", "teen"):
-            w = float(parts[2]) if len(parts) > 2 else (20.0 if sub == "kid" else 35.0)
+            try:
+                w = float(parts[2]) if len(parts) > 2 else (20.0 if sub == "kid" else 35.0)
+            except Exception:
+                w = 20.0 if sub == "kid" else 35.0
             res = calculate_antibiotic(w, is_child=True)
             msg = (
                 f"👶 <b>Калькулятор антибиотика: Ребенок {int(w)} кг</b>\n"
@@ -1612,13 +1779,20 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
-            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "prophylaxis":
-            w = float(parts[2]) if len(parts) > 2 else 70.0
+            try:
+                w = float(parts[2]) if len(parts) > 2 else 70.0
+            except Exception:
+                w = 70.0
             res = calculate_antibiotic(w, is_child=False, is_prophylaxis=True)
             msg = (
                 f"🛡 <b>Антибиотикопрофилактика инфекционного эндокардита (AHA / ESE / ADA)</b>\n"
@@ -1631,14 +1805,19 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             )
             buttons = [
                 [Button.inline("⚠️ При аллергии на пенициллин", data=f"pharma:prophylaxis_all:{int(w)}")],
-                [Button.inline("🔄 Другой расчет", data="pharma:menu")]
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "prophylaxis_all":
-            w = float(parts[2]) if len(parts) > 2 else 70.0
+            try:
+                w = float(parts[2]) if len(parts) > 2 else 70.0
+            except Exception:
+                w = 70.0
             res = calculate_antibiotic(w, is_child=False, allergy_penicillin=True, is_prophylaxis=True)
             msg = (
                 f"🛡 <b>Профилактика эндокардита при АЛЛЕРГИИ на пенициллин</b>\n"
@@ -1648,13 +1827,20 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
-            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "adult":
-            w = float(parts[2]) if len(parts) > 2 else 70.0
+            try:
+                w = float(parts[2]) if len(parts) > 2 else 70.0
+            except Exception:
+                w = 70.0
             res = calculate_antibiotic(w, is_child=False)
             msg = (
                 f"👨 <b>Калькулятор антибиотика: Взрослый ({int(w)} кг)</b>\n"
@@ -1665,13 +1851,20 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
-            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "allergy":
-            w = float(parts[2]) if len(parts) > 2 else 70.0
+            try:
+                w = float(parts[2]) if len(parts) > 2 else 70.0
+            except Exception:
+                w = 70.0
             res = calculate_antibiotic(w, is_child=False, allergy_penicillin=True)
             msg = (
                 f"⚠️ <b>Антибиотик при АЛЛЕРГИИ на пенициллин ({int(w)} кг)</b>\n"
@@ -1682,13 +1875,20 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
-            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "severe":
-            w = float(parts[2]) if len(parts) > 2 else 75.0
+            try:
+                w = float(parts[2]) if len(parts) > 2 else 75.0
+            except Exception:
+                w = 75.0
             res = calculate_antibiotic(w, is_child=False, severe_infection=True)
             msg = (
                 f"🔥 <b>Усиленная схема: Периостит / Флегмона ({int(w)} кг)</b>\n"
@@ -1698,24 +1898,43 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{res.patient_message_text}"
             )
-            buttons = [[Button.inline("🔄 Другой расчет", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "analgesia":
             scheme = calculate_analgesia()
             msg = f"⚡️ <b>Обезболивание прямо у кресла:</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n{scheme}"
-            buttons = [[Button.inline("🔄 Назад к фармакологии", data="pharma:menu")]]
-            await event.edit(msg, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, msg, buttons=buttons)
             return True
 
         elif sub == "dexa":
             dex_card = dexamethasone_emergency_card()
-            buttons = [[Button.inline("🔄 Назад к фармакологии", data="pharma:menu")]]
-            await event.edit(dex_card, buttons=buttons, parse_mode="html")
-            await event.answer()
+            buttons = [
+                [
+                    Button.inline("⬅️ К фармакотерапии", data="pharma:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, dex_card, buttons=buttons)
+            return True
+
+        else:
+            # Fallback for unknown pharma action
+            text = "💊 <b>Клиническая фармакотерапия у кресла</b>\nВыберите раздел:"
+            buttons = build_pharma_quick_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     # 7. AAE ENDODONTIC CASE DIFFICULTY CALCULATOR (aae:*)
@@ -1733,12 +1952,14 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Оцените рентгенологическую анатомию каналов по прицельному снимку / КЛКТ:"
             )
             buttons = build_aae_markup(step=1, tooth_str=tooth_str)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif sub == "s1":
-            s1_val = int(parts[2])
+            try:
+                s1_val = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            except Exception:
+                s1_val = 1
             tooth_str = parts[3] if len(parts) > 3 else "Зуб"
             text = (
                 f"📊 <b>Калькулятор сложности AAE ({tooth_str})</b>\n"
@@ -1747,13 +1968,15 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Оцените открывание рта, наклон зуба и условия наложения коффердама:"
             )
             buttons = build_aae_markup(step=2, s1=s1_val, tooth_str=tooth_str)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif sub == "s2":
-            s1_val = int(parts[2])
-            s2_val = int(parts[3])
+            try:
+                s1_val = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                s2_val = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+            except Exception:
+                s1_val, s2_val = 1, 1
             tooth_str = parts[4] if len(parts) > 4 else "Зуб"
             text = (
                 f"📊 <b>Калькулятор сложности AAE ({tooth_str})</b>\n"
@@ -1762,25 +1985,36 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
                 "Что происходило с этим зубом до сегодняшнего дня?"
             )
             buttons = build_aae_markup(step=3, s1=s1_val, s2=s2_val, tooth_str=tooth_str)
-            await event.edit(text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
         elif sub == "s3":
-            s1_val = int(parts[2])
-            s2_val = int(parts[3])
-            s3_val = int(parts[4])
+            try:
+                s1_val = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                s2_val = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+                s3_val = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 1
+            except Exception:
+                s1_val, s2_val, s3_val = 1, 1, 1
             tooth_str = parts[5] if len(parts) > 5 else "Зуб"
             res = AAEDifficultyCalculator.evaluate_case((s1_val, s2_val, s3_val), tooth_num=tooth_str)
             buttons = [
-                [Button.inline("🔄 Новый расчет AAE", data=f"aae:start:{tooth_str}")],
-                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+                [
+                    Button.inline("🔄 Начать заново", data=f"aae:start:{tooth_str}"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
             ]
-            await event.edit(res.shareable_card_text, buttons=buttons, parse_mode="html")
-            await event.answer()
+            await _safe_edit_chairside(event, res.shareable_card_text, buttons=buttons)
+            return True
+
+        else:
+            # Fallback for unknown AAE action
+            text = "📊 <b>Калькулятор эндодонтической сложности AAE</b>\nНачните расчет:"
+            buttons = build_aae_markup(step=1)
+            await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
     return False
+
 
 
 # ==============================================================================

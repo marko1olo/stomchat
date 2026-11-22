@@ -1825,11 +1825,15 @@ def generate_evening_poll_debrief(
     *,
     explanation_deep: Optional[str] = None,
     discussion_seed_question: Optional[str] = None,
+    question: Optional[str] = None,
+    correct_option: Optional[str] = None,
+    topic: Optional[str] = None,
+    poll_type: Optional[str] = None,
 ) -> str:
     """
-    Формирует живой текст вечернего разбора опроса с клиническим обоснованием
-    и открытым вопросом-катализатором для практикующих врачей чата.
-    Поддерживает как передачу PollPayload, так и прямые аргументы (explanation_deep, discussion_seed_question).
+    Формирует живой текст вечернего разбора опроса с клиническим обоснованием,
+    формулировкой кейса, эталонным ответом и открытым вопросом-катализатором для практикующих врачей чата.
+    Поддерживает как передачу PollPayload, так и прямые аргументы (explanation_deep, discussion_seed_question, question, correct_option).
     """
     deep_exp = (explanation_deep or (payload.explanation_deep if payload else "") or "").strip()
     seed_q = (discussion_seed_question or (payload.discussion_seed_question if payload else "") or "").strip()
@@ -1838,23 +1842,39 @@ def generate_evening_poll_debrief(
         seed_q = seed_q[0].upper() + seed_q[1:]
     brief_exp = (payload.explanation_brief if payload else "") or ""
 
-    parts = ["🏁 <b>Клинический разбор кейса:</b>\n"]
+    resolved_q = (question or (payload.question if payload else "") or "").strip()
+    resolved_topic = (topic or (payload.topic if payload else "") or "").strip()
+    resolved_poll_type = poll_type or (payload.poll_type.value if payload else None) or (vote_stats.get("poll_type") if vote_stats else None) or "quiz"
+
+    resolved_corr = correct_option
+    if resolved_corr is None and payload and payload.correct_option_id is not None:
+        if 0 <= payload.correct_option_id < len(payload.options):
+            resolved_corr = payload.options[payload.correct_option_id]
+
+    topic_badge = f" [{resolved_topic}]" if resolved_topic else ""
+    parts = [f"🏁 <b>Клинический разбор кейса{topic_badge}:</b>\n"]
+
+    if resolved_q:
+        parts.append(f"📋 <b>Кейс:</b> <i>{resolved_q}</i>\n")
+
+    if resolved_corr and str(resolved_poll_type).lower() == "quiz":
+        parts.append(f"✅ <b>Эталонная тактика:</b> <i>{resolved_corr}</i>\n")
 
     if vote_stats and vote_stats.get("total_votes", 0) > 0:
         total = vote_stats["total_votes"]
-        poll_type = vote_stats.get("poll_type") or (payload.poll_type.value if payload else "quiz")
-        if str(poll_type).lower() == "quiz":
+        p_type = vote_stats.get("poll_type") or resolved_poll_type
+        if str(p_type).lower() == "quiz":
             acc = vote_stats.get("accuracy_percent", 0.0)
             parts.append(f"📊 <i>Итоги викторины: проголосовало {total} врачей, верный ответ выбрали {acc}%.</i>\n")
         else:
             parts.append(f"📊 <i>Итоги опроса: мнением поделились {total} участников.</i>\n")
 
     if deep_exp:
-        parts.append(deep_exp)
+        parts.append(f"💡 <b>Клиническое обоснование (EBM):</b>\n{deep_exp}")
     elif brief_exp:
-        parts.append(brief_exp)
+        parts.append(f"💡 <b>Клиническое обоснование (EBM):</b>\n{brief_exp}")
     else:
-        parts.append("Выбранная тактика обеспечивает надежный биомеханический прогноз и сохраняет зуб.")
+        parts.append("💡 <b>Клиническое обоснование (EBM):</b>\nВыбранная тактика обеспечивает надежный биомеханический прогноз и сохраняет зуб.")
 
     if seed_q:
         parts.append(f"\n\n💬 <b>Клинический вопрос к чату:</b>\n{seed_q}")

@@ -1014,7 +1014,7 @@ async def save_clinical_bookmark(saved_by_user_id, msg_id, chat_id, sender_name,
     return await _run_db(operation)
 
 
-async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offset=0):
+async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offset=0, include_id=False):
     """
     Закладки врача, свежие сверху.
 
@@ -1029,6 +1029,8 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offse
     /bookmarks поднимает из базы весь личный архив ради 10 строк. По умолчанию
     limit=None — поведение прежнее, чтобы правка не требовала одновременного
     изменения вызова.
+    include_id=True возвращает id закладки первым полем кортежа для интерактивных
+    кнопок просмотра и удаления (bm:view:ID, bm:del:ID).
     """
     def operation():
         with _connection() as db:
@@ -1037,6 +1039,9 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offse
             # принимает.
             window = "LIMIT ? OFFSET ?"
             bounds = (-1 if limit is None else int(limit), int(offset or 0))
+            cols = ("id, msg_id, chat_id, sender_name, text, media_description, date"
+                    if include_id else
+                    "msg_id, chat_id, sender_name, text, media_description, date")
             if query:
                 # Поиск идёт и по автору. Раньше искали только в тексте и в
                 # описании снимка, поэтому «тот пост Иванова» найти было нельзя
@@ -1045,7 +1050,7 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offse
                 like = f"%{query}%"
                 return db.execute(
                     f"""
-                    SELECT msg_id, chat_id, sender_name, text, media_description, date
+                    SELECT {cols}
                     FROM clinical_bookmarks
                     WHERE saved_by_user_id = ?
                       AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
@@ -1057,7 +1062,7 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offse
             else:
                 return db.execute(
                     f"""
-                    SELECT msg_id, chat_id, sender_name, text, media_description, date
+                    SELECT {cols}
                     FROM clinical_bookmarks
                     WHERE saved_by_user_id = ?
                     ORDER BY date DESC, id DESC
@@ -1065,6 +1070,57 @@ async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offse
                     """,
                     (saved_by_user_id,) + bounds,
                 ).fetchall()
+    return await _run_db(operation)
+
+
+async def get_clinical_bookmark_by_id(bookmark_id, saved_by_user_id=None):
+    """
+    Получить конкретную клиническую закладку по её id.
+    Если указан saved_by_user_id, проверяет принадлежность врачу (защита от IDOR).
+    Возвращает (id, msg_id, chat_id, sender_name, text, media_description, date) или None.
+    """
+    def operation():
+        with _connection() as db:
+            if saved_by_user_id is not None:
+                return db.execute(
+                    """
+                    SELECT id, msg_id, chat_id, sender_name, text, media_description, date
+                    FROM clinical_bookmarks
+                    WHERE id = ? AND saved_by_user_id = ?
+                    """,
+                    (bookmark_id, saved_by_user_id),
+                ).fetchone()
+            else:
+                return db.execute(
+                    """
+                    SELECT id, msg_id, chat_id, sender_name, text, media_description, date
+                    FROM clinical_bookmarks
+                    WHERE id = ?
+                    """,
+                    (bookmark_id,),
+                ).fetchone()
+    return await _run_db(operation)
+
+
+async def delete_clinical_bookmark(bookmark_id, saved_by_user_id=None):
+    """
+    Удалить клиническую закладку по id.
+    Если указан saved_by_user_id, удаление происходит только если закладка принадлежит этому врачу (защита от IDOR).
+    Возвращает True, если строка была удалена, иначе False.
+    """
+    def operation():
+        with _connection() as db:
+            if saved_by_user_id is not None:
+                cursor = db.execute(
+                    "DELETE FROM clinical_bookmarks WHERE id = ? AND saved_by_user_id = ?",
+                    (bookmark_id, saved_by_user_id),
+                )
+            else:
+                cursor = db.execute(
+                    "DELETE FROM clinical_bookmarks WHERE id = ?",
+                    (bookmark_id,),
+                )
+            return cursor.rowcount > 0
     return await _run_db(operation)
 
 
@@ -1149,10 +1205,10 @@ async def clear_user_interactive_state(user_id):
     return await _run_db(operation)
 
 
-async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_seconds=259200):
+async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_seconds=7200):
     """
     Удаляет зависшие интерактивные сессии симулятора (старше max_age_seconds, по умолчанию 1 час)
-    и устаревшие конфигурации квизов (старше max_quiz_age_seconds, по умолчанию 3 суток).
+    и устаревшие конфигурации квизов (завершенные — через 10 мин, заброшенные — через max_quiz_age_seconds=2 часа, любые — через 24 часа).
     """
     now = time.time()
     def operation():
@@ -1178,8 +1234,13 @@ async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_se
                                 is_stale = True
                         elif state_type == "quiz_config":
                             ts = None
+                            is_completed = False
+                            votes_count = 0
                             if isinstance(data, dict):
                                 ts = data.get("last_updated") or data.get("created_at")
+                                is_completed = bool(data.get("is_completed", False))
+                                voters = data.get("voters", {})
+                                votes_count = len(voters) if isinstance(voters, dict) else 0
                             if not ts:
                                 try:
                                     u_int = int(user_id)
@@ -1187,7 +1248,16 @@ async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_se
                                         ts = abs(u_int) / 1_000_000.0
                                 except Exception:
                                     pass
-                            if not ts or (now - float(ts) > max_quiz_age_seconds):
+
+                            # Завершенные квизы удаляем через 10 минут
+                            if is_completed:
+                                if not ts or (now - float(ts) > 600):
+                                    is_stale = True
+                            # Квизы без ответов (заброшенные карточки) удаляем через max_quiz_age_seconds (2 часа)
+                            elif votes_count == 0 and ts and (now - float(ts) > max_quiz_age_seconds):
+                                is_stale = True
+                            # Любые квизы старше max(max_quiz_age_seconds, 86400) (24 часа) удаляем
+                            elif not ts or (now - float(ts) > max(max_quiz_age_seconds, 86400)):
                                 is_stale = True
                         else:
                             is_stale = True
@@ -1202,6 +1272,14 @@ async def cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_se
                         pass
             return deleted
     return await _run_db(operation)
+
+
+async def cleanup_orphaned_quiz_configs(max_age_seconds=7200):
+    """
+    Немедленная очистка устаревших конфигураций квизов (отрицательные user_id)
+    из user_interactive_states для предотвращения утечки строк.
+    """
+    return await cleanup_stale_interactive_states(max_age_seconds=3600, max_quiz_age_seconds=max_age_seconds)
 
 
 async def save_bot_sent_message(msg_id, chat_id):

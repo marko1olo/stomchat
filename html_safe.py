@@ -179,7 +179,7 @@ def safe_cut_index(text, limit):
 def safe_truncate_html(html_str, max_len=9500):
     html_str = html_str or ""
     suffix = (
-        "<br><br><b>[Отчет сокращен из-за лимитов Telegram]</b>"
+        "\n\n<b>[Ответ сокращен из-за лимитов Telegram]</b>"
         if max_len <= 4000
         else "<br><br><b>[Отчет сокращен из-за лимитов Telegraph]</b>"
     )
