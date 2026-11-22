@@ -50,6 +50,12 @@ def run_tests():
     print("\n[1] Эвристический фильтр кандидатов на спасение (is_clinical_rescue_candidate)")
     check("клинический вопрос распознан",
           cr.is_clinical_rescue_candidate("Коллеги, подскажите протокол при обломке в средней трети?", False))
+    check("вопрос по ВНОЛ и пробе Сильвермана распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Коллеги, подскажите как определить ВНОЛ по пробе Сильвермана?", False))
+    check("вопрос по линии Паунда распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Подскажите, как ориентировать моляры по линии Паунда?", False))
+    check("вопрос по высоте покоя и freeway space распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Какой нормальный freeway space и высота покоя при тотале?", False))
     check("сообщение со снимком распознано",
           cr.is_clinical_rescue_candidate("Снимок 46 зуба", True))
     check("смайл со снимком распознан",

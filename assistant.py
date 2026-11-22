@@ -22,6 +22,7 @@ from cachetools import TTLCache
 import runtime_guard
 import blocking_tools
 import clinical_cognitive_core
+import clinical_anatomy_guard
 import config
 import database
 from dental_vocab import (
@@ -4538,6 +4539,21 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
     if not draft_reply or not draft_reply.strip():
         return False, "empty_draft"
 
+    # Deterministic anatomical root & surface orientation guard (Domain 1: FDI 11-48)
+    if clinical_anatomy_guard:
+        _ctx_str = ""
+        if isinstance(context_msgs, str):
+            _ctx_str = context_msgs[-2000:]
+        elif isinstance(context_msgs, (list, tuple)):
+            _ctx_str = " ".join(str(m) for m in context_msgs[-5:] if m)
+        _is_anat_valid, _anat_violations = clinical_anatomy_guard.verify_and_guard_anatomy(
+            draft_reply,
+            context=_ctx_str
+        )
+        if not _is_anat_valid:
+            logger.error("VALIDATOR BLOCKED ANATOMICAL ROOT/SURFACE HALLUCINATION: %s", _anat_violations)
+            return False, f"anatomy_violation: {'; '.join(_anat_violations)}"
+
     def _unavailable(detail):
         if invited:
             # Deterministic toxic taboo check: even on fail-open, never release fatal toxicities
@@ -4615,7 +4631,7 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
    — ТОКСИЧЕСКИЕ И ЯТРОГЕННЫЕ ПРАКТИКИ: Запрещённые препараты (мышьяк, девит-АРС, параформальдегид, пульпарсен, депулпин, резорцин-формалин, форедент, крезофен, Солкосерил, Актовегин, депофорез) или опасные процедуры (адреналин/эпинефрин при гипертоническом кризе/АД ≥ 180/110, химическое прижигание слизистой спиртом/перекисью/марганцовкой, промывание NaOCl под давлением, адреналиновые тампоны в гайморову пазуху) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
    — КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Выдуманные дозировки, выдуманные артикулы/системы, выдуманные значения торков, либо грубые ошибки, противоречащие доказательной медицине — ОТКЛОНИ.
    — Педиатрия: артикаин >5 мг/кг у ребёнка <12 лет / <40 кг — токсическая передозировка, ОТКЛОНИ.
-   — Топографические ошибки и анатомический бред: перепутал зуб, орган, сторону, поверхность, либо нарушил анатомический порядок зубной дуги (резцы [1,2] -> клык [3] -> премоляры [4,5] -> моляры [6,7,8]; премоляров мезиальнее клыков НЕ СУЩЕСТВУЕТ; в молочном прикусе премоляров нет — только резцы [1,2], клык [3] и моляры [4,5]) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — Топографические ошибки и анатомический бред: перепутал зуб, орган, сторону, поверхность, либо нарушил анатомический порядок зубной дуги (резцы [1,2] -> клык [3] -> премоляры [4,5] -> моляры [6,7,8]; премоляров мезиальнее клыков НЕ СУЩЕСТВУЕТ; в молочном прикусе премоляров нет — только резцы [1,2], клык [3] и моляры [4,5]); у зубов нижней челюсти (31-48, 71-85) НЕТ небного корня, небного канала или небной поверхности (строго язычная); у зубов верхней челюсти (11-28, 51-65) НЕТ язычного корня или язычной стенки (корень и стенка — небные) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
 
 3. ПРОФЕССИОНАЛЬНЫЙ ТОН И КОЛЛЕГИАЛЬНОСТЬ:
    — Аудитория — дипломированные врачи. Общение строго на равных: оперирующий врач — оперирующему врачу.
@@ -6597,7 +6613,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
    - Запасной практический протокол.
 """
             async with _safe_typing_action(bot_client, event.chat_id):
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=45.0)
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
 
             if error:
                 logger.error(f"Assistant Gemini generation error on attempt {attempt}: {error}")
@@ -7472,7 +7488,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 """
             ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
             ebm_ctx["kind"] = "media_ebm_fallback"
-            ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
+            ebm_resp, _ = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=180.0)
             if ebm_resp and getattr(ebm_resp, "text", None):
                 candidate_fb = clean_html_formatting(ebm_resp.text.strip())
                 fb_ok, fb_clean, fb_reason = sanitize_and_validate_chad_output(candidate_fb)
@@ -9322,7 +9338,21 @@ CLINICAL_RECORD_TEMPLATES = {'complication': {'crosslinks': [('sos', 'sos:file',
                                                                'ревизия, апикальный уступ #35/.04. Ирригация NaOCl 3% '
                                                                '+ EDTA 17%. Временная обтурация пастой гидроксида '
                                                                'кальция Ca(OH)2 на 14 дней. Временная пломба Cavit '
-                                                               'герметична.</code>'}}},
+                                                               'герметична.</code>'},
+                                                       'v_insurance_dms': {'tab_label': '3. Обоснование ДМС (3.7 PAI 4)',
+                                                                           'text': '📋 <b>043/у: Обоснование для страховой компании (ДМС / ВК)</b>\n'
+                                                                                   '\n'
+                                                                                   '💡 <i>Нажмите на текст ниже, чтобы скопировать в МИС (в 1 тап):</i>\n'
+                                                                                   '\n'
+                                                                                   '<code>Диагноз (МКБ-10): K04.5 Хронический верхушечный периодонтит.\n'
+                                                                                   'Локализация: Зуб 3.7 (Нижняя челюсть, слева, второй моляр).\n'
+                                                                                   'Status praesens: Жалобы на дискомфорт при накусывании. Облитерация пульповой камеры и устьев корневых каналов, периапикальный очаг деструкции кости PAI 4.\n'
+                                                                                   'Обоснование расширенного протокола эндодонтии (ДМС / Экспертиза):\n'
+                                                                                   '1. КЛКТ срезы (FOV 5x5, 75 мкм): визуализация скрытой деструкции кости (PAI >= 3), топография корней и оценка расстояния до нижнечелюстного канала.\n'
+                                                                                   '2. Операционный микроскоп (Carl Zeiss/Leica): визуализация облитерированных устьев, сохранение перицервикального дентина (PCD), предупреждение ятрогенной перфорации корня.\n'
+                                                                                   '3. Ультразвуковая насадка Start-X и 17% EDTA: селективная дезобтурация склерозированного дентина, удаление смазанного слоя.\n'
+                                                                                   '4. Двухэтапный протокол: временная санация гидроксидом кальция Ca(OH)2 на 14 дней, постоянная 3D-обтурация биокерамическим силером (BioRoot RCS / MTA).\n'
+                                                                                   'Клинический протокол соответствует стандартам СтАР (МЗ РФ) и ESE Quality Guidelines. Прогноз зубосохраняющего лечения благоприятный.</code>'}}},
  'implant': {'crosslinks': [('sos', 'sos:torque_loss', '🚨 Срыв торка (<15 Нсм)'),
                             ('vs', 'vs:implant_retention', '🔩 Винтовая vs Цементная'),
                             ('rx', 'rx:mronj', '🦴 Бисфосфонаты & Риски'),
@@ -11917,6 +11947,12 @@ TEXT_MENU_COMMAND_MAP = {
     "🪑 chairside": "/chairside",
     "chairside": "/chairside",
     "у кресла": "/chairside",
+    "🏛 консультация / дмс": "/consultation",
+    "консультация": "/consultation",
+    "согласование": "/consultation",
+    "экспертиза": "/consultation",
+    "дмс": "/consultation",
+    "страховая": "/consultation",
     "🦷 зубная формула fdi": "/fdi",
     "🦷️ зубная формула fdi": "/fdi",
     "зубная формула fdi": "/fdi",
@@ -13219,6 +13255,61 @@ async def handle_private_message(bot_client, event):
             await bot_client.send_message(entity=chat_id, message=search_out, parse_mode='html')
             return
 
+        if (text.lower() == "/consultation" or text.lower().startswith("/consultation ") or
+            text.lower() in ("/согласование", "/экспертиза", "/дмс", "/insurance") or
+            text.lower().startswith(("/согласование ", "/экспертиза ", "/дмс ", "/insurance "))):
+            parts = text.split(None, 1)
+            consult_arg = parts[1].strip() if len(parts) > 1 else ""
+            if not consult_arg:
+                consult_info = (
+                    "🏛 <b>Клиническая консультация и экспертиза для страховой (ДМС / СтАР / 043/у)</b>\n\n"
+                    "Превращает клинический кейс зуба со сложной анатомией, облитерацией или периапикальной деструкцией "
+                    "в официальное экспертное заключение для страховой компании и амбулаторной карты.\n\n"
+                    "💡 <b>Как использовать:</b>\n"
+                    "Отправьте команду с данными кейса:\n"
+                    "• <code>/consultation 3.7 облитерация каналов, хронический апикальный периодонтит К04.5 PAI 4, КЛКТ, микроскоп, ультразвук, биокерамика</code>\n"
+                    "• <code>/consultation 1.6 подозрение на MB2, периодонтит PAI 3, микроскоп Carl Zeiss, КЛКТ</code>\n"
+                    "• <code>/consultation 4.6 отломок инструмента в апикальной трети, ревизия под микроскопом, Bypass</code>\n\n"
+                    "👇 <i>Или откройте готовые экспертные протоколы и шаблоны 043/у:</i>"
+                )
+                from telethon import Button
+                buttons = [
+                    [Button.inline("📋 Обоснование ДМС: Зуб 3.7 (PAI 4)", data="record:endo:v_insurance_dms")],
+                    [Button.inline("🔬 Пульпит MB2 (Эндо)", data="record:endo"), Button.inline("⚠️ Осложнение (Юр. защита)", data="record:complication")],
+                    [Button.inline("⚖️ Батл: Биокерамика vs AH Plus", data="vs:sealer")],
+                    [Button.inline("⬅️ В главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(entity=chat_id, message=consult_info, buttons=buttons, parse_mode='html')
+                return
+            else:
+                from clinical_insurance_protocol import format_insurance_justification_report
+                tooth_match = re.search(r"(?<!\d)([1-4]\s*[.\-_/]?\s*[1-8]|[5-8]\s*[.\-_/]?\s*[1-5])(?!\d)", consult_arg)
+                tooth_val = tooth_match.group(0) if tooth_match else "3.7"
+
+                icd_match = re.search(r"[KkКк]\d{2}(?:\.\d{1,2})?", consult_arg)
+                icd_val = icd_match.group(0) if icd_match else "K04.5"
+
+                req_procs = []
+                for p_name in ("клкт", "кт", "cbct", "микроскоп", "microscope", "лейка", "цейс", "ультразвук", "start-x", "биокерамика", "кальций", "мта", "bioroot"):
+                    if p_name in consult_arg.lower():
+                        req_procs.append(p_name)
+                if not req_procs:
+                    req_procs = ["cbct", "microscope", "ultrasound_chelator", "bioceramics_calcium"]
+
+                report = format_insurance_justification_report(
+                    tooth_fdi=tooth_val,
+                    diagnosis_icd=icd_val,
+                    clinical_findings=consult_arg,
+                    requested_procedures=req_procs
+                )
+                from telethon import Button
+                rep_buttons = [
+                    [Button.inline("📋 Скопировать шаблон 043/у", data="record:endo:v_insurance_dms")],
+                    [Button.inline("⬅️ В главное меню", data="nav:main")]
+                ]
+                await bot_client.send_message(entity=chat_id, message=report, buttons=rep_buttons, parse_mode='html')
+                return
+
         if (text.lower() == "/record" or text.lower().startswith("/record ") or
             text.lower() in ("/043", "/дневник", "/карта") or
             text.lower().startswith(("/043 ", "/дневник ", "/карта "))):
@@ -14450,7 +14541,7 @@ async def handle_private_message(bot_client, event):
         async with _safe_typing_action(bot_client, chat_id):
             last_pm_candidate = ""
             pm_start_time = time.time()
-            PM_MAX_TOTAL_BUDGET = 360.0
+            PM_MAX_TOTAL_BUDGET = 600.0
             for attempt in range(max_retries + 1):
                 elapsed_pm = time.time() - pm_start_time
                 rem_pm_budget = max(10.0, PM_MAX_TOTAL_BUDGET - elapsed_pm)
@@ -14503,7 +14594,7 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                attempt_timeout = max(30.0, min(rem_pm_budget - 15.0, 240.0))
+                attempt_timeout = max(30.0, min(rem_pm_budget - 15.0, 480.0))
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
 
                 if error:
@@ -14556,7 +14647,7 @@ async def handle_private_message(bot_client, event):
                 logger.warning("PM reflection rejected chat_id=%s (%s attempts). Generating cautious LLM response.", chat_id, max_retries + 1)
                 c_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 c_ctx["kind"] = "pm_cautious_ebm"
-                c_timeout = max(10.0, min(PM_MAX_TOTAL_BUDGET - (time.time() - pm_start_time) - 5.0, 45.0))
+                c_timeout = max(10.0, min(PM_MAX_TOTAL_BUDGET - (time.time() - pm_start_time) - 5.0, 180.0))
                 fb_candidate, fb_reason = await generate_dialogue_fallback_async(
                     context_msgs=validator_context_msgs,
                     draft_reply=last_pm_candidate,
@@ -15216,7 +15307,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 [ЗАМЕЧАНИЕ КЛИНИЧЕСКОГО РЕЦЕНЗЕНТА]:
 Предыдущий вариант сводки отклонён: "{_sum_reason}".
 Перепиши сводку: исключи спорные категоричные утверждения, опирайся строго на реплики врачей из чата выше, представь объективный нейтральный конспект позиций коллег."""
-            cons_resp, _ = await generate_gemini_text_async(cons_prompt, status_ctx, timeout=60)
+            cons_resp, _ = await generate_gemini_text_async(cons_prompt, status_ctx, timeout=240.0)
             if cons_resp and getattr(cons_resp, "text", None):
                 summary_text = clean_html_formatting(cons_resp.text.strip())
 
@@ -17526,6 +17617,73 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     except Exception as ans_e:
         logger.debug("Failed to answer final ai callback event: %s", ans_e)
 
+async def render_bookmarks_page(bot_client, event, page=1):
+    """Отрисовывает страницу списка клинических закладок пользователя."""
+    from telethon import Button
+    total_items = await database.count_clinical_bookmarks(event.sender_id)
+    if not total_items:
+        empty_text = (
+            "⭐ <b>Ваши клинические закладки</b>\n\n"
+            "У вас пока нет сохраненных записей.\n\n"
+            "💡 <i>Отправьте команду <code>/save</code> в ответ на любое сообщение в общем чате сообщества, "
+            "или нажмите кнопку «⭐ В закладки» при чтении статьи в Энциклопедии.</i>"
+        )
+        buttons = [
+            [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
+            [Button.inline("⬅️ Назад в меню", data="nav:main")]
+        ]
+        await edit_callback_message(bot_client, event, empty_text,
+                                   "edit_message:bm_empty", buttons=buttons,
+                                   parse_mode='html')
+        await event.answer()
+        return
+
+    per_page = 5
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * per_page
+    page_rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=offset, include_id=True)
+
+    bm_text = f"⭐ <b>Ваши клинические закладки (Страница {page}/{total_pages}):</b>\n\n"
+    item_buttons = []
+    for i, row in enumerate(page_rows, offset + 1):
+        bm_id, msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
+        bm_text += f"{i}. <b>{_bookmark_snippet(sender_name, limit=32)}</b> ({date}):\n"
+        bm_text += f"«{_bookmark_snippet(msg_text, limit=120)}»\n"
+        if media_desc:
+            bm_text += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc, limit=80)}\n"
+        is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
+        if is_group_message:
+            clean_chat_id = str(chat_id_val)[4:]
+            bm_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
+        else:
+            bm_text += "📖 <i>Статья энциклопедии</i>\n\n"
+        item_buttons.append(Button.inline(f"👁 Закладка #{i}", data=f"bm:view:{bm_id}:{page}"))
+
+    bm_text += f"<i>Всего закладок: {total_items}</i>"
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(Button.inline("◀️ Пред", data=f"bm:page:{page - 1}"))
+    nav_row.append(Button.inline(f"{page}/{total_pages}", data="bm:noop"))
+    if page < total_pages:
+        nav_row.append(Button.inline("След ▶️", data=f"bm:page:{page + 1}"))
+
+    buttons = []
+    if item_buttons:
+        for chunk_idx in range(0, len(item_buttons), 2):
+            buttons.append(item_buttons[chunk_idx:chunk_idx + 2])
+    if nav_row:
+        buttons.append(nav_row)
+    buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
+
+    await edit_callback_message(bot_client, event, bm_text,
+                               "edit_message:bm_list", buttons=buttons,
+                               parse_mode='html', link_preview=False)
+    await event.answer()
+
+
 async def handle_quiz_callback(bot_client, event):
     """
     Централизованный диспетчер навигационных колбэков и инлайн-кнопок.
@@ -18219,70 +18377,115 @@ async def handle_quiz_callback(bot_client, event):
         await event.answer()
         return
 
+    if data_str == "bm:noop":
+        await event.answer()
+        return
+
     if data_str.startswith("bm:page:"):
         page = 1
         try:
             page = max(1, int(data_str.split(":")[2]))
         except (IndexError, ValueError):
             page = 1
+        await render_bookmarks_page(bot_client, event, page=page)
+        return
 
-        total_items = await database.count_clinical_bookmarks(event.sender_id)
-        if not total_items:
-            empty_text = (
-                "⭐ <b>Ваши клинические закладки</b>\n\n"
-                "У вас пока нет сохраненных записей.\n\n"
-                "💡 <i>Отправьте команду <code>/save</code> в ответ на любое сообщение в общем чате сообщества, "
-                "или нажмите кнопку «⭐ В закладки» при чтении статьи в Энциклопедии.</i>"
-            )
-            buttons = [
-                [Button.inline("📖 В Базу Знаний", data="nav:wiki")],
-                [Button.inline("⬅️ Назад в меню", data="nav:main")]
-            ]
-            await edit_callback_message(bot_client, event, empty_text,
-                                       "edit_message:bm_empty", buttons=buttons,
-                                       parse_mode='html')
-            await event.answer()
+    if data_str.startswith("bm:view:"):
+        parts = data_str.split(":")
+        try:
+            bm_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+        except (IndexError, ValueError):
+            await event.answer("⚠️ Неверный идентификатор закладки.", alert=True)
             return
 
-        per_page = 5
-        total_pages = max(1, (total_items + per_page - 1) // per_page)
-        if page > total_pages:
-            page = total_pages
-        offset = (page - 1) * per_page
-        page_rows = await database.get_clinical_bookmarks(event.sender_id, limit=per_page, offset=offset)
+        bm = await database.get_clinical_bookmark_by_id(bm_id, saved_by_user_id=event.sender_id)
+        if not bm:
+            await event.answer("⚠️ Закладка не найдена или удалена.", alert=True)
+            await render_bookmarks_page(bot_client, event, page=page)
+            return
 
-        bm_text = f"⭐ <b>Ваши клинические закладки (Страница {page}/{total_pages}):</b>\n\n"
-        for i, row in enumerate(page_rows, offset + 1):
-            msg_id, chat_id_val, sender_name, msg_text, media_desc, date = row
-            bm_text += f"{i}. <b>{_bookmark_snippet(sender_name, limit=32)}</b> ({date}):\n"
-            bm_text += f"«{_bookmark_snippet(msg_text, limit=120)}»\n"
-            if media_desc:
-                bm_text += f"🖼️ <i>Описание снимка:</i> {_bookmark_snippet(media_desc, limit=80)}\n"
-            is_group_message = str(chat_id_val).startswith("-100") and msg_id > 0
-            if is_group_message:
-                clean_chat_id = str(chat_id_val)[4:]
-                bm_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к сообщению</a>\n\n"
-            else:
-                bm_text += "📖 <i>Статья энциклопедии</i>\n\n"
+        bm_id, msg_id, chat_id_val, sender_name, msg_text, media_desc, date = bm
+        is_group_msg = str(chat_id_val).startswith("-100") and msg_id > 0
 
-        bm_text += f"<i>Всего закладок: {total_items}</i>"
+        clean_text = clean_html_formatting(msg_text)
+        view_text = (
+            f"📌 <b>Клиническая закладка #{bm_id}</b>\n\n"
+            f"👤 <b>Автор:</b> {_bookmark_snippet(sender_name, limit=32)}\n"
+            f"📅 <b>Дата сохранения:</b> {html.escape(str(date))}\n\n"
+            f"{clean_text}\n\n"
+        )
+        if media_desc:
+            view_text += f"🖼️ <b>Описание снимка:</b>\n{_bookmark_snippet(media_desc, limit=300)}\n\n"
 
-        nav_row = []
-        if page > 1:
-            nav_row.append(Button.inline("◀️ Пред", data=f"bm:page:{page - 1}"))
-        nav_row.append(Button.inline(f"{page}/{total_pages}", data=f"bm:page:{page}"))
-        if page < total_pages:
-            nav_row.append(Button.inline("След ▶️", data=f"bm:page:{page + 1}"))
+        if is_group_msg:
+            clean_chat_id = str(chat_id_val)[4:]
+            view_text += f"🔗 <a href='https://t.me/c/{clean_chat_id}/{msg_id}'>Перейти к оригинальному сообщению</a>\n\n"
 
-        buttons = []
-        if nav_row:
-            buttons.append(nav_row)
-        buttons.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
-
-        await edit_callback_message(bot_client, event, bm_text,
-                                   "edit_message:bm_list", buttons=buttons,
-                                   parse_mode='html', link_preview=False)
+        view_buttons = [
+            [Button.inline("🗑 Удалить закладку", data=f"bm:del:{bm_id}:{page}")],
+            [
+                Button.inline("⬅️ К списку закладок", data=f"bm:page:{page}"),
+                Button.inline("⬅️ В главное меню", data="nav:main")
+            ]
+        ]
+        await edit_callback_message(bot_client, event, view_text,
+                                   f"edit_message:bm_view_{bm_id}",
+                                   buttons=view_buttons, parse_mode='html',
+                                   link_preview=False)
         await event.answer()
+        return
+
+    if data_str.startswith("bm:del:"):
+        parts = data_str.split(":")
+        try:
+            bm_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+        except (IndexError, ValueError):
+            await event.answer("⚠️ Неверный идентификатор закладки.", alert=True)
+            return
+
+        bm = await database.get_clinical_bookmark_by_id(bm_id, saved_by_user_id=event.sender_id)
+        if not bm:
+            await event.answer("⚠️ Закладка не найдена или уже удалена.", alert=True)
+            await render_bookmarks_page(bot_client, event, page=page)
+            return
+
+        bm_id, msg_id, chat_id_val, sender_name, msg_text, media_desc, date = bm
+        del_text = (
+            "❓ <b>Подтверждение удаления закладки</b>\n\n"
+            "Вы действительно хотите удалить эту клиническую закладку?\n\n"
+            f"👤 <b>Автор:</b> {_bookmark_snippet(sender_name, limit=32)}\n"
+            f"📅 <b>Дата:</b> {html.escape(str(date))}\n"
+            f"«{_bookmark_snippet(msg_text, limit=140)}»\n\n"
+            "⚠️ <i>Это действие необратимо.</i>"
+        )
+        del_buttons = [
+            [Button.inline("🗑 Да, удалить", data=f"bm:cdel:{bm_id}:{page}")],
+            [Button.inline("❌ Отмена", data=f"bm:page:{page}")]
+        ]
+        await edit_callback_message(bot_client, event, del_text,
+                                   f"edit_message:bm_del_{bm_id}",
+                                   buttons=del_buttons, parse_mode='html')
+        await event.answer()
+        return
+
+    if data_str.startswith("bm:cdel:"):
+        parts = data_str.split(":")
+        try:
+            bm_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+        except (IndexError, ValueError):
+            await event.answer("⚠️ Неверный идентификатор закладки.", alert=True)
+            return
+
+        deleted = await database.delete_clinical_bookmark(bm_id, saved_by_user_id=event.sender_id)
+        if deleted:
+            await event.answer("🗑 Закладка успешно удалена!", alert=False)
+        else:
+            await event.answer("⚠️ Не удалось удалить: закладка не найдена.", alert=True)
+
+        await render_bookmarks_page(bot_client, event, page=page)
         return
 
     # 3. ДЕТАЛЬНЫЙ СПРАВОЧНИК-КАЛЬКУЛЯТОР calc:*
@@ -20190,7 +20393,7 @@ async def check_and_send_pm_pings(bot_client):
 Начинай сразу с сути обращения к врачу (или выведи NO_PING)."""
 
                 status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
-                response, error = await generate_gemini_text_async(expert_prompt, status_ctx, timeout=90)
+                response, error = await generate_gemini_text_async(expert_prompt, status_ctx, timeout=180.0)
 
                 if not error and response and getattr(response, "text", None):
                     reply_text = response.text.strip()

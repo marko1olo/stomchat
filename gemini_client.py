@@ -151,7 +151,7 @@ def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
         )
         time.sleep(min(15, remaining))
 
-def get_openai_client(api_key, base_url, timeout=120.0, **kwargs):
+def get_openai_client(api_key, base_url, timeout=480.0, **kwargs):
     client_kwargs = {
         "api_key": api_key if api_key else "dummy_key",
         "base_url": base_url,
@@ -375,7 +375,7 @@ def set_provider_pool_cooldown(provider: str, seconds: int = GCP_PROJECT_COOLDOW
         set_key_cooldown(provider, k, seconds=seconds)
 
 
-def get_provider_client(provider, api_key, timeout=120.0):
+def get_provider_client(provider, api_key, timeout=480.0):
     """Клиент к провайдеру по его имени. Единственная точка создания клиента."""
     base_url = PROVIDER_BASE_URLS.get(provider)
     if not base_url:
@@ -763,7 +763,14 @@ def compute_call_timeout(
 
     # 4. Распределяем доступное время модели между оставшимися попытками (ключами)
     attempts_left = max(1, attempts_planned - attempt)
-    attempt_share = model_available / attempts_left
+    if provider == "agentrouter":
+        # Для AgentRouter (gpt-6.1-sol) не делим время между ключами:
+        # глубокая рассуждающая модель CoT должна получить максимум доступного времени
+        # на первой попытке (не менее 80-100% доступного бюджета).
+        # В случае быстрого сбоя ключа (401/429) следующий ключ динамически получит остаток.
+        attempt_share = model_available
+    else:
+        attempt_share = model_available / attempts_left
 
     # 5. Интерактивные потолки для предотвращения зависания
     if is_triage:
@@ -775,15 +782,19 @@ def compute_call_timeout(
         ceiling = 720.0 if provider == "agentrouter" else 240.0
     elif provider == "agentrouter":
         # Флагман gpt-6.1-sol (AgentRouter) — глубокая рассуждающая модель.
-        # Даем просторный потолок, чтобы не обрывать цепочку рассуждений (CoT).
-        if timeout is None or timeout >= 240.0:
-            ceiling = 180.0
+        # Даем просторный потолок до 480с, чтобы не обрывать цепочку рассуждений (CoT).
+        if timeout is None or timeout >= 480.0:
+            ceiling = 480.0
+        elif timeout >= 300.0:
+            ceiling = 480.0
+        elif timeout >= 240.0:
+            ceiling = 360.0
         elif timeout >= 120.0:
-            ceiling = 110.0
+            ceiling = 240.0
         elif timeout >= 60.0:
-            ceiling = 55.0
+            ceiling = 120.0
         else:
-            ceiling = max(15.0, timeout * 0.6)
+            ceiling = max(15.0, timeout * 0.85)
     elif is_chatbot:
         # Для Gemini и Groq в интерактивном диалоге
         if thinking_level == "HIGH":
@@ -1236,8 +1247,11 @@ def generate_text(prompt, status_context=None, timeout=None):
         if is_triage:
             req_timeout = max(7.0 if budget >= 7.0 else 2.5, min(req_timeout, 15.0))
         elif is_chatbot:
-            chat_max = 120.0 if thinking_level == "HIGH" else 45.0
-            chat_ceiling = 120.0 if thinking_level == "HIGH" else 45.0
+            # Не душить интерактивные рассуждающие модели (gpt-6.1-sol / AgentRouter) потолком 120с!
+            # Для AgentRouter и HIGH thinking потолок до 480.0с.
+            is_reasoning_cascade = (thinking_level == "HIGH") or any(p == "agentrouter" for _, p in active_cascade)
+            chat_max = 480.0 if is_reasoning_cascade else 120.0
+            chat_ceiling = 480.0 if is_reasoning_cascade else 120.0
             req_timeout = max(15.0, min(req_timeout, chat_max, chat_ceiling))
         deadline = time.monotonic() + usable
         logger.debug(
@@ -1354,7 +1368,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                             )
                             _sleep_with_status(provider_switch_pause, status_context, attempt + 1, max_attempts, f"switch_{provider}")
 
-                rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (240.0 if provider == 'agentrouter' else 120.0))
+                rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (480.0 if provider == 'agentrouter' else 120.0))
                 call_timeout = compute_call_timeout(
                     provider=provider,
                     model_name=model_name,

@@ -135,7 +135,9 @@ F13. Правка F2 работает ТОЛЬКО ВПЕРЁД: уже поме
 верными. Перепрогон нужен, чтобы вернуть те 59 % архива — это отдельное
 решение человека, здесь оно не запускается.
 """
+import ast
 import asyncio
+from typing import Any, Optional, Union
 import hashlib
 import json
 import logging
@@ -508,17 +510,288 @@ def build_prompt_log(messages, parent_lookup=None):
     return "".join(lines), stats
 
 
+def strip_json_comments(text: str) -> str:
+    """
+    Удаляет однострочные (// ...) и многострочные (/* ... */) комментарии,
+    не затрагивая строковые литералы.
+    """
+    result = []
+    in_string = False
+    quote_char = None
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            result.append(ch)
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == quote_char:
+                in_string = False
+                quote_char = None
+            i += 1
+            continue
+
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == '/' and i + 1 < n and text[i + 1] == '/':
+            i += 2
+            while i < n and text[i] not in ('\r', '\n'):
+                i += 1
+            continue
+
+        if ch == '/' and i + 1 < n and text[i + 1] == '*':
+            i += 2
+            while i + 1 < n and not (text[i] == '*' and text[i + 1] == '/'):
+                i += 1
+            i += 2
+            continue
+
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def fix_trailing_commas(text: str) -> str:
+    """
+    Устраняет висячие запятые (trailing commas) перед } или ] с сохранением строковых литералов.
+    """
+    result = []
+    in_string = False
+    quote_char = None
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            result.append(ch)
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == quote_char:
+                in_string = False
+                quote_char = None
+            i += 1
+            continue
+
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == ',':
+            j = i + 1
+            while j < n and text[j] in (' ', '\t', '\r', '\n'):
+                j += 1
+            if j < n and text[j] in ('}', ']'):
+                i += 1
+                continue
+
+        result.append(ch)
+        i += 1
+
+    return "".join(result)
+
+
+def _try_parse_candidate(candidate: str) -> Optional[Union[dict, list]]:
+    """Пошаговый парсинг строки-кандидата с возрастающей глубиной восстановления."""
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+
+    # 1. Прямой json.loads (strict=False для неэкранированных переводов строк в строках)
+    try:
+        val = json.loads(candidate, strict=False)
+        if isinstance(val, (dict, list)):
+            return val
+    except Exception:
+        pass
+
+    # 2. Снятие JS-комментариев (// и /* ... */)
+    no_comments = strip_json_comments(candidate).strip()
+    if no_comments != candidate:
+        try:
+            val = json.loads(no_comments, strict=False)
+            if isinstance(val, (dict, list)):
+                return val
+        except Exception:
+            pass
+
+    # 3. Устранение trailing commas перед } и ]
+    for base in (candidate, no_comments):
+        fixed_commas = fix_trailing_commas(base).strip()
+        try:
+            val = json.loads(fixed_commas, strict=False)
+            if isinstance(val, (dict, list)):
+                return val
+        except Exception:
+            pass
+
+    # 4. Безопасный ast.literal_eval для одинарных кавычек и Python-литералов
+    for base in (candidate, no_comments):
+        py_cand = fix_trailing_commas(base)
+        py_cand = re.sub(r'\btrue\b', 'True', py_cand)
+        py_cand = re.sub(r'\bfalse\b', 'False', py_cand)
+        py_cand = re.sub(r'\bnull\b', 'None', py_cand)
+        try:
+            val = ast.literal_eval(py_cand)
+            if isinstance(val, (dict, list)):
+                return val
+        except Exception:
+            pass
+
+    return None
+
+
+def _extract_facts_by_regex(text: str) -> list[dict]:
+    """Резервное regex-извлечение фактов из тяжело повреждённого ответа модели."""
+    facts = []
+    pattern = re.compile(
+        r'\{\s*(?:'
+        r'"c"\s*:\s*"([^"]+)"\s*,\s*"f"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"s"\s*:\s*\[([^\]]*)\]'
+        r'|'
+        r'"f"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"c"\s*:\s*"([^"]+)"\s*,\s*"s"\s*:\s*\[([^\]]*)\]'
+        r')'
+        r'(?:\s*,\s*"case"\s*:\s*(true|false|True|False))?'
+        r'\s*\}',
+        re.DOTALL
+    )
+    for m in pattern.finditer(text):
+        if m.group(1) is not None:
+            c_code = m.group(1).strip()
+            f_raw = m.group(2)
+            s_raw = m.group(3)
+        else:
+            f_raw = m.group(4)
+            c_code = m.group(5).strip()
+            s_raw = m.group(6)
+
+        f_text = f_raw.encode().decode('unicode_escape', errors='replace') if '\\' in f_raw else f_raw
+        s_ids = [int(x.strip()) for x in re.findall(r'\d+', s_raw)]
+        case_val = m.group(7)
+        is_case = case_val.lower() == 'true' if case_val else False
+        facts.append({
+            "c": c_code,
+            "f": f_text,
+            "s": s_ids,
+            "case": is_case
+        })
+    return facts
+
+
+def extract_resilient_json(text: Any, fallback_to_regex: bool = True) -> Optional[Union[dict, list]]:
+    """
+    Пуленепробиваемый экстрактор JSON для ответов LLM.
+    Обрабатывает:
+      - Зачистку BOM (\ufeff) и невидимых символов (\u200b-\u200d)
+      - Зачистку управляющих символов ASCII 0-31 (сохраняя \t, \n, \r)
+      - Снятие Markdown codeblocks (```json ... ``` или ``` ... ```)
+      - Поиск внешних границ {...} или [...]
+      - Устранение trailing commas перед } и ]
+      - Снятие комментариев // и /* ... */
+      - Безопасный ast.literal_eval для одинарных кавычек и синтаксиса Python
+      - Резервное извлечение ключевых полей через регулярные выражения
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
+
+    # 1. Зачистка BOM и невидимых символов
+    raw = text.replace('\ufeff', '').replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
+    # Зачистка непечатаемых управляющих символов 0-31 (кроме \t, \n, \r) и 127
+    raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', raw).strip()
+    if not raw:
+        return None
+
+    candidates: list[str] = []
+
+    # 2. Извлечение содержимого блоков кода markdown
+    fenced_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', raw, re.IGNORECASE)
+    for block in fenced_blocks:
+        b_clean = block.strip()
+        if b_clean and b_clean not in candidates:
+            candidates.append(b_clean)
+
+    # Незакрытый блок кода (обрыв ответа)
+    unclosed = re.findall(r'```(?:json)?\s*([\s\S]+)$', raw, re.IGNORECASE)
+    for block in unclosed:
+        b_clean = block.strip()
+        if b_clean and b_clean not in candidates:
+            candidates.append(b_clean)
+
+    # 3. Полный текст со снятыми блоками кода
+    fenced_stripped = re.sub(r'```(?:json)?\s*', '', raw).replace('```', '').strip()
+    if fenced_stripped and fenced_stripped not in candidates:
+        candidates.append(fenced_stripped)
+
+    # 4. Поиск внешних границ {...} или [...]
+    first_brace = raw.find('{')
+    last_brace = raw.rfind('}')
+    brace_cand = raw[first_brace:last_brace + 1].strip() if (first_brace != -1 and last_brace > first_brace) else None
+
+    first_bracket = raw.find('[')
+    last_bracket = raw.rfind(']')
+    bracket_cand = raw[first_bracket:last_bracket + 1].strip() if (first_bracket != -1 and last_bracket > first_bracket) else None
+
+    if first_brace != -1 and (first_bracket == -1 or first_brace < first_bracket):
+        if brace_cand and brace_cand not in candidates:
+            candidates.append(brace_cand)
+        if bracket_cand and bracket_cand not in candidates:
+            candidates.append(bracket_cand)
+    else:
+        if bracket_cand and bracket_cand not in candidates:
+            candidates.append(bracket_cand)
+        if brace_cand and brace_cand not in candidates:
+            candidates.append(brace_cand)
+
+    if raw not in candidates:
+        candidates.append(raw)
+
+    for cand in candidates:
+        parsed = _try_parse_candidate(cand)
+        if parsed is not None:
+            return parsed
+
+    # 5. Резервное извлечение при тяжелых повреждениях (если запрошено)
+    if fallback_to_regex:
+        regex_facts = _extract_facts_by_regex(raw)
+        if regex_facts:
+            return {"facts": regex_facts}
+
+    return None
+
+
 def clean_json_string(text):
     """Очищает строку от мусора нейронки (маркеры кода, пояснения) для парсинга JSON."""
     if not text:
         return ""
-    text = re.sub(r"```json\s*", "", text)
+    text = text.replace('\ufeff', '').strip()
+    text = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"```", "", text)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        return text[start:end + 1]
-    return text
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    first_bracket = text.find("[")
+    last_bracket = text.rfind("]")
+
+    if first_bracket != -1 and (first_brace == -1 or first_bracket < first_brace):
+        if last_bracket != -1 and last_bracket > first_bracket:
+            return text[first_bracket:last_bracket + 1]
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return text[first_brace:last_brace + 1]
+    return text.strip()
 
 
 def _iter_json_objects(text):
@@ -559,76 +832,68 @@ def parse_facts(raw_res):
       "parse_error" — ответ есть, но JSON не собрался даже частично;
       "salvaged"    — полный JSON не собрался, но целые объекты фактов вынуты;
       "ok"          — разобрано штатно (в том числе честное `{"facts": []}`).
-
-    Раньше все четыре случая возвращали `[]`, и вызывающий помечал пачку
-    обработанной в любом из них. Именно этим 70 015 реплик (59.41 % архива)
-    были выжжены без единого факта.
-
-    Спасение частичного ответа не роскошь: `max_output_tokens = 8192` в
-    `gemini_knowledge.py`, и на обрезанном ответе `rfind('}')` даёт невалидный
-    JSON — терялась ВСЯ пачка фактов, хотя первые 8 объектов были целыми.
-    (По `distiller.log` за прогон 2026-02-17..19 таких случаев 0, то есть
-    механизм профилактический, а не задним числом.)
     """
     if not raw_res:
         return [], "no_response"
-    # Сначала пробуем ответ как есть (только без маркдаун-обёртки): модель
-    # может отдать верхнеуровневый СПИСОК `[{...}]`, а clean_json_string режет
-    # от первой `{` до последней `}` и превращает такой список в один объект.
-    fenced = re.sub(r"```(?:json)?\s*", "", str(raw_res)).strip()
-    data = None
-    for candidate in (fenced, clean_json_string(raw_res)):
-        try:
-            data = json.loads(candidate)
-            break
-        except Exception as e:
-            err = e
-    if data is None:
-        logger.error("Провал парсинга JSON: %s | начало ответа: %s", err, str(raw_res)[:160])
-        salvaged, seen = [], set()
-        for chunk in _iter_json_objects(raw_res):
-            try:
-                obj = json.loads(chunk)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            if "facts" in obj and isinstance(obj["facts"], list):
-                for x in obj["facts"]:
-                    if isinstance(x, dict):
-                        key = json.dumps(x, sort_keys=True, ensure_ascii=False)
-                        if key not in seen:
-                            seen.add(key)
-                            salvaged.append(x)
-            elif "f" in obj or "content" in obj:
-                key = json.dumps(obj, sort_keys=True, ensure_ascii=False)
-                if key not in seen:
-                    seen.add(key)
-                    salvaged.append(obj)
-        if salvaged:
-            logger.warning("Спасено %d фактов из битого JSON вместо потери всей пачки", len(salvaged))
-            return salvaged, "salvaged"
-        return [], "parse_error"
-    if isinstance(data, list):
-        facts = [x for x in data if isinstance(x, dict)]
-        return facts, "ok"
-    if not isinstance(data, dict):
-        return [], "parse_error"
-    facts = data.get("facts")
-    if facts is None:
-        # Модель могла назвать ключ иначе. Ищем первый список словарей.
-        for value in data.values():
-            if isinstance(value, list) and any(isinstance(x, dict) for x in value):
-                facts = value
-                break
-    if facts is None:
-        return [], "ok"  # честно пустой ответ без ключа facts
-    if not isinstance(facts, list):
-        return [], "parse_error"
-    good = [x for x in facts if isinstance(x, dict)]
-    if len(good) != len(facts):
-        logger.warning("В facts пришло %d элементов не-словарей, они отброшены", len(facts) - len(good))
-    return good, "ok"
+
+    # Сначала пробуем восстановить полноценную JSON-структуру (без fallback_to_regex,
+    # чтобы не замаскировать обрезанный ответ под штатный ok)
+    data = extract_resilient_json(raw_res, fallback_to_regex=False)
+    if data is not None:
+        if isinstance(data, list):
+            facts = [x for x in data if isinstance(x, dict)]
+            return facts, "ok"
+        if isinstance(data, dict):
+            facts = data.get("facts")
+            if facts is None:
+                if ("f" in data or "content" in data) and ("c" in data or "s" in data):
+                    facts = [data]
+                else:
+                    for value in data.values():
+                        if isinstance(value, list) and any(isinstance(x, dict) for x in value):
+                            facts = value
+                            break
+            if facts is None:
+                return [], "ok"  # честно пустой ответ без ключа facts
+            if not isinstance(facts, list):
+                return [], "parse_error"
+            good = [x for x in facts if isinstance(x, dict)]
+            if len(good) != len(facts):
+                logger.warning("В facts пришло %d элементов не-словарей, они отброшены", len(facts) - len(good))
+            return good, "ok"
+
+    # Полная структура не собралась (например, обрыв ответа по лимиту токенов).
+    # Спасаем целые объекты фактов на любой глубине вложенности.
+    salvaged, seen = [], set()
+    for chunk in _iter_json_objects(raw_res):
+        obj = extract_resilient_json(chunk)
+        if not isinstance(obj, dict):
+            continue
+        if "facts" in obj and isinstance(obj["facts"], list):
+            for x in obj["facts"]:
+                if isinstance(x, dict):
+                    key = json.dumps(x, sort_keys=True, ensure_ascii=False)
+                    if key not in seen:
+                        seen.add(key)
+                        salvaged.append(x)
+        elif "f" in obj or "content" in obj:
+            key = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+            if key not in seen:
+                seen.add(key)
+                salvaged.append(obj)
+
+    if salvaged:
+        logger.warning("Спасено %d фактов из битого JSON вместо потери всей пачки", len(salvaged))
+        return salvaged, "salvaged"
+
+    # Резервный поиск фактов регулярным выражением
+    regex_salvaged = _extract_facts_by_regex(raw_res)
+    if regex_salvaged:
+        logger.warning("Спасено %d фактов через regex из битого JSON вместо потери всей пачки", len(regex_salvaged))
+        return regex_salvaged, "salvaged"
+
+    logger.error("Провал парсинга JSON: не удалось извлечь структуру | начало ответа: %s", str(raw_res)[:160])
+    return [], "parse_error"
 
 
 async def init_wiki_db():

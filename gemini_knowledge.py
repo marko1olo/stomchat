@@ -120,11 +120,19 @@ def validate_fact_payload(text):
                  уходил в вики — 353 факта без провенанса появились так.
     """
     raw = str(text or "")
-    stripped = re.sub(r"```(?:json)?\s*", "", raw).strip()
+    data = None
     try:
-        data = json.loads(stripped)
-    except Exception as e:
-        return "unparsed", f"как JSON не собралось ({str(e)[:60]})"
+        from distiller import extract_resilient_json
+        data = extract_resilient_json(raw, fallback_to_regex=False)
+    except Exception:
+        data = None
+
+    if data is None:
+        stripped = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        try:
+            data = json.loads(stripped)
+        except Exception as e:
+            return "unparsed", f"как JSON не собралось ({str(e)[:60]})"
 
     facts = None
     if isinstance(data, list):

@@ -21,6 +21,12 @@ from telethon import Button
 
 import anesthesia_calc as ac
 
+try:
+    from clinical_gnathology_phonetics import get_phonetic_test_chairside_card
+except ImportError:
+    def get_phonetic_test_chairside_card() -> str:
+        return "🗣 Протокол фонетических проб временно недоступен."
+
 logger = logging.getLogger("chairside_tools")
 
 
@@ -973,7 +979,7 @@ def build_chairside_hub_markup():
         ],
         [
             Button.inline("🧪 Дезинфекция каналов (NaOCl/PCA)", data="chairside:irrigation"),
-            Button.inline("🛡 Профилактика эндокардита", data="pharma:prophylaxis:70")
+            Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics")
         ],
         [
             Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
@@ -1343,6 +1349,31 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
         logger.debug("Failed to answer chairside callback query: %s", e)
 
     # 0. Меню Chairside Hub
+    # 0.1 ФОНЕТИЧЕСКИЕ ПРОБЫ И ВНОЛ (chairside:phonetics)
+    if data_str == "chairside:phonetics":
+        card = get_phonetic_test_chairside_card()
+        buttons = [
+            [
+                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                Button.inline("🏠 Главное меню", data="nav:main")
+            ]
+        ]
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
+
+    # 0.2 ДЕЗИНФЕКЦИЯ КАНАЛОВ (chairside:irrigation)
+    if data_str == "chairside:irrigation":
+        card = format_irrigation_protocol_card()
+        buttons = [
+            [Button.inline("🚨 При аварии NaOCl", data="sos:naocl")],
+            [
+                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                Button.inline("🏠 Главное меню", data="nav:main")
+            ]
+        ]
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
+
     if data_str in ("chairside:hub", "chairside:menu"):
         text = (
             "🛠 <b>Клинические Chairside-инструменты StomChat</b>\n"
@@ -2092,6 +2123,18 @@ async def _safe_send_chairside(bot_client, event, text: str, buttons=None):
 # 10. ОБРАБОТЧИКИ КОМАНД (/chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve)
 # ==============================================================================
 
+async def handle_phonetics_command(bot_client, event, arg: str = ""):
+    """Команда /phonetics [или /внол, /фонетика, /vdo]: протокол фонетических проб для определения ВНОЛ."""
+    card = get_phonetic_test_chairside_card()
+    buttons = [
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+    await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+
+
 async def handle_chairside_command(bot_client, event, arg: str = ""):
     """Команда /chairside: выводит меню клинических chairside-инструментов."""
     text = (
@@ -2104,7 +2147,8 @@ async def handle_chairside_command(bot_client, event, arg: str = ""):
         "• 💔 <b>Обломок инструмента:</b> пошаговый протокол спасения (Bypass) (/sos)\n"
         "• 💊 <b>Фармакотерапия:</b> точный расчет доз и готовая памятка пациенту (/pharma)\n"
         "• 📐 <b>Сохранение зуба:</b> экспресс-консилиум и оценка феррула (/preserve)\n"
-        "• 📊 <b>Сложность AAE:</b> триаж клинического риска в 3 клика (/aae)"
+        "• 📊 <b>Сложность AAE:</b> триаж клинического риска в 3 клика (/aae)\n"
+        "• 🗣 <b>Фонетические пробы:</b> ВНОЛ, пробы «М», «Ф/В», «С», «И», линия Паунда (/phonetics)"
     )
     buttons = build_chairside_hub_markup()
     await _safe_send_chairside(bot_client, event, text, buttons=buttons)
@@ -2533,6 +2577,9 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
         ]
         await _safe_send_chairside(bot_client, event, card, buttons=buttons)
         return True
+    elif cmd_name in ("/phonetics", "/фонетика", "/внол", "/vdo"):
+        await handle_phonetics_command(bot_client, event, arg)
+        return True
     elif cmd_name in ("/preserve", "/феррул", "/сохранение"):
         await handle_preserve_command(bot_client, event, arg)
         return True
@@ -2541,4 +2588,4 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
-is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция")))
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo")))

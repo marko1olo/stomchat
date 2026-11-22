@@ -220,6 +220,21 @@ for phrase in [
 ]:
     check(f"«{phrase[:40]}» клиника", dv.has_dental_term(phrase.lower()) is True)
 
+print("\n[14] Red-Team: Гнатология, фонетические пробы и ВНОЛ (Domain 5)")
+for phrase in [
+    "как определить внол?",
+    "проба сильвермана при полном съемном протезе",
+    "линия паунда на нижней челюсти",
+    "определить высоту покоя",
+    "расчет vdo и vdr",
+    "freeway space в норме 2-4 мм",
+    "фонетические пробы для определения прикуса",
+    "постановка зубов на бюгеле",
+    "линия клейна на нижней губе",
+    "проба гизи для покоя",
+]:
+    check(f"«{phrase[:40]}» клиника", dv.has_dental_term(phrase.lower()) is True)
+
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
 if FAIL:
     print("Провалено: " + ", ".join(FAIL))
