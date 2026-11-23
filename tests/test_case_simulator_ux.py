@@ -543,5 +543,96 @@ class TestCaseSimulatorFlowAndSafety(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buttons[1][0].data, b"nav:main")
 
 
+class TestCaseBankAndNeuralEvaluation(unittest.IsolatedAsyncioTestCase):
+    """Тестирование банка острых кейсов и системных промптов симулятора."""
+
+    def test_case_bank_subcutaneous_emphysema(self):
+        """Проверка наличия кейса ятрогенной подкожной эмфиземы."""
+        import clinical_case_simulator as ccs
+        case = ccs.get_clinical_case_by_id("subcutaneous_emphysema")
+        self.assertIsNotNone(case, "Кейс subcutaneous_emphysema обязан быть в банке")
+        self.assertIn("1.4", case["tooth"])
+        self.assertIn("пустер", case["description"].lower())
+        self.assertIn("крепитация", case["description"].lower())
+        opts = case["options"]
+        self.assertEqual(len(opts), 4)
+        self.assertIn("A", opts)
+        self.assertIn("B", opts)
+        self.assertIn("C", opts)
+        self.assertIn("D", opts)
+        self.assertEqual(case["ebm_key"], "B")
+        self.assertIn("Амоксиклав", opts["B"])
+
+    def test_case_bank_sinus_perforation(self):
+        """Проверка наличия кейса перфорации дна гайморовой пазухи."""
+        import clinical_case_simulator as ccs
+        case = ccs.get_clinical_case_by_id("sinus_perforation")
+        self.assertIsNotNone(case, "Кейс sinus_perforation обязан быть в банке")
+        self.assertIn("1.6", case["tooth"])
+        self.assertIn("гайморов", case["title"].lower())
+        self.assertIn("носоротовая", case["description"].lower())
+        opts = case["options"]
+        self.assertEqual(len(opts), 4)
+        self.assertEqual(case["ebm_key"], "B")
+        self.assertIn("MTA", opts["B"])
+        self.assertIn("запрет сморкаться", opts["B"])
+
+    def test_case_bank_formatting(self):
+        """Форматирование кейсов из банка гарантирует 4 опции A, B, C, D."""
+        import clinical_case_simulator as ccs
+        for case in ccs.CLINICAL_CASE_BANK:
+            text = ccs.format_case_step1_from_dict(case)
+            self.assertIn("A)", text)
+            self.assertIn("B)", text)
+            self.assertIn("C)", text)
+            self.assertIn("D)", text)
+            self.assertIn("❓ <b>Клинический вопрос:</b>", text)
+
+    def test_neural_prompts_invariants(self):
+        """Проверка когнитивных директив в системных промптах симулятора."""
+        import clinical_case_simulator as ccs
+        # 1. Промпт генерации
+        self.assertIn("A) [Тактика 1]", ccs.CASE_SYSTEM_GENERATION_PROMPT)
+        self.assertIn("D) [Тактика 4]", ccs.CASE_SYSTEM_GENERATION_PROMPT)
+        # 2. Промпт ветвления
+        self.assertIn("{doctor_action}", ccs.CASE_STEP_EVALUATION_PROMPT)
+        self.assertIn("КЛИНИЧЕСКИЙ АУДИТ", ccs.CASE_STEP_EVALUATION_PROMPT)
+        # 3. Финальный дебрифинг
+        self.assertIn("ДОКАЗАТЕЛЬНЫЙ ПРОГНОЗ", ccs.CASE_FINAL_DEBRIEF_PROMPT)
+        self.assertIn("ТОТАЛЬНЫЙ ЗАПРЕТ СИКОФАНТСТВА", ccs.CASE_FINAL_DEBRIEF_PROMPT)
+
+    @patch("assistant.send_message_chunks_async")
+    @patch("database.get_user_interactive_state", return_value=None)
+    @patch("database.set_user_interactive_state")
+    @patch("database.save_pm_message")
+    @patch("clinical_case_simulator.get_random_clinical_case")
+    async def test_start_case_delivers_bank_case(
+        self, mock_get_case, mock_save_pm, mock_set_state, mock_get_state, mock_send_chunks
+    ):
+        """start_interactive_case успешно доставляет кейс из банка."""
+        import clinical_case_simulator as ccs
+        emphysema_case = ccs.get_clinical_case_by_id("subcutaneous_emphysema")
+        mock_get_case.return_value = emphysema_case
+        mock_bot = AsyncMock()
+        mock_send_chunks.return_value = MagicMock(value=MagicMock(id=555001))
+
+        await assistant.start_interactive_case(mock_bot, 999888)
+
+        mock_send_chunks.assert_called_once()
+        msg_text = mock_send_chunks.call_args[0][2]
+        self.assertIn("Ятрогенная подкожная эмфизема", msg_text)
+        self.assertIn("Клинический симулятор: Шаг 1 из 4", msg_text)
+        buttons = mock_send_chunks.call_args[1]["buttons"]
+        self.assertEqual(buttons[0][0].text, "🔘 Вариант A")
+        self.assertEqual(buttons[0][0].data, b"case:opt:A")
+        self.assertEqual(buttons[0][1].text, "🔘 Вариант B")
+        self.assertEqual(buttons[0][1].data, b"case:opt:B")
+        self.assertEqual(buttons[1][0].text, "🔘 Вариант C")
+        self.assertEqual(buttons[1][0].data, b"case:opt:C")
+        self.assertEqual(buttons[1][1].text, "🔘 Вариант D")
+        self.assertEqual(buttons[1][1].data, b"case:opt:D")
+
+
 if __name__ == "__main__":
     unittest.main()
+

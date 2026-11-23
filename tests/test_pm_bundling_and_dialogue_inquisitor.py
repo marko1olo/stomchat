@@ -281,7 +281,7 @@ class TestPMDialogueContextInquisitor(unittest.IsolatedAsyncioTestCase):
             final_prompt = captured_prompts[-1]
 
             # Проверяем, что промпт содержит явный блок преемственности диалога:
-            self.assertIn("[АКТИВНЫЙ ДИАЛОГ: ПРЯМОЙ ОТВЕТ ВРАЧА НА ТВОЙ ВОПРОС / РЕПЛИКУ]", final_prompt)
+            self.assertIn("[АКТИВНЫЙ ДИАЛОГ: РЕПЛИКА / ОТВЕТ ВРАЧА В ТЕКУЩЕМ КЛИНИЧЕСКОМ КЕЙСЕ]", final_prompt)
             self.assertIn("Что в итоге с фрагментом в МБ2", final_prompt)
             self.assertIn("«Достал»", final_prompt)
 

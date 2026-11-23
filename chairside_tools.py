@@ -982,7 +982,10 @@ def build_chairside_hub_markup():
             Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics")
         ],
         [
-            Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
+            Button.inline("🛠 Починка композита", data="chairside:composite_repair"),
+            Button.inline("📊 Калькулятор сложности AAE", data="aae:start")
+        ],
+        [
             Button.inline("⬅️ В главное меню", data="nav:main")
         ]
     ]
@@ -1153,6 +1156,10 @@ def build_resuscitation_sos_markup():
             Button.inline("🚨 Гипохлоритовая авария", data="sos:naocl"),
         ],
         [
+            Button.inline("💨 Подкожная эмфизема", data="sos:subcutaneous_emphysema"),
+            Button.inline("🕳 Перфорация пазухи (ОАС)", data="sos:sinus"),
+        ],
+        [
             Button.inline("🪡 Перелом иглы", data="sos:needle"),
             Button.inline("⚖️ Адреналин vs Аллергия", data="sos:adrenaline"),
         ],
@@ -1310,7 +1317,8 @@ def is_chairside_callback(data_str: str) -> bool:
             "anaphylaxis", "last", "collapse", "syncope", "hypoglycemia",
             "hypertension", "crisis", "hypertensive", "needle", "needle_break",
             "needle_breakage", "adrenaline", "adrenaline_vs_allergy",
-            "adrenaline_reaction", "pregnancy", "pregnancy_protocol"
+            "adrenaline_reaction", "pregnancy", "pregnancy_protocol",
+            "subcutaneous_emphysema", "emphysema_chairside", "sinus", "oac", "perforation_sinus"
         }
         return sos_k in chairside_sos_keys
     return False
@@ -1347,6 +1355,42 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
         await event.answer()
     except Exception as e:
         logger.debug("Failed to answer chairside callback query: %s", e)
+
+    # 0.4 ПОДКОЖНАЯ ЭМФИЗЕМА (chairside:emphysema)
+    if data_str in ("chairside:emphysema", "chairside:subcutaneous_emphysema"):
+        card = format_subcutaneous_emphysema_card()
+        buttons = [
+            [
+                Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                Button.inline("🏠 Chairside Hub", data="chairside:hub")
+            ]
+        ]
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
+
+    # 0.5 ПЕРФОРАЦИЯ ПАЗУХИ (chairside:sinus, chairside:oac)
+    if data_str in ("chairside:sinus", "chairside:oac", "chairside:sinus_perforation"):
+        card = format_sinus_perforation_card()
+        buttons = [
+            [
+                Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                Button.inline("🏠 Chairside Hub", data="chairside:hub")
+            ]
+        ]
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
+
+    # 0.3 ПОЧИНКА КОМПОЗИТА (chairside:composite_repair)
+    if data_str in ("chairside:composite_repair", "chairside:repair"):
+        card = format_composite_repair_card()
+        buttons = [
+            [
+                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+                Button.inline("🏠 Главное меню", data="nav:main")
+            ]
+        ]
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
 
     # 0. Меню Chairside Hub
     # 0.1 ФОНЕТИЧЕСКИЕ ПРОБЫ И ВНОЛ (chairside:phonetics)
@@ -1622,6 +1666,28 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
 
         if sos_key == "naocl":
             card = format_naocl_accident_card()
+            buttons = [
+                [
+                    Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+
+        if sos_key in ("emphysema", "subcutaneous_emphysema", "emphysema_chairside"):
+            card = format_subcutaneous_emphysema_card()
+            buttons = [
+                [
+                    Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+
+        if sos_key in ("sinus", "oac", "perforation_sinus"):
+            card = format_sinus_perforation_card()
             buttons = [
                 [
                     Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
@@ -2090,18 +2156,95 @@ def format_naocl_accident_card() -> str:
         "🚨 <b>Экстренный клинический протокол: Гипохлоритовая авария (выведение NaOCl за апекс)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<b>1. Немедленная остановка:</b>\n"
-        "• Прекратить подачу гипохлорита! Обильно промыть канал <b>0.9% стерильным физраствором</b> (10–20 мл) для разбавления и аспирации остатков NaOCl. Кислоты (лимонную, ЭДТА) НЕ лить!\n\n"
+        "• Прекратить подачу гипохлорита! Обильно промыть канал <code>0.9% стерильный физраствор 10–20 мл</code> для разбавления и аспирации остатков NaOCl. Кислоты (лимонную, ЭДТА) НЕ лить!\n\n"
         "<b>2. Обезболивание:</b>\n"
-        "• Анестезия (артикаин или лидокаин) для купирования жестокой ишемической боли. По возможности <b>без адреналина</b> или 1:200 000 (не усугублять тканевую ишемию).\n\n"
+        "• Анестезия (артикаин или лидокаин) для купирования ишемической боли: <code>Артикаин 4% 1:200 000</code> или без адреналина (не усугублять тканевую ишемию).\n\n"
         "<b>3. Противоотечная терапия (в кресле):</b>\n"
-        "• <b>Дексаметазон 4–8 мг внутримышечно</b> немедленно! Блокирует лавинообразный отек клетчатки лица.\n\n"
-        "<b>4. Антибактериальное прикрытие и анальгезия:</b>\n"
-        "• <b>Амоксиклав 875/125 мг</b> по 1 таб 2 раза в день (7 дней) из-за риска вторичного некроза и флегмоны.\n"
-        "• Обезболивание: <b>Ибупрофен 400-600 мг + Парацетамол 500 мг</b> каждые 6–8 часов.\n\n"
+        "• <code>Дексаметазон 4–8 мг в/м</code> немедленно! Блокирует лавинообразный отек клетчатки лица.\n\n"
+        "<b>4. Антибактериальное прикрытие и анальгезия (для копирования в МИС):</b>\n"
+        "• <code>Амоксиклав 875/125 мг по 1 таб 2 раза в день (7 дней)</code> из-за риска вторичного некроза и флегмоны.\n"
+        "• <i>При аллергии:</i> <code>Кларитромицин 500 мг по 1 таб 2 раза в день (7 дней)</code>\n"
+        "• Обезболивание: <code>Ибупрофен 400 мг + Парацетамол 500 мг каждые 6–8 часов</code>\n\n"
         "<b>5. Режим и наблюдение:</b>\n"
         "• <b>Холод снаружи</b> на щеку (по 15 мин с перерывом 15 мин) первые 24 часа.\n"
         "⚠️ <b>ТЕПЛО КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО!</b> (вызывает мгновенный тромбоз и прогрессирование некроза).\n"
         "• Контроль проходимости дыхательных путей. При нарастании отека дна рта или шеи — срочная госпитализация в ЧЛХ-стационар."
+    )
+
+
+def format_subcutaneous_emphysema_card() -> str:
+    """Экстренный клинический протокол при подкожной эмфиземе лица и шеи."""
+    return (
+        "💨 <b>Экстренный клинический протокол: Подкожная эмфизема лица и шеи</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Возникает при нагнетании сжатого воздуха пустером в канал/карман или работе турбиной в зоне разреза/десны.</i>\n\n"
+        "<b>1. Немедленные действия у кресла:</b>\n"
+        "• 🛑 <b>НЕМЕДЛЕННО ПРЕКРАТИТЬ</b> подачу воздуха из турбины и пустера!\n"
+        "• ⚠️ <b>МАССАЖ И ДАВЛЕНИЕ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ!</b> (риск проталкивания воздуха в окологлоточное пространство и средостение — пневмомедиастинум).\n"
+        "• Оценить пальпаторную крепитацию («хруст сухого снега») и симметрию шеи/дна рта.\n\n"
+        "<b>2. Противоотечная терапия (в кресле):</b>\n"
+        "• <code>Дексаметазон 4–8 мг в/м</code> (или в/в) немедленно для купирования реактивного воспаления и отека клетчатки.\n\n"
+        "<b>3. Антибактериальное прикрытие (инфицирование клетчатки флорой рта):</b>\n"
+        "• <code>Амоксиклав 875/125 мг по 1 таб 2 раза в день (7 дней)</code>\n"
+        "• <i>При аллергии:</i> <code>Кларитромицин 500 мг по 1 таб 2 раза в день (7 дней)</code>\n\n"
+        "<b>4. Купирование боли:</b>\n"
+        "• <code>Ибупрофен 400 мг по 1 таб каждые 8 часов</code>\n\n"
+        "<b>5. Мониторинг и маршрутизация:</b>\n"
+        "• Оценить голос (осиплость) и глотание (дисфагия).\n"
+        "• ⚠️ При нарастании отека шеи, одышке или загрудинной боли — <b>срочный вызов СМП (112) и госпитализация в ЧЛХ/торакальный стационар!</b>\n"
+        "• Пациенту: строгий запрет натуживаться, сморкаться, надувать щеки и кашлять с закрытым ртом 7–10 дней."
+    )
+
+
+def format_sinus_perforation_card() -> str:
+    """Клинический протокол при перфорации дна гайморовой пазухи (ОАС / ороантральное соустье)."""
+    return (
+        "🕳 <b>Клинический протокол: Перфорация дна гайморовой пазухи (ОАС / Ороантральное соустье)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Осложнение при удалении 1.8–1.4, 2.8–2.4 или синус-лифтинге.</i>\n\n"
+        "<b>1. Диагностика у кресла:</b>\n"
+        "• <b>Носоротовая проба (Вальсальва):</b> зажать нос пальцами и осторожно выдохнуть через нос — пузырьки крови/воздуха в лунке.\n"
+        "• 🛑 <b>ГЛУБОКОЕ ЗОНДИРОВАНИЕ ЛУНКИ ЗАПРЕЩЕНО!</b> (риск разрыва слизистой Шнайдера и проталкивания отломка в синус).\n"
+        "• Осмотреть удаленный корень. Если апекс в пазухе — не кюретажить! Направить на КЛКТ и к ЧЛХ/ЛОР.\n\n"
+        "<b>2. Хирургическая тактика по размеру дефекта:</b>\n"
+        "• <b>Малый (<2 мм):</b> Ведение под кровяным сгустком. Гемостатическая губка (Альвостаз / Спонгостан) в устье, 8-образный шов <code>Викрил 4-0</code> на десну.\n"
+        "• <b>Средний и крупный (≥2–5 мм):</b> Пластика лунки щечным трапециевидным лоскутом по Рехрману (рассечение надкостницы у основания лоскута для безнатяжного сопоставления) с глухим ушиванием швами <code>ПГА / Викрил 4-0</code>.\n\n"
+        "<b>3. Назначения для копирования в МИС (в 1 тап):</b>\n"
+        "• <b>Антибиотик:</b> <code>Амоксиклав 875/125 мг по 1 таб 2 раза в день (7 дней)</code>\n"
+        "• <b>Капли в нос:</b> <code>Ксилометазолин 0.1% по 2–3 капли в ноздрю 3 раза в день (5 дней)</code> (дренирование естественного соустья пазухи, профилактика синусита).\n"
+        "• <b>Обезболивание:</b> <code>Ибупрофен 400 мг по 1 таб каждые 8 часов</code>\n"
+        "• <b>Антигистаминное:</b> <code>Лоратадин 10 мг по 1 таб 1 раз в день (5 дней)</code>\n\n"
+        "<b>4. Охранительный режим пациента (Памятка):</b>\n"
+        "• ⚠️ Строгий запрет сморкаться 14 дней (чихать строго с открытым ртом!).\n"
+        "• Не пить через соломинку, не надувать щеки, исключить баню, авиаперелеты и бассейн на 14 дней."
+    )
+
+
+def format_composite_repair_card() -> str:
+    """Клинический протокол починки композитных реставраций у кресла (Gold Standard)."""
+    return (
+        "🛠 <b>Клинический протокол: Починка композитной реставрации у кресла (Gold Standard)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Поверхность старого композита деградирована и лишена свободных радикалов. Надежная адгезия требует микроретенции и химической силанизации.</i>\n\n"
+        "<b>1. Механическая обработка:</b>\n"
+        "• Сглаживание острых краев дефекта мелкозернистым бором (желтый/красный).\n"
+        "• Формирование пологого кругового скоса (фальца) <code>45° шириной 1.5–2.0 мм</code> для плавного перехода и прочности сцепления.\n\n"
+        "<b>2. Микроабразия (Золотой стандарт EBM):</b>\n"
+        "• <b>Пескоструй:</b> <code>Оксид алюминия (Al2O3) 27–50 мкм</code> под давлением 2.0–2.5 бар (дистанция 5–10 мм, 5–10 сек под коффердамом).\n"
+        "• <i>Если пескоструя нет:</i> придание шероховатости грубым алмазным бором (зеленый/синий) на малых оборотах.\n\n"
+        "<b>3. Очистка и деконтаминация:</b>\n"
+        "• Очистка поверхности: <code>37% ортофосфорная кислота 30–60 секунд</code> (для удаления продуктов сошлифовывания и очистки пор, не протравка!).\n"
+        "• Смывание водой <code>30 секунд</code>, бережное высушивание воздухом.\n\n"
+        "<b>4. Силанизация (Химическая связь):</b>\n"
+        "• Нанесение <code>Силан (Silane Coupling Agent) на 60 секунд</code>.\n"
+        "• Высушивание теплым воздухом <code>50°C в течение 30 секунд</code> до полного испарения растворителя (активация силоксановых мостиков Si-O-Si).\n\n"
+        "<b>5. Адгезивный протокол:</b>\n"
+        "• Нанесение ненаполненной смолы / бонда (<code>OptiBond FL / Heliobond / Clearfil SE Bond</code>).\n"
+        "• Тщательное раздувание в тонкую пленку, фотополимеризация <code>20 секунд</code> (≥1000 мВт/см²).\n\n"
+        "<b>6. Моделирование и финиш:</b>\n"
+        "• Послойное внесение композита порциями до <code>1.5–2.0 мм</code> с полимеризацией каждого слоя.\n"
+        "• Финальная фотополимеризация под слоем глицерина (<code>DeOx</code>) 20 сек (устранение липкого слоя).\n"
+        "• Финишная полировка дисками и пастами."
     )
 
 
@@ -2122,6 +2265,42 @@ async def _safe_send_chairside(bot_client, event, text: str, buttons=None):
 # ==============================================================================
 # 10. ОБРАБОТЧИКИ КОМАНД (/chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve)
 # ==============================================================================
+
+async def handle_emphysema_command(bot_client, event, arg: str = ""):
+    """Команда /emphysema [или /эмфизема]: протокол при подкожной эмфиземе лица и шеи."""
+    card = format_subcutaneous_emphysema_card()
+    buttons = [
+        [
+            Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+            Button.inline("🏠 Chairside Hub", data="chairside:hub")
+        ]
+    ]
+    await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+
+
+async def handle_sinus_command(bot_client, event, arg: str = ""):
+    """Команда /oac [или /пазуха, /соустье, /sinus]: протокол при перфорации пазухи (ОАС)."""
+    card = format_sinus_perforation_card()
+    buttons = [
+        [
+            Button.inline("⬅️ В меню реанимации", data="sos:resuscitation_menu"),
+            Button.inline("🏠 Chairside Hub", data="chairside:hub")
+        ]
+    ]
+    await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+
+
+async def handle_composite_repair_command(bot_client, event, arg: str = ""):
+    """Команда /composite_repair [или /починка, /скол]: протокол починки композита у кресла."""
+    card = format_composite_repair_card()
+    buttons = [
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+    await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+
 
 async def handle_phonetics_command(bot_client, event, arg: str = ""):
     """Команда /phonetics [или /внол, /фонетика, /vdo]: протокол фонетических проб для определения ВНОЛ."""
@@ -2148,7 +2327,10 @@ async def handle_chairside_command(bot_client, event, arg: str = ""):
         "• 💊 <b>Фармакотерапия:</b> точный расчет доз и готовая памятка пациенту (/pharma)\n"
         "• 📐 <b>Сохранение зуба:</b> экспресс-консилиум и оценка феррула (/preserve)\n"
         "• 📊 <b>Сложность AAE:</b> триаж клинического риска в 3 клика (/aae)\n"
-        "• 🗣 <b>Фонетические пробы:</b> ВНОЛ, пробы «М», «Ф/В», «С», «И», линия Паунда (/phonetics)"
+        "• 🗣 <b>Фонетические пробы:</b> ВНОЛ, пробы «М», «Ф/В», «С», «И», линия Паунда (/phonetics)\n"
+        "• 💨 <b>Подкожная эмфизема:</b> протокол при нагнетании воздуха пустером (/emphysema)\n"
+        "• 🕳 <b>Перфорация пазухи:</b> тактика при ОАС и соустье после удаления (/oac)\n"
+        "• 🛠 <b>Починка композита:</b> адгезивный протокол, микроабразия, силан (/починка)"
     )
     buttons = build_chairside_hub_markup()
     await _safe_send_chairside(bot_client, event, text, buttons=buttons)
@@ -2302,6 +2484,24 @@ async def handle_sos_command(bot_client, event, arg: str = ""):
             text = format_naocl_accident_card()
             buttons = [
                 [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
+                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            ]
+            await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+            return
+
+        if any(k in clean_arg for k in ["эмфизем", "emphysema", "воздух"]):
+            text = format_subcutaneous_emphysema_card()
+            buttons = [
+                [Button.inline("🚨 Меню реанимации", data="sos:resuscitation_menu")],
+                [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
+            ]
+            await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+            return
+
+        if any(k in clean_arg for k in ["пазух", "соусть", "oac", "гаймор", "синус"]):
+            text = format_sinus_perforation_card()
+            buttons = [
+                [Button.inline("🚨 Меню реанимации", data="sos:resuscitation_menu")],
                 [Button.inline("⬅️ В Chairside меню", data="chairside:hub")]
             ]
             await _safe_send_chairside(bot_client, event, text, buttons=buttons)
@@ -2580,6 +2780,15 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
     elif cmd_name in ("/phonetics", "/фонетика", "/внол", "/vdo"):
         await handle_phonetics_command(bot_client, event, arg)
         return True
+    elif cmd_name in ("/emphysema", "/эмфизема"):
+        await handle_emphysema_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/oac", "/пазуха", "/соустье", "/sinus"):
+        await handle_sinus_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/composite_repair", "/починка", "/скол"):
+        await handle_composite_repair_command(bot_client, event, arg)
+        return True
     elif cmd_name in ("/preserve", "/феррул", "/сохранение"):
         await handle_preserve_command(bot_client, event, arg)
         return True
@@ -2588,4 +2797,4 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
-is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo")))
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo", "/emphysema", "/эмфизема", "/oac", "/пазуха", "/соустье", "/sinus", "/composite_repair", "/починка", "/скол", "/repair")))

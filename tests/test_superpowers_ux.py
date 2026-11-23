@@ -264,5 +264,98 @@ class TestSuperpowersUX(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(truncated.count("<b>"), truncated.count("</b>"))
 
 
+    def test_sos_cards_all_contain_1tap_code_blocks(self):
+        """Все 10 карточек CLINICAL_SOS_CARDS содержат блок <code> для 1-тапового копирования в МИС."""
+        sos_cards = assistant.CLINICAL_SOS_CARDS
+        self.assertEqual(len(sos_cards), 10, "Ожидается ровно 10 ургентных SOS-протоколов")
+
+        expected_cards = [
+            "anesthesia_failure", "aspiration", "bleed", "dislocation", "emphysema",
+            "file", "perf", "sealer", "sinus_perf", "torque_loss"
+        ]
+        for sk in expected_cards:
+            self.assertIn(sk, sos_cards, f"Карточка {sk} отсутствует в CLINICAL_SOS_CARDS")
+            card = sos_cards[sk]
+            text = card.get("text", "")
+
+            # Наличие тега <code> для мгновенного копирования в буфер обмена в Telegram
+            self.assertIn("<code>", text, f"В SOS-карточке {sk} отсутствует открывающий тег <code>")
+            self.assertIn("</code>", text, f"В SOS-карточке {sk} отсутствует закрывающий тег </code>")
+            self.assertIn("в 1 тап для МИС", text, f"В SOS-карточке {sk} нет указания на 1-тап копирование")
+
+            # Валидация парсером Telethon MTProto
+            parsed_text, entities = th_html.parse(text)
+            code_entities = [e for e in entities if type(e).__name__ == "MessageEntityCode"]
+            self.assertTrue(len(code_entities) >= 1, f"Парсер Telethon не нашел MessageEntityCode в {sk}")
+
+            # Извлечение чистого блока: убеждаемся, что внутри есть диагноз и клинические манипуляции
+            code_e = code_entities[0]
+            utf16_bytes = parsed_text.encode('utf-16-le')
+            extracted = utf16_bytes[code_e.offset * 2 : (code_e.offset + code_e.length) * 2].decode('utf-16-le')
+            self.assertIn("Диагноз", extracted, f"В блоке <code> карточки {sk} нет диагноза")
+
+    def test_complication_has_emphysema_and_sinus_variants(self):
+        """В карточке complication 043/у присутствуют шаблоны для эмфиземы и перфорации пазухи."""
+        comp_card = assistant.CLINICAL_RECORD_TEMPLATES.get("complication")
+        self.assertIsNotNone(comp_card, "Карточка complication отсутствует в CLINICAL_RECORD_TEMPLATES")
+
+        variants = comp_card.get("variants", {})
+        self.assertIn("v_emphysema", variants, "Вариант v_emphysema отсутствует в complication")
+        self.assertIn("v_sinus_opening", variants, "Вариант v_sinus_opening отсутствует в complication")
+        self.assertIn("v_instrument_broken", variants, "Вариант v_instrument_broken отсутствует в complication")
+
+        # Проверка клинического наполнения эмфиземы (Приказ 834н, МКБ T81.8)
+        emph_text = variants["v_emphysema"]["text"]
+        self.assertIn("<code>", emph_text)
+        self.assertIn("T81.8", emph_text)
+        self.assertIn("крепитация", emph_text)
+        self.assertIn("Амоксиклав", emph_text)
+        self.assertIn("Нимесил", emph_text)
+
+        # Проверка клинического наполнения перфорации пазухи (МКБ T81.2, Вассмунд, Vicryl 4-0)
+        sinus_text = variants["v_sinus_opening"]["text"]
+        self.assertIn("<code>", sinus_text)
+        self.assertIn("T81.2", sinus_text)
+        self.assertIn("Вальсальвы", sinus_text)
+        self.assertIn("трапециевидный", sinus_text)
+        self.assertIn("лоскут", sinus_text)
+        self.assertIn("Vicryl 4-0", sinus_text)
+        self.assertIn("запрет сморкания", sinus_text)
+
+        # Проверка связности кросс-линков
+        crosslinks = comp_card.get("crosslinks", [])
+        cl_targets = [cb for _, cb, _ in crosslinks]
+        self.assertIn("sos:emphysema", cl_targets, "Кросс-линк на sos:emphysema отсутствует")
+        self.assertIn("sos:sinus_perf", cl_targets, "Кросс-линк на sos:sinus_perf отсутствует")
+
+    def test_slash_command_resolution_aliases(self):
+        """Проверяем поддержку алиасов команд /emergency, /неотложка, /protocol, /протокол, /консультация."""
+        with open(r'c:\Users\danat\Desktop\stomchat\assistant.py', 'r', encoding='utf-8') as f:
+            src = f.read()
+
+        # Алиасы для экстренных протоколов (/emergency, /неотложка)
+        self.assertIn('"/emergency"', src, "Алиас /emergency не найден в коде assistant.py")
+        self.assertIn('"/неотложка"', src, "Алиас /неотложка не найден в коде assistant.py")
+
+        # Алиасы для каталога протоколов (/protocol, /протокол, /протоколы)
+        self.assertIn('"/protocol"', src, "Алиас /protocol не найден в коде assistant.py")
+        self.assertIn('"/протокол"', src, "Алиас /протокол не найден в коде assistant.py")
+        self.assertIn('"/протоколы"', src, "Алиас /протоколы не найден в коде assistant.py")
+
+        # Алиасы для консультации / консилиума (/консилиум, /консультация)
+        self.assertIn('"/консилиум"', src, "Алиас /консилиум не найден в коде assistant.py")
+        self.assertIn('"/консультация"', src, "Алиас /консультация не найден в коде assistant.py")
+
+    def test_superpower_prompts_instruct_code_blocks_without_regex(self):
+        """Промпты суперсил системно требуют от модели тег <code> без пост-регулярочных заплаток."""
+        with open(r'c:\Users\danat\Desktop\stomchat\assistant.py', 'r', encoding='utf-8') as f:
+            src = f.read()
+
+        # Проверяем, что промпт для 043/у системно требует открывать <code> для МИС
+        self.assertIn("ОБЯЗАТЕЛЬНО открой тег <code>", src)
+        self.assertIn("Нажмите на текст ниже, чтобы скопировать протокол для МИС (в 1 тап)", src)
+        self.assertIn("📝 <b>Запись в Карту 043/у (в 1 тап для МИС):</b>", src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -172,5 +172,83 @@ class TestStylePromptsIntegrity(unittest.TestCase):
             self.assertIn("«я бы»", prompt_text, f"В стиле {name} отсутствует запрет сослагательного 'я бы'!")
 
 
+
+
+class TestChairsideInquisitorClinicalDomains(unittest.TestCase):
+    """Тестирование 4 новых клинических доменов: эмфизема, перфорация пазухи, починка композита, Zero-Iteration."""
+
+    def test_subcutaneous_emphysema_protocol_in_core_and_pm(self):
+        """Подкожная эмфизема лица и шеи (Кейс 805936432) содержит полный алгоритм у кресла."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            self.assertIn("шуршит как пакет", text)
+            self.assertIn("крепитация", text)
+            self.assertIn("надключичн", text)
+            self.assertIn("пневмомедиастинум", text)
+            self.assertIn("112", text)
+            self.assertIn("Амоксиклав", text)
+            self.assertIn("875/125", text)
+            self.assertIn("массаж", text)
+            self.assertTrue("компресс" in text or "тепло" in text)
+
+    def test_sinus_perforation_oac_protocol_in_core_and_pm(self):
+        """Перфорация гайморовой пазухи / Ороантральное сообщение содержит дифференцированный алгоритм."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            self.assertTrue("Вальсальвы" in text or "Вальсальва" in text)
+            self.assertIn("< 2 мм", text)
+            self.assertTrue("2–5 мм" in text or "2-5 мм" in text or "2 – 5 мм" in text)
+            self.assertIn("> 5 мм", text)
+            self.assertTrue("Регрману" in text or "Rehrmann" in text)
+            self.assertTrue("Оксиметазолин" in text or "Ксилометазолин" in text)
+            self.assertIn("Амоксиклав", text)
+            self.assertIn("йодоформ", text)
+
+    def test_composite_repair_silane_sandblasting_benchmark(self):
+        """Починка старого композита (Сообщения 185553–185565) содержит эталонный адгезивный протокол."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            self.assertTrue("Al2O3" in text or "оксидом алюминия" in text)
+            self.assertTrue("27–50 мкм" in text or "27-50 мкм" in text)
+            self.assertTrue("H3PO4" in text or "ортофосфорн" in text)
+            self.assertTrue("НЕ ТРАВИТ" in text or "НЕ травит" in text or "не травит" in text or "Исключительно для очистки" in text or "ИСКЛЮЧИТЕЛЬНО ДЛЯ ОЧИСТКИ" in text or "ИСКЛЮЧИТЕЛЬНО очистка" in text)
+            self.assertTrue("силан" in text or "Силан" in text or "γ-MPTS" in text)
+            self.assertTrue("10-MDP" in text)
+            self.assertTrue("0.5 мм" in text)
+
+    def test_zero_iteration_chairside_protocol(self):
+        """Директива исчерпывающей полноты у кресла (Кейс 5130294926) задает исчерпывающий ответ в Turn 1."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        self.assertIn("5130294926", core)
+        self.assertIn("стерильных перчатках", core)
+        self.assertIn("олива с красной полосой", core)
+        self.assertIn("chamfer", core)
+        self.assertTrue("1.0–1.2 мм" in core or "1.0-1.2 мм" in core)
+        self.assertTrue("1.5–2.0 мм" in core or "1.5-2.0 мм" in core)
+        self.assertIn("биологической ширины", core)
+        self.assertIn("феррул", core)
+
+        self.assertIn("5130294926", pm_dir)
+        self.assertIn("олива с красной полосой", pm_dir)
+        self.assertIn("chamfer", pm_dir)
+
+    def test_pm_few_shot_contrast_example_5_emphysema(self):
+        """В PM_FEW_SHOT_CONTRAST_BLOCK добавлен ПРИМЕР 5 с эталонным триажем эмфиземы."""
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+        self.assertIn("ПРИМЕР 5: Неотложная ситуация у кресла", fs)
+        self.assertIn("805936432", fs)
+        self.assertIn("шуршит как пакет", fs)
+        self.assertIn("пневмомедиастинума", fs)
+        self.assertIn("112", fs)
+
+
 if __name__ == "__main__":
     unittest.main()
