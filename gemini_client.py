@@ -151,7 +151,7 @@ def _sleep_with_status(seconds, context, attempt, max_attempts, key_id):
         )
         time.sleep(min(15, remaining))
 
-def get_openai_client(api_key, base_url, timeout=480.0, **kwargs):
+def get_openai_client(api_key, base_url, timeout=650.0, **kwargs):
     client_kwargs = {
         "api_key": api_key if api_key else "dummy_key",
         "base_url": base_url,
@@ -375,7 +375,7 @@ def set_provider_pool_cooldown(provider: str, seconds: int = GCP_PROJECT_COOLDOW
         set_key_cooldown(provider, k, seconds=seconds)
 
 
-def get_provider_client(provider, api_key, timeout=480.0):
+def get_provider_client(provider, api_key, timeout=650.0):
     """Клиент к провайдеру по его имени. Единственная точка создания клиента."""
     base_url = PROVIDER_BASE_URLS.get(provider)
     if not base_url:
@@ -781,12 +781,14 @@ def compute_call_timeout(
     elif kind in summary_kinds:
         ceiling = 720.0 if provider == "agentrouter" else 240.0
     elif provider == "agentrouter":
-        # Флагман gpt-6.1-sol (AgentRouter) — глубокая рассуждающая модель.
-        # Даем просторный потолок до 480с, чтобы не обрывать цепочку рассуждений (CoT).
-        if timeout is None or timeout >= 480.0:
-            ceiling = 480.0
+        # Флагман gpt-6.1-sol (AgentRouter) — глубокая рассуждающая модель CoT.
+        # Даем полный просторный потолок (300-650с) для глубокого контекстного синтеза без урезания.
+        if timeout is None or timeout >= 650.0:
+            ceiling = 650.0
+        elif timeout >= 480.0:
+            ceiling = 650.0
         elif timeout >= 300.0:
-            ceiling = 480.0
+            ceiling = 500.0
         elif timeout >= 240.0:
             ceiling = 360.0
         elif timeout >= 120.0:
@@ -794,7 +796,7 @@ def compute_call_timeout(
         elif timeout >= 60.0:
             ceiling = 120.0
         else:
-            ceiling = max(15.0, timeout * 0.85)
+            ceiling = max(30.0, timeout * 0.9)
     elif is_chatbot:
         # Для Gemini и Groq в интерактивном диалоге
         if thinking_level == "HIGH":
@@ -892,6 +894,66 @@ GPT_61_SOL_STEERING_PAYLOAD = """
    - Предлагай неочевидные клинические развилки, анализируй долгосрочную стабильность и делись альтернативными протоколами.
    - Если коллега просто делится случаем или ведёт живой разговор с другими врачами, и тебе нечего содержательно добавить — верни ровно одно слово: IGNORE.
 """
+
+
+QUICK_REF_PATTERNS = [
+    # Торк / усилие затяжки
+    r"\b(?:торк|torque|нсм|н\*см|н·см|ncm)\b",
+    r"\b(?:усили[ея]|затяжк[аи]|динамометрическ\w*)\b",
+    # Дозировки / препараты
+    r"\b(?:дозировк[а-я]*|доза|дозы|мг/кг|мг\b|мкг\b|карпул[а-я]*)\b",
+    r"\b(?:ибупрофен\w*|парацетамол\w*|амоксиклав\w*|аугментин\w*|артикаин\w*|мепивакаин\w*|скандонест\w*|ультракаин\w*)\b",
+    # Клампы / коффердам
+    r"\b(?:кламп\w*|кламмер\w*|коффердам\w*|раббердам\w*|платок)\b",
+    r"\b(?:w8a|w2a|w3|b4|brinker|212|13a|12a|w56)\b",
+    # Артикулы / размеры / параметры инструментов
+    r"\b(?:артикул\w*|номер бора|какой бор|размер файла|конусност\w*|протейпер\w*|protaper|reciproc\w*|реципрок\w*|сожер|sooco)\b",
+    r"\b(?:iso размер|цветов\w* маркировк\w*|размер штифта|диаметр имплант\w*)\b",
+    # Имплантационные бренды и компоненты в коротких запросах
+    r"\b(?:неодент\w*|neodent|мультиюнит\w*|multi-?unit|абатмент\w*|винтов\w* фиксаци\w*)\b",
+]
+
+DEEP_CLINICAL_MARKERS = [
+    r"\b(?:жалоб\w*|анамнез\w*|симптом\w*|дифдиагноз\w*|дифференциальн\w*)\b",
+    r"\b(?:сомнева\w*|сомнени\w*|удалять или|сохранять или|что выбрать)\b",
+    r"\b(?:осложнени\w*|перфораци\w*|сломал\w*|отлом\w*|периодонтит\w*)\b",
+    r"\b(?:кист\w*|гранулем\w*|свищ\w*|пульпит\w*|гангрен\w*|некроз\w*|парестези\w*)\b",
+    r"\b(?:кровотечени\w*|пациент\w*|пациентк\w*|клиническ\w* случа[йя]|тактик\w* лечени\w*|план лечени\w*|прогноз\w*)\b",
+    r"\b(?:накусывани\w*|перкусси\w*|пальпаци\w*|иррадиаци\w*|отек\w*|флегмон\w*|абсцесс\w*)\b",
+]
+
+_QUICK_RE = re.compile("|".join(f"(?:{p})" for p in QUICK_REF_PATTERNS), re.IGNORECASE)
+_DEEP_RE = re.compile("|".join(f"(?:{p})" for p in DEEP_CLINICAL_MARKERS), re.IGNORECASE)
+
+
+def is_quick_reference_query(text: str, has_media: bool = False) -> bool:
+    """
+    Определяет, является ли вопрос врача у кресла лаконичным справочным запросом
+    (дозировки, артикулы, торки, клампы, размеры инструментов), требующим быстрого отклика (3-8с)
+    вместо 45-60 секунд CoT-рассуждений gpt-6.1-sol.
+    Для развернутых клинических кейсов, сомнений, дифдиагнозов и снимков возвращает False.
+    """
+    if has_media:
+        return False
+    if not text or not isinstance(text, str):
+        return False
+
+    clean_text = text.strip()
+    words = clean_text.split()
+
+    if len(words) > 18:
+        return False
+
+    if _DEEP_RE.search(clean_text):
+        return False
+
+    if _QUICK_RE.search(clean_text):
+        return True
+
+    if len(words) <= 7 and re.search(r"\b(?:какой|какая|какое|какие|сколько|номер|размер|калибр)\b", clean_text, re.IGNORECASE):
+        return True
+
+    return False
 
 
 MEDIA_PROMPT_PATTERNS = [
@@ -1015,8 +1077,8 @@ def cascade_for_context(status_context=None, prompt=None):
     # Строго быстрые модели с таймаутом <= 7-15с. НИКАКИХ gpt-6.1-sol и НИКАКИХ gemini-3.8-flash!
     if is_triage or kind == "response_validator":
         return [
-            ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
             ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.6-flash", "gemini"),
         ]
@@ -1093,10 +1155,31 @@ def cascade_for_context(status_context=None, prompt=None):
         if has_agentrouter:
             base.append((agentrouter_model, "agentrouter"))
         return base
-    elif is_chatbot and thinking_level == "LOW":
+    is_quick_ref = (
+        bool(isinstance(status_context, dict) and status_context.get("is_quick_reference"))
+        or bool(prompt and is_quick_reference_query(prompt, has_media=is_media_task(status_context, prompt)))
+    )
+
+    if is_chatbot and is_quick_ref:
+        # Лаконичные справочные вопросы (дозировки, артикулы, торки, клампы) у кресла:
+        # Быстрый отклик за 3-8 секунд через Groq (openai/gpt-oss-120b) или gemini-3.6-flash!
+        # AgentRouter (gpt-6.1-sol) выступает надежным глубоким резервом в хвосте каскада.
         cascade = [
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
             ("gemini-3.1-flash-lite", "gemini"),
+            (groq_primary, "groq"),
+        ]
+        if has_agentrouter:
+            cascade.append((agentrouter_model, "agentrouter"))
+        return cascade
+    elif is_chatbot and thinking_level == "LOW":
+        cascade = [
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
             (groq_primary, "groq"),
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
@@ -1106,8 +1189,8 @@ def cascade_for_context(status_context=None, prompt=None):
             cascade.append((agentrouter_model, "agentrouter"))
         return cascade
     elif is_chatbot:
-        # Клинические ответы в чате и ЛС (HIGH и MEDIUM):
-        # ФЛАГМАН: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ!
+        # Развернутые клинические кейсы, сомнения, дифдиагнозы (HIGH):
+        # БЕЗУСЛОВНЫЙ ПРИОРИТЕТ: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ с полным CoT-бюджетом (300-650с)!
         cascade = []
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
@@ -1189,9 +1272,19 @@ def generate_text(prompt, status_context=None, timeout=None):
     is_chatbot = (kind in CHAT_KINDS) and not is_validator
     is_clinical_review = (kind == "poll_clinical_review")
     is_poll_gen = kind in POLL_GEN_KINDS
+
+    # Авто-детект фокуса на изображении/рентгене по контексту и промпту
+    is_media = is_media_task(status_context, prompt)
+    if is_media and isinstance(status_context, dict) and not status_context.get("has_media"):
+        status_context["has_media"] = True
+
     summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
     if kind in summary_kinds and (not status_context or "thinking_level" not in status_context):
         thinking_level = "HIGH"
+    elif status_context and "thinking_level" in status_context:
+        thinking_level = status_context["thinking_level"]
+    elif prompt and is_quick_reference_query(prompt, has_media=is_media):
+        thinking_level = "MEDIUM"
     else:
         thinking_level = status_context.get("thinking_level", "HIGH") if status_context else "HIGH"
 
@@ -1200,11 +1293,6 @@ def generate_text(prompt, status_context=None, timeout=None):
     # Таймаут одного запроса считается ниже, когда известен каскад: он зависит от
     # числа попыток, а число попыток — от числа моделей и живых ключей.
     req_timeout = 140.0
-
-    # Авто-детект фокуса на изображении/рентгене по контексту и промпту
-    is_media = is_media_task(status_context, prompt)
-    if is_media and isinstance(status_context, dict) and not status_context.get("has_media"):
-        status_context["has_media"] = True
 
     models_cascade = cascade_for_context(status_context, prompt=prompt)
     active_cascade = active_models(models_cascade)
@@ -1266,6 +1354,7 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     last_provider_used = None
     last_failure_reason = None
+    did_sleep_on_error = False
     while media_round < max_media_rounds and not out_of_budget:
         min_cooldown_seen = float('inf')
         for model_index, (model_name, provider) in enumerate(active_cascade):
@@ -1357,7 +1446,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                             "Provider transition (%s -> %s): skipping pacing backoff after content-blocked for instant fallback.",
                             last_provider_used, provider
                         )
-                    else:
+                    elif not did_sleep_on_error:
                         provider_switch_pause = 2.5
                         if deadline is not None:
                             provider_switch_pause = min(provider_switch_pause, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
@@ -1367,6 +1456,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                                 last_provider_used, provider, provider_switch_pause
                             )
                             _sleep_with_status(provider_switch_pause, status_context, attempt + 1, max_attempts, f"switch_{provider}")
+                did_sleep_on_error = False
 
                 rem_calc = max(1.0, (deadline - time.monotonic()) if deadline else (480.0 if provider == 'agentrouter' else 120.0))
                 call_timeout = compute_call_timeout(
@@ -1510,11 +1600,12 @@ def generate_text(prompt, status_context=None, timeout=None):
                                             "content": content_items
                                         }
                                     ]
+                                ar_effort = "medium" if thinking_level == "MEDIUM" else "high"
                                 ar_payload = {
                                     "model": model_name,
                                     "input": ar_input,
                                     "stream": True,
-                                    "reasoning": {"effort": "high"}
+                                    "reasoning": {"effort": ar_effort}
                                 }
                                 ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, stream=True, timeout=call_timeout)
                                 if ar_resp.status_code == 200:
@@ -1715,6 +1806,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                                 f"{provider.capitalize()} key rate limited (429); pausing {rate_sleep:.1f}s before trying next key."
                             )
                             _sleep_with_status(rate_sleep, status_context, attempt + 1, max_attempts, key_id)
+                            did_sleep_on_error = True
                         continue
 
                     if failure_reason in ("model_overloaded", "model_not_found", "content_blocked"):
@@ -1728,6 +1820,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                                     f"pausing {backoff_503:.1f}s before trying fallback model/provider."
                                 )
                                 _sleep_with_status(backoff_503, status_context, attempt + 1, max_attempts, key_id)
+                                did_sleep_on_error = True
                         break
 
                     if failure_reason == "key_denied":
@@ -1752,6 +1845,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     if sleep_time > 0:
                         logger.info(f"{provider.capitalize()} retry in {sleep_time:.1f}s")
                         _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
+                        did_sleep_on_error = True
                     continue
 
         if out_of_budget:

@@ -142,10 +142,10 @@ def test_assistant_clinical_timeouts():
         "EBM media fallback must have timeout=180.0"
     )
 
-    # 3. PM бюджет (строка ~14453): PM_MAX_TOTAL_BUDGET = 600.0, attempt_timeout до 480.0
-    assert "PM_MAX_TOTAL_BUDGET = 600.0" in content, "PM_MAX_TOTAL_BUDGET must be 600.0"
-    assert re.search(r"attempt_timeout\s*=\s*max\(30\.0,\s*min\(rem_pm_budget\s*-\s*15\.0,\s*480\.0\)\)", content), (
-        "attempt_timeout ceiling must be 480.0"
+    # 3. PM бюджет (строка ~14453): PM_MAX_TOTAL_BUDGET = 650.0, attempt_timeout до 650.0
+    assert "PM_MAX_TOTAL_BUDGET = 650.0" in content, "PM_MAX_TOTAL_BUDGET must be 650.0"
+    assert re.search(r"attempt_timeout\s*=\s*max\(60\.0,\s*min\(rem_pm_budget\s*-\s*15\.0,\s*650\.0\)\)", content), (
+        "attempt_timeout ceiling must be 650.0"
     )
 
     # 4. Консилиум ретрай (строка ~15219): timeout=240.0 (не 60)
@@ -157,3 +157,28 @@ def test_assistant_clinical_timeouts():
     assert re.search(r"generate_gemini_text_async\(expert_prompt,\s*status_ctx,\s*timeout=180\.0\)", content), (
         "Expert PM ping must have timeout=180.0"
     )
+
+
+def test_agentrouter_compute_call_timeout_budget_650():
+    """При максимальном бюджете 650с gpt-6.1-sol сохраняет щедрый таймаут >= 600с (до 650с)."""
+    active_cascade = [
+        ("openai/gpt-6.1-sol", "agentrouter"),
+        ("llama-3.3-70b-versatile", "groq"),
+    ]
+    t = gemini_client.compute_call_timeout(
+        provider="agentrouter",
+        model_name="openai/gpt-6.1-sol",
+        model_index=0,
+        active_cascade=active_cascade,
+        remaining_time=650.0,
+        timeout=650.0,
+        is_triage=False,
+        is_chatbot=True,
+        thinking_level="HIGH",
+        summary_kinds=frozenset(),
+        kind="pm_chat",
+        attempt=0,
+        attempts_planned=2,
+    )
+    assert t >= 600.0, f"Expected >= 600.0s for 650s budget, got {t}s"
+    assert t <= 650.0

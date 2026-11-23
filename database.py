@@ -2,12 +2,22 @@ import asyncio
 import os
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import timezone
 import time
 
+import atexit
+
+import html
+
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+
 import config
+
 import db_worker
 
 
@@ -39,28 +49,108 @@ def checkpoint_wal(mode: str = "TRUNCATE", max_retries: int = 5, retry_delay: fl
     Для ручного бекапа/синхронизации узлов используется TRUNCATE.
     Для периодического фонового сброса во время работы используется PASSIVE,
     чтобы не блокировать активные читающие и пишущие транзакции Telegram-сообщений.
+    Защищен от дедлоков и сбоев блокировок: перехватывает sqlite3.OperationalError и повторяет с паузой.
     """
     valid_modes = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
     mode_upper = mode.upper() if mode and mode.upper() in valid_modes else "TRUNCATE"
     for attempt in range(max_retries):
-        with _connection() as db:
-            row = db.execute(f"PRAGMA wal_checkpoint({mode_upper})").fetchone()
-            if row:
-                busy, log_pages, ckpt_pages = row[0], row[1], row[2]
-                if busy == 0:
-                    logger.debug("WAL checkpoint (%s) успешен: log=%d, checkpointed=%d", mode_upper, log_pages, ckpt_pages)
+        try:
+            with _connection() as db:
+                row = db.execute(f"PRAGMA wal_checkpoint({mode_upper})").fetchone()
+                if row:
+                    busy, log_pages, ckpt_pages = row[0], row[1], row[2]
+                    if busy == 0:
+                        logger.debug("WAL checkpoint (%s) успешен: log=%d, checkpointed=%d", mode_upper, log_pages, ckpt_pages)
+                        return True
+                    logger.warning(
+                        "WAL checkpoint (%s) busy (попытка %d/%d): log=%d, checkpointed=%d. Ожидание...",
+                        mode_upper, attempt + 1, max_retries, log_pages, ckpt_pages
+                    )
+                else:
                     return True
-                logger.warning(
-                    "WAL checkpoint (%s) busy (попытка %d/%d): log=%d, checkpointed=%d. Ожидание...",
-                    mode_upper, attempt + 1, max_retries, log_pages, ckpt_pages
-                )
-            else:
-                return True
+        except sqlite3.OperationalError as exc:
+            logger.warning("WAL checkpoint (%s) lock contention (попытка %d/%d): %s", mode_upper, attempt + 1, max_retries, exc)
+        except Exception as exc:
+            logger.warning("WAL checkpoint (%s) error (попытка %d/%d): %s", mode_upper, attempt + 1, max_retries, exc)
         if attempt + 1 < max_retries:
             time.sleep(retry_delay * (attempt + 1))
     if mode_upper == "PASSIVE":
         logger.debug("WAL checkpoint (PASSIVE) отложен из-за активных читателей")
         return False
+    logger.error("WAL checkpoint (%s) не завершился после %d попыток из-за блокировок", mode_upper, max_retries)
+    return False
+
+
+def close_db(checkpoint: bool = True) -> bool:
+    """Корректное закрытие базы данных с соблюдением SQLite WAL Checkpoint Law (RULE 12):
+    1. Автоматический PRAGMA wal_checkpoint(TRUNCATE) для сброса WAL-журнала в основной файл базы.
+    2. Освобождение кэша страниц PRAGMA shrink_memory.
+    3. Остановка рабочего пула транзакций _DB_EXECUTOR.
+    """
+    success = True
+    if checkpoint:
+        try:
+            success = checkpoint_wal(mode="TRUNCATE", max_retries=5)
+        except Exception as exc:
+            logger.warning("close_db: checkpoint_wal failed: %s", exc)
+            success = False
+    try:
+        shrink_memory_sync()
+    except Exception:
+        pass
+    try:
+        db_worker.shutdown_db_worker(wait=True)
+    except Exception:
+        pass
+    return success
+
+
+async def close_db_async(checkpoint: bool = True) -> bool:
+    """Асинхронное закрытие базы данных с выполнением wal_checkpoint(TRUNCATE)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: close_db(checkpoint=checkpoint))
+
+
+def _atexit_wal_checkpoint():
+    """Автоматический сброс WAL при завершении процесса."""
+    try:
+        checkpoint_wal(mode="TRUNCATE", max_retries=3, retry_delay=0.1)
+    except Exception:
+        pass
+
+
+atexit.register(_atexit_wal_checkpoint)
+
+
+def verify_database_invariants() -> Dict[str, Any]:
+    """Проверяет соблюдение ключевых инвариантов надежности базы данных (RULE 12 и Micro-VPS):
+    1. journal_mode == 'wal'
+    2. synchronous == 1 (NORMAL)
+    3. busy_timeout >= 30000 (30 сек)
+    4. cache_size == -4000 (4 МБ)
+    5. целостность PRAGMA quick_check
+    """
+    with _connection() as db:
+        j_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+        sync_mode = db.execute("PRAGMA synchronous").fetchone()[0]
+        b_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
+        c_size = db.execute("PRAGMA cache_size").fetchone()[0]
+        integrity = db.execute("PRAGMA quick_check").fetchone()[0]
+        return {
+            "journal_mode": str(j_mode).lower(),
+            "synchronous": sync_mode,
+            "busy_timeout": b_timeout,
+            "cache_size": c_size,
+            "quick_check": integrity,
+            "is_wal": str(j_mode).lower() == "wal",
+            "is_normal_sync": sync_mode in (1, "1", "NORMAL"),
+            "is_safe": str(j_mode).lower() == "wal" and integrity == "ok"
+        }
+
+
+async def verify_database_invariants_async() -> Dict[str, Any]:
+    """Асинхронная проверка инвариантов надежности базы данных."""
+    return await _run_db(verify_database_invariants)
     logger.error("WAL checkpoint (%s) не завершился после %d попыток из-за блокировок", mode_upper, max_retries)
     return False
 
@@ -217,7 +307,8 @@ async def init_db():
                     text TEXT,
                     has_media BOOLEAN,
                     media_description TEXT,
-                    date TEXT
+                    date TEXT,
+                    tags TEXT DEFAULT ''
                 )
                 """
             )
@@ -260,6 +351,17 @@ async def init_db():
                     )
             except Exception as e:
                 logger.warning(f"Could not enforce bookmark uniqueness: {e}")
+
+            # Автомиграция тегов для clinical_bookmarks
+            try:
+                bm_cols = [info[1] for info in db.execute("PRAGMA table_info(clinical_bookmarks)").fetchall()]
+                if "tags" not in bm_cols:
+                    db.execute("ALTER TABLE clinical_bookmarks ADD COLUMN tags TEXT DEFAULT ''")
+                    logger.info("database schema migrated: added tags to clinical_bookmarks")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    logger.warning("clinical_bookmarks migration tags error: %s", exc)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_tags ON clinical_bookmarks(saved_by_user_id, tags)")
 
             db.execute(
                 """
@@ -453,8 +555,122 @@ async def init_db():
             db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_category ON clinical_protocols(category)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_protocol_title ON clinical_protocols(title)")
 
+
+
+            # Полнотекстовый поиск FTS5 для клинических протоколов
+
+            try:
+
+                db.execute("""
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS clinical_protocols_fts USING fts5(
+
+                    title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor,
+
+                    content='clinical_protocols',
+
+                    content_rowid='id'
+
+                )
+
+                """)
+
+                db.execute("""
+
+                CREATE TRIGGER IF NOT EXISTS protocols_ai AFTER INSERT ON clinical_protocols BEGIN
+
+                    INSERT INTO clinical_protocols_fts(rowid, title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor)
+
+                    VALUES (new.id, new.title, new.category, new.indication, new.contraindications, new.steps_json, new.materials, new.key_nuances, new.author_doctor);
+
+                END;
+
+                """)
+
+                db.execute("""
+
+                CREATE TRIGGER IF NOT EXISTS protocols_ad AFTER DELETE ON clinical_protocols BEGIN
+
+                    INSERT INTO clinical_protocols_fts(clinical_protocols_fts, rowid, title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor)
+
+                    VALUES('delete', old.id, old.title, old.category, old.indication, old.contraindications, old.steps_json, old.materials, old.key_nuances, old.author_doctor);
+
+                END;
+
+                """)
+
+                db.execute("""
+
+                CREATE TRIGGER IF NOT EXISTS protocols_au AFTER UPDATE ON clinical_protocols BEGIN
+
+                    INSERT INTO clinical_protocols_fts(clinical_protocols_fts, rowid, title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor)
+
+                    VALUES('delete', old.id, old.title, old.category, old.indication, old.contraindications, old.steps_json, old.materials, old.key_nuances, old.author_doctor);
+
+                    INSERT INTO clinical_protocols_fts(rowid, title, category, indication, contraindications, steps_json, materials, key_nuances, author_doctor)
+
+                    VALUES (new.id, new.title, new.category, new.indication, new.contraindications, new.steps_json, new.materials, new.key_nuances, new.author_doctor);
+
+                END;
+
+                """)
+
+            except sqlite3.OperationalError as exc:
+
+                logger.debug("clinical_protocols_fts setup info: %s", exc)
+
     await _run_db(operation)
     await purge_broken_media_remote_urls()
+    try:
+        import protocol_extractor
+        await protocol_extractor.seed_default_protocols_async()
+    except Exception as seed_err:
+        logger.debug("Automatic protocol seeding on init: %s", seed_err)
+    # Проверка наличия и сидирование протокола VDO
+    try:
+        def seed_vdo_if_missing():
+            with _connection() as db:
+                vdo_row = db.execute(
+                    "SELECT 1 FROM clinical_protocols WHERE LOWER(title) LIKE '%vdo%' OR LOWER(title) LIKE '%высота прикуса%' LIMIT 1"
+                ).fetchone()
+                if not vdo_row:
+                    vdo_steps = json.dumps([
+                        {"step": 1, "name": "Миорелаксация и депрограммирование мышц", "description": "Использование депрограмматора Койса (Kois deprogrammer), Lucia Jig или аппарата TENS в течение 20–30 минут для стирания энграмм мышечной памяти и релаксации латеральных крыловидных мышц."},
+                        {"step": 2, "name": "Регистрация центрального соотношения (CR)", "description": "Ведение нижней челюсти в терминальную шарнирную ось (Central Relation) без насильственного давления на подбородок. Фиксация положения жестким окклюзионным регистратором (LuxaBite / Futar D) при разобщении резцов на 1.5–2 мм в области депрограмматора."},
+                        {"step": 3, "name": "Определение физиологической VDO", "description": "Оценка высоты покоя (Rest Position): физиологический покой минус 2–3 мм свободного межокклюзионного пространства (Freeway space). Фонетические пробы: произнесение звуков «С», «З» («шестьдесят шесть»), зазор между резцами 1.0–1.5 мм (Closest Speaking Space по Сильверману)."},
+                        {"step": 4, "name": "Тестирование на временных реставрациях (Mock-up / Overlay)", "description": "Перенос запланированной VDO в полость рта прямым композитным mock-up или безакриловыми накладками (Overlay) на жевательные зубы на срок 6–12 недель для функциональной адаптации жевательных мышц и суставных головок ВНЧС."},
+                        {"step": 5, "name": "Окончательное протезирование", "description": "Постоянные керамические реставрации (виниры, оверлеи e.max, коронки) в найденном и адаптированном положении центрального соотношения с клыковым и резцовым ведением без балансирующих суперконтактов."}
+                    ], ensure_ascii=False)
+                    db.execute(
+                        """
+                        INSERT INTO clinical_protocols (
+                            title, category, indication, contraindications, steps_json,
+                            materials, key_nuances, author_doctor, source_msg_id, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            "Определение и восстановление высоты прикуса (VDO / депрограмматор Койса / Lucia Jig)",
+                            "Ортопедия",
+                            "Патологическая стираемость зубов (генерализованная форма), потеря межальвеолярной высоты (VDO), мышечно-суставная дисфункция ВНЧС, тотальная эстетическая и функциональная реабилитация.",
+                            "Острый артрит ВНЧС в фазе выраженного синовита без предварительной противовоспалительной терапии.",
+                            vdo_steps,
+                            "Депрограмматор Койса / Lucia Jig, регистратор прикуса LuxaBite / Futar D, лицевая дуга, артикулятор (Artex / SAM), бис-акрил (Protemp 4 / Structur 3), фольга Бауша 8–12 мкм.",
+                            "Никогда не увеличивать VDO более чем на 3–4 мм одномоментно без предварительного шинотерапевтического или mock-up тестирования. Центральное соотношение должно быть воспроизводимым и безболезненным.",
+                            "John Kois / Эксперты сообщества Docendo Discimus"
+                        )
+                    )
+                    logger.info("Default VDO clinical protocol seeded successfully.")
+                try:
+                    fts_c = db.execute("SELECT count(*) FROM clinical_protocols_fts").fetchone()
+                    proto_c = db.execute("SELECT count(*) FROM clinical_protocols").fetchone()
+                    if proto_c and proto_c[0] > 0 and (not fts_c or fts_c[0] == 0):
+                        db.execute("INSERT INTO clinical_protocols_fts(clinical_protocols_fts) VALUES('rebuild')")
+                except Exception:
+                    pass
+        await _run_db(seed_vdo_if_missing)
+    except Exception as vdo_err:
+        logger.debug("VDO protocol seeding: %s", vdo_err)
 
 
 async def get_messages_for_daily_summary(start_time, end_time, min_count=100, allow_backfill=True):
@@ -1000,114 +1216,181 @@ async def get_media_short_caption(msg_id):
 
 
 
-async def save_clinical_bookmark(saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date):
+def normalize_bookmark_tags(tags: Union[str, list, tuple, set]) -> str:
+    """Приводит список или строку тегов к каноническому формату '#тег1, #тег2'."""
+    if not tags:
+        return ""
+    if isinstance(tags, (list, tuple, set)):
+        items = list(tags)
+    elif isinstance(tags, str):
+        items = [t.strip() for t in re.split(r'[,; ]+', tags) if t.strip()]
+    else:
+        items = [str(tags)]
+    clean_tags = []
+    for item in items:
+        cleaned = item.strip().lower()
+        if not cleaned:
+            continue
+        if not cleaned.startswith("#"):
+            cleaned = "#" + cleaned
+        if cleaned not in clean_tags:
+            clean_tags.append(cleaned)
+    return ", ".join(clean_tags)
+
+
+def extract_hashtags_from_text(text: str) -> List[str]:
+    """Автоматически извлекает хештеги из клинического текста сообщения."""
+    if not text:
+        return []
+    tags = re.findall(r'#([a-zA-Zа-яА-Я0-9_]{2,30})', text)
+    return [f"#{t.lower()}" for t in dict.fromkeys(tags)]
+
+
+async def save_clinical_bookmark(
+    saved_by_user_id: int,
+    msg_id: int,
+    chat_id: int,
+    sender_name: str,
+    text: str,
+    has_media: bool = False,
+    media_description: str = "",
+    date: Any = None,
+    tags: Union[str, list, tuple, set] = "",
+):
+    """Сохраняет клиническую запись в Избранное / Закладки врача с поддержкой тегов."""
+    clean_tags = normalize_bookmark_tags(tags)
+    if not clean_tags and text:
+        extracted = extract_hashtags_from_text(text)
+        if extracted:
+            clean_tags = ", ".join(extracted)
+
+    date_val = _date_text(date) if hasattr(date, 'strftime') else str(date if date is not None else time.strftime("%Y-%m-%d %H:%M:%S"))
+
     def operation():
         with _connection() as db:
             db.execute(
                 """
                 INSERT OR IGNORE INTO clinical_bookmarks
-                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, _date_text(date) if hasattr(date, 'strftime') else str(date)),
+                (saved_by_user_id, msg_id, chat_id, sender_name, text, has_media, media_description, date_val, clean_tags),
             )
     return await _run_db(operation)
 
 
-async def get_clinical_bookmarks(saved_by_user_id, query=None, limit=None, offset=0, include_id=False):
-    """
-    Закладки врача, свежие сверху.
-
-    ORDER BY получил добор по id. Дата закладки — секунды, а сохраняют пачкой,
-    отвечая на серию постов: реплики одной секунды выстраивались произвольно, и
-    при постраничном выводе (/bookmarks листает по 10) одна и та же закладка
-    могла показаться на двух страницах подряд, а соседняя — ни на одной. Порядок
-    внутри секунды по id совпадает с порядком сохранения.
-
-    limit/offset добавлены для постраничного вывода: сейчас вызывающая сторона
-    забирает ВСЕ закладки пользователя и режет их в Python, то есть на каждый
-    /bookmarks поднимает из базы весь личный архив ради 10 строк. По умолчанию
-    limit=None — поведение прежнее, чтобы правка не требовала одновременного
-    изменения вызова.
-    include_id=True возвращает id закладки первым полем кортежа для интерактивных
-    кнопок просмотра и удаления (bm:view:ID, bm:del:ID).
-    """
+async def update_clinical_bookmark_tags(bookmark_id: int, tags: Union[str, list, tuple, set], saved_by_user_id: Optional[int] = None) -> bool:
+    """Обновляет теги клинической закладки. При передаче saved_by_user_id проверяет принадлежность врачу (IDOR)."""
+    clean_tags = normalize_bookmark_tags(tags)
     def operation():
         with _connection() as db:
-            # LIMIT -1 — способ SQLite сказать «без ограничения», он же
-            # обязателен, если нужен OFFSET: голый OFFSET синтаксис не
-            # принимает.
-            window = "LIMIT ? OFFSET ?"
-            bounds = (-1 if limit is None else int(limit), int(offset or 0))
-            cols = ("id, msg_id, chat_id, sender_name, text, media_description, date"
-                    if include_id else
-                    "msg_id, chat_id, sender_name, text, media_description, date")
-            if query:
-                # Поиск идёт и по автору. Раньше искали только в тексте и в
-                # описании снимка, поэтому «тот пост Иванова» найти было нельзя
-                # — а по автору коллеги вспоминают сохранённое ничуть не реже,
-                # чем по словам.
-                like = f"%{query}%"
-                return db.execute(
-                    f"""
-                    SELECT {cols}
-                    FROM clinical_bookmarks
-                    WHERE saved_by_user_id = ?
-                      AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
-                    ORDER BY date DESC, id DESC
-                    {window}
-                    """,
-                    (saved_by_user_id, like, like, like) + bounds,
-                ).fetchall()
+            if saved_by_user_id is not None:
+                cur = db.execute(
+                    "UPDATE clinical_bookmarks SET tags = ? WHERE id = ? AND saved_by_user_id = ?",
+                    (clean_tags, bookmark_id, saved_by_user_id)
+                )
             else:
-                return db.execute(
-                    f"""
-                    SELECT {cols}
-                    FROM clinical_bookmarks
-                    WHERE saved_by_user_id = ?
-                    ORDER BY date DESC, id DESC
-                    {window}
-                    """,
-                    (saved_by_user_id,) + bounds,
-                ).fetchall()
+                cur = db.execute(
+                    "UPDATE clinical_bookmarks SET tags = ? WHERE id = ?",
+                    (clean_tags, bookmark_id)
+                )
+            return cur.rowcount > 0
     return await _run_db(operation)
 
 
-async def get_clinical_bookmark_by_id(bookmark_id, saved_by_user_id=None):
+async def get_clinical_bookmarks(
+    saved_by_user_id: int,
+    query: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    include_id: bool = False,
+    tag: Optional[str] = None,
+    include_tags: bool = False,
+):
+    """Закладки врача, свежие сверху.
+    
+    Поддерживает фильтрацию по поисковому запросу (query) и тегам (tag).
+    Обратная совместимость:
+    - include_id=False, include_tags=False -> кортеж из 6 элементов: (msg_id, chat_id, sender_name, text, media_description, date)
+    - include_id=True, include_tags=False -> кортеж из 7 элементов: (id, msg_id, chat_id, sender_name, text, media_description, date)
+    - include_tags=True -> добавляет поле tags в конец кортежа.
     """
-    Получить конкретную клиническую закладку по её id.
-    Если указан saved_by_user_id, проверяет принадлежность врачу (защита от IDOR).
-    Возвращает (id, msg_id, chat_id, sender_name, text, media_description, date) или None.
+    def operation():
+        with _connection() as db:
+            window = "LIMIT ? OFFSET ?"
+            bounds = (-1 if limit is None else int(limit), int(offset or 0))
+            if include_id:
+                cols = "id, msg_id, chat_id, sender_name, text, media_description, date" + (", tags" if include_tags else "")
+            else:
+                cols = "msg_id, chat_id, sender_name, text, media_description, date" + (", tags" if include_tags else "")
+
+            conditions = ["saved_by_user_id = ?"]
+            params = [saved_by_user_id]
+
+            if query:
+                like_q = f"%{query}%"
+                conditions.append("(text LIKE ? OR media_description LIKE ? OR sender_name LIKE ? OR tags LIKE ?)")
+                params.extend([like_q, like_q, like_q, like_q])
+
+            if tag:
+                clean_tag = tag.strip().lstrip('#').lower()
+                like_t = f"%{clean_tag}%"
+                conditions.append("(LOWER(tags) LIKE ? OR LOWER(text) LIKE ?)")
+                params.extend([like_t, like_t])
+
+            where_clause = " AND ".join(conditions)
+            sql = f"""
+                SELECT {cols}
+                FROM clinical_bookmarks
+                WHERE {where_clause}
+                ORDER BY date DESC, id DESC
+                {window}
+            """
+            return db.execute(sql, params + list(bounds)).fetchall()
+    return await _run_db(operation)
+
+
+async def get_clinical_bookmark_by_id(bookmark_id: int, saved_by_user_id: Optional[int] = None, include_tags: bool = False):
+    """Получить клиническую закладку по ID.
+    По умолчанию возвращает 7 элементов для строгой совместимости с распаковкой в assistant.py:
+    (id, msg_id, chat_id, sender_name, text, media_description, date).
+    При include_tags=True возвращает 8 элементов (+ tags).
     """
+    cols = "id, msg_id, chat_id, sender_name, text, media_description, date" + (", tags" if include_tags else "")
     def operation():
         with _connection() as db:
             if saved_by_user_id is not None:
                 return db.execute(
-                    """
-                    SELECT id, msg_id, chat_id, sender_name, text, media_description, date
-                    FROM clinical_bookmarks
-                    WHERE id = ? AND saved_by_user_id = ?
-                    """,
+                    f"SELECT {cols} FROM clinical_bookmarks WHERE id = ? AND saved_by_user_id = ?",
                     (bookmark_id, saved_by_user_id),
                 ).fetchone()
             else:
                 return db.execute(
-                    """
-                    SELECT id, msg_id, chat_id, sender_name, text, media_description, date
-                    FROM clinical_bookmarks
-                    WHERE id = ?
-                    """,
+                    f"SELECT {cols} FROM clinical_bookmarks WHERE id = ?",
                     (bookmark_id,),
                 ).fetchone()
     return await _run_db(operation)
 
 
-async def delete_clinical_bookmark(bookmark_id, saved_by_user_id=None):
-    """
-    Удалить клиническую закладку по id.
-    Если указан saved_by_user_id, удаление происходит только если закладка принадлежит этому врачу (защита от IDOR).
-    Возвращает True, если строка была удалена, иначе False.
-    """
+async def get_clinical_bookmark_dict(bookmark_id: int, saved_by_user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Возвращает закладку в виде удобного словаря со всеми полями, включая tags."""
+    row = await get_clinical_bookmark_by_id(bookmark_id, saved_by_user_id=saved_by_user_id, include_tags=True)
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "msg_id": row[1],
+        "chat_id": row[2],
+        "sender_name": row[3],
+        "text": row[4],
+        "media_description": row[5],
+        "date": row[6],
+        "tags": row[7] if len(row) > 7 else ""
+    }
+
+
+async def delete_clinical_bookmark(bookmark_id: int, saved_by_user_id: Optional[int] = None) -> bool:
+    """Удалить клиническую закладку по id с защитой IDOR."""
     def operation():
         with _connection() as db:
             if saved_by_user_id is not None:
@@ -1124,34 +1407,73 @@ async def delete_clinical_bookmark(bookmark_id, saved_by_user_id=None):
     return await _run_db(operation)
 
 
-async def count_clinical_bookmarks(saved_by_user_id, query=None):
-    """
-    Сколько всего закладок подходит под условие.
-
-    Нужно вместе с limit/offset: /bookmarks печатает «страница X из Y» и без
-    общего числа страниц вызывающая сторона снова вынуждена тянуть все строки.
-    Условие ОБЯЗАНО повторять get_clinical_bookmarks — иначе счётчик страниц
-    разойдётся с содержимым.
-    """
+async def count_clinical_bookmarks(saved_by_user_id: int, query: Optional[str] = None, tag: Optional[str] = None) -> int:
+    """Сколько всего закладок подходит под условие с учетом поискового запроса и фильтрации по тегам."""
     def operation():
         with _connection() as db:
+            conditions = ["saved_by_user_id = ?"]
+            params = [saved_by_user_id]
             if query:
-                like = f"%{query}%"
-                row = db.execute(
-                    """
-                    SELECT COUNT(*) FROM clinical_bookmarks
-                    WHERE saved_by_user_id = ?
-                      AND (text LIKE ? OR media_description LIKE ? OR sender_name LIKE ?)
-                    """,
-                    (saved_by_user_id, like, like, like),
-                ).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT COUNT(*) FROM clinical_bookmarks WHERE saved_by_user_id = ?",
-                    (saved_by_user_id,),
-                ).fetchone()
+                like_q = f"%{query}%"
+                conditions.append("(text LIKE ? OR media_description LIKE ? OR sender_name LIKE ? OR tags LIKE ?)")
+                params.extend([like_q, like_q, like_q, like_q])
+            if tag:
+                clean_tag = tag.strip().lstrip('#').lower()
+                like_t = f"%{clean_tag}%"
+                conditions.append("(LOWER(tags) LIKE ? OR LOWER(text) LIKE ?)")
+                params.extend([like_t, like_t])
+            where_clause = " AND ".join(conditions)
+            row = db.execute(f"SELECT COUNT(*) FROM clinical_bookmarks WHERE {where_clause}", params).fetchone()
             return row[0] if row else 0
     return await _run_db(operation)
+
+
+async def get_user_bookmark_tags(saved_by_user_id: int) -> List[str]:
+    """Возвращает отсортированный список всех уникальных тегов закладок конкретного врача."""
+    def operation():
+        with _connection() as db:
+            rows = db.execute(
+                "SELECT tags FROM clinical_bookmarks WHERE saved_by_user_id = ? AND tags IS NOT NULL AND tags != ''",
+                (saved_by_user_id,)
+            ).fetchall()
+            tags_set = set()
+            for r in rows:
+                if not r[0]:
+                    continue
+                for t in re.split(r'[,; ]+', str(r[0])):
+                    t_clean = t.strip()
+                    if t_clean:
+                        if not t_clean.startswith("#"):
+                            t_clean = "#" + t_clean
+                        tags_set.add(t_clean.lower())
+            return sorted(list(tags_set))
+    return await _run_db(operation)
+
+
+async def search_clinical_bookmarks(saved_by_user_id: int, query: Optional[str] = None, tag: Optional[str] = None, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+    """Поиск клинических закладок врача с выдачей структурированных словарей."""
+    rows = await get_clinical_bookmarks(
+        saved_by_user_id=saved_by_user_id,
+        query=query,
+        limit=limit,
+        offset=offset,
+        include_id=True,
+        tag=tag,
+        include_tags=True,
+    )
+    return [
+        {
+            "id": r[0],
+            "msg_id": r[1],
+            "chat_id": r[2],
+            "sender_name": r[3],
+            "text": r[4],
+            "media_description": r[5],
+            "date": r[6],
+            "tags": r[7] if len(r) > 7 else ""
+        }
+        for r in rows
+    ]
 
 
 async def set_user_interactive_state(user_id, state_type, current_step, case_id, history):
@@ -1179,14 +1501,26 @@ async def get_user_interactive_state(user_id):
                     "SELECT state_type, current_step, case_id, history FROM user_interactive_states WHERE user_id = ?",
                     (user_id,),
                 ).fetchone()
-                if row:
-                    return {
-                        "state_type": row[0],
-                        "current_step": row[1],
-                        "case_id": row[2],
-                        "history": row[3]
-                    }
-                return None
+                if not row:
+                    return None
+                state_type, current_step, case_id, history = row
+                # Автоочистка зависших сессий (> 1 часа неактивности)
+                if state_type == "case" and history:
+                    try:
+                        h = json.loads(history)
+                        if isinstance(h, dict):
+                            ts = h.get("last_updated")
+                            if ts and (time.time() - float(ts) > 3600):
+                                db.execute("DELETE FROM user_interactive_states WHERE user_id = ?", (user_id,))
+                                return None
+                    except Exception:
+                        pass
+                return {
+                    "state_type": state_type,
+                    "current_step": current_step,
+                    "case_id": case_id,
+                    "history": history
+                }
             except sqlite3.OperationalError:
                 return None
     return await _run_db(operation)
@@ -2044,8 +2378,55 @@ async def save_clinical_protocol(
     return await _run_db(operation)
 
 
-async def get_clinical_protocols(category=None, search=None, limit=50):
-    """Возвращает перечень клинических протоколов с фильтрацией по категории и поисковому запросу."""
+_CLINICAL_PROTOCOL_SYNONYMS = {
+    "naocl": ["гипохлорит", "гипохлорита", "ирригац", "апекс", "гипохлоритовая авария", "растворение"],
+    "гипохлорит": ["naocl", "ирригац", "апекс", "гипохлоритовая авария"],
+    "emax": ["e.max", "дисиликат", "литий-дисиликат", "фиксаци", "цементировк", "цемент", "бондинг"],
+    "e.max": ["emax", "дисиликат", "литий-дисиликат", "фиксаци", "цементировк"],
+    "анестезия": ["анестетик", "артикаин", "проводников", "инфильтрацион", "убистезин", "лидокаин", "мепивакаин"],
+    "анестетик": ["анестезия", "артикаин", "лидокаин", "мепивакаин"],
+    "артикаин": ["анестезия", "анестетик", "ультракаин", "септонест", "убистезин"],
+    "торк": ["нсм", "н·см", "имплант", "стабильност", "isq", "первичная стабильность"],
+    "адгезия": ["бондинг", "травлен", "etching", "силан", "адгез", "фиксация", "фиксаци", "optibond", "clearfil"],
+    "bopt": ["vertiprep", "вертипреп", "препарирован", "уступ", "бесуступ"],
+    "vertiprep": ["bopt", "вертипреп", "препарирован", "уступ", "knife-edge"],
+    "вертипреп": ["vertiprep", "bopt", "препарирован", "уступ"],
+    "препарирование": ["препарирован", "уступ", "bopt", "vertiprep", "вертипреп", "коронка", "оверлей", "винир", "knife-edge", "редукция"],
+    "препаринг": ["препарирование", "препарирован", "уступ", "bopt", "vertiprep"],
+    "фиксация": ["фиксаци", "цементировк", "бондинг", "адгезия", "цемент", "силанизация", "вариолинк", "variolink", "relyx", "panavia", "e.max", "emax"],
+    "цементировка": ["фиксация", "фиксаци", "цемент", "бондинг", "адгезия"],
+    "апекс": ["апикальн", "верхушка", "апекслокатор", "заапикальн", "гипохлорит", "деструкция", "периодонтит", "wl", "апекса", "апексом"],
+    "апикальный": ["апекс", "верхушка", "апекслокатор", "периодонтит"],
+    "сломанный инструмент": ["сломанн", "отломок", "байпас", "извлечение", "фрагмент", "протейпер", "файл", "bypass", "broken instrument", "ультразвук"],
+    "сломанный": ["сломанный инструмент", "отломок", "байпас", "извлечение", "фрагмент", "файл"],
+    "отломок": ["сломанный инструмент", "извлечение", "байпас", "фрагмент", "ультразвук", "файл"],
+    "байпас": ["сломанный инструмент", "обход", "извлечение", "отломок", "bypass", "glide path"],
+    "vdo": ["высота прикуса", "межальвеолярн", "окклюзи", "депрограмматор", "койс", "jig", "окклюзионная высота", "стираемость", "центральное соотношение"],
+    "высота прикуса": ["vdo", "межальвеолярн", "окклюзи", "депрограмматор", "койс"],
+    "депрограмматор": ["vdo", "высота прикуса", "койс", "jig", "окклюзия", "миорелаксация"],
+    "коффердам": ["раббердам", "рабердам", "кламп", "изоляция"],
+    "ирригация": ["naocl", "гипохлорит", "эдта", "edta", "активация", "pui"],
+}
+
+_RU_STEM_CUTS = (
+    "иями", "ями", "ами", "ями", "иях", "ях", "ах",
+    "ия", "ии", "ию", "ией", "ей", "ой", "ом", "ем", "ов", "ев",
+    "ный", "ная", "ное", "ные", "ного", "ной", "ных", "ным", "ными",
+    "ский", "ская", "ское", "ские", "ского", "ской", "ских",
+    "а", "ы", "е", "у", "и", "о", "я"
+)
+
+def _clinical_search_stem(word: str) -> str:
+    for cut in _RU_STEM_CUTS:
+        if word.endswith(cut) and len(word) - len(cut) >= 3:
+            return word[:-len(cut)]
+    return word
+
+
+async def get_clinical_protocols(category: Optional[str] = None, search: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Возвращает перечень клинических протоколов с мгновенной фильтрацией по категории и клиническому поисковому запросу.
+    Использует гибридный поиск: FTS5 полнотекстовый индекс + расширение клинических синонимов (препарирование, фиксация, апекс, сломанный инструмент, VDO).
+    """
     def operation():
         with _connection() as db:
             query = """
@@ -2058,12 +2439,83 @@ async def get_clinical_protocols(category=None, search=None, limit=50):
             if category:
                 query += " AND LOWER(category) = LOWER(?)"
                 params.append(category)
+
             if search:
-                query += " AND (LOWER(title) LIKE ? OR LOWER(materials) LIKE ? OR LOWER(steps_json) LIKE ? OR LOWER(indication) LIKE ?)"
-                like_param = f"%{search.lower()}%"
-                params.extend([like_param, like_param, like_param, like_param])
-            query += " ORDER BY id DESC LIMIT ?"
-            params.append(limit)
+                clean_search = (search or "").lower().strip()
+                tokens = [t.strip() for t in re.split(r'[\s,]+', clean_search) if len(t.strip()) >= 2]
+                expanded_terms = set(tokens)
+                if clean_search:
+                    expanded_terms.add(clean_search)
+
+                for phrase, syns in _CLINICAL_PROTOCOL_SYNONYMS.items():
+                    if phrase in clean_search or clean_search in phrase:
+                        expanded_terms.update(syns)
+                        expanded_terms.add(phrase)
+
+                for t in tokens:
+                    st = _clinical_search_stem(t)
+                    if len(st) >= 3:
+                        expanded_terms.add(st)
+                    for k, syns in _CLINICAL_PROTOCOL_SYNONYMS.items():
+                        if k in t or t in k or (len(st) >= 3 and st in k):
+                            expanded_terms.update(syns)
+                            expanded_terms.add(k)
+
+                # Попытка поиска через FTS5
+                fts_ids = []
+                try:
+                    fts_tokens = [f'"{t}"' for t in tokens if len(t) >= 2]
+                    if fts_tokens:
+                        fts_match_query = " OR ".join(fts_tokens)
+                        fts_rows = db.execute(
+                            "SELECT rowid FROM clinical_protocols_fts WHERE clinical_protocols_fts MATCH ? LIMIT 20",
+                            (fts_match_query,)
+                        ).fetchall()
+                        fts_ids = [r[0] for r in fts_rows]
+                except Exception:
+                    pass
+
+                if expanded_terms:
+                    clauses = []
+                    for term in expanded_terms:
+                        like_p = f"%{term}%"
+                        clauses.append(
+                            "(LOWER(title) LIKE ? OR LOWER(materials) LIKE ? OR LOWER(steps_json) LIKE ? "
+                            "OR LOWER(indication) LIKE ? OR LOWER(key_nuances) LIKE ? OR LOWER(category) LIKE ?)"
+                        )
+                        params.extend([like_p] * 6)
+                    
+                    if fts_ids:
+                        ph_fts = ",".join("?" for _ in fts_ids)
+                        query += f" AND (id IN ({ph_fts}) OR (" + " OR ".join(clauses) + "))"
+                        params = params[:-len(clauses)*6] + fts_ids + params[-len(clauses)*6:]
+                    else:
+                        query += " AND (" + " OR ".join(clauses) + ")"
+
+                    title_cases = " OR ".join(["LOWER(title) LIKE ?"] * len(expanded_terms))
+                    mat_cases = " OR ".join(["LOWER(materials) LIKE ?"] * len(expanded_terms))
+                    query += (
+                        f" ORDER BY CASE "
+                        f"WHEN LOWER(title) LIKE ? THEN 0 "
+                        f"WHEN {title_cases} THEN 1 "
+                        f"WHEN LOWER(materials) LIKE ? THEN 2 "
+                        f"WHEN {mat_cases} THEN 3 "
+                        f"ELSE 4 END, id DESC LIMIT ?"
+                    )
+                    params.append(f"%{clean_search}%")
+                    for term in expanded_terms:
+                        params.append(f"%{term}%")
+                    params.append(f"%{clean_search}%")
+                    for term in expanded_terms:
+                        params.append(f"%{term}%")
+                    params.append(limit)
+                else:
+                    query += " ORDER BY id DESC LIMIT ?"
+                    params.append(limit)
+            else:
+                query += " ORDER BY id DESC LIMIT ?"
+                params.append(limit)
+
             rows = db.execute(query, params).fetchall()
             return [
                 {
@@ -2084,7 +2536,7 @@ async def get_clinical_protocols(category=None, search=None, limit=50):
     return await _run_db(operation)
 
 
-async def get_clinical_protocol_by_id(proto_id):
+async def get_clinical_protocol_by_id(proto_id: int) -> Optional[Dict[str, Any]]:
     """Возвращает один протокол по ID."""
     def operation():
         with _connection() as db:
@@ -2114,9 +2566,174 @@ async def get_clinical_protocol_by_id(proto_id):
     return await _run_db(operation)
 
 
-async def search_clinical_protocols(query, limit=5):
-    """Полнотекстовый поиск по протоколам для RAG-подмешивания."""
+async def search_clinical_protocols(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Полнотекстовый поиск по протоколам для RAG-подмешивания и пользовательского поиска."""
     return await get_clinical_protocols(search=query, limit=limit)
+
+
+# ==============================================================================
+# Экспорт клинических записей в формате МИС (IDENT, Инфодент, форма 043/у)
+# ==============================================================================
+
+def format_protocol_mis(proto: Dict[str, Any]) -> str:
+    """Форматирует клинический протокол для 1-тап копирования в МИС (моноширинный блок <code>...</code>)."""
+    title = html.escape(str(proto.get("title", "Клинический протокол")).strip())
+    category = html.escape(str(proto.get("category", "Стоматология")).strip())
+    indication = html.escape(str(proto.get("indication", "")).strip())
+    contra = html.escape(str(proto.get("contraindications", "")).strip())
+    materials = html.escape(str(proto.get("materials", "")).strip())
+    nuances = html.escape(str(proto.get("key_nuances", "")).strip())
+    author = html.escape(str(proto.get("author_doctor", "")).strip())
+
+    steps_raw = proto.get("steps_json", "[]")
+    try:
+        steps_list = json.loads(steps_raw) if isinstance(steps_raw, str) else (steps_raw or [])
+    except Exception:
+        steps_list = []
+
+    steps_lines = []
+    for s in steps_list:
+        if isinstance(s, dict):
+            s_num = s.get("step", len(steps_lines) + 1)
+            s_name = s.get("name", "")
+            s_desc = s.get("description", "")
+            step_text = f"{s_num}. {s_name}: {s_desc}" if s_name else f"{s_num}. {s_desc}"
+            steps_lines.append(html.escape(step_text.strip()))
+        else:
+            steps_lines.append(f"{len(steps_lines) + 1}. {html.escape(str(s).strip())}")
+    steps_formatted = "\n".join(steps_lines) if steps_lines else "По стандартному клиническому протоколу."
+
+    mis_body = (
+        f"[ПРОТОКОЛ МИС / ФОРМА 043/У]\n"
+        f"НАЗВАНИЕ: {title}\n"
+        f"КАТЕГОРИЯ: {category}\n"
+        f"ПОКАЗАНИЯ: {indication}\n"
+        f"ПРОТИВОПОКАЗАНИЯ: {contra}\n"
+        f"МАТЕРИАЛЫ И ОСНАЩЕНИЕ: {materials}\n"
+        f"ЭТАПЫ:\n{steps_formatted}\n"
+        f"КЛЮЧЕВЫЕ НЮАНСЫ: {nuances}\n"
+        f"АВТОР / ИСТОЧНИК: {author}"
+    )
+
+    return (
+        f"📋 <b>{title}</b>\n"
+        f"📁 <i>Категория: {category}</i>\n\n"
+        f"💡 <i>1-тап копирование в МИС (IDENT / Инфодент / 043/у):</i>\n"
+        f"<code>{mis_body}</code>"
+    )
+
+
+async def export_protocol_mis_async(proto_id: int) -> Optional[str]:
+    """Асинхронно получает протокол по ID и возвращает его в формате МИС с блоком <code>...</code>."""
+    proto = await get_clinical_protocol_by_id(proto_id)
+    if not proto:
+        return None
+    return format_protocol_mis(proto)
+
+
+def format_clinical_note_for_mis(
+    title: str,
+    text: str,
+    doctor: str = "",
+    date_str: Optional[str] = None,
+    tags: Optional[str] = None,
+    tooth: Optional[str] = None,
+    diagnosis: Optional[str] = None,
+    protocol_steps: Optional[List[str]] = None,
+) -> str:
+    """Создает готовую клиническую запись для медицинской карты (форма 043/у, IDENT, Инфодент) в теге <code>...</code>."""
+    clean_title = html.escape(str(title).strip())
+    clean_text = html.escape(str(text).strip())
+    clean_doctor = html.escape(str(doctor or "Лечащий врач").strip())
+    clean_date = html.escape(str(date_str or time.strftime("%Y-%m-%d %H:%M")).strip())
+    clean_tooth = html.escape(str(tooth or "Не указан").strip())
+    clean_diag = html.escape(str(diagnosis or "По клинической картине").strip())
+    clean_tags = html.escape(str(tags or "").strip())
+
+    parts = [
+        "[КЛИНИЧЕСКАЯ ЗАПИСЬ В МИС (IDENT / ИНФОДЕНТ / 043/У)]",
+        f"ДАТА: {clean_date}",
+        f"ВРАЧ: {clean_doctor}",
+        f"ЗУБ: {clean_tooth}",
+        f"ДИАГНОЗ: {clean_diag}",
+    ]
+    if clean_tags:
+        parts.append(f"ТЕГИ: {clean_tags}")
+    parts.append(f"ДНЕВНИК ПРИЕМА / ХОД ЛЕЧЕНИЯ:\n{clean_text}")
+
+    if protocol_steps:
+        st_lines = []
+        for i, s in enumerate(protocol_steps, 1):
+            st_lines.append(f"{i}. {html.escape(str(s).strip())}")
+        parts.append("ЭТАПЫ:\n" + "\n".join(st_lines))
+
+    mis_block = "\n".join(parts)
+    return (
+        f"📋 <b>{clean_title}</b>\n"
+        f"💡 <i>1-тап копирование в медицинскую карту МИС (IDENT / Инфодент / 043/у):</i>\n\n"
+        f"<code>{mis_block}</code>"
+    )
+
+
+async def export_bookmark_to_mis_async(bookmark_id: int, saved_by_user_id: Optional[int] = None) -> Optional[str]:
+    """Асинхронно форматирует сохраненную клиническую закладку врача для вставки в один клик в МИС."""
+    bm_dict = await get_clinical_bookmark_dict(bookmark_id, saved_by_user_id=saved_by_user_id)
+    if not bm_dict:
+        return None
+    return format_clinical_note_for_mis(
+        title=f"Клиническая закладка #{bm_dict['id']} ({bm_dict['sender_name']})",
+        text=bm_dict["text"],
+        doctor=bm_dict["sender_name"],
+        date_str=str(bm_dict["date"]),
+        tags=bm_dict.get("tags", "")
+    )
+
+
+async def search_clinical_notes(query: str, user_id: Optional[int] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """Мгновенный объединенный поиск клинических заметок, протоколов и закладок по ключевым словам.
+    Возвращает структурированный перечень найденных клинических материалов со сниппетами и готовыми МИС-блоками.
+    Приоритет отдается личным сохраненным закладкам врача, дополненным протоколами сообщества.
+    """
+    results = []
+    clean_q = (query or "").strip()
+    if not clean_q:
+        return results
+
+    # 1. Персональные закладки врача (наивысший приоритет)
+    if user_id is not None:
+        bms = await search_clinical_bookmarks(saved_by_user_id=user_id, query=clean_q, limit=limit)
+        for b in bms:
+            results.append({
+                "source": "bookmark",
+                "id": b["id"],
+                "title": f"Закладка: {b['sender_name']}",
+                "category": "Избранное",
+                "text": b["text"],
+                "author": b["sender_name"],
+                "tags": b.get("tags", ""),
+                "mis_export": format_clinical_note_for_mis(
+                    title=f"Закладка #{b['id']}",
+                    text=b["text"],
+                    doctor=b["sender_name"],
+                    date_str=str(b["date"]),
+                    tags=b.get("tags", "")
+                )
+            })
+
+    # 2. Клинические протоколы сообщества
+    protos = await search_clinical_protocols(clean_q, limit=limit)
+    for p in protos:
+        results.append({
+            "source": "protocol",
+            "id": p["id"],
+            "title": p["title"],
+            "category": p["category"],
+            "text": p.get("indication", "") + " " + p.get("key_nuances", ""),
+            "author": p.get("author_doctor", ""),
+            "mis_export": format_protocol_mis(p)
+        })
+
+    return results[:limit]
 
 async def enqueue_outbox_message(chat_id: int, text: str, parse_mode: str = "html") -> int:
     """Ставит исходящее сообщение в очередь bot_outbox для гарантированной отправки активным ботом."""

@@ -262,6 +262,130 @@ check("готовый текст для Telegram сформирован", "КЛ�
 
 
 # ==============================================================================
+# [9] Протоколы фиксации реставраций (E.max, ZrO2, Полевой шпат)
+# ==============================================================================
+print("\\n[9] Протоколы адгезивной фиксации (E.max, ZrO2, Полевой шпат)")
+
+# 1. E.max (дисиликат лития)
+emax = ct.get_cementation_protocol("emax")
+check("E.max: протокол найден по ключу 'emax'", emax is not None)
+check("E.max: травление HF ровно 20 секунд", "20 секунд" in emax.etching_time)
+check("E.max: силанизация 60 секунд", "60 секунд" in emax.priming_protocol and "Силан" in emax.priming_protocol)
+check("E.max: КАТЕГОРИЧЕСКИЙ ЗАПРЕТ пескоструя корундом Al2O3", "ЗАПРЕЩЕНО пескоструить E.max" in emax.strict_prohibitions)
+check("E.max: сниппет МИС в <code>...</code>", len(emax.mis_snippet) > 50 and "HF 5% 20 сек" in emax.mis_snippet)
+
+emax_card = ct.format_cementation_card(emax)
+check("E.max: карточка содержит HTML-теги и блок МИС", "<b>" in emax_card and "<code>" in emax_card)
+
+# Поиск по алиасам E.max
+check("E.max: поиск по алиасу 'дисиликат'", ct.get_cementation_protocol("дисиликат") is not None)
+check("E.max: поиск по алиасу 'емакс'", ct.get_cementation_protocol("емакс") is not None)
+
+# 2. Диоксид циркония (ZrO2)
+zirconia = ct.get_cementation_protocol("zirconia")
+check("ZrO2: протокол найден по ключу 'zirconia'", zirconia is not None)
+check("ZrO2: пескоструй Al2O3 50 мкм", "Al2O3 50" in zirconia.etching_agent)
+check("ZrO2: праймер с 10-MDP мономером", "10-MDP" in zirconia.priming_protocol)
+check("ZrO2: ЗАПРЕТ плавиковой кислоты HF", "ЗАПРЕЩЕНО травление плавиковой кислотой" in zirconia.strict_prohibitions)
+check("ZrO2: ЗАПРЕТ очистки H3PO4 после примерки", "ЗАПРЕЩЕНА очистка циркония ортофосфорной кислотой" in zirconia.strict_prohibitions)
+check("ZrO2: сниппет МИС содержит APC протокол", "APC" in zirconia.mis_snippet and "Ivoclean" in zirconia.mis_snippet)
+
+# 3. Полевошпатная керамика
+feld = ct.get_cementation_protocol("feldspathic")
+check("Полевой шпат: протокол найден", feld is not None)
+check("Полевой шпат: травление HF 60-90 секунд", "60–90 секунд" in feld.etching_time)
+check("Полевой шпат: светоотверждаемый композитный цемент", "Светоотверждаемый" in feld.recommended_cement)
+
+# 4. Вкладки и металлокерамика
+inlay = ct.get_cementation_protocol("composite_inlay")
+check("Композитная вкладка: протокол в базе", inlay is not None)
+mc = ct.get_cementation_protocol("metal_ceramic")
+check("Металлокерамика: протокол в базе", mc is not None)
+
+
+# ==============================================================================
+# [10] Препарирование: Chamfer vs Vertiprep (Биоширина, Феррул)
+# ==============================================================================
+print("\\n[10] Препарирование: Chamfer vs Vertiprep")
+
+# 1. Chamfer
+chamfer = ct.get_prep_protocol("chamfer")
+check("Chamfer: протокол найден", chamfer is not None)
+check("Chamfer: закругленный уступ 0.8-1.2 мм", "0.8–1.2 мм" in chamfer.geometry_and_depth)
+check("Chamfer: обязателен феррул >= 1.5-2.0 мм", "1.5–2.0 мм" in chamfer.ferrule_requirement)
+check("Chamfer: сохранение биоширины 2.04 мм", "2.04 мм" in chamfer.biologic_width_rules)
+check("Chamfer: бор 856 (торпеда)", "856" in chamfer.recommended_burs)
+
+chamfer_card = ct.format_prep_card(chamfer)
+check("Chamfer: карточка содержит блок МИС", "<code>" in chamfer_card and "856-016" in chamfer_card)
+
+# 2. Vertiprep / B.O.P.T.
+verti = ct.get_prep_protocol("vertiprep")
+check("Vertiprep: протокол найден", verti is not None)
+check("Vertiprep: тангенциальный сход без уступа", "без уступа" in verti.geometry_and_depth.lower())
+check("Vertiprep: бор 862 (пламя)", "862" in verti.recommended_burs)
+check("Vertiprep: ЗАПРЕТ для бескаркасной полевошпатной керамики и тонкого E.max", "ЗАПРЕЩЕНО для бескаркасной" in verti.contraindications)
+check("Vertiprep: обязательная временная коронка PMMA для профиля прорезывания", "PMMA" in verti.impression_and_temp)
+
+# 3. Сравнительный консилиум
+comp = ct.get_prep_protocol("comparison")
+check("Сравнение Chamfer vs Vertiprep: протокол в базе", comp is not None and "Золотое правило" in comp.clinical_pearl)
+
+
+# ==============================================================================
+# [11] Торки имплантатов и абатментов (15, 25, 30, 32, 35 Н·см)
+# ==============================================================================
+print("\\n[11] Торки имплантатов и абатментов")
+
+# 1. Клинические стандарты (general)
+gen_t = ct.get_implant_torque("general")
+check("Стандарты торка: протокол найден", gen_t is not None)
+check("Формирователь: ручная затяжка 10-15 Нсм", "10–15 Н·см" in gen_t.healing_abutment_torque)
+check("Временный абатмент: 15-20 Нсм", "15–20 Н·см" in gen_t.temporary_abutment_torque)
+check("Постоянный абатмент: 30-35 Нсм с дотягом через 10 мин", "30–35 Н·см" in gen_t.permanent_abutment_torque and "settling effect" in gen_t.permanent_abutment_torque)
+check("Мультиюнит винт моста: СТРОГО 15 Нсм", "СТРОГО 15 Н·см" in gen_t.prosthetic_screw_torque)
+
+# 2. Straumann
+straumann_t = ct.get_implant_torque("straumann")
+check("Straumann: торк постоянного абатмента 35 Нсм", "35 Н·см" in straumann_t.permanent_abutment_torque)
+check("Straumann: отвертка SCS / TorcFit", "SCS" in straumann_t.screwdriver_profile)
+
+# 3. Neodent Grand Morse
+neodent_t = ct.get_implant_torque("neodent")
+check("Neodent GM: торк 32 Нсм", "32 Н·см" in neodent_t.permanent_abutment_torque)
+check("Neodent GM: отвертка Neo (шестилучевой)", "Neo" in neodent_t.screwdriver_profile)
+check("Neodent GM: ЗАПРЕТ шестигранника 1.2 мм", "ЗАПРЕЩЕНО затягивать винты Neodent GM шестигранником" in neodent_t.warning_and_pearl)
+
+# 4. Osstem TSIII
+osstem_t = ct.get_implant_torque("osstem")
+check("Osstem: торк 30 Нсм", "30 Н·см" in osstem_t.permanent_abutment_torque)
+check("Osstem: отвертка 1.2 Hex", "1.2 Hex" in osstem_t.screwdriver_profile)
+
+# 5. Dentium SuperLine
+dentium_t = ct.get_implant_torque("dentium")
+check("Dentium: торк 30 Нсм", "30 Н·см" in dentium_t.permanent_abutment_torque)
+check("Dentium: отвертка 1.27 Hex (.050 inch)", "1.27" in dentium_t.screwdriver_profile)
+
+# 6. Nobel Biocare
+nobel_t = ct.get_implant_torque("nobel")
+check("Nobel: торк 35 Нсм", "35 Н·см" in nobel_t.permanent_abutment_torque)
+check("Nobel: отвертка Unigrip", "Unigrip" in nobel_t.screwdriver_profile)
+
+# 7. Astra Tech EV
+astra_t = ct.get_implant_torque("astra")
+check("Astra Tech: торк постоянного абатмента строго 25 Нсм (не 35!)", "25 Н·см" in astra_t.permanent_abutment_torque)
+
+# 8. Мультиюниты (All-on-4 / All-on-6)
+multi_t = ct.get_implant_torque("multiunit")
+check("Мультиюниты: абатмент в имплантат 30-35 Нсм", "30–35 Н·см" in multi_t.permanent_abutment_torque or "30–35 Н·см" in multi_t.multiunit_torque)
+check("Мультиюниты: протетический винт моста СТРОГО 15 Нсм", "15 Н·см" in multi_t.prosthetic_screw_torque and "СТРОГО" in multi_t.prosthetic_screw_torque)
+check("Мультиюниты: предупреждение о срезе микрорезьбы M1.4", "M1.4" in multi_t.prosthetic_screw_torque and "срезает" in multi_t.prosthetic_screw_torque)
+
+torque_card = ct.format_implant_torque_card(multi_t)
+check("Торк карточка форматируется в HTML с блоком МИС", "<code>" in torque_card and "All-on-4" in torque_card)
+
+
+# ==============================================================================
 # [8] Интерактивные разметки и Callback Dispatcher
 # ==============================================================================
 print("\n[8] Telethon UI Widgets и Callback Dispatcher")
@@ -354,14 +478,69 @@ async def run_callback_tests():
     ok_irr = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/irrigation")
     check("/irrigation перехватывается", ok_irr and bot.send_message.called)
 
+    # Cementation callbacks
+    ev_cem_menu = MockCallbackEvent("cement:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_cem_menu, "cement:menu")
+    check("cement:menu диспетчеризируется", ok and ev_cem_menu.edit.called)
+
+    ev_emax = MockCallbackEvent("cement:emax")
+    ok = await ct.dispatch_chairside_callback(bot, ev_emax, "cement:emax")
+    check("cement:emax диспетчеризируется", ok and ev_emax.edit.called)
+
+    ev_zirconia = MockCallbackEvent("cement:zirconia")
+    ok = await ct.dispatch_chairside_callback(bot, ev_zirconia, "cement:zirconia")
+    check("cement:zirconia диспетчеризируется", ok and ev_zirconia.edit.called)
+
+    # Prep callbacks
+    ev_prep_menu = MockCallbackEvent("prep:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_prep_menu, "prep:menu")
+    check("prep:menu диспетчеризируется", ok and ev_prep_menu.edit.called)
+
+    ev_chamfer = MockCallbackEvent("prep:chamfer")
+    ok = await ct.dispatch_chairside_callback(bot, ev_chamfer, "prep:chamfer")
+    check("prep:chamfer диспетчеризируется", ok and ev_chamfer.edit.called)
+
+    ev_verti = MockCallbackEvent("prep:vertiprep")
+    ok = await ct.dispatch_chairside_callback(bot, ev_verti, "prep:vertiprep")
+    check("prep:vertiprep диспетчеризируется", ok and ev_verti.edit.called)
+
+    # Implant torque callbacks
+    ev_t_menu = MockCallbackEvent("torque_imp:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_t_menu, "torque_imp:menu")
+    check("torque_imp:menu диспетчеризируется", ok and ev_t_menu.edit.called)
+
+    ev_neodent = MockCallbackEvent("torque_imp:neodent")
+    ok = await ct.dispatch_chairside_callback(bot, ev_neodent, "torque_imp:neodent")
+    check("torque_imp:neodent диспетчеризируется", ok and ev_neodent.edit.called)
+
+    ev_multi = MockCallbackEvent("torque_imp:multiunit")
+    ok = await ct.dispatch_chairside_callback(bot, ev_multi, "torque_imp:multiunit")
+    check("torque_imp:multiunit диспетчеризируется", ok and ev_multi.edit.called)
+
+    # Новые команды в handle_if_chairside_command
+    ok_cem = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/cement")
+    check("/cement перехватывается", ok_cem and bot.send_message.called)
+
+    ok_prep = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/prep")
+    check("/prep перехватывается", ok_prep and bot.send_message.called)
+
+    ok_torque_imp = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/implant_torque")
+    check("/implant_torque перехватывается", ok_torque_imp and bot.send_message.called)
+
+
     ok_other = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/help")
     check("/help не перехватывается chairside-фасадом", not ok_other)
 
 
-asyncio.run(run_callback_tests())
+def test_all_chairside_tools():
+    asyncio.run(run_callback_tests())
+    assert not FAIL, f"Chairside tools failed: {FAIL}"
 
-print("\n" + "=" * 62)
-print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("FAILS:", FAIL)
-sys.exit(1 if FAIL else 0)
+
+if __name__ == "__main__":
+    test_all_chairside_tools()
+    print("\n" + "=" * 62)
+    print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print("FAILS:", FAIL)
+    sys.exit(1 if FAIL else 0)

@@ -22,7 +22,15 @@ from telethon import Button
 import anesthesia_calc as ac
 
 try:
-    from clinical_gnathology_phonetics import get_phonetic_test_chairside_card
+    from clinical_gnathology_phonetics import (
+    get_phonetic_test_chairside_card,
+    format_vdr_vdo_protocol_card,
+    format_fv_test_card,
+    format_s_test_card,
+    format_lisping_etiology_card,
+    format_i_test_card,
+    format_pound_line_card,
+)
 except ImportError:
     def get_phonetic_test_chairside_card() -> str:
         return "🗣 Протокол фонетических проб временно недоступен."
@@ -240,6 +248,370 @@ def format_file_system_card(data: Dict[str, Any]) -> str:
     lines.append(f"💡 <b>Chairside Совет:</b> {html.escape(data['tip'])}")
     return "\n".join(lines)
 
+
+# ==============================================================================
+# 1.1. ПРОТОКОЛЫ АДГЕЗИВНОЙ И ПОЛУАДГЕЗИВНОЙ ФИКСАЦИИ (CEMENTATION & BONDING)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class CementationProtocol:
+    material_key: str
+    material_name: str
+    etching_agent: str
+    etching_time: str
+    cleaning_protocol: str
+    priming_protocol: str
+    tooth_prep: str
+    recommended_cement: str
+    strict_prohibitions: str
+    mis_snippet: str
+    chairside_tip: str
+
+
+CEMENTATION_PROTOCOLS: Dict[str, CementationProtocol] = {
+    "emax": CementationProtocol(
+        material_key="emax",
+        material_name="Дисиликат лития (IPS e.max CAD / Press, LiSi)",
+        etching_agent="Плавиковая кислота 4.5%–9% (HF, Hydrofluoric acid)",
+        etching_time="Строго 20 секунд (не перетравливать!)",
+        cleaning_protocol="Промыть водой 60 сек + ультразвуковая ванна в 96% спирте или дистиллированной воде 3–5 мин (удаление солей фторсиликата).",
+        priming_protocol="Силан (Silane) 60 секунд -> высушивание теплым воздухом 50°C (активация мостиков Si-O-Si).",
+        tooth_prep="Селективное или тотальное травление 37% H3PO4 (эмаль 30 сек, дентин 15 сек) -> смыть -> не пересушивать дентин -> адгезив (OptiBond FL / Clearfil SE Bond / Prime&Bond).",
+        recommended_cement="Композитный цемент двойного отверждения (Variolink Esthetic DC, Panavia V5, RelyX Ultimate) или светового (для виниров <0.8 мм: Variolink LC).",
+        strict_prohibitions="⛔ <b>КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО пескоструить E.max оксидом алюминия (корундом Al2O3)!</b> Создает микротрещины, концентраторы напряжений и фазовые дефекты, приводящие к расколу реставрации. Травление HF более 20 сек ослабляет стеклокерамику.",
+        mis_snippet="Протокол фиксации E.max: HF 5% 20 сек -> промыть 60 сек -> спирт UZ 3 мин -> Силан 60 сек + теплый воздух 50°C. Зуб: селективное протравливание 37% H3PO4 (эмаль 30с, дентин 15с) -> бонд -> фиксация на Variolink Esthetic DC. Полимеризация 20с с каждой поверхности под глицерином DeOx.",
+        chairside_tip="После примерки слюнные белки нейтрализуются 37% H3PO4 20 сек (очистка) или Ivoclean, затем ОБЯЗАТЕЛЬНО наносится свежий слой силана!"
+    ),
+    "zirconia": CementationProtocol(
+        material_key="zirconia",
+        material_name="Диоксид циркония (ZrO2 — 3Y-TZP, 4Y, 5Y / Prettau / Katana)",
+        etching_agent="Механическая микроабразия оксидом алюминия Al2O3 50 мкм (HF НЕ действует!)",
+        etching_time="10–15 секунд под давлением 1.5–2.0 бар (дистанция 10 мм)",
+        cleaning_protocol="Очистка от слюны после примерки: Ivoclean / ZirClean на 20 секунд -> смыть водой. (H3PO4 ЗАПРЕЩЕНА!).",
+        priming_protocol="Праймер с 10-MDP мономером (Z-Prime Plus, Clearfil Ceramic Primer Plus, Monobond Plus) 60 секунд -> высушить воздухом (связь P-O-Zr).",
+        tooth_prep="Деликатная очистка дентина пемзой без масел или пескоструй глицином/Al2O3 27 мкм. При самоадгезивных цементах протравка дентина не требуется.",
+        recommended_cement="Самоадгезивный композитный цемент (RelyX U200, RelyX Universal) или адгезивный цемент с MDP-праймером (Panavia V5, Multilink Automix).",
+        strict_prohibitions="⛔ <b>КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО травление плавиковой кислотой (HF)</b> — цирконий химически не содержит стеклофазы и HF его НЕ протравливает!\n⛔ <b>ЗАПРЕЩЕНА очистка циркония ортофосфорной кислотой (H3PO4)</b> после примерки — фосфаты блокируют оксидные центры ZrO2 и обнуляют связь с 10-MDP праймером!",
+        mis_snippet="Протокол фиксации ZrO2 (APC): Пескоструй Al2O3 50 мкм, 1.5-2.0 бар -> очистка Ivoclean 20с -> праймер с 10-MDP (Z-Prime Plus / Clearfil Ceramic Primer) 60с -> фиксация на Panavia V5 / RelyX U200. Контроль посадки, удаление излишков, полимеризация 20с под глицерином.",
+        chairside_tip="APC-протокол проф. Маркуса Блатца (Air-abrasion + Primer MDP + Composite) обеспечивает прочность сцепления циркония свыше 30–40 МПа."
+    ),
+    "feldspathic": CementationProtocol(
+        material_key="feldspathic",
+        material_name="Полевошпатная керамика (Feldspathic / Виниры на огнеупоре / Empress)",
+        etching_agent="Плавиковая кислота 9%–10% (HF)",
+        etching_time="60–90 секунд (высокая доля стеклофазы требует глубокого микрорельефа)",
+        cleaning_protocol="Смывание водой 60 секунд, ультразвуковая ванна с 96% спиртом 3 минуты, сушка.",
+        priming_protocol="Силан (Silane) 60 секунд -> прогрев теплым воздухом 50°C (или в печи 100°C 1 мин) для формирования устойчивой силоксановой сетки.",
+        tooth_prep="Тотальное протравливание эмали 37% H3PO4 30 секунд. Нанесение наполненного бонда (OptiBond FL) без полимеризации перед посадкой винира.",
+        recommended_cement="Светоотверждаемый композитный цемент высокой стабильности цвета (Variolink Esthetic LC, Choice 2, RelyX Veneer).",
+        strict_prohibitions="⛔ <b>КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать цементы двойного отверждения с третичными аминами</b> под тонкие полевошпатные виниры (неминуемое потемнение краев через 12–24 мес!).",
+        mis_snippet="Протокол фиксации полевошпатного винира: HF 9% 90 сек -> промыть 60 сек -> спирт UZ 3 мин -> Силан 60 сек + сушка 50°C. Эмаль: H3PO4 37% 30с -> бонд OptiBond FL. Фиксация на световой композитный цемент Variolink Esthetic LC. Полимеризация 40с на грань под DeOx.",
+        chairside_tip="Полевошпатная керамика — эталон эстетики для виниров, но требует работы строго в пределах эмали (ретенция к эмали > 30 МПа)."
+    ),
+    "metal_ceramic": CementationProtocol(
+        material_key="metal_ceramic",
+        material_name="Металлокерамика и литые сплавы (КХС, золото, кобальт-хром)",
+        etching_agent="Пескоструй оксидом алюминия Al2O3 50–110 мкм",
+        etching_time="15 секунд под давлением 2.5–3.0 бар до матового блеска",
+        cleaning_protocol="Пароструйная или ультразвуковая очистка в спирте 3 мин.",
+        priming_protocol="Праймер для металла (Alloy Primer / Metal Primer / Monobond Plus) при использовании адгезивных цементов.",
+        tooth_prep="Очистка культи пемзой, дезинфекция 2% хлоргексидином 30 сек, смыть, оставить дентин слегка влажным.",
+        recommended_cement="Стеклоиономерный цемент модифицированный смолой (Fuji Plus, RelyX Luting) или самоадгезивный композитный цемент (RelyX U200).",
+        strict_prohibitions="⛔ <b>ЗАПРЕЩЕНО пересушивать культю перед СИЦ</b> (вызывает постоперационную чувствительность и гибель одонтобластов).",
+        mis_snippet="Протокол фиксации МК: Пескоструй внутренней поверхности каркаса Al2O3 50 мкм -> обезжиривание спиртом. Культя: 2% CHX 30с -> влажный дентин -> замешивание Fuji Plus / RelyX U200 -> посадка, прикусной валик на 3 мин -> удаление излишков цемента по экватору.",
+        chairside_tip="При достаточной высоте культи (>=4 мм) и конусности стенок <=6° надежную ретенцию обеспечивает классический Fuji Plus."
+    ),
+    "composite_inlay": CementationProtocol(
+        material_key="composite_inlay",
+        material_name="Композитные вкладки / Onlay / Оверлей (лабораторный композит)",
+        etching_agent="Пескоструйная обработка Al2O3 27–50 мкм",
+        etching_time="5–10 секунд под давлением 1.5–2.0 бар",
+        cleaning_protocol="Промыть водой, ультразвуковая ванна в спирте 3 мин.",
+        priming_protocol="Силан 60 секунд (для сцепления с наполнителем) + ненаполненная смола / бонд без полимеризации.",
+        tooth_prep="Селективное/тотальное травление H3PO4 (эмаль 30с, дентин 15с) -> бонд 4/5 поколения (OptiBond FL / Clearfil SE).",
+        recommended_cement="Композитный цемент двойного отверждения (Variolink DC, Panavia V5) или разогретый композит.",
+        strict_prohibitions="⛔ <b>Плавиковая кислота HF НЕ протравливает полимерную матрицу композита!</b> Только микропескоструй Al2O3.",
+        mis_snippet="Протокол фиксации композитной вкладки: Пескоструй Al2O3 50 мкм 2.0 бар -> Силан 60 сек -> бонд OptiBond FL. Полость: 37% H3PO4 (эмаль 30с, дентин 15с) -> OptiBond FL -> фиксация на Variolink Esthetic DC. Полимеризация 20с с каждой стороны под слоем DeOx.",
+        chairside_tip="Разогретый до 55°C реставрационный композит обеспечивает минимальную толщину шва и максимальную монолитность реставрации."
+    )
+}
+
+def get_cementation_protocol(key: str) -> Optional[CementationProtocol]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "e.max": "emax", "емакс": "emax", "е.макс": "emax", "дисиликат": "emax", "лиси": "emax", "disilicate": "emax",
+        "zirconia": "zirconia", "циркон": "zirconia", "цирконий": "zirconia", "диоксид циркония": "zirconia", "zro2": "zirconia", "prettau": "zirconia",
+        "feldspathic": "feldspathic", "полевой": "feldspathic", "шпат": "feldspathic", "полевошпатная": "feldspathic", "винир": "feldspathic", "empress": "feldspathic",
+        "мк": "metal_ceramic", "металлокерамика": "metal_ceramic", "кхс": "metal_ceramic", "металл": "metal_ceramic",
+        "вкладка": "composite_inlay", "онлей": "composite_inlay", "оверлей": "composite_inlay", "inlay": "composite_inlay", "onlay": "composite_inlay"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return CEMENTATION_PROTOCOLS.get(resolved)
+
+def format_cementation_card(p: CementationProtocol) -> str:
+    return (
+        f"💎 <b>Протокол фиксации: {html.escape(p.material_name)}</b>\\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\\n"
+        f"🧪 <b>Подготовка реставрации:</b>\\n"
+        f"• <b>Травление / пескоструй:</b> {html.escape(p.etching_agent)}\\n"
+        f"• <b>Экспозиция:</b> <code>{html.escape(p.etching_time)}</code>\\n"
+        f"• <b>Очистка:</b> {html.escape(p.cleaning_protocol)}\\n"
+        f"• <b>Силанизация / Прайминг:</b> {html.escape(p.priming_protocol)}\\n\\n"
+        f"🦷 <b>Подготовка зуба (эмаль / дентин):</b>\\n"
+        f"• {html.escape(p.tooth_prep)}\\n\\n"
+        f"🧴 <b>Рекомендуемый цемент:</b>\\n"
+        f"• <b>{html.escape(p.recommended_cement)}</b>\\n\\n"
+        f"{p.strict_prohibitions}\\n\\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\\n"
+        f"<code>{html.escape(p.mis_snippet)}</code>\\n\\n"
+        f"💡 <b>Chairside Совет:</b> {html.escape(p.chairside_tip)}"
+    )
+
+
+# ==============================================================================
+# 1.2. ПРЕПАРИРОВАНИЕ: CHAMFER VS VERTIPREP (УСТУП VS БЕЗ УСТУПА / B.O.P.T.)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class PrepProtocol:
+    prep_key: str
+    prep_name: str
+    geometry_and_depth: str
+    indications: str
+    contraindications: str
+    ferrule_requirement: str
+    biologic_width_rules: str
+    recommended_burs: str
+    impression_and_temp: str
+    mis_snippet: str
+    clinical_pearl: str
+
+
+PREP_PROTOCOLS: Dict[str, PrepProtocol] = {
+    "chamfer": PrepProtocol(
+        prep_key="chamfer",
+        prep_name="Chamfer (Закругленный желобоватый уступ)",
+        geometry_and_depth="Глубина уступа 0.8–1.2 мм, внутренний угол закруглен (90–120°), угол конвергенции осевых стенок 4°–6°.",
+        indications="Одиночные коронки и мосты из дисиликата лития (E.max), диоксида циркония с вестибулярным нанесением, металлокерамики. Интактный пародонт, четкий экватор зуба, наддесневое или парагингивальное препарирование.",
+        contraindications="Зубы с критическим дефицитом коронкового дентина, разрушением корня глубже 2 мм под десну, обнажением фуркации.",
+        ferrule_requirement="ОБЯЗАТЕЛЕН круговой феррул (Ferrule Effect) >= 1.5–2.0 мм высоты здорового дентина над уступом (на 360° по окружности зуба). Толщина стенок дентина >= 1.0 мм.",
+        biologic_width_rules="Строгое сохранение биологической ширины (2.04 мм = 0.97 мм эпителий + 1.07 мм соединительнотканное прикрепление). Граница препарирования не должна приближаться к гребню кости ближе 2.5–3.0 мм!",
+        recommended_burs="Торпедовидные алмазные боры с закругленным торцом (ISO 856-016 / 856-018: синее кольцо для препарирования, красное для сглаживания, желтое/Arkansas для полировки).",
+        impression_and_temp="Двухнитевая техника ретракции: первая нить #000 апикально в борозду, вторая нить #1 поверх уступа на 4 минуты перед оттиском. Временная коронка с точной посадкой по краю уступа.",
+        mis_snippet="Препарирование Chamfer: Торпедовидный бор 856-016. Закругленный уступ 1.0 мм, ширина феррула 2.0 мм, конвергенция стенок 6°. Ретракционная нить #000 + #1. Финишная полировка Arkansas / OptiDisc. Снятие оттиска А-силиконом (Honigum / Express). Временная коронка Protemp 4 на Temp-Bond NE.",
+        clinical_pearl="Никогда не оставляйте острый угол уступа: концентрация напряжений в керамике повышается в 3 раза, что вызывает продольные трещины коронки!"
+    ),
+    "vertiprep": PrepProtocol(
+        prep_key="vertiprep",
+        prep_name="Vertiprep / B.O.P.T. (Вертикальное препарирование без уступа / Feather Edge)",
+        geometry_and_depth="Тангенциальное (перовидное) препарирование без уступа с контролируемым кюретажем зубодесневой борозды бором (по Ignazio Loi). Сглаживание цементно-эмалевой границы (CEJ) в единый конический профиль.",
+        indications="1. Дефицит феррула после снятия старых коронок с глубокими поддесневыми дефектами.\\n2. Тонкие стенки корней после эндодонтического лечения (максимальное сохранение дентина).\\n3. Пародонтологические зубы с обнажением корней, десневыми рецессиями и бороздами фуркаций.\\n4. Монолитный диоксид циркония (Monolithic ZrO2) или литой металл.",
+        contraindications="⛔ <b>КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО для бескаркасной полевошпатной керамики и тонкого E.max!</b> Тонкий край стеклокерамики неизбежно скалывается под нагрузкой. Противопоказано при остром воспалении маргинальной десны.",
+        ferrule_requirement="Формирует вертикальный феррул (1.5–2.0 мм) непосредственно на поверхности корня в пределах зубодесневой борозды за счет ликвидации анатомического уступа.",
+        biologic_width_rules="Контролируемый микрокюретаж эпителия борозды бором запускает утолщение десневого края и адаптацию новой биологической ширины вокруг временной коронки PMMA с овоидным профилем прорезывания.",
+        recommended_burs="Длинные тонкие пламевидные боры (ISO 862-012 / 863-012 / 862-010: зеленое/синее кольцо под углом 10°–15° к длинной оси зуба, красное для финиша).",
+        impression_and_temp="Ключевой этап B.O.P.T. — ВРЕМЕННАЯ КОРОНКА PMMA: создание стабильного овоидного поддесневого контура прорезывания (emergence profile), выдерживание 4–8 недель до созревания плотной манжеты десны.",
+        mis_snippet="Препарирование Vertiprep (B.O.P.T.): Пламевидный бор 862-012. Тангенциальное сглаживание перехода коронка-корень без уступа. Сохранение субингвивального феррула 1.8 мм. Временная коронка PMMA с овоидной шейкой для моделирования профиля прорезывания. Фиксация постоянной коронки из монолитного ZrO2.",
+        clinical_pearl="Vertiprep без тщательно смоделированной временной коронки B.O.P.T. — это врачебная ошибка! Десневой край формируется не бором, а контуром временной реставрации."
+    ),
+    "comparison": PrepProtocol(
+        prep_key="comparison",
+        prep_name="Сравнительный консилиум: Chamfer vs Vertiprep",
+        geometry_and_depth="Chamfer: четкий желобок 1.0 мм с границей.\\nVertiprep: плавный тангенциальный сход на нет без ступени.",
+        indications="Выбор методики определяется объемом сохранного дентина и материалом реставрации.",
+        contraindications="Соблюдайте абсолютные материаловедческие показания (см. ниже).",
+        ferrule_requirement="Обе методики требуют минимум 1.5-2.0 мм высоты дентина (феррул-эффект) для предотвращения раскола корня!",
+        biologic_width_rules="Биоширина (2.04 мм) не должна нарушаться инвазией бора глубже дна борозды к кости.",
+        recommended_burs="Chamfer: бор 856 (торпеда).\\nVertiprep: бор 862/863 (пламя).",
+        impression_and_temp="Chamfer: двухнитевая ретракция -> постоянный оттиск.\\nVertiprep: обязательный этап ношения временной B.O.P.T.-коронки 4-8 недель.",
+        mis_snippet="Клинический выбор препарирования: При интактном пародонте и фиксации E.max — Chamfer 1.0 мм (бор 856). При дефиците феррула, поддесневом дефекте и фиксации монолитного ZrO2 — Vertiprep B.O.P.T. (бор 862). В обоих протоколах феррул >= 1.5 мм обязателен.",
+        clinical_pearl="Золотое правило: Стеклокерамика (E.max, виниры) = ВСЕГДА УСТУП (Chamfer / Shoulder). Оксид циркония на разрушенный корень = Vertiprep."
+    )
+}
+
+def get_prep_protocol(key: str) -> Optional[PrepProtocol]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "chamfer": "chamfer", "уступ": "chamfer", "желоб": "chamfer", "чамфер": "chamfer",
+        "vertiprep": "vertiprep", "вертипреп": "vertiprep", "bopt": "vertiprep", "бопт": "vertiprep", "перо": "vertiprep", "feather": "vertiprep", "без уступа": "vertiprep",
+        "сравнение": "comparison", "консилиум": "comparison", "vs": "comparison", "compare": "comparison"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return PREP_PROTOCOLS.get(resolved)
+
+def format_prep_card(p: PrepProtocol) -> str:
+    return (
+        f"📐 <b>Протокол препарирования: {html.escape(p.prep_name)}</b>\\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\\n"
+        f"📏 <b>Геометрия и глубина:</b> {html.escape(p.geometry_and_depth)}\\n\\n"
+        f"🎯 <b>Показания:</b>\\n{html.escape(p.indications)}\\n\\n"
+        f"⚠️ <b>Противопоказания:</b>\\n{html.escape(p.contraindications)}\\n\\n"
+        f"🛡 <b>Феррул (Ferrule Effect):</b>\\n{html.escape(p.ferrule_requirement)}\\n\\n"
+        f"🌿 <b>Биологическая ширина (Biologic Width):</b>\\n{html.escape(p.biologic_width_rules)}\\n\\n"
+        f"🛠 <b>Рекомендуемые боры:</b> {html.escape(p.recommended_burs)}\\n"
+        f"⏱ <b>Оттиск и временные коронки:</b> {html.escape(p.impression_and_temp)}\\n\\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\\n"
+        f"<code>{html.escape(p.mis_snippet)}</code>\\n\\n"
+        f"💡 <b>Chairside Совет:</b> {html.escape(p.clinical_pearl)}"
+    )
+
+
+# ==============================================================================
+# 1.3. ТОРКИ ИМПЛАНТАТОВ И АБАТМЕНТОВ (IMPLANT & ABUTMENT TORQUE PROTOCOLS)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class ImplantTorqueSpec:
+    system_key: str
+    system_title: str
+    implant_insertion_torque: str
+    healing_abutment_torque: str
+    temporary_abutment_torque: str
+    permanent_abutment_torque: str
+    multiunit_torque: str
+    prosthetic_screw_torque: str
+    screwdriver_profile: str
+    mis_snippet: str
+    warning_and_pearl: str
+
+
+IMPLANT_TORQUE_CATALOG: Dict[str, ImplantTorqueSpec] = {
+    "general": ImplantTorqueSpec(
+        system_key="general",
+        system_title="Клинические стандарты торка: Имплантаты и Абатменты",
+        implant_insertion_torque="30–45 Н·см (оптимальная первичная стабильность). >=35 Н·см для немедленной нагрузки. Предел <=50–55 Н·см во избежание компрессионного некроза кости!",
+        healing_abutment_torque="10–15 Н·см (строго ручная затяжка пальцами или отверткой без динамометрического ключа!).",
+        temporary_abutment_torque="15–20 Н·см (винтовая фиксация временных коронок).",
+        permanent_abutment_torque="30–35 Н·см (повторная затяжка через 10 минут для компенсации эффекта осадки винта / settling effect).",
+        multiunit_torque="30–32 Н·см (затяжка тела мультиюнита в имплантат).",
+        prosthetic_screw_torque="СТРОГО 15 Н·см! Винт протетической балки/коронки к мультиюниту (M1.4). Превышение 15 Н·см срезает микрорезьбу!",
+        screwdriver_profile="Соответствует бренду имплантата (шестигранник 1.2, 1.25, 1.27 мм, TorcFit, Neo, Unigrip).",
+        mis_snippet="Фиксация абатмента: Очистка шахты имплантата 0.2% хлоргексидином. Посадка абатмента с контролем прицельным снимком. Затяжка ключом 30-35 Н·см. Повторный дотяг через 10 минут (settling effect). Защита шахты лентой PTFE, закрытие световым композитом.",
+        warning_and_pearl="Никогда не затягивайте формирователи десны ключом на 30 Н·см: это приводит к заклиниванию, срыву граней или выкручиванию имплантата при снятии!"
+    ),
+    "straumann": ImplantTorqueSpec(
+        system_key="straumann",
+        system_title="Straumann (Bone Level, BLX, TL, TorcFit)",
+        implant_insertion_torque="35–45 Н·см (BLX до 50–60 Н·см в мягкой кости D3/D4, в плотной кости D1 строго соблюдать протокол метчика).",
+        healing_abutment_torque="Ручная затяжка отверткой SCS (пальцами, ~10 Н·см).",
+        temporary_abutment_torque="15 Н·см (отвертка SCS).",
+        permanent_abutment_torque="35 Н·см (оригинальный винт Basal Screw, динамометрический ключ Straumann).",
+        multiunit_torque="35 Н·см (винтовой абатмент Screw-Retained Abutment SRA к имплантату).",
+        prosthetic_screw_torque="15 Н·см (окклюзионный винт моста к SRA).",
+        screwdriver_profile="Отвертка SCS (Symmetric Conical System) звездообразная форма / TorcFit для BLX.",
+        mis_snippet="Straumann BL: Посадка постоянного абатмента. Торк 35 Н·см динамометрическим ключом Straumann, отвертка SCS. Контрольный рентген-снимок. Изоляция шахты тефлоном, композитная реставрация доступа.",
+        warning_and_pearl="Оригинальные винты Straumann рассчитаны на 35 Н·см. Использование неоригинальных шестигранников 1.2 мм в шахте SCS разбивает грани!"
+    ),
+    "neodent": ImplantTorqueSpec(
+        system_key="neodent",
+        system_title="Neodent Grand Morse (GM / Helix / Drive)",
+        implant_insertion_torque="35–45 Н·см (Drive GM для немедленной нагрузки требует >=35 Н·см, допустимый пик до 60 Н·см в плотной кости).",
+        healing_abutment_torque="Ручная затяжка отверткой Neo (10–15 Н·см).",
+        temporary_abutment_torque="15–20 Н·см (отвертка Neo).",
+        permanent_abutment_torque="32 Н·см (затяжка титанового основания GM / абатмента строго 32 Н·см).",
+        multiunit_torque="32 Н·см (мультиюнит GM в имплантат).",
+        prosthetic_screw_torque="15 Н·см (винт протетической конструкции к GM мультиюниту).",
+        screwdriver_profile="Отвертка Neo (шестилучевой профиль типа Torx). Не путать с обычным шестигранником!",
+        mis_snippet="Neodent Grand Morse: Установка прямого титанового основания GM. Затяжка ключом 32 Н·см отверткой Neo. Рентген-контроль полного сопоставления конуса 16°. Закрытие шахты PTFE и композитом.",
+        warning_and_pearl="КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО затягивать винты Neodent GM шестигранником 1.2 / 1.27 мм — шестилучевой профиль Neo слизывается мгновенно!"
+    ),
+    "osstem": ImplantTorqueSpec(
+        system_key="osstem",
+        system_title="Osstem (TSIII SA/CA, ETIII, Regular / Mini)",
+        implant_insertion_torque="30–40 Н·см. При плотной кости D1/D2 обязателен кортикальный фрезер во избежание клина (>50 Н·см).",
+        healing_abutment_torque="Ручная затяжка 1.2 Hex (пальцами, 10–12 Н·см).",
+        temporary_abutment_torque="20 Н·см.",
+        permanent_abutment_torque="30 Н·см (абатмент Regular / Mini с конусом 11°).",
+        multiunit_torque="30 Н·см (абатмент Multi-Unit Osstem в тело имплантата).",
+        prosthetic_screw_torque="15 Н·см (протетический винт к мультиюниту).",
+        screwdriver_profile="Шестигранник 1.2 мм (1.2 Hex driver). Длина 20 / 25 мм.",
+        mis_snippet="Osstem TSIII: Установка постоянного индивидуального циркониевого абатмента на Ti-Base. Торк 30 Н·см динамометрическим ключом, отвертка 1.2 Hex. Выдержка 10 мин, контрольный дотяг 30 Н·см. Защита шахты PTFE.",
+        warning_and_pearl="Внутренний конус 11° у Osstem создает колоссальный эффект заклинивания. Обязателен контрольный снимок до затяжки 30 Н·см!"
+    ),
+    "dentium": ImplantTorqueSpec(
+        system_key="dentium",
+        system_title="Dentium (SuperLine, SimpleLine II, Implantium)",
+        implant_insertion_torque="30–40 Н·см. Не превышать 45 Н·см (риск компрессии кортикального слоя).",
+        healing_abutment_torque="Ручная затяжка отверткой 1.27 Hex (10–12 Н·см).",
+        temporary_abutment_torque="15–20 Н·см.",
+        permanent_abutment_torque="30 Н·см (Dual / Combi / Ti-Base абатмент).",
+        multiunit_torque="30 Н·см (Multi-Unit Dentium в имплантат).",
+        prosthetic_screw_torque="15 Н·см (винт мостовидного протеза к мультиюниту).",
+        screwdriver_profile="Шестигранник 1.27 мм (1.27 Hex / .050 inch). Отвертка 1.2 мм проскальзывает!",
+        mis_snippet="Dentium SuperLine: Установка постоянного абатмента Combi. Затяжка ключом 30 Н·см отверткой 1.27 Hex. Повторный дотяг через 10 минут. Шахта изолирована тефлоном, световая пломба.",
+        warning_and_pearl="Внимание: Отвертка 1.2 мм от Osstem меньше посадочного гнезда Dentium (1.27 мм) и при усилии 30 Н·см может провернуться в головке винта!"
+    ),
+    "nobel": ImplantTorqueSpec(
+        system_key="nobel",
+        system_title="Nobel Biocare (Active, Replace, Parallel CC, Tri-Lobe)",
+        implant_insertion_torque="35–45 Н·см (Active за счет агрессивной резьбы достигает 45–50 Н·см даже в мягкой кости).",
+        healing_abutment_torque="Ручная затяжка отверткой Unigrip (пальцами, 10–15 Н·см).",
+        temporary_abutment_torque="15–20 Н·см.",
+        permanent_abutment_torque="35 Н·см (Conical Connection / Tri-Lobe).",
+        multiunit_torque="35 Н·см (Multi-unit Plus в имплантат).",
+        prosthetic_screw_torque="15 Н·см (клинический протетический винт к Multi-unit).",
+        screwdriver_profile="Отвертка Unigrip (звездообразная форма с фрикционным удержанием).",
+        mis_snippet="Nobel Active CC: Установка прямого титанового абатмента Snappy / Universal. Динамометрический ключ 35 Н·см, отвертка Unigrip. Контрольный снимок, тефлоновая заглушка шахты.",
+        warning_and_pearl="Отвертка Unigrip должна плотно входить в винт до упора. Изношенный кончик отвертки при 35 Н·см срезает грани фирменного винта TorqTite."
+    ),
+    "astra": ImplantTorqueSpec(
+        system_key="astra",
+        system_title="Astra Tech Implant System (OsseoSpeed TX / EV)",
+        implant_insertion_torque="30–40 Н·см (в плотной кости не форсировать выше 45 Н·см).",
+        healing_abutment_torque="Ручная затяжка 10–15 Н·см.",
+        temporary_abutment_torque="15 Н·см.",
+        permanent_abutment_torque="25 Н·см (внимание: у Astra стандарт постоянного абатмента 25 Н·см, а не 35!).",
+        multiunit_torque="25 Н·см (Uni Abutment к имплантату).",
+        prosthetic_screw_torque="15 Н·см (протетический мостовой винт).",
+        screwdriver_profile="Шестигранная отвертка EV / TX Hex.",
+        mis_snippet="Astra Tech EV: Фиксация абатмента TiDesign / CastDesign. Затяжка ключом 25 Н·см шестигранной отверткой EV. Контрольный рентген-снимок посадки конуса Conical Seal Design.",
+        warning_and_pearl="У Astra Tech коническое соединение Conical Seal Design требует торк 25 Н·см! Затягивать на 35 Н·см категорически запрещено — деформация шейки!"
+    ),
+    "multiunit": ImplantTorqueSpec(
+        system_key="multiunit",
+        system_title="Мультиюнит-системы (Multi-Unit / All-on-4 / All-on-6)",
+        implant_insertion_torque=">=35–45 Н·см для каждого опорного имплантата под немедленную нагрузку (All-on-4/6). Суммарный торк на 4 имплантата >= 140 Н·см.",
+        healing_abutment_torque="Защитный колпачок (Healing cap) на мультиюнит: ручная затяжка 10–12 Н·см.",
+        temporary_abutment_torque="15 Н·см (титановый цилиндр временного моста к мультиюниту).",
+        permanent_abutment_torque="30–35 Н·см (вкручивание тела прямого или углового мультиюнита в имплантат).",
+        multiunit_torque="Прямой мультиюнит: 30–35 Н·см специальной четырехгранной или шестигранной головкой. Угловой мультиюнит (17°/30°): винт 25–30 Н·см.",
+        prosthetic_screw_torque="КРИТИЧЕСКОЕ ПРАВИЛО: Протетический винт моста к мультиюниту (M1.4) затягивается СТРОГО на 15 Н·см! Превышение 15 Н·см необратимо срезает резьбу внутри мультиюнита!",
+        screwdriver_profile="Окклюзионный винт моста: 1.2 Hex / Unigrip / 1.27 Hex (в зависимости от платформы).",
+        mis_snippet="Протокол Multi-Unit (All-on-4): Затяжка угловых и прямых мультиюнитов в имплантаты 30-32 Н·см. Примерка каркаса. Окклюзионные винты затянуты динамометрическим ключом строго на 15 Н·см. Защита шахт PTFE, пломбирование временным композитом.",
+        warning_and_pearl="Никогда не путайте торк мультиюнита (30–35 Н·см) и торк протетического винта моста (строго 15 Н·см). 15 Н·см — золотой стандарт ортопедии на мультиюнитах!"
+    )
+}
+
+def get_implant_torque(key: str) -> Optional[ImplantTorqueSpec]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "straumann": "straumann", "штрауман": "straumann", "blx": "straumann", "bl": "straumann", "scs": "straumann",
+        "neodent": "neodent", "неодент": "neodent", "gm": "neodent", "grand morse": "neodent", "helix": "neodent",
+        "osstem": "osstem", "осстем": "osstem", "остем": "osstem", "tsiii": "osstem", "ts3": "osstem",
+        "dentium": "dentium", "дентиум": "dentium", "superline": "dentium", "суперлайн": "dentium",
+        "nobel": "nobel", "нобель": "nobel", "active": "nobel", "unigrip": "nobel",
+        "astra": "astra", "астра": "astra", "osseospeed": "astra",
+        "multiunit": "multiunit", "мультиюнит": "multiunit", "мульти-юнит": "multiunit", "all-on-4": "multiunit", "all-on-6": "multiunit", "мю": "multiunit",
+        "general": "general", "стандарты": "general", "торк": "general", "абатмент": "general"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return IMPLANT_TORQUE_CATALOG.get(resolved)
+
+def format_implant_torque_card(spec: ImplantTorqueSpec) -> str:
+    return (
+        f"🔩 <b>Торк и протокол: {html.escape(spec.system_title)}</b>\\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\\n"
+        f"🏗 <b>Установка имплантата:</b>\\n• {html.escape(spec.implant_insertion_torque)}\\n\\n"
+        f"🌱 <b>Формирователь десны:</b>\\n• <code>{html.escape(spec.healing_abutment_torque)}</code>\\n\\n"
+        f"⏱ <b>Временный абатмент:</b>\\n• <code>{html.escape(spec.temporary_abutment_torque)}</code>\\n\\n"
+        f"👑 <b>Постоянный абатмент (в имплантат):</b>\\n• <b><code>{html.escape(spec.permanent_abutment_torque)}</code></b>\\n\\n"
+        f"🔗 <b>Мультиюнит к имплантату:</b>\\n• <code>{html.escape(spec.multiunit_torque)}</code>\\n\\n"
+        f"🎯 <b>Протетический винт к мультиюниту:</b>\\n• <b><code>{html.escape(spec.prosthetic_screw_torque)}</code></b>\\n\\n"
+        f"🔧 <b>Профиль отвертки:</b> {html.escape(spec.screwdriver_profile)}\\n\\n"
+        f"⚠️ <b>ВНИМАНИЕ:</b> <i>{html.escape(spec.warning_and_pearl)}</i>\\n\\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\\n"
+        f"<code>{html.escape(spec.mis_snippet)}</code>"
+    )
 
 # ==============================================================================
 # 2. ИНТЕРАКТИВНАЯ ЗУБНАЯ ФОРМУЛА FDI 11-48: АНАТОМИЯ, ОПАСНЫЕ ЗОНЫ
@@ -962,6 +1334,28 @@ class AAEDifficultyCalculator:
 # 8. TELETHON ИНЛАЙН-ВИДЖЕТЫ И РАЗМЕТКИ
 # ==============================================================================
 
+def build_phonetics_menu_markup():
+    """Инлайн-кнопки подменю фонетических проб и ВНОЛ у кресла."""
+    return [
+        [
+            Button.inline("📏 Замер VDR/VDO (снаружи)", data="phonetics:vdr"),
+            Button.inline("👄 Звуки «Ф»/«В» (Клейн)", data="phonetics:fv"),
+        ],
+        [
+            Button.inline("⚡ Звук «С» (стук зубов)", data="phonetics:s"),
+            Button.inline("👅 Шепелявость при ПСП", data="phonetics:lisping"),
+        ],
+        [
+            Button.inline("📐 Линия Паунда", data="phonetics:pound"),
+            Button.inline("👀 Звук «И» (экспозиция)", data="phonetics:i"),
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+
+
 def build_chairside_hub_markup():
     """Главное меню клинических инструментов Chairside."""
     return [
@@ -970,23 +1364,90 @@ def build_chairside_hub_markup():
             Button.inline("⚙️ Файлы и торк эндомотора", data="files:menu")
         ],
         [
-            Button.inline("⚡ Не берет анестезия (SOS)", data="anes_sos:menu"),
-            Button.inline("💔 Сломался инструмент", data="sos:file_matrix")
+            Button.inline("💎 Фиксация (E.max / ZrO2)", data="cement:menu"),
+            Button.inline("📐 Препарирование (Chamfer/BOPT)", data="prep:menu")
         ],
         [
-            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu"),
-            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu")
+            Button.inline("🔩 Торки имплантатов", data="torque_imp:menu"),
+            Button.inline("⚡ Не берет анестезия (SOS)", data="anes_sos:menu")
         ],
         [
-            Button.inline("🧪 Дезинфекция каналов (NaOCl/PCA)", data="chairside:irrigation"),
-            Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics")
+            Button.inline("💔 Сломался инструмент", data="sos:file_matrix"),
+            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu")
         ],
         [
-            Button.inline("🛠 Починка композита", data="chairside:composite_repair"),
-            Button.inline("📊 Калькулятор сложности AAE", data="aae:start")
+            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu"),
+            Button.inline("🧪 Дезинфекция каналов (NaOCl)", data="chairside:irrigation")
         ],
         [
+            Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics"),
+            Button.inline("🛠 Починка композита", data="chairside:composite_repair")
+        ],
+        [
+            Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
             Button.inline("⬅️ В главное меню", data="nav:main")
+        ]
+    ]
+
+
+def build_cementation_menu_markup():
+    """Инлайн-кнопки выбора протокола фиксации реставраций."""
+    return [
+        [
+            Button.inline("💎 E.max (дисиликат лития)", data="cement:emax"),
+            Button.inline("🧱 Диоксид циркония (ZrO2)", data="cement:zirconia")
+        ],
+        [
+            Button.inline("🏺 Полевошпатный винир", data="cement:feldspathic"),
+            Button.inline("🧩 Вкладки / Onlay / Оверлей", data="cement:composite_inlay")
+        ],
+        [
+            Button.inline("⚙️ Металлокерамика / КХС", data="cement:metal_ceramic"),
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+        ]
+    ]
+
+
+def build_prep_menu_markup():
+    """Инлайн-кнопки протоколов препарирования (Chamfer vs Vertiprep)."""
+    return [
+        [
+            Button.inline("📐 Chamfer (закругленный уступ)", data="prep:chamfer"),
+            Button.inline("📏 Vertiprep (B.O.P.T. без уступа)", data="prep:vertiprep")
+        ],
+        [
+            Button.inline("⚖️ Сравнение: Chamfer vs Vertiprep", data="prep:comparison"),
+            Button.inline("🛡 Оценка феррула", data="preserve:tooth:46")
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+
+
+def build_implant_torque_menu_markup():
+    """Инлайн-кнопки выбора протокола торка имплантатов и абатментов."""
+    return [
+        [
+            Button.inline("📊 Клинические стандарты торка", data="torque_imp:general"),
+            Button.inline("🔗 Мультиюниты (All-on-4/6)", data="torque_imp:multiunit")
+        ],
+        [
+            Button.inline("🇨🇭 Straumann (35 Н·см)", data="torque_imp:straumann"),
+            Button.inline("🇧🇷 Neodent GM (32 Н·см)", data="torque_imp:neodent")
+        ],
+        [
+            Button.inline("🇰🇷 Osstem TSIII (30 Н·см)", data="torque_imp:osstem"),
+            Button.inline("🇰🇷 Dentium (30 Н·см)", data="torque_imp:dentium")
+        ],
+        [
+            Button.inline("🇸🇪 Nobel Biocare (35 Н·см)", data="torque_imp:nobel"),
+            Button.inline("🇸🇪 Astra Tech EV (25 Н·см)", data="torque_imp:astra")
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
 
@@ -1303,7 +1764,8 @@ def is_chairside_callback(data_str: str) -> bool:
         return True
     if data_str.startswith((
         "chairside:", "fdi:", "files:", "file_sys:", "pres_st:",
-        "pres_eval:", "preserve:", "anes_sos:", "file_frag:", "pharma:", "aae:"
+        "pres_eval:", "preserve:", "anes_sos:", "file_frag:", "pharma:", "aae:", "phonetics:",
+        "cement:", "prep:", "torque_imp:"
     )):
         return True
     if data_str.startswith("sos:"):
@@ -1356,6 +1818,96 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
     except Exception as e:
         logger.debug("Failed to answer chairside callback query: %s", e)
 
+    # 0.6 ПРОТОКОЛЫ ФИКСАЦИИ (cement:*)
+    if data_str.startswith("cement:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "💎 <b>Протоколы фиксации реставраций у кресла (Gold Standard)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите материал реставрации для получения пошагового протокола подготовки, "
+                "таймингов протравки, силанизации, выбора цемента и сниппета для МИС:"
+            )
+            buttons = build_cementation_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        proto = get_cementation_protocol(sub)
+        if proto:
+            card = format_cementation_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ К материалам фиксации", data="cement:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "💎 <b>Протоколы фиксации: Выберите материал:</b>"
+            buttons = build_cementation_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+    # 0.7 ПРЕПАРИРОВАНИЕ (prep:*)
+    if data_str.startswith("prep:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "📐 <b>Протоколы препарирования культи: Chamfer vs Vertiprep</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите методику для вывода геометрии, показаний, требований к феррулу "
+                "и правил сохранения биологической ширины:"
+            )
+            buttons = build_prep_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        proto = get_prep_protocol(sub)
+        if proto:
+            card = format_prep_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ К выбору уступа", data="prep:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "📐 <b>Протоколы препарирования: Выберите методику:</b>"
+            buttons = build_prep_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+    # 0.8 ТОРКИ ИМПЛАНТАТОВ И АБАТМЕНТОВ (torque_imp:*)
+    if data_str.startswith("torque_imp:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "🔩 <b>Торки имплантатов, абатментов и мультиюнитов</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите систему или категорию для получения точных усилий затяжки (Н·см), "
+                "профилей отверток и защиты от срыва резьбы микровинтов:"
+            )
+            buttons = build_implant_torque_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        spec = get_implant_torque(sub)
+        if spec:
+            card = format_implant_torque_card(spec)
+            buttons = [
+                [
+                    Button.inline("⬅️ Ко всем системам", data="torque_imp:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "🔩 <b>Торки имплантатов: Выберите систему:</b>"
+            buttons = build_implant_torque_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
     # 0.4 ПОДКОЖНАЯ ЭМФИЗЕМА (chairside:emphysema)
     if data_str in ("chairside:emphysema", "chairside:subcutaneous_emphysema"):
         card = format_subcutaneous_emphysema_card()
@@ -1393,13 +1945,34 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
         return True
 
     # 0. Меню Chairside Hub
-    # 0.1 ФОНЕТИЧЕСКИЕ ПРОБЫ И ВНОЛ (chairside:phonetics)
-    if data_str == "chairside:phonetics":
+    # 0.1 ФОНЕТИЧЕСКИЕ ПРОБЫ И ВНОЛ (chairside:phonetics, phonetics:*)
+    if data_str in ("chairside:phonetics", "phonetics:menu", "phonetics:all"):
         card = get_phonetic_test_chairside_card()
+        buttons = build_phonetics_menu_markup()
+        await _safe_edit_chairside(event, card, buttons=buttons)
+        return True
+
+    if data_str.startswith("phonetics:"):
+        sub_action = data_str.split(":", 1)[1]
+        if sub_action == "vdr":
+            card = format_vdr_vdo_protocol_card()
+        elif sub_action == "fv":
+            card = format_fv_test_card()
+        elif sub_action == "s":
+            card = format_s_test_card()
+        elif sub_action == "lisping":
+            card = format_lisping_etiology_card()
+        elif sub_action == "pound":
+            card = format_pound_line_card()
+        elif sub_action == "i":
+            card = format_i_test_card()
+        else:
+            card = get_phonetic_test_chairside_card()
+
         buttons = [
             [
-                Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
-                Button.inline("🏠 Главное меню", data="nav:main")
+                Button.inline("⬅️ Ко всем пробам", data="chairside:phonetics"),
+                Button.inline("🏠 Chairside Hub", data="chairside:hub")
             ]
         ]
         await _safe_edit_chairside(event, card, buttons=buttons)
@@ -2266,6 +2839,84 @@ async def _safe_send_chairside(bot_client, event, text: str, buttons=None):
 # 10. ОБРАБОТЧИКИ КОМАНД (/chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve)
 # ==============================================================================
 
+async def handle_cementation_command(bot_client, event, arg: str = ""):
+    """Команда /cement [или /фиксация, /emax, /zirconia]: протоколы адгезивной фиксации."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        proto = get_cementation_protocol(clean_arg)
+        if proto:
+            card = format_cementation_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ Ко всем протоколам", data="cement:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "💎 <b>Протоколы фиксации реставраций у кресла (Gold Standard)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите материал реставрации для получения пошагового протокола подготовки, "
+        "таймингов протравки, силанизации, выбора цемента и готового сниппета для МИС:"
+    )
+    buttons = build_cementation_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
+async def handle_prep_command(bot_client, event, arg: str = ""):
+    """Команда /prep [или /препарирование, /vertiprep, /bopt, /chamfer]: протоколы препарирования."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        proto = get_prep_protocol(clean_arg)
+        if proto:
+            card = format_prep_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ К выбору уступа", data="prep:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "📐 <b>Протоколы препарирования культи: Chamfer vs Vertiprep</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите концепцию препарирования для вывода геометрии, показаний, правил биоширины, "
+        "требований к феррулу и сниппета для амбулаторной карты:"
+    )
+    buttons = build_prep_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
+async def handle_implant_torque_command(bot_client, event, arg: str = ""):
+    """Команда /implant_torque [или /торк_импланта, /абатмент, /мультиюнит]: стандарты торка."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        spec = get_implant_torque(clean_arg)
+        if spec:
+            card = format_implant_torque_card(spec)
+            buttons = [
+                [
+                    Button.inline("⬅️ Ко всем системам", data="torque_imp:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "🔩 <b>Торки имплантатов, абатментов и мультиюнитов</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите систему или категорию для получения точных усилий затяжки (Н·см), "
+        "профилей отверток и защиты от срыва резьбы микровинтов:"
+    )
+    buttons = build_implant_torque_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
 async def handle_emphysema_command(bot_client, event, arg: str = ""):
     """Команда /emphysema [или /эмфизема]: протокол при подкожной эмфиземе лица и шеи."""
     card = format_subcutaneous_emphysema_card()
@@ -2304,13 +2955,23 @@ async def handle_composite_repair_command(bot_client, event, arg: str = ""):
 
 async def handle_phonetics_command(bot_client, event, arg: str = ""):
     """Команда /phonetics [или /внол, /фонетика, /vdo]: протокол фонетических проб для определения ВНОЛ."""
-    card = get_phonetic_test_chairside_card()
-    buttons = [
-        [
-            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
-            Button.inline("🏠 Главное меню", data="nav:main")
-        ]
-    ]
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg in ("vdr", "vdo", "м", "m", "покой", "замер"):
+        card = format_vdr_vdo_protocol_card()
+    elif clean_arg in ("ф", "в", "fv", "f_v", "сильверман", "клейн"):
+        card = format_fv_test_card()
+    elif clean_arg in ("с", "s", "стук", "соударение"):
+        card = format_s_test_card()
+    elif clean_arg in ("шепелявость", "lisping", "диск"):
+        card = format_lisping_etiology_card()
+    elif clean_arg in ("паунд", "pound", "бугорок"):
+        card = format_pound_line_card()
+    elif clean_arg in ("и", "i", "улыбка"):
+        card = format_i_test_card()
+    else:
+        card = get_phonetic_test_chairside_card()
+
+    buttons = build_phonetics_menu_markup()
     await _safe_send_chairside(bot_client, event, card, buttons=buttons)
 
 
@@ -2792,9 +3453,18 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
     elif cmd_name in ("/preserve", "/феррул", "/сохранение"):
         await handle_preserve_command(bot_client, event, arg)
         return True
+    elif cmd_name in ("/cement", "/фиксация", "/emax", "/е.макс", "/zirconia", "/цирконий"):
+        await handle_cementation_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/prep", "/препарирование", "/vertiprep", "/вертипреп", "/bopt", "/бопт", "/chamfer", "/уступ"):
+        await handle_prep_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/implant_torque", "/торк_импланта", "/абатмент", "/мультиюнит"):
+        await handle_implant_torque_command(bot_client, event, arg)
+        return True
     return False
 
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
-is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo", "/emphysema", "/эмфизема", "/oac", "/пазуха", "/соустье", "/sinus", "/composite_repair", "/починка", "/скол", "/repair")))
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo", "/emphysema", "/эмфизема", "/oac", "/пазуха", "/соустье", "/sinus", "/composite_repair", "/починка", "/скол", "/repair", "/cement", "/фиксация", "/emax", "/zirconia", "/цирконий", "/prep", "/препарирование", "/vertiprep", "/bopt", "/chamfer", "/уступ", "/implant_torque", "/торк_импланта", "/абатмент", "/мультиюнит")))

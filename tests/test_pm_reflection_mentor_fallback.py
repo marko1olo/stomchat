@@ -160,7 +160,7 @@ class TestPmRetryAndFallbackIntegration(unittest.TestCase):
         src = inspect.getsource(assistant.handle_private_message)
 
         # 1. Проверяем, что контекст не режется на коротких/progress репликах
-        self.assertIn("is_short_or_continuation = len((text or \"\").split()) <= 8 or is_clinical_progress", src)
+        self.assertIn("is_short_or_continuation = not has_media and (len((text or \"\").split()) <= 8 or is_clinical_progress", src)
         self.assertIn("if not is_short_or_continuation and len(current_context_msgs) > 2:", src)
 
         # 2. Проверяем, что cautious fallback вызывает generate_dialogue_fallback_async

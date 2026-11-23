@@ -51,7 +51,7 @@ RESOLVED_FONT_PATH = next((f for f in FONT_CANDIDATES if os.path.exists(f)), Non
 # Ключевые маркеры прицельного визиографа (Periapical / Bitewing X-Ray)
 PERIAPICAL_KEYWORDS = [
     "прицельн", "визиограф", "радиовизиогр", "радиовизиограмм", "рентгенограмм", "периапикальн",
-    "интраоральн", "снимок зуба", "рентген зуба"
+    "интраоральн", "снимок зуба", "рентген зуба", "интерпроксимальн", "байтвинг", "bitewing", "внутриротовой рентген"
 ]
 
 # Маркеры исключения (НЕ визиограф)
@@ -67,7 +67,9 @@ DOUBT_TRIGGERS = [
     "очаг", "периодонтит", "разрежени", "деструкци", "кист", "гранулем", "латераль",
     "дельта", "перфораци", "стрип", "ступен", "не пройден", "пройден ли", "где верхушка",
     "апекс", "зажив", "кариес", "нависающ", "прилегани", "сомнева", "посмотри", "видите",
-    "кто видит", "подскажите", "что думаете", "артефакт", "наложени", "пустот", "недопломбирован"
+    "кто видит", "подскажите", "что думаете", "артефакт", "наложени", "пустот", "недопломбирован",
+    "дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "облитерац", "шарик",
+    "шаровидн", "склероз пульп", "интрапульпарн"
 ]
 
 
@@ -354,13 +356,16 @@ def validate_visiodent_candidate(img_source: Union[str, bytes], user_text: str =
         return True, "OK"
 
 
-def get_recommendation_text_for_quadrant(quad: int) -> str:
+def get_recommendation_text_for_quadrant(quad: int, focus: str = "") -> str:
     """Возвращает прикладное клиническое пояснение для рекомендованного квадранта."""
+    f_low = (focus or "").lower()
     if quad == 4:
         return "Используйте Квадрант 4 (Контурная резкость) для детальной оценки краев объекта, границ отломка и просвета канала."
     elif quad == 3:
         return "Используйте Квадрант 3 (Негатив), где плотная кость темнеет, а очаги разрежения и трещины светятся яркими белыми контурами."
     else:
+        if any(k in f_low for k in ["дентикл", "петрификат", "кальцификат", "кальцинат", "шарик", "пульполит", "облитерац"]):
+            return "Используйте Квадрант 2 (CLAHE) для выявления дентиклей, петрификатов и микроструктуры пульпарной камеры."
         return "Используйте Квадрант 2 (CLAHE) для выравнивания локального контраста и четкой визуализации анатомии каналов."
 
 
@@ -371,6 +376,7 @@ async def analyze_xray_context_and_doubt_async(
     """
     Анализирует контекст запроса врача и описание снимка.
     Возвращает структурированный вердикт с фокусом внимания и рекомендованным квадрантом.
+    Автомаршрутизирует подозрения на кальцификаты/дентикли пульпы в Квадрант 2 (CLAHE HD).
     """
     user_t = (user_text or "").strip()
     vis_desc = str(vision_description or "").strip()
@@ -386,32 +392,44 @@ async def analyze_xray_context_and_doubt_async(
     else:
         is_xray = is_periapical_xray_confirmed(vision_description, user_t)
 
-    has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t)
+    t_lower = user_t.lower()
+    desc_lower = vis_desc.lower()
+    combined_lower = f"{t_lower} {desc_lower}"
+
+    denticle_kws = ["дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "шарик", "шаровидн", "интрапульпарн", "облитерац"]
+    is_denticle = any(k in combined_lower for k in denticle_kws)
+
+    has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t) or is_denticle
     target_tooth = meta.get("target_tooth")
     if not target_tooth:
-        tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', f"{user_t} {vis_desc}")
+        tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', combined_lower)
         target_tooth = tooth_match.group(1).replace(".", "") if tooth_match else None
 
-    rec_quad = meta.get("recommended_quadrant")
-    if not rec_quad:
-        t_lower = user_t.lower()
-        if any(k in t_lower for k in ["отломок", "обломок", "сломал", "сепарац", "ступен", "нависающ", "край"]):
-            rec_quad = 4
-        elif any(k in t_lower for k in ["периодонтит", "очаг", "кист", "разрежени", "трещин", "перелом", "зажив"]):
-            rec_quad = 3
-        else:
-            rec_quad = 2
+    # Автомаршрутизация кальцификатов пульпарной камеры («шарик», «дентикль», «петрификат») строго в Квадрант 2 (CLAHE HD)
+    if is_denticle:
+        rec_quad = 2
+    else:
+        rec_quad = meta.get("recommended_quadrant")
+        if not rec_quad:
+            if any(k in t_lower for k in ["отломок", "обломок", "сломал", "сепарац", "ступен", "нависающ", "край"]):
+                rec_quad = 4
+            elif any(k in t_lower for k in ["периодонтит", "очаг", "кист", "разрежени", "трещин", "перелом", "зажив"]):
+                rec_quad = 3
+            else:
+                rec_quad = 2
 
     focus = meta.get("doubt_subject")
     if not focus:
-        if rec_quad == 4:
+        if is_denticle:
+            focus = f"Зуб {target_tooth or ''}: ревизия пульпарной камеры (дентикли/петрификаты пульпы)".strip()
+        elif rec_quad == 4 or any(k in t_lower for k in ["отломок", "обломок", "сепарац", "ступен"]):
             focus = f"Зуб {target_tooth or ''}: поиск отломка инструмента / дефектов канала".strip()
-        elif rec_quad == 3:
+        elif rec_quad == 3 or any(k in t_lower for k in ["периодонтит", "очаг", "кист", "разрежени", "трещин"]):
             focus = f"Зуб {target_tooth or ''}: ревизия периапикальной зоны и плотности костной ткани".strip()
         else:
             focus = f"Зуб {target_tooth or ''}: рентгено-анатомический анализ корневых каналов".strip()
 
-    rec_text = get_recommendation_text_for_quadrant(rec_quad)
+    rec_text = get_recommendation_text_for_quadrant(rec_quad, focus)
 
     result = {
         "is_periapical_xray": is_xray,
@@ -440,10 +458,17 @@ def format_xray_collage_caption(analysis: Dict[str, Any]) -> str:
     }
     target_q_name = quad_names.get(rec_quad, f"Квадрант {rec_quad}")
 
+    # Устраняем тавтологичный зачин "обратите внимание на Квадрант X — Используйте Квадрант X"
+    rec_body = rec_text
+    match = re.match(r"^Используйте\s+Квадрант\s+\d+\s*(?:\([^)]*\))?\s*(?:—|-)?\s*(.*)$", rec_text, re.IGNORECASE)
+    if match and match.group(1):
+        rec_body = match.group(1).strip()
+        rec_body = rec_body[0].upper() + rec_body[1:]
+
     caption = (
         "🔬 <b>Рентген-фильтры 2х2 HD (Визиограф)</b>\n\n"
         f"🎯 <b>Фокус внимания:</b> {focus}\n"
-        f"💡 <b>Рекомендация:</b> обратите внимание на <b>{target_q_name}</b> — {rec_text}\n\n"
+        f"💡 <b>Рекомендация:</b> обратите внимание на <b>{target_q_name}</b> — {rec_body}\n\n"
         "<i>Сетка: 1 — Исходный | 2 — CLAHE | 3 — Негатив | 4 — Контурный шарп</i>"
     )
     return caption

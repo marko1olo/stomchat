@@ -153,13 +153,17 @@ print(f"      осталось без проверки: {', '.join(uncovered)}")
 # клинический вопрос врача, а ведёт экзамен; пинги и итог чата не содержат
 # клинических утверждений от себя.
 check("непокрытыми остались только неклинические и экзаменационные пути",
-      set(uncovered) <= {"handle_interactive_case_step", "handle_group_summary",
+      set(uncovered) <= {"handle_interactive_case_step", "start_interactive_case", "handle_group_summary",
                          "handle_group_quiz", "check_and_trigger_referee",
                          "handle_term_explainer", "check_and_send_pm_pings",
                          "check_and_send_group_activity_pings"},
       f"без проверки остался клинический путь: {uncovered}")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+def test_validator_coverage_ast():
+    assert not FAIL, f"Validator coverage failed: {FAIL}"
+
+if __name__ == "__main__":
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    sys.exit(1 if FAIL else 0)

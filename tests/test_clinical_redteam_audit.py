@@ -178,7 +178,7 @@ class TestChairsideInquisitorClinicalDomains(unittest.TestCase):
     """Тестирование 4 новых клинических доменов: эмфизема, перфорация пазухи, починка композита, Zero-Iteration."""
 
     def test_subcutaneous_emphysema_protocol_in_core_and_pm(self):
-        """Подкожная эмфизема лица и шеи (Кейс 805936432) содержит полный алгоритм у кресла."""
+        """Подкожная эмфизема лица и шеи: универсальный алгоритм триажа и ведения у кресла."""
         core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
         pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
 
@@ -209,7 +209,7 @@ class TestChairsideInquisitorClinicalDomains(unittest.TestCase):
             self.assertIn("йодоформ", text)
 
     def test_composite_repair_silane_sandblasting_benchmark(self):
-        """Починка старого композита (Сообщения 185553–185565) содержит эталонный адгезивный протокол."""
+        """Починка старого композита: эталонный адгезивный протокол репарации."""
         core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
         pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
 
@@ -223,11 +223,15 @@ class TestChairsideInquisitorClinicalDomains(unittest.TestCase):
             self.assertTrue("0.5 мм" in text)
 
     def test_zero_iteration_chairside_protocol(self):
-        """Директива исчерпывающей полноты у кресла (Кейс 5130294926) задает исчерпывающий ответ в Turn 1."""
+        """Директива исчерпывающей полноты у кресла: 4-компонентный ответ с Turn 1 и запрет тизеров."""
         core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
         pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
 
-        self.assertIn("5130294926", core)
+        # Проверка универсального присутствия директивы Zero-Iteration
+        self.assertTrue("ZERO ITERATION CHAIRSIDE PROTOCOL" in core or "ДИРЕКТИВА ИСЧЕРПЫВАЮЩЕЙ ПОЛНОТЫ" in core)
+        self.assertTrue("ZERO ITERATION CHAIRSIDE PROTOCOL" in pm_dir or "ДИРЕКТИВА ИСЧЕРПЫВАЮЩЕЙ ПОЛНОТЫ" in pm_dir)
+
+        # 1. Диагноз / статус, топография и геометрия
         self.assertIn("стерильных перчатках", core)
         self.assertIn("олива с красной полосой", core)
         self.assertIn("chamfer", core)
@@ -236,18 +240,113 @@ class TestChairsideInquisitorClinicalDomains(unittest.TestCase):
         self.assertIn("биологической ширины", core)
         self.assertIn("феррул", core)
 
-        self.assertIn("5130294926", pm_dir)
         self.assertIn("олива с красной полосой", pm_dir)
         self.assertIn("chamfer", pm_dir)
 
+        # 2. Пошаговый EBM-протокол манипуляции
+        self.assertIn("пошаговый ebm-протокол", core.lower())
+        self.assertIn("пошаговый ebm-протокол", pm_dir.lower())
+
+        # 3. Фармакотерапия
+        self.assertIn("фармакотерапия", core.lower())
+        self.assertIn("фармакотерапия", pm_dir.lower())
+
+        # 4. Риски / пределы безопасности / маршрутизация
+        self.assertIn("члх", core.lower())
+        self.assertIn("члх", pm_dir.lower())
+
+        # 5. Оформление протоколов в <code>...</code> для 1-тап копирования в МИС
+        self.assertIn("<code>...</code>", core)
+        self.assertIn("<code>...</code>", pm_dir)
+
     def test_pm_few_shot_contrast_example_5_emphysema(self):
-        """В PM_FEW_SHOT_CONTRAST_BLOCK добавлен ПРИМЕР 5 с эталонным триажем эмфиземы."""
+        """В PM_FEW_SHOT_CONTRAST_BLOCK эталонный триаж эмфиземы без привязки к номерам кейсов."""
         fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
         self.assertIn("ПРИМЕР 5: Неотложная ситуация у кресла", fs)
-        self.assertIn("805936432", fs)
         self.assertIn("шуршит как пакет", fs)
         self.assertIn("пневмомедиастинума", fs)
         self.assertIn("112", fs)
+
+    def test_ankylosis_vs_retention_molar_blockade_protocol(self):
+        """Протокол: Анкилоз зуба vs ретенция vs механическая блокада."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            self.assertTrue("анкилоз" in text or "Анкилоз" in text)
+            self.assertTrue("инфраокклюзи" in text or "Инфраокклюзи" in text)
+            self.assertIn("металлический звук", text)
+            self.assertIn("звук треснувшей чашки", text)
+            self.assertIn("КЛКТ", text)
+            self.assertTrue("механическая блокада" in text or "Механическая блокада" in text)
+            self.assertTrue("сублюксация" in text or "Сублюксация" in text)
+            self.assertIn("24 час", text)
+            self.assertTrue("оверлей" in text or "накладка" in text or "коронаропластика" in text)
+            self.assertTrue("остеотомия" in text or "Остеотомия" in text)
+
+    def test_pm_few_shot_contrast_example_6_ankylosis(self):
+        """В PM_FEW_SHOT_CONTRAST_BLOCK дифдиагноз анкилоза и блокады без привязки к номерам сообщений."""
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+        self.assertIn("ПРИМЕР 6: Ортодонтия / Инфраокклюзия моляра", fs)
+        self.assertIn("металлический звук", fs)
+        self.assertIn("звук треснувшей чашки", fs)
+        self.assertIn("КЛКТ", fs)
+        self.assertIn("сублюксация", fs)
+
+
+
+
+class TestPromptDecontamination(unittest.TestCase):
+    """Тестирование деконтаминации промптов: никаких user ID, номеров сообщений, тикетов/инцидентов."""
+
+    def test_no_user_ids_in_prompt_architectures(self):
+        """В когнитивном ядре и директивах PM отсутствуют user ID (напр. 1054868515)."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"),
+                           (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE"),
+                           (fs, "PM_FEW_SHOT_CONTRAST_BLOCK")]:
+            self.assertNotIn("1054868515", text, f"User ID 1054868515 найден в {name}!")
+
+    def test_no_message_ids_in_section_headers(self):
+        """В заголовках разделов PM_CLINICAL_COGNITIVE_DIRECTIVE отсутствуют номера сообщений (53080, 185553, 185599)."""
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+
+        for bad_str in ["СООБЩЕНИЯ 185553–185565", "КЕЙС СООБЩЕНИЙ 185599–185607", "КЕЙС 1054868515", "СООБЩЕНИЯ 53080–53085"]:
+            self.assertNotIn(bad_str, pm_dir, f"Загрязнение {bad_str} найдено в PM_CLINICAL_COGNITIVE_DIRECTIVE!")
+            self.assertNotIn(bad_str, fs, f"Загрязнение {bad_str} найдено в PM_FEW_SHOT_CONTRAST_BLOCK!")
+
+
+class TestProceduralStatusUpdateSupport(unittest.TestCase):
+    """Тестирование распознавания процедурных реплик («достал», «извлек», «обошел», «спилил») и запрета канцелярита."""
+
+    def test_procedural_milestones_supported_in_core_and_pm(self):
+        """В когнитивном ядре и директивах PM зафиксированы манипуляции («достал», «извлек», «обошел», «спилил»)."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            for verb in ["достал", "извлек", "обошел", "спилил"]:
+                self.assertIn(verb, text.lower(), f"Глагол манипуляции '{verb}' отсутствует в директивах!")
+
+    def test_bureaucratic_brush_offs_strictly_banned(self):
+        """Канцелярские отписки («Уточнить, что означает...», «Для выбора инструмента указать процедуру») строго запрещены."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text in (core, pm_dir):
+            self.assertIn("Уточнить, что означает", text)
+            self.assertIn("Для выбора инструмента указать процедуру", text)
+
+    def test_pm_few_shot_contrast_example_9_procedural_report(self):
+        """В PM_FEW_SHOT_CONTRAST_BLOCK присутствует Пример 9 с контрастной парой (канцелярит vs поддержка коллеги)."""
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+        self.assertIn("ПРИМЕР 9: Ход процедуры у кресла", fs)
+        self.assertIn("Уточнить, что означает", fs)
+        self.assertIn("Отлично, что извлекли", fs)
 
 
 if __name__ == "__main__":
