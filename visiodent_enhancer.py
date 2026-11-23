@@ -69,7 +69,7 @@ DOUBT_TRIGGERS = [
     "апекс", "зажив", "кариес", "нависающ", "прилегани", "сомнева", "посмотри", "видите",
     "кто видит", "подскажите", "что думаете", "артефакт", "наложени", "пустот", "недопломбирован",
     "дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "облитерац", "шарик",
-    "шаровидн", "склероз пульп", "интрапульпарн"
+    "шаровидн", "склероз пульп", "интрапульпарн", "камень в пульп"
 ]
 
 
@@ -147,6 +147,8 @@ def generate_visiodent_collage(
     """
     try:
         if isinstance(input_source, bytes):
+            if len(input_source) == 0:
+                return None, None
             nparr = np.frombuffer(input_source, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         elif isinstance(input_source, str) and os.path.exists(input_source):
@@ -396,14 +398,48 @@ async def analyze_xray_context_and_doubt_async(
     desc_lower = vis_desc.lower()
     combined_lower = f"{t_lower} {desc_lower}"
 
-    denticle_kws = ["дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "шарик", "шаровидн", "интрапульпарн", "облитерац"]
+    denticle_kws = ["дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "шарик", "шаровидн", "камень в пульп", "интрапульпарн", "облитерац"]
     is_denticle = any(k in combined_lower for k in denticle_kws)
 
-    has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t) or is_denticle
-    target_tooth = meta.get("target_tooth")
+    # Приоритет определения целевого зуба:
+    # 1. Явный FDI в реплике врача (напр. "зуб 47", "4.7")
+    user_tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', user_t)
+    target_tooth = None
+    if user_tooth_match:
+        target_tooth = user_tooth_match.group(1).replace(".", "")
+    else:
+        # 2. Разговорная форма в реплике врача ("7го зуба", "7-го", "семерка")
+        colloquial_tooth_m = re.search(r'(?<!\d)([1-8])(?:-?го|-й|-я|-ом|-е)?\s*зуб|семерк|восьмерк|шестерк|пятерк', user_t, re.IGNORECASE)
+        if colloquial_tooth_m:
+            c_digit = None
+            if colloquial_tooth_m.group(1):
+                c_digit = colloquial_tooth_m.group(1)
+            else:
+                c_word = colloquial_tooth_m.group(0).lower()
+                num_map = {"пятерк": "5", "шестерк": "6", "семерк": "7", "восьмерк": "8"}
+                for k_w, d_val in num_map.items():
+                    if k_w in c_word:
+                        c_digit = d_val
+                        break
+            if c_digit:
+                # Ищем квадрант в контексте снимка (напр., 4.7 или 47 в описании)
+                quad_m = re.search(r'\b([1-4])\.' + c_digit + r'\b|\b([1-4])' + c_digit + r'\b', combined_lower)
+                if quad_m:
+                    q_num = quad_m.group(1) or quad_m.group(2)
+                    target_tooth = f"{q_num}{c_digit}"
+                else:
+                    target_tooth = c_digit
+
+    # 3. Если в тексте врача зуб не назван, берем из метаданных Vision
+    if not target_tooth:
+        target_tooth = meta.get("target_tooth")
+
+    # 4. Если в метаданных нет, ищем любой FDI в описании снимка
     if not target_tooth:
         tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', combined_lower)
         target_tooth = tooth_match.group(1).replace(".", "") if tooth_match else None
+
+    has_doubt = bool(meta.get("has_clinical_doubt")) or has_clinical_doubt_heuristic(user_t) or is_denticle
 
     # Автомаршрутизация кальцификатов пульпарной камеры («шарик», «дентикль», «петрификат») строго в Квадрант 2 (CLAHE HD)
     if is_denticle:

@@ -349,5 +349,88 @@ class TestProceduralStatusUpdateSupport(unittest.TestCase):
         self.assertIn("Отлично, что извлекли", fs)
 
 
+
+
+class TestPediatricPreventiveCariologyAudit(unittest.TestCase):
+    """Тестирование практических EBM-ответов по детской стоматологии, кариесологии и профилактике."""
+
+    def test_stephan_curve_in_core_and_pm(self):
+        """Кривая Стефана: критический pH 5.5, 20-30 минут деминерализации, частота атак, сладкое после еды."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertIn("5.5", text, f"pH 5.5 отсутствует в {name}")
+            self.assertTrue("20–30 минут" in text or "20-30 минут" in text, f"Время деминерализации 20-30 мин отсутствует в {name}")
+            self.assertTrue("ЧАСТОТА" in text or "частота" in text, f"Частота атак отсутствует в {name}")
+            self.assertTrue("СРАЗУ ПОСЛЕ" in text or "сразу после" in text, f"Правило приема сладкого после еды отсутствует в {name}")
+
+    def test_acid_erosion_vs_abrasion_and_30min_pause(self):
+        """Кислотная эрозия (pH < 4.0): размягчение эмали, запрет чистки щеткой, пауза 30 минут."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertIn("ПАУЗА 30 МИНУТ", text, f"Пауза 30 мин отсутствует в {name}")
+            self.assertTrue("эрози" in text.lower(), f"Термин эрозия отсутствует в {name}")
+            self.assertTrue("абрази" in text.lower(), f"Термин абразия отсутствует в {name}")
+
+    def test_who_child_sugar_limits(self):
+        """Рекомендации ВОЗ/AAPD по сахару: <5% калорийности, 19-24 г (4-5 ложек) для 5-6 лет, 0 г до 2 лет."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertIn("19–24", text, f"Норма 19-24г отсутствует в {name}")
+            self.assertTrue("5%" in text, f"Лимит 5% отсутствует в {name}")
+            self.assertTrue("0 грамм" in text or "0 г" in text, f"Лимит 0г до 2 лет отсутствует в {name}")
+
+    def test_enzyme_toothpastes_ebm_status(self):
+        """Ферментные пасты (лактопероксидаза, лизоцим) и EBM-статус фторидов/nHAP."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertTrue("лактопероксидаза" in text or "лизоцим" in text, f"Ферменты отсутствуют в {name}")
+            self.assertIn("1000–1450 ppm", text, f"Стандарт 1000-1450 ppm фтора отсутствует в {name}")
+            self.assertTrue("nHAP" in text or "гидроксиапатит" in text, f"nHAP отсутствует в {name}")
+
+    def test_nhap_vs_fluorides_and_splat_rationale(self):
+        """Фторапатит (pH 4.5) vs nHAP, маркетинг паст без фтора (Splat) и дозировки детям."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertIn("4.5", text, f"Критический pH 4.5 фторапатита отсутствует в {name}")
+            self.assertTrue("хемофоби" in text.lower() or "splat" in text.lower(), f"Анализ паст без фтора отсутствует в {name}")
+            self.assertTrue("рисовое зерно" in text.lower(), f"Дозировка рисовое зерно отсутствует в {name}")
+            self.assertTrue("горошина" in text.lower(), f"Дозировка горошина отсутствует в {name}")
+
+    def test_spit_dont_rinse_protocol(self):
+        """Международный протокол Spit don't rinse («Сплюнь, не полощи»): выполоскать крошки ДО чистки."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        pm_dir = assistant.PM_CLINICAL_COGNITIVE_DIRECTIVE
+
+        for text, name in [(core, "MASTER_COGNITIVE_ARCHITECTURE"), (pm_dir, "PM_CLINICAL_COGNITIVE_DIRECTIVE")]:
+            self.assertTrue("spit, don't rinse" in text.lower() or "сплюнь, не полощи" in text.lower(), f"Spit don't rinse отсутствует в {name}")
+            self.assertTrue("крошек" in text.lower() or "до чистки" in text.lower(), f"Инструкция по крошкам/полосканию ДО чистки отсутствует в {name}")
+
+    def test_parent_memo_and_kindergarten_lesson_plan(self):
+        """Готовая памятка родителям и 20-минутный сценарий урока гигиены в детском саду."""
+        core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
+        self.assertIn("Памятка для родителей: здоровая улыбка ребенка", core)
+        self.assertIn("Сценарий интерактивного урока гигиены в детском саду (20 минут)", core)
+        self.assertIn("2х2", core)
+        self.assertIn("до 8–9 лет", core)
+
+    def test_pm_few_shot_contrast_example_10(self):
+        """В PM_FEW_SHOT_CONTRAST_BLOCK присутствует Пример 10 по детской гигиене и кариесологии."""
+        fs = assistant.PM_FEW_SHOT_CONTRAST_BLOCK
+        self.assertIn("ПРИМЕР 10: Профилактика, кариесология и детский прием", fs)
+        self.assertIn("Кривая Стефана", fs)
+        self.assertIn("Spit don't rinse", fs)
+        self.assertIn("Памятка для родителей", fs)
+
+
 if __name__ == "__main__":
     unittest.main()

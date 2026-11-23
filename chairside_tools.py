@@ -613,6 +613,312 @@ def format_implant_torque_card(spec: ImplantTorqueSpec) -> str:
         f"<code>{html.escape(spec.mis_snippet)}</code>"
     )
 
+
+
+# ==============================================================================
+# 1.4. ОЦЕНКА КОРОНОК ПОСЛЕ ФИКСАЦИИ (POST-CEMENTATION QC)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class PostCementationCheck:
+    check_key: str
+    title: str
+    clinical_risk: str
+    protocol_steps: List[str]
+    tolerance_criteria: str
+    mis_snippet: str
+    clinical_pearl: str
+
+
+POST_CEMENTATION_CHECKS: Dict[str, PostCementationCheck] = {
+    "excess": PostCementationCheck(
+        check_key="excess",
+        title="Контроль излишков цемента (Профилактика периимплантита и пародонтита)",
+        clinical_risk="Остатки поддесневого цемента (особенно композитного на имплантатах) — причина №1 ятрогенного цементного периимплантита. Вокруг имплантата нет круговой связки зуба (волокон Шарпея), инфекция мгновенно вызывает резорбцию кости до первого витка за 2–6 месяцев!",
+        protocol_steps=[
+            "1. Контролируемая гель-фаза (Tack-cure): предварительная фотополимеризация 1–2 секунды (не более!), переход цемента в резиноподобное состояние -> легкое скалывание серповидным скейлером.",
+            "2. Межзубные промежутки: узелковая флосс-нить (нить с завязанным простым узлом) или SuperFloss с протяжкой в щечно-язычном направлении до полимеризации.",
+            "3. Финальная полимеризация под глицериновым гелем (DeOx / Airblock) 20 секунд с каждой поверхности для устранения ингибированного кислородом липкого слоя.",
+            "4. Контрольный зондаж зубодесневой борозды на 360° тонким пародонтологическим зондом (UNC-15).",
+            "5. Контрольный прицельный рентген-снимок (Bitewing / периапикальный) строго под прямым углом к уступу/платформе для исключения рентгеноконтрастных наплывов цемента."
+        ],
+        tolerance_criteria="Полное отсутствие цементных затеков на снимке и при зондировании борозды на 360°.",
+        mis_snippet="Контроль после фиксации: Удаление излишков цемента в гель-фазе скейлером и узелковым флоссом. Полимеризация 20с под DeOx. Зондирование борозды на 360° — чисто. Прицельный рентген-контроль: наплывы цемента отсутствуют, краевое прилегание плотное.",
+        clinical_pearl="При цементировке коронок на имплантатах всегда используйте аналоговый метод выдавливания: перед посадкой коронки на абатмент во рту наденьте её на силиконовый дубликат абатмента, чтобы 90% излишков цемента вышли вне полости рта!"
+    ),
+    "margin": PostCementationCheck(
+        check_key="margin",
+        title="Краевое прилегание под уступом (Marginal Fit & Microgap)",
+        clinical_risk="Зазор в зоне уступа > 80–120 мкм приводит к быстрой гидролитической деградации цемента, микроподтеканию ротовой жидкости, вторичному кариесу корня и расцементировке конструкции.",
+        protocol_steps=[
+            "1. Зондирование границы препарирования острым зондом Explorer #23: зонд должен скользить гладко от коронки к корню без «зацепа» (catch) и без нависающего края (overhang).",
+            "2. Проверка припасовки индикаторным силиконом (Fit Checker / индикаторный корригирующий слой) до замешивания цемента: слой индикатора должен быть равномерным, без сквозного продавливания.",
+            "3. Оценка уступа на прицельном рентген-снимке: посадка коронки строго на плечо уступа без ступени и щелей.",
+            "4. Проверка устойчивости к ротации (anti-rotation stability) перед полимеризацией."
+        ],
+        tolerance_criteria="Клинический допуск краевого зазора: < 50–80 мкм (идеально 30–50 мкм). При зазоре >100 мкм коронка подлежит переделке!",
+        mis_snippet="Оценка краевого прилегания: Зондирование зондом #23 — переход коронка-уступ гладкий, без зацепов и нависающих краев. Прицельный рентген-снимок: краевой зазор <50 мкм, полное смыкание на уступе.",
+        clinical_pearl="Никогда не надейтесь «залить зазор цементом»: композитные цементы в толстом слое дают усадку до 3–4%, что гарантирует отрыв от стенки дентина в первый же месяц."
+    ),
+    "occlusion": PostCementationCheck(
+        check_key="occlusion",
+        title="Окклюзионный контроль (Центрика и динамическая окклюзия)",
+        clinical_risk="Суперконтакт в центральной окклюзии вызывает острый периодонтит, боль при накусывании и перелом корня. Балансирующий суперконтакт в динамике — главная причина сколов облицовки и дисфункции ВНЧС.",
+        protocol_steps=[
+            "1. Центральная окклюзия (MIP / Центральное соотношение): артикуляционная фольга 8–12 мкм (Shimstock / Bausch 8 мкм). Плотные точечные контакты на опорных буграх.",
+            "2. Окклюзия на имплантатах (Implant-protected occlusion): физиологический зазор (infra-occlusion) 10–15 мкм при легком смыкании! Фольга 12 мкм должна свободно протягиваться при легком сжатии и зажиматься только при сильном волевом стискивании (компенсация подвижности периодонта соседних зубов 25–30 мкм против анкилоза имплантата 2–3 мкм).",
+            "3. Латеротрузия: проверка клыкового ведения (Canine guidance) или групповой направляющей. Полное разобщение моляров на рабочей и балансирующей сторонах!",
+            "4. Протрузия: резцовое ведение, дизокклюзия боковых зубов (феномен Кристенсена).",
+            "5. Финишная полировка окклюзионных пришлифованных участков керамики алмазными полирами (Dialite / CeraGloss) до зеркального блеска (неполированный цирконий стирает зубы-антагонисты как наждак!)."
+        ],
+        tolerance_criteria="Фольга 8-12 мкм удерживается на соседних естественных зубах; на коронке имплантата протягивается с легким сопротивлением.",
+        mis_snippet="Окклюзионная юстировка: Проверка фольгой Bausch 8 мкм. В центральной окклюзии точечные контакты без суперконтактов. На имплантате обеспечена инфроокклюзия 10 мкм. В динамике: латеротрузия — клыковое ведение, балансирующие контакты устранены. Полировка керамики пастой Diamond Polish.",
+        clinical_pearl="Шероховатый оксид циркония истирает эмаль зубов-антагонистов в 5 раз сильнее металлокерамики. Любая пришлифовка циркония во рту ОБЯЗАНА заканчиваться трехэтапной полировкой силиконовыми головками и алмазной пастой!"
+    ),
+    "all": PostCementationCheck(
+        check_key="all",
+        title="Полный протокол сдачи коронки (Excess + Margin + Occlusion)",
+        clinical_risk="Комплексная триада рисков: периимплантит от излишков цемента, вторичный кариес от краевого зазора, скол керамики/травма ВНЧС от суперконтактов.",
+        protocol_steps=[
+            "1. Удаление излишков: гель-фаза 2с -> скейлер -> узелковый флосс -> глицерин DeOx 20с -> зондирование 360°.",
+            "2. Краевое прилегание: зонд #23 без зацепа, прицельный рентген-контроль (зазор <50–80 мкм).",
+            "3. Окклюзия: фольга 8–12 мкм (на имплантатах инфроокклюзия 10–15 мкм при легком сжатии), проверка латеротрузии и протрузии, полировка керамики.",
+            "4. Выдача рекомендаций пациенту и назначение контрольного осмотра через 7–14 дней."
+        ],
+        tolerance_criteria="Полный комплекс: чистота борозды + краевой зазор <80 мкм + сбалансированная окклюзия.",
+        mis_snippet="Сдача ортопедической конструкции: Излишки цемента удалены в гель-фазе под DeOx. Борозда зондирована на 360° — чисто. Краевое прилегание проверено зондом и рентгенологически (зазор <50 мкм). Окклюзия выверена фольгой 8 мкм (на имплантате инфроокклюзия 10 мкм, клыковое ведение). Полировка керамики. Контроль через 10 дней.",
+        clinical_pearl="Золотое правило сдачи: «Рентген уступа -> Чистая борозда -> Фольга 8 мкм -> Полировка до блеска». Никогда не отпускайте пациента без контрольного снимка после постоянной цементировки!"
+    )
+}
+
+def get_post_cement_check(key: str) -> Optional[PostCementationCheck]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "excess": "excess", "излишки": "excess", "цемент": "excess", "периимплантит": "excess",
+        "margin": "margin", "прилегание": "margin", "уступ": "margin", "зазор": "margin", "край": "margin",
+        "occlusion": "occlusion", "окклюзия": "occlusion", "суперконтакт": "occlusion", "прикус": "occlusion", "фольга": "occlusion",
+        "all": "all", "полный": "all", "комплекс": "all", "сдача": "all", "контроль": "all"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return POST_CEMENTATION_CHECKS.get(resolved)
+
+get_post_cementation_check = get_post_cement_check
+
+def format_post_cement_card(check: PostCementationCheck) -> str:
+    steps_block = "\n".join(check.protocol_steps)
+    return (
+        f"🔍 <b>Клинический протокол: {html.escape(check.title)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ <b>Клинический риск осложнения:</b>\n<i>{html.escape(check.clinical_risk)}</i>\n\n"
+        f"<b>📋 Пошаговый протокол у кресла:</b>\n{steps_block}\n\n"
+        f"🎯 <b>Критерий допуска:</b> <code>{html.escape(check.tolerance_criteria)}</code>\n\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\n"
+        f"<code>{html.escape(check.mis_snippet)}</code>\n\n"
+        f"💡 <b>Chairside Совет:</b> {html.escape(check.clinical_pearl)}"
+    )
+
+
+# ==============================================================================
+# 1.5. ТРАБЛШУТИНГ ИМПЛАНТАТОВ (IMPLANT IMPRESSION & PROSTHETIC SOS)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class ImplantTroubleProtocol:
+    problem_key: str
+    problem_title: str
+    etiology: str
+    diagnostic_step: str
+    chairside_solution: List[str]
+    strict_prohibition: str
+    mis_snippet: str
+    clinical_pearl: str
+
+
+IMPLANT_TROUBLE_PROTOCOLS: Dict[str, ImplantTroubleProtocol] = {
+    "transfer_not_seating": ImplantTroubleProtocol(
+        problem_key="transfer_not_seating",
+        problem_title="Слепочный трансфер не садится на имплантат",
+        etiology="1. Нависающий костный козырек над платформой (субкрестальная посадка).\n2. Защемление десневого сосочка или коллапс маргинальной десны.\n3. Несовпадение антиротационного шестигранника/индекса.",
+        diagnostic_step="Обязательный прицельный рентген-снимок с позиционером строго параллельным лучом! Если между платформой и трансфером видна черная щель — трансфер НЕ сел, слепок снимать ЗАПРЕЩЕНО!",
+        chairside_solution=[
+            "1. Ослабить фиксирующий винт трансфера на 1–2 оборота.",
+            "2. Пальцевыми поисковыми вращательными движениями найти точку защелкивания граней индекса (ощущение «провала»).",
+            "3. Затянуть направляющий винт трансфера ручной отверткой пальцами (10–12 Н·см).",
+            "4. Повторить прицельный рентген-контроль: граница трансфер-имплантат должна быть абсолютно монолитной (zero gap).",
+            "5. Если щель сохраняется — диагностировать костную интерференцию или защемление мягких тканей (см. протокол Bone Profiler)."
+        ],
+        strict_prohibition="⛔ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО затягивать винт трансфера с силой через сопротивление динамометрическим ключом! Это приводит к срыву резьбы шахты имплантата или деформации посадочного конуса.",
+        mis_snippet="Припасовка трансфера: Контрольный прицельный снимок — полное сопоставление платформы трансфера и имплантата (зазор отсутствует). Антиротационный индекс зафиксирован. Снятие оттиска методом открытой/закрытой ложки.",
+        clinical_pearl="Слепок, снятый с недосаженного трансфера — это 100% гарантия переделки всей работы в лаборатории с потерей нескольких недель и денег."
+    ),
+    "bone_interference": ImplantTroubleProtocol(
+        problem_key="bone_interference",
+        problem_title="Интерференция костного козырька (Bone Profiler / Костная фреза)",
+        etiology="Субкрестальная установка имплантата (на 1–2 мм ниже гребня кости) или ремоделирование кости над скосом шейки имплантата (характерно для Neodent GM, Astra Tech EV, Ankylos, Straumann BL). Кость физически упирается в юбку трансфера или абатмента.",
+        diagnostic_step="Рентген-снимок показывает контакт трансфера с гребнем альвеолярной кости ДО контакта с посадочной платформой имплантата.",
+        chairside_solution=[
+            "1. Выкрутить трансфер или формирователь десны. Промыть шахту 0.2% хлоргексидином.",
+            "2. Установить в шахту имплантата направляющий пин (Guide Pin) соответствующей системы (Neodent GM, Straumann, Osstem). Направляющий пин защищает внутреннюю резьбу имплантата от касания фрезой!",
+            "3. Надеть на пин костный профилер (Bone Profiler / костную фрезу) диаметра, соответствующего будущему трансферу/абатменту.",
+            "4. Включить микромотор на скорости 50–100 об/мин (или хирургический наконечник 20:1 со скоростью 50 об/мин) с ОБИЛЬНЫМ охлаждением стерильным 0.9% физраствором.",
+            "5. Деликатно без давления погрузить фрезу до упора в ограничитель пина. Удалить нависающий костный козырек вокруг платформы.",
+            "6. Обильная элюция физраствором, выкручивание направляющего пина.",
+            "7. Повторная посадка трансфера -> прицельный рентген: трансфер идеально сел на платформу без заклинивания костью."
+        ],
+        strict_prohibition="⛔ ЗАПРЕЩЕНО работать костной фрезой без оригинального направляющего пина (Guide Pin)! Фреза разобьет внутреннее коническое соединение и сорвет витки резьбы имплантата.",
+        mis_snippet="Устранение костной интерференции: Установка направляющего пина Guide Pin. Использование костного профилера Bone Profiler (50 об/мин с физраствором). Костный козырек вокруг платформы сглажен. Повторная посадка трансфера с рентген-контролем: плотная посадка на платформу.",
+        clinical_pearl="Костный профилер — обязательный инструмент ортопеда при работе с системами конического сочленения (Morse Taper). Без него правильная посадка субкрестальных абатментов невозможна."
+    ),
+    "soft_tissue_impingement": ImplantTroubleProtocol(
+        problem_key="soft_tissue_impingement",
+        problem_title="Защемление мягких тканей и гипертрофия десны вокруг платформы",
+        etiology="Коллапс толстого десневого сосочка или врастание грануляций под формирователь при длительном заживлении. Десна подворачивается под край трансфера/абатмента при закручивании.",
+        diagnostic_step="Ощущение «резинового» пружинящего сопротивления при попытке закрутить трансфер от руки; десна бледнеет от ишемического сдавливания.",
+        chairside_solution=[
+            "1. Местная инфильтрационная анестезия десневого сосочка (0.2–0.3 мл 4% артикаина).",
+            "2. Установка более широкого формирователя десны на 5–10 минут для предварительного расширения шахты (blanching test).",
+            "3. Альтернатива: укладка ретракционной нити #000 вокруг платформы имплантата тонким гладилком перед позиционированием трансфера.",
+            "4. При выраженном гипертрофическом валике десны — микрогингивотомия лезвием #12 или #15c (удаление нависающего десневого воротничка) с гемостазом.",
+            "5. Посадка трансфера под визуальным контролем полного отсутствия ущемления слизистой."
+        ],
+        strict_prohibition="⛔ ЗАПРЕЩЕНО зажимать десну между металлом трансфера и имплантата: это приведет к некрозу десны, инфицированию ложа и неточным оттискам.",
+        mis_snippet="Коррекция десневого профиля: Устранение интерференции мягких тканей деликатным кюретажем борозды. Ретракция десны нитью #000. Посадка трансфера без защемления тканей, рентген-контроль герметичности соединения.",
+        clinical_pearl="Перед снятием оттиска просушите переходную зону воздухом: если из-под трансфера сочится кровь от сдавленной десны — слепочная масса даст дефектные оттяжки."
+    ),
+    "stripped_hex_screw": ImplantTroubleProtocol(
+        problem_key="stripped_hex_screw",
+        problem_title="Слизанные грани винта абатмента / трансфера (Stripped Hex SOS)",
+        etiology="Использование изношенной отвертки, несоответствие калибра (отвертка 1.2 мм в винте 1.27 мм) или приложение избыточного торка с перекосом оси ключа.",
+        diagnostic_step="Отвертка свободно проворачивается в головке винта на 360°, винт невозможно выкрутить или докрутить.",
+        chairside_solution=[
+            "1. СТОП усилие! Прекратить попытки крутить обычной отверткой во избежание полного стачивания головки в круглый цилиндр.",
+            "2. Алмазная паста (Grip / Valve grinding paste): нанести каплю алмазной пасты на кончик новой отвертки для создания микроабразивного фрикционного сцепления.",
+            "3. Реверсивный спасательный конический экстрактор (Screw Rescue Extractor / левосторонняя коническая фреза): вращение строго ПРОТИВ часовой стрелки на 15–20 об/мин. Конус экстрактора врезается в шлиц винта и выкручивает его.",
+            "4. Ультразвуковая методика: тонкая эндо-насадка (Start-X #4 / ET25) на минимальной мощности без воды прижимается к краю головки винта с вибрацией против часовой стрелки.",
+            "5. После извлечения винта: тщательная ирригация шахты, замена поврежденного винта на НОВЫЙ оригинальный винт!"
+        ],
+        strict_prohibition="⛔ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО рассверливать поврежденный винт турбинным бором на высоких оборотах! Вибрация разрушит резьбу шахты имплантата, что сделает имплантат полностью непригодным к протезированию.",
+        mis_snippet="Извлечение поврежденного винта: Использование реверсивного конического экстрактора Screw Rescue. Винт с поврежденным шлицем успешно удален без повреждения резьбы шахты имплантата. Промывание 0.2% CHX. Установлен новый клинический винт.",
+        clinical_pearl="Каждые 6 месяцев выбрасывайте старые шестигранные отвертки: износ граней на 0.05 мм — причина 90% слизанных винтов в клинике."
+    )
+}
+
+def get_implant_trouble_protocol(key: str) -> Optional[ImplantTroubleProtocol]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "transfer_not_seating": "transfer_not_seating", "трансфер": "transfer_not_seating", "не садится": "transfer_not_seating", "щель": "transfer_not_seating",
+        "bone_interference": "bone_interference", "профилер": "bone_interference", "bone profiler": "bone_interference", "кость": "bone_interference", "козырек": "bone_interference",
+        "soft_tissue_impingement": "soft_tissue_impingement", "десна": "soft_tissue_impingement", "защемление": "soft_tissue_impingement", "ткани": "soft_tissue_impingement",
+        "stripped_hex_screw": "stripped_hex_screw", "слизан": "stripped_hex_screw", "винт": "stripped_hex_screw", "грани": "stripped_hex_screw", "сорван": "stripped_hex_screw", "экстрактор": "stripped_hex_screw"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return IMPLANT_TROUBLE_PROTOCOLS.get(resolved)
+
+def format_implant_trouble_card(p: ImplantTroubleProtocol) -> str:
+    sol_block = "\n".join(p.chairside_solution)
+    return (
+        f"⚠️ <b>Протокол SOS: {html.escape(p.problem_title)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 <b>Этиология проблемы:</b>\n{html.escape(p.etiology)}\n\n"
+        f"📸 <b>Диагностика у кресла:</b>\n{html.escape(p.diagnostic_step)}\n\n"
+        f"🛠 <b>Пошаговый алгоритм решения:</b>\n{sol_block}\n\n"
+        f"{p.strict_prohibition}\n\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\n"
+        f"<code>{html.escape(p.mis_snippet)}</code>\n\n"
+        f"💡 <b>Chairside Совет:</b> {html.escape(p.clinical_pearl)}"
+    )
+
+
+# ==============================================================================
+# 1.6. АТРАВМАТИЧНОЕ СНЯТИЕ КОРОНОК (CROWN REMOVAL WITHOUT HAMMER IMPACT)
+# ==============================================================================
+
+@dataclass(frozen=True)
+class CrownRemovalSpec:
+    removal_key: str
+    title: str
+    indication: str
+    danger_of_impact_hammer: str
+    burs_and_technique: List[str]
+    splitting_instrument: str
+    mis_snippet: str
+    clinical_pearl: str
+
+
+CROWN_REMOVAL_CATALOG: Dict[str, CrownRemovalSpec] = {
+    "sectioning_standard": CrownRemovalSpec(
+        removal_key="sectioning_standard",
+        title="Атравматичное снятие коронок распиливанием (Gold Standard)",
+        indication="Необходимость снятия старых коронок или мостов при несостоятельности краевого прилегания, вторичном кариесе, расцементировке, эндодонтическом перелечивании корней.",
+        danger_of_impact_hammer="⛔ <b>ОПАСНОСТЬ УДАРНЫХ КОРОНКОСНИМАТЕЛЕЙ (Копп / грузик):</b>\nУдарная волна молотка передается на периодонт и корень зуба: вызывает вывих зуба, продольный перелом истонченного корня, отрыв биопленки имплантата или раскол культевой вкладки! При подвижности или депульпированных зубах молоток КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН!",
+        burs_and_technique=[
+            "1. Вестибулярный пропил: турбинный твердосплавный бор высокой агрессивности (Tri Hawk Talon, Komet Great White Gold, цельнотвердосплавный бор). Пропил ведется от шеечной границы до окклюзионной поверхности.",
+            "2. Окклюзионный пропил: рассечение окклюзионной поверхности через фиссуру до орального ската («раскрытие книги»).",
+            "3. Контроль глубины: резать строго до появления белой полоски цемента! Как только показался цемент — СТОП углубление бора (не повреждать культю зуба!).",
+            "4. Оральная стенка сохраняется интактной или слегка подпиливается для создания точки вращения."
+        ],
+        splitting_instrument="Раскрытие (разламывание) коронки ручным рычажным инструментом (ручной эксцентрик Coronaflex / прямой элеватор 2.5–3.0 мм / гладилка): лезвие вводится в вестибулярный паз и плавно поворачивается на 90°. Обе половины коронки расходятся без нагрузки на зуб!",
+        mis_snippet="Атравматичное снятие коронки: Рассечение металлического/металлокерамического каркаса твердосплавным бором Tri Hawk Talon вестибулярно и окклюзионно до слоя цемента. Разламывание ручным коронкоснимателем рычажного типа без ударных нагрузок. Культя зуба сохранена без повреждений.",
+        clinical_pearl="Никогда не сбивайте коронки молотком: 5 минут распиливания твердосплавным бором гарантируют 100% сохранение корня и отсутствие судебных претензий пациента."
+    ),
+    "zirconia_cutting": CrownRemovalSpec(
+        removal_key="zirconia_cutting",
+        title="Снятие коронок из монолитного оксида циркония (ZrO2 Cutting)",
+        indication="Снятие или трепанация монолитных циркониевых коронок и мостов (Prettau, Katana, 3Y/4Y/5Y-TZP).",
+        danger_of_impact_hammer="⛔ Монолитный цирконий не имеет хрупкого фарфорового скола, удары молотком приводят исключительно к перелому корня зуба под десной!",
+        burs_and_technique=[
+            "1. Специальные Z-боры для циркония: крупнозернистые алмазные боры со специальным гальваническим связующим (Komet 4ZR / Diatech Z-Rex / Meisinger Z-Cut) или цельнотвердосплавные фрезы.",
+            "2. Водное охлаждение: МАКСИМАЛЬНОЕ! Не менее 50–60 мл/мин (четырехточечный спрей). Цирконий имеет низкую теплопроводность, в точке контакта мгновенно развивается температура до 800°C (риск коагуляционного некроза культи!).",
+            "3. Режим работы: турбина на скорости 160 000 об/мин, легкие прерывистые клюющие движения (pecking motion) без сильного нажима (сильный нажим сжигает алмазные зерна бора за 10 секунд).",
+            "4. Пропил вестибулярно и окклюзионно до дентина."
+        ],
+        splitting_instrument="Ручной рычажный коронкосниматель с плоским лезвием: поворот в пропиле на 90°. Половинки монолитного циркония щелкают и легко снимаются.",
+        mis_snippet="Снятие циркониевой коронки: Рассечение монолитного оксида циркония бором Komet 4ZR с обильным водным охлаждением (50 мл/мин). Коронка раскрыта ручным рычажным инструментом без давления на культю. Зуб чист, цемент удален ультразвуком.",
+        clinical_pearl="Обычные алмазные боры «лысеют» на цирконии за 30 секунд. Всегда держите в кабинете 2–3 новых специализированных бора для циркония (зеленое кольцо Z-Cut)."
+    ),
+    "implant_crown_removal": CrownRemovalSpec(
+        removal_key="implant_crown_removal",
+        title="Снятие коронки на имплантате (Винтовая и цементная фиксация)",
+        indication="Раскручивание винта, перелом абатмента, периимплантит, замена реставрации на имплантате.",
+        danger_of_impact_hammer="⛔ СТРОЖАЙШИЙ ЗАПРЕТ: Удары молотком по коронке на имплантате приводят к микроперелому кости в зоне остеоинтеграции и мгновенной потере имплантата!",
+        burs_and_technique=[
+            "1. При винтовой фиксации: прицельный рентген-снимок для точной проекции шахты винта. Перфорация композитной пломбы окклюзионно шаровидным твердосплавным бором до тефлоновой ленты (PTFE).",
+            "2. Извлечение тефлона зондом -> очистка шлица винта спиртом -> введение оригинальной отвертки до упора -> выкручивание винта против часовой стрелки.",
+            "3. При цементной фиксации (если нет доступа к винту): распиливание коронки твердосплавным бором с вестибулярной и окклюзионной стороны строго до уровня титанового абатмента.",
+            "4. Раскрытие коронки ручным рычагом без касания шейки имплантата."
+        ],
+        splitting_instrument="Оригинальная отвертка имплантационной системы (при винтовой фиксации) или ручной рычаг Coronaflex (при цементной).",
+        mis_snippet="Снятие коронки на имплантате: Окклюзионный доступ к шахте винта сформирован шаровидным бором под рентген-контролем. Тефлоновая заглушка удалена. Винт абатмента выкручен оригинальной отверткой без осевой нагрузки на имплантат. Шахта промыта 0.2% CHX.",
+        clinical_pearl="Всегда делайте прицельный снимок перед поиском шахты винта: это сбережет титановый абатмент от повреждения бором."
+    )
+}
+
+def get_crown_removal_spec(key: str) -> Optional[CrownRemovalSpec]:
+    clean_k = key.lower().strip()
+    aliases = {
+        "sectioning_standard": "sectioning_standard", "распил": "sectioning_standard", "снятие": "sectioning_standard", "снять коронку": "sectioning_standard", "молоток": "sectioning_standard",
+        "zirconia_cutting": "zirconia_cutting", "циркон": "zirconia_cutting", "распил циркона": "zirconia_cutting", "zirconia": "zirconia_cutting",
+        "implant_crown_removal": "implant_crown_removal", "имплант": "implant_crown_removal", "коронка на импланте": "implant_crown_removal", "шахта": "implant_crown_removal"
+    }
+    resolved = aliases.get(clean_k, clean_k)
+    return CROWN_REMOVAL_CATALOG.get(resolved)
+
+get_crown_removal_protocol = get_crown_removal_spec
+
+def format_crown_removal_card(spec: CrownRemovalSpec) -> str:
+    tech_block = "\n".join(spec.burs_and_technique)
+    return (
+        f"✂️ <b>Клинический протокол: {html.escape(spec.title)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>Показания:</b> {html.escape(spec.indication)}\n\n"
+        f"{spec.danger_of_impact_hammer}\n\n"
+        f"🛠 <b>Боры и техника распиливания:</b>\n{tech_block}\n\n"
+        f"🔓 <b>Инструмент раскрытия:</b>\n{html.escape(spec.splitting_instrument)}\n\n"
+        f"📋 <b>ДЛЯ КОПИРОВАНИЯ В МИС (в 1 тап):</b>\n"
+        f"<code>{html.escape(spec.mis_snippet)}</code>\n\n"
+        f"💡 <b>Chairside Совет:</b> {html.escape(spec.clinical_pearl)}"
+    )
+
 # ==============================================================================
 # 2. ИНТЕРАКТИВНАЯ ЗУБНАЯ ФОРМУЛА FDI 11-48: АНАТОМИЯ, ОПАСНЫЕ ЗОНЫ
 # ==============================================================================
@@ -1368,23 +1674,30 @@ def build_chairside_hub_markup():
             Button.inline("📐 Препарирование (Chamfer/BOPT)", data="prep:menu")
         ],
         [
-            Button.inline("🔩 Торки имплантатов", data="torque_imp:menu"),
-            Button.inline("⚡ Не берет анестезия (SOS)", data="anes_sos:menu")
+            Button.inline("🔍 Контроль после фиксации", data="post_cement:menu"),
+            Button.inline("🔩 Торки имплантатов", data="torque_imp:menu")
         ],
         [
-            Button.inline("💔 Сломался инструмент", data="sos:file_matrix"),
-            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu")
+            Button.inline("⚠️ Трансфер не садится (SOS)", data="imp_trouble:menu"),
+            Button.inline("✂️ Снятие коронки (без удара)", data="crown_rem:menu")
         ],
         [
-            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu"),
-            Button.inline("🧪 Дезинфекция каналов (NaOCl)", data="chairside:irrigation")
+            Button.inline("⚡ Не берет анестезия (SOS)", data="anes_sos:menu"),
+            Button.inline("💔 Сломался инструмент", data="sos:file_matrix")
         ],
         [
-            Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics"),
-            Button.inline("🛠 Починка композита", data="chairside:composite_repair")
+            Button.inline("🚨 Экстренная реанимация (SOS)", data="sos:resuscitation_menu"),
+            Button.inline("💊 Фармакотерапия в 1 тап", data="pharma:menu")
         ],
         [
-            Button.inline("📊 Калькулятор сложности AAE", data="aae:start"),
+            Button.inline("🧪 Дезинфекция каналов (NaOCl)", data="chairside:irrigation"),
+            Button.inline("🗣 Фонетические пробы (ВНОЛ)", data="chairside:phonetics")
+        ],
+        [
+            Button.inline("🛠 Починка композита", data="chairside:composite_repair"),
+            Button.inline("📊 Калькулятор сложности AAE", data="aae:start")
+        ],
+        [
             Button.inline("⬅️ В главное меню", data="nav:main")
         ]
     ]
@@ -1447,6 +1760,59 @@ def build_implant_torque_menu_markup():
         ],
         [
             Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+
+
+def build_post_cement_menu_markup():
+    """Инлайн-кнопки протоколов оценки коронки после фиксации."""
+    return [
+        [
+            Button.inline("🔍 Излишки цемента (периимплантит)", data="post_cement:excess"),
+            Button.inline("📏 Краевой зазор (<50-80 мкм)", data="post_cement:margin")
+        ],
+        [
+            Button.inline("⚖️ Окклюзия (фольга 8 мкм)", data="post_cement:occlusion"),
+            Button.inline("📋 Полный протокол сдачи", data="post_cement:all")
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+
+
+def build_implant_trouble_menu_markup():
+    """Инлайн-кнопки SOS-траблшутинга имплантатов."""
+    return [
+        [
+            Button.inline("⚠️ Трансфер не садится (щель)", data="imp_trouble:transfer_not_seating"),
+            Button.inline("🦴 Bone Profiler (козырек)", data="imp_trouble:bone_interference")
+        ],
+        [
+            Button.inline("🌱 Защемление десны", data="imp_trouble:soft_tissue_impingement"),
+            Button.inline("🔩 Слизан шлиц винта (SOS)", data="imp_trouble:stripped_hex_screw")
+        ],
+        [
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub"),
+            Button.inline("🏠 Главное меню", data="nav:main")
+        ]
+    ]
+
+
+def build_crown_removal_menu_markup():
+    """Инлайн-кнопки протокола атравматичного снятия коронок."""
+    return [
+        [
+            Button.inline("✂️ Атравматичный распил (без молотка)", data="crown_rem:sectioning_standard"),
+            Button.inline("💎 Распил циркония (Z-бор)", data="crown_rem:zirconia_cutting")
+        ],
+        [
+            Button.inline("🔩 Снятие коронки на имплантате", data="crown_rem:implant_crown_removal"),
+            Button.inline("⬅️ В Chairside меню", data="chairside:hub")
+        ],
+        [
             Button.inline("🏠 Главное меню", data="nav:main")
         ]
     ]
@@ -1765,7 +2131,8 @@ def is_chairside_callback(data_str: str) -> bool:
     if data_str.startswith((
         "chairside:", "fdi:", "files:", "file_sys:", "pres_st:",
         "pres_eval:", "preserve:", "anes_sos:", "file_frag:", "pharma:", "aae:", "phonetics:",
-        "cement:", "prep:", "torque_imp:"
+        "cement:", "prep:", "torque_imp:",
+        "post_cement:", "imp_trouble:", "crown_rem:"
     )):
         return True
     if data_str.startswith("sos:"):
@@ -1817,6 +2184,95 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
         await event.answer()
     except Exception as e:
         logger.debug("Failed to answer chairside callback query: %s", e)
+
+    # 0.9 ОЦЕНКА КОРОНКИ ПОСЛЕ ФИКСАЦИИ (post_cement:*)
+    if data_str.startswith("post_cement:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "🔍 <b>Клинический контроль после фиксации коронок (QC Protocol)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите этап контроля для получения пошагового алгоритма у кресла, "
+                "критериев допуска и готового сниппета для амбулаторной карты:"
+            )
+            buttons = build_post_cement_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        chk = get_post_cement_check(sub)
+        if chk:
+            card = format_post_cement_card(chk)
+            buttons = [
+                [
+                    Button.inline("⬅️ К протоколам контроля", data="post_cement:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "🔍 <b>Контроль коронки: Выберите этап:</b>"
+            buttons = build_post_cement_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+    # 0.10 ТРАБЛШУТИНГ ИМПЛАНТАТОВ (imp_trouble:*)
+    if data_str.startswith("imp_trouble:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "⚠️ <b>Ортопедический SOS-траблшутинг имплантатов</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите клиническую проблему (не садится трансфер, нависает кость, "
+                "защемлена десна, слизан шлиц винта):"
+            )
+            buttons = build_implant_trouble_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        proto = get_implant_trouble_protocol(sub)
+        if proto:
+            card = format_implant_trouble_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ К траблшутингу", data="imp_trouble:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "⚠️ <b>Траблшутинг имплантатов: Выберите проблему:</b>"
+            buttons = build_implant_trouble_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+
+    # 0.11 АТРАВМАТИЧНОЕ СНЯТИЕ КОРОНОК (crown_rem:*)
+    if data_str.startswith("crown_rem:"):
+        sub = data_str.split(":", 1)[1] if ":" in data_str else "menu"
+        if sub in ("menu", "main", ""):
+            text = (
+                "✂️ <b>Атравматичное снятие коронок и мостов (БЕЗ УДАРА МОЛОТКОМ)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Выберите клиническую ситуацию (металлокерамика, монолитный цирконий, коронка на имплантате):"
+            )
+            buttons = build_crown_removal_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
+        spec = get_crown_removal_spec(sub)
+        if spec:
+            card = format_crown_removal_card(spec)
+            buttons = [
+                [
+                    Button.inline("⬅️ К методикам снятия", data="crown_rem:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_edit_chairside(event, card, buttons=buttons)
+            return True
+        else:
+            text = "✂️ <b>Снятие коронок: Выберите методику:</b>"
+            buttons = build_crown_removal_menu_markup()
+            await _safe_edit_chairside(event, text, buttons=buttons)
+            return True
 
     # 0.6 ПРОТОКОЛЫ ФИКСАЦИИ (cement:*)
     if data_str.startswith("cement:"):
@@ -2839,6 +3295,83 @@ async def _safe_send_chairside(bot_client, event, text: str, buttons=None):
 # 10. ОБРАБОТЧИКИ КОМАНД (/chairside, /torque, /anes, /fdi, /aae, /sos, /pharma, /preserve)
 # ==============================================================================
 
+async def handle_post_cement_command(bot_client, event, arg: str = ""):
+    """Команда /crown_eval [или /оценка_коронки, /излишки_цемента]: протоколы контроля после фиксации."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        chk = get_post_cement_check(clean_arg)
+        if chk:
+            card = format_post_cement_card(chk)
+            buttons = [
+                [
+                    Button.inline("⬅️ К протоколам контроля", data="post_cement:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "🔍 <b>Клинический контроль после фиксации коронок (QC Protocol)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите этап контроля для получения пошагового алгоритма у кресла, "
+        "критериев допуска и готового сниппета для амбулаторной карты:"
+    )
+    buttons = build_post_cement_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
+async def handle_implant_trouble_command(bot_client, event, arg: str = ""):
+    """Команда /transfer_sos [или /трансфер, /профилер, /не_садится]: SOS-траблшутинг имплантатов."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        proto = get_implant_trouble_protocol(clean_arg)
+        if proto:
+            card = format_implant_trouble_card(proto)
+            buttons = [
+                [
+                    Button.inline("⬅️ К траблшутингу", data="imp_trouble:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "⚠️ <b>Ортопедический SOS-траблшутинг имплантатов</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите клиническую проблему (не садится трансфер, нависает кость, "
+        "защемлена десна, слизан шлиц винта):"
+    )
+    buttons = build_implant_trouble_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
+async def handle_crown_removal_command(bot_client, event, arg: str = ""):
+    """Команда /crown_removal [или /снятие_коронки, /распил_коронки]: атравматичное снятие коронок."""
+    clean_arg = (arg or "").lower().strip()
+    if clean_arg:
+        spec = get_crown_removal_spec(clean_arg)
+        if spec:
+            card = format_crown_removal_card(spec)
+            buttons = [
+                [
+                    Button.inline("⬅️ К методикам снятия", data="crown_rem:menu"),
+                    Button.inline("🏠 Chairside Hub", data="chairside:hub")
+                ]
+            ]
+            await _safe_send_chairside(bot_client, event, card, buttons=buttons)
+            return
+
+    text = (
+        "✂️ <b>Атравматичное снятие коронок и мостов (БЕЗ УДАРА МОЛОТКОМ)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Выберите клиническую ситуацию (металлокерамика, монолитный цирконий, коронка на имплантате):"
+    )
+    buttons = build_crown_removal_menu_markup()
+    await _safe_send_chairside(bot_client, event, text, buttons=buttons)
+
+
 async def handle_cementation_command(bot_client, event, arg: str = ""):
     """Команда /cement [или /фиксация, /emax, /zirconia]: протоколы адгезивной фиксации."""
     clean_arg = (arg or "").lower().strip()
@@ -3462,9 +3995,18 @@ async def handle_if_chairside_command(bot_client, event, cmd: str) -> bool:
     elif cmd_name in ("/implant_torque", "/торк_импланта", "/абатмент", "/мультиюнит"):
         await handle_implant_torque_command(bot_client, event, arg)
         return True
+    elif cmd_name in ("/crown_eval", "/оценка_коронки", "/излишки_цемента", "/краевое_прилегание"):
+        await handle_post_cement_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/transfer_sos", "/трансфер", "/профилер", "/не_садится", "/костный_профилер"):
+        await handle_implant_trouble_command(bot_client, event, arg)
+        return True
+    elif cmd_name in ("/crown_removal", "/снятие_коронки", "/распил_коронки", "/снять_коронку"):
+        await handle_crown_removal_command(bot_client, event, arg)
+        return True
     return False
 
 # Backwards-compatible aliases
 dispatch_chairside_group_command = handle_if_chairside_command
 dispatch_chairside_pm_command = handle_if_chairside_command
-is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo", "/emphysema", "/эмфизема", "/oac", "/пазуха", "/соустье", "/sinus", "/composite_repair", "/починка", "/скол", "/repair", "/cement", "/фиксация", "/emax", "/zirconia", "/цирконий", "/prep", "/препарирование", "/vertiprep", "/bopt", "/chamfer", "/уступ", "/implant_torque", "/торк_импланта", "/абатмент", "/мультиюнит")))
+is_chairside_command = lambda text: bool(text and text.strip().startswith(("/chairside", "/torque", "/торк", "/anes", "/анестезия", "/fdi", "/зуб", "/aae", "/sos", "/обломок", "/pharma", "/антибиотики", "/нпвп", "/preserve", "/феррул", "/сохранение", "/irrigation", "/ирригация", "/дезинфекция", "/phonetics", "/фонетика", "/внол", "/vdo", "/emphysema", "/эмфизема", "/oac", "/пазуха", "/соустье", "/sinus", "/composite_repair", "/починка", "/скол", "/repair", "/cement", "/фиксация", "/emax", "/zirconia", "/цирконий", "/prep", "/препарирование", "/vertiprep", "/bopt", "/chamfer", "/уступ", "/implant_torque", "/торк_импланта", "/абатмент", "/мультиюнит", "/crown_eval", "/оценка_коронки", "/излишки_цемента", "/transfer_sos", "/трансфер", "/профилер", "/не_садится", "/crown_removal", "/снятие_коронки", "/распил_коронки")))

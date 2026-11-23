@@ -573,3 +573,155 @@ async def test_database_reliability_invariants_and_wal_checkpoint():
     # 4. Проверка закрытия базы со сбросом WAL
     close_ok = database.close_db(checkpoint=True)
     assert close_ok is True
+
+
+@pytest.mark.asyncio
+async def test_real_clinician_queries_fts_and_ranking():
+    """
+    Проверяет полнотекстовый поиск FTS5 и семантическое ранжирование
+    по реальным клиническим запросам врачей из чата:
+    1. «сладкое» -> купирование гиперестезии дентина и боли от сладкого
+    2. «паста с фтором» -> фторпрофилактика, концентрации 1450–5000 ppm
+    3. «шепелявость» -> фонетическая проба по Сильверману, окклюзия
+    4. «звук с» -> фонетическое расстояние Closest Speaking Space
+    5. «шарик в центре коронки» -> дентикли/пульполиты пульповой камеры
+    6. «феррул» -> оценка и создание кругового феррул-эффекта 1.5–2 мм
+    7. «препарирование» -> вертикальное препарирование / BOPT
+    8. «фиксация e.max» -> адгезивная фиксация дисиликата лития
+    Все результаты должны содержать точный сниппет с блоком <code>...</code> для 1-тап копирования в МИС.
+    """
+    real_queries_expectations = [
+        ("сладкое", "сладк"),
+        ("паста с фтором", "фтор"),
+        ("шепелявость", "шепеляв"),
+        ("звук с", "сильверман"),
+        ("шарик в центре коронки", "дентикл"),
+        ("феррул", "феррул"),
+        ("препарирование", "препарирован"),
+        ("фиксация e.max", "дисиликат"),
+    ]
+
+    for q, expected_marker in real_queries_expectations:
+        protos = await database.get_clinical_protocols(search=q, limit=5)
+        assert len(protos) >= 1, f"Запрос '{q}' должен вернуть хотя бы 1 протокол"
+        top_title = protos[0]["title"].lower()
+        top_content = (protos[0]["title"] + " " + protos[0].get("materials", "") + " " + protos[0].get("key_nuances", "")).lower()
+        assert expected_marker in top_content, f"Для запроса '{q}' ожидался маркер '{expected_marker}' в топе, получено: '{protos[0]['title']}'"
+
+        # Проверка МИС-экспорта и 1-тап сниппета
+        mis_snippet = database.format_protocol_mis(protos[0])
+        assert "<code>" in mis_snippet, "Сниппет должен содержать <code> блок"
+        assert "</code>" in mis_snippet, "Сниппет должен содержать </code> закрывающий тег"
+        assert "1-тап" in mis_snippet or "1 тап" in mis_snippet, "Сниппет должен содержать маркер 1-тап"
+        assert "**" not in mis_snippet, "В сниппете не должно быть Markdown '**'"
+        assert "###" not in mis_snippet, "В сниппете не должно быть Markdown '###'"
+
+
+@pytest.mark.asyncio
+async def test_media_safe_handling_and_fallbacks(tmp_path):
+    """
+    Проверяет отказоустойчивость методов базы данных при работе с битыми и отсутствующими файлами:
+    - validate_media_file_safe защищает от пустых/несуществующих/0-байтовых путей
+    - safe_get_media_url очищает битую запись и возвращает безопасный fallback (None)
+    """
+    # 1. Валидация несуществующих и пустых файлов
+    assert database.validate_media_file_safe(None) is False
+    assert database.validate_media_file_safe("") is False
+    assert database.validate_media_file_safe("   ") is False
+    assert database.validate_media_file_safe("totally_missing_file.jpg") is False
+
+    # 2. Валидация поврежденного файла (0 байт)
+    empty_file = tmp_path / "zero_bytes.jpg"
+    empty_file.write_bytes(b"")
+    assert database.validate_media_file_safe(str(empty_file)) is False
+
+    # 3. Валидация корректного файла
+    valid_file = tmp_path / "valid_image.jpg"
+    valid_file.write_bytes(b"JFIF" + b"\x00" * 200)
+    assert database.validate_media_file_safe(str(valid_file), min_bytes=50) is True
+
+    # 4. Проверка безопасной санитизации в БД (safe_get_media_url)
+    msg_id = 887766
+    await database.save_message(
+        msg_id=msg_id,
+        sender_id=12345,
+        sender_name="Doctor",
+        sender_username="doc",
+        text="Снимок с битым локальным файлом",
+        date="2026-11-23 12:00:00",
+        has_media=True,
+        media_type="photo"
+    )
+    # Записываем битый локальный путь
+    await database.update_media_remote_url(msg_id, "totally_missing_file.jpg")
+
+    # safe_get_media_url обнаруживает, что файл отсутствует, очищает запись и возвращает None!
+    url_res = await database.safe_get_media_url(msg_id)
+    assert url_res is None
+
+    # Проверяем, что битая ссылка зачищена в БД
+    def check_cleaned():
+        with database._connection() as db:
+            row = db.execute("SELECT media_remote_url, has_media FROM messages WHERE msg_id = ?", (msg_id,)).fetchone()
+            return row
+    cleaned_row = await database._run_db(check_cleaned)
+    assert cleaned_row[0] is None
+    assert cleaned_row[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrency_stress_and_deadlock_protection():
+    """
+    Стресс-тест многопоточности и защиты от SQLITE_BUSY:
+    Запускает 25 одновременных асинхронных операций чтения, записи, обновления тегов
+    и фонового сброса WAL (PASSIVE) без взаимных блокировок и сбоев целостности.
+    """
+    async def worker_task(worker_id):
+        user_id = 800000 + worker_id
+        # 1. Запись сообщения
+        await database.save_message(
+            msg_id=user_id,
+            sender_id=user_id,
+            sender_name=f"Stress Doc {worker_id}",
+            sender_username=f"doc_{worker_id}",
+            text=f"Клиническое обсуждение в стресс-тесте {worker_id} #stress",
+            date="2026-11-23 15:00:00"
+        )
+        # 2. Запись клинической закладки
+        await database.save_clinical_bookmark(
+            saved_by_user_id=user_id,
+            msg_id=user_id,
+            chat_id=-100999,
+            sender_name=f"Stress Doc {worker_id}",
+            text=f"Закладка стресс-теста #{worker_id}",
+            has_media=False,
+            media_description="",
+            date="2026-11-23 15:00:00",
+            tags=[f"#стресс_{worker_id}", "#высокая_нагрузка"]
+        )
+        # 3. Обновление тегов
+        bms = await database.get_clinical_bookmarks(user_id, include_id=True)
+        assert len(bms) >= 1
+        bm_id = bms[0][0]
+        await database.update_clinical_bookmark_tags(bm_id, [f"#тег_обновлен_{worker_id}"], saved_by_user_id=user_id)
+
+        # 4. Поиск протоколов под нагрузкой
+        protos = await database.get_clinical_protocols(search="препарирование", limit=3)
+        assert len(protos) >= 1
+
+        # 5. Фоновый сброс WAL во время параллельной работы
+        if worker_id % 5 == 0:
+            await database.checkpoint_wal_async(mode="PASSIVE")
+
+        return True
+
+    # Запускаем 25 параллельных конкурентных воркеров
+    tasks = [worker_task(i) for i in range(1, 26)]
+    results = await asyncio.gather(*tasks)
+    assert len(results) == 25
+    assert all(r is True for r in results)
+
+    # Итоговая проверка целостности БД
+    inv = await database.verify_database_invariants_async()
+    assert inv["quick_check"] == "ok"
+    assert inv["is_safe"] is True

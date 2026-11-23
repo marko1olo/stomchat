@@ -385,6 +385,114 @@ torque_card = ct.format_implant_torque_card(multi_t)
 check("Торк карточка форматируется в HTML с блоком МИС", "<code>" in torque_card and "All-on-4" in torque_card)
 
 
+
+# ==============================================================================
+# [12] Оценка коронок непосредственно после фиксации (Контроль излишков, краевой зазор, окклюзия)
+# ==============================================================================
+print("\n[12] Оценка коронок непосредственно после фиксации")
+
+# 1. Удаление излишков цемента (excess)
+chk_excess = ct.get_post_cementation_check("excess")
+check("Контроль излишков цемента: протокол найден", chk_excess is not None)
+check("Контроль излишков: риск периимплантита", "периимплантит" in chk_excess.clinical_risk.lower() or "пародонтит" in chk_excess.clinical_risk.lower())
+check("Контроль излишков: фаза геля (tack-cure 1-2 сек)", any("гель" in step.lower() or "tack-cure" in step.lower() for step in chk_excess.protocol_steps))
+check("Контроль излишков: интердентальный флосс с узелками", any("узелк" in step for step in chk_excess.protocol_steps))
+check("Контроль излишков: DeOx глицериновый гель", any("DeOx" in step or "глицерин" in step for step in chk_excess.protocol_steps))
+check("Контроль излишков: критерий допуска - борозда свободна, рентген без рентгеноконтрастных теней", "борозд" in chk_excess.tolerance_criteria.lower())
+check("Контроль излишков: сниппет МИС в <code>...</code>", "<code>" in ct.format_post_cement_card(chk_excess) and "Удаление излишков" in chk_excess.mis_snippet)
+
+# 2. Краевое прилегание (margin)
+chk_margin = ct.get_post_cementation_check("margin")
+check("Краевое прилегание: протокол найден", chk_margin is not None)
+check("Краевое прилегание: риск вторичного кариеса при зазоре >80-120 мкм", "кариес" in chk_margin.clinical_risk.lower() or "80" in chk_margin.clinical_risk)
+check("Краевое прилегание: зондирование острым зондом #17/23", any("зондом" in step for step in chk_margin.protocol_steps))
+check("Краевое прилегание: критерий зазора < 50-80 мкм", "< 50–80 мкм" in chk_margin.tolerance_criteria or "50" in chk_margin.tolerance_criteria)
+check("Краевое прилегание: сниппет МИС", "краево" in chk_margin.mis_snippet.lower())
+
+# 3. Окклюзионный контроль (occlusion)
+chk_occ = ct.get_post_cementation_check("occlusion")
+check("Окклюзионный контроль: протокол найден", chk_occ is not None)
+check("Окклюзионный контроль: фольга Бауша 8-12 мкм (Shimstock)", any("Shimstock" in step or "8" in step or "12" in step for step in chk_occ.protocol_steps))
+check("Окклюзионный контроль: клыковое ведение без суперконтактов", any("клыков" in step for step in chk_occ.protocol_steps))
+check("Окклюзионный контроль: имплантаты - инфраокклюзия 10-15 мкм при легком смыкании", any("10" in s and ("infra" in s.lower() or "инфр" in s.lower()) for s in chk_occ.protocol_steps))
+check("Окклюзионный контроль: сниппет МИС", "Окклюзионная" in chk_occ.mis_snippet or "Bausch" in chk_occ.mis_snippet)
+
+# 4. Сводный чек-лист (all)
+chk_all = ct.get_post_cementation_check("all")
+check("Сводный чек-лист сдачи: протокол найден", chk_all is not None)
+check("Сводный чек-лист: карточка форматируется в HTML", "<code>" in ct.format_post_cement_card(chk_all))
+
+
+# ==============================================================================
+# [13] Траблшутинг имплантатов (Не садится трансфер, Bone Profiler, Защемление десны, Слизанный винт)
+# ==============================================================================
+print("\n[13] Траблшутинг имплантатов")
+
+# 1. Трансфер не садится (transfer_not_seating)
+imp_tr = ct.get_implant_trouble_protocol("transfer_not_seating")
+check("Трансфер не садится: протокол найден", imp_tr is not None)
+check("Трансфер не садится: обязательный рентген параллельным лучом", "параллельным" in imp_tr.diagnostic_step.lower() or "прицельный" in imp_tr.diagnostic_step.lower())
+check("Трансфер не садится: поиск граней индекса ручной отверткой", any("индекс" in s.lower() or "провал" in s.lower() for s in imp_tr.chairside_solution))
+check("Трансфер не садится: строгий запрет силовой затяжки ключом", "ЗАПРЕЩЕНО затягивать" in imp_tr.strict_prohibition)
+check("Трансфер не садится: сниппет МИС", "Припасовка трансфера" in imp_tr.mis_snippet)
+
+# 2. Костная интерференция и Bone Profiler (bone_interference)
+imp_bone = ct.get_implant_trouble_protocol("bone_interference")
+check("Костная интерференция: протокол найден", imp_bone is not None)
+check("Bone Profiler: направляющий пин Guide Pin обязателен", any("Guide Pin" in s or "направляющий пин" in s for s in imp_bone.chairside_solution))
+check("Bone Profiler: скорость 50-100 об/мин с физраствором", any("50" in s and "об/мин" in s for s in imp_bone.chairside_solution))
+check("Bone Profiler: строгий запрет работы без направляющего пина", "ЗАПРЕЩЕНО работать костной фрезой без оригинального направляющего пина" in imp_bone.strict_prohibition)
+check("Bone Profiler: сниппет МИС", "Bone Profiler" in imp_bone.mis_snippet)
+
+# 3. Защемление десны (soft_tissue_impingement)
+imp_soft = ct.get_implant_trouble_protocol("soft_tissue_impingement")
+check("Защемление десны: протокол найден", imp_soft is not None)
+check("Защемление десны: ретракция нитью #000 или микрогингивотомия", any("нить" in s or "гингивотоми" in s for s in imp_soft.chairside_solution))
+check("Защемление десны: запрет зажимать слизистую под трансфер", "ЗАПРЕЩЕНО зажимать десну" in imp_soft.strict_prohibition)
+check("Защемление десны: сниппет МИС", "Коррекция десневого профиля" in imp_soft.mis_snippet)
+
+# 4. Слизанный винт (stripped_hex_screw)
+imp_screw = ct.get_implant_trouble_protocol("stripped_hex_screw")
+check("Слизанный винт: протокол найден", imp_screw is not None)
+check("Слизанный винт: алмазная/фрикционная паста Grip", any("паст" in s.lower() for s in imp_screw.chairside_solution))
+check("Слизанный винт: реверсивный экстрактор Rescue Extractor 15-20 об/мин", any("экстрактор" in s.lower() or "Rescue" in s for s in imp_screw.chairside_solution))
+check("Слизанный винт: КАТЕГОРИЧЕСКИЙ ЗАПРЕТ турбинного рассверливания", "ЗАПРЕЩЕНО рассверливать поврежденный винт турбинным бором" in imp_screw.strict_prohibition)
+check("Слизанный винт: сниппет МИС", "Screw Rescue" in imp_screw.mis_snippet)
+
+
+# ==============================================================================
+# [14] Атравматичное снятие коронок и мостов (Без ударного молотка)
+# ==============================================================================
+print("\n[14] Атравматичное снятие коронок")
+
+# 1. Стандартное распиливание (sectioning_standard)
+cr_std = ct.get_crown_removal_spec("sectioning_standard")
+check("Атравматичное снятие: протокол найден", cr_std is not None)
+check("Атравматичное снятие: бор Tri Hawk Talon / Komet", any("Tri Hawk" in b or "Komet" in b for b in cr_std.burs_and_technique))
+check("Атравматичное снятие: глубина строго до слоя цемента", any("цемент" in b for b in cr_std.burs_and_technique))
+check("Атравматичное снятие: раскрытие ручным рычагом на 90 градусов", "90°" in cr_std.splitting_instrument or "рычаг" in cr_std.splitting_instrument)
+check("Атравматичное снятие: СТРОЖАЙШИЙ ЗАПРЕТ молотка Коппа / грузика", "ОПАСНОСТЬ УДАРНЫХ КОРОНКОСНИМАТЕЛЕЙ" in cr_std.danger_of_impact_hammer and "ЗАПРЕЩЕН" in cr_std.danger_of_impact_hammer)
+check("Атравматичное снятие: сниппет МИС", "Атравматичное снятие коронки" in cr_std.mis_snippet)
+
+# 2. Диоксид циркония (zirconia_cutting)
+cr_zr = ct.get_crown_removal_spec("zirconia_cutting")
+check("Распил циркония: протокол найден", cr_zr is not None)
+check("Распил циркония: специальные боры Komet 4ZR / Z-Rex", any("4ZR" in b or "Z-Rex" in b or "Z-Cut" in b for b in cr_zr.burs_and_technique))
+check("Распил циркония: обильное охлаждение >=50 мл/мин (защита от перегрева 800°C)", any("50" in b and "мл/мин" in b for b in cr_zr.burs_and_technique))
+check("Распил циркония: прерывистые клюющие движения pecking motion", any("pecking" in b or "клюющ" in b for b in cr_zr.burs_and_technique))
+check("Распил циркония: сниппет МИС", "Komet 4ZR" in cr_zr.mis_snippet or "циркон" in cr_zr.mis_snippet.lower())
+
+# 3. Коронка на имплантате (implant_crown_removal)
+cr_imp = ct.get_crown_removal_spec("implant_crown_removal")
+check("Снятие коронки на имплантате: протокол найден", cr_imp is not None)
+check("Снятие на имплантате: доступ к шахте винта через тефлон PTFE", any("PTFE" in b or "тефлон" in b for b in cr_imp.burs_and_technique))
+check("Снятие на имплантате: СТРОЖАЙШИЙ ЗАПРЕТ ударов молотком (потеря остеоинтеграции)", "потере имплантата" in cr_imp.danger_of_impact_hammer or "остеоинтеграции" in cr_imp.danger_of_impact_hammer)
+check("Снятие на имплантате: сниппет МИС", "Снятие коронки на имплантате" in cr_imp.mis_snippet)
+
+# 4. Проверка алиаса get_crown_removal_protocol
+check("Алиас get_crown_removal_protocol работает идентично get_crown_removal_spec", ct.get_crown_removal_protocol("zirconia_cutting") == cr_zr)
+
+
 # ==============================================================================
 # [8] Интерактивные разметки и Callback Dispatcher
 # ==============================================================================
@@ -399,6 +507,9 @@ check("разметка систем файлов", len(ct.build_files_catalog_m
 check("разметка скорой помощи по файлам", len(ct.build_broken_file_matrix_markup()) == 5)
 check("разметка быстрой фармы", len(ct.build_pharma_quick_markup()) >= 5)
 check("разметка AAE шаг 1", len(ct.build_aae_markup(1)) == 4)
+check("разметка контроля после фиксации формируется", len(ct.build_post_cement_menu_markup()) >= 3)
+check("разметка траблшутинга имплантатов формируется", len(ct.build_implant_trouble_menu_markup()) >= 3)
+check("разметка снятия коронок формируется", len(ct.build_crown_removal_menu_markup()) >= 3)
 
 
 class MockCallbackEvent:
@@ -527,6 +638,67 @@ async def run_callback_tests():
     ok_torque_imp = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/implant_torque")
     check("/implant_torque перехватывается", ok_torque_imp and bot.send_message.called)
 
+
+    # Post-cementation callbacks
+    ev_pc_menu = MockCallbackEvent("post_cement:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_pc_menu, "post_cement:menu")
+    check("post_cement:menu диспетчеризируется", ok and ev_pc_menu.edit.called)
+
+    ev_pc_excess = MockCallbackEvent("post_cement:excess")
+    ok = await ct.dispatch_chairside_callback(bot, ev_pc_excess, "post_cement:excess")
+    check("post_cement:excess диспетчеризируется", ok and ev_pc_excess.edit.called)
+
+    ev_pc_margin = MockCallbackEvent("post_cement:margin")
+    ok = await ct.dispatch_chairside_callback(bot, ev_pc_margin, "post_cement:margin")
+    check("post_cement:margin диспетчеризируется", ok and ev_pc_margin.edit.called)
+
+    ev_pc_occ = MockCallbackEvent("post_cement:occlusion")
+    ok = await ct.dispatch_chairside_callback(bot, ev_pc_occ, "post_cement:occlusion")
+    check("post_cement:occlusion диспетчеризируется", ok and ev_pc_occ.edit.called)
+
+    # Implant troubleshooting callbacks
+    ev_it_menu = MockCallbackEvent("imp_trouble:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_it_menu, "imp_trouble:menu")
+    check("imp_trouble:menu диспетчеризируется", ok and ev_it_menu.edit.called)
+
+    ev_it_bone = MockCallbackEvent("imp_trouble:bone_interference")
+    ok = await ct.dispatch_chairside_callback(bot, ev_it_bone, "imp_trouble:bone_interference")
+    check("imp_trouble:bone_interference диспетчеризируется", ok and ev_it_bone.edit.called)
+
+    ev_it_seating = MockCallbackEvent("imp_trouble:transfer_not_seating")
+    ok = await ct.dispatch_chairside_callback(bot, ev_it_seating, "imp_trouble:transfer_not_seating")
+    check("imp_trouble:transfer_not_seating диспетчеризируется", ok and ev_it_seating.edit.called)
+
+    ev_it_screw = MockCallbackEvent("imp_trouble:stripped_hex_screw")
+    ok = await ct.dispatch_chairside_callback(bot, ev_it_screw, "imp_trouble:stripped_hex_screw")
+    check("imp_trouble:stripped_hex_screw диспетчеризируется", ok and ev_it_screw.edit.called)
+
+    # Crown removal callbacks
+    ev_cr_menu = MockCallbackEvent("crown_rem:menu")
+    ok = await ct.dispatch_chairside_callback(bot, ev_cr_menu, "crown_rem:menu")
+    check("crown_rem:menu диспетчеризируется", ok and ev_cr_menu.edit.called)
+
+    ev_cr_std = MockCallbackEvent("crown_rem:sectioning_standard")
+    ok = await ct.dispatch_chairside_callback(bot, ev_cr_std, "crown_rem:sectioning_standard")
+    check("crown_rem:sectioning_standard диспетчеризируется", ok and ev_cr_std.edit.called)
+
+    ev_cr_zr = MockCallbackEvent("crown_rem:zirconia_cutting")
+    ok = await ct.dispatch_chairside_callback(bot, ev_cr_zr, "crown_rem:zirconia_cutting")
+    check("crown_rem:zirconia_cutting диспетчеризируется", ok and ev_cr_zr.edit.called)
+
+    ev_cr_imp = MockCallbackEvent("crown_rem:implant_crown_removal")
+    ok = await ct.dispatch_chairside_callback(bot, ev_cr_imp, "crown_rem:implant_crown_removal")
+    check("crown_rem:implant_crown_removal диспетчеризируется", ok and ev_cr_imp.edit.called)
+
+    # Новые команды: /crown_eval, /transfer_sos, /crown_removal
+    ok_ce = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/crown_eval")
+    check("/crown_eval перехватывается", ok_ce and bot.send_message.called)
+
+    ok_ts = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/transfer_sos")
+    check("/transfer_sos перехватывается", ok_ts and bot.send_message.called)
+
+    ok_cr = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/crown_removal")
+    check("/crown_removal перехватывается", ok_cr and bot.send_message.called)
 
     ok_other = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/help")
     check("/help не перехватывается chairside-фасадом", not ok_other)

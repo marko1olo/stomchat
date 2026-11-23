@@ -320,6 +320,113 @@ class TestVisionSystematicDrilldown(unittest.TestCase):
         finally:
             loop.close()
 
+    def test_incident_doctor_frustration_reproduction_tooth7(self):
+        """
+        Репродукция реального инцидента из живой базы:
+        Доктор в отчаянии пишет: «Нет вопрос в шарике в центре коронки 7го зуба»!
+        В снимке упомянуты 4.7 и 4.8. Бот не должен зацикливаться на 4.8!
+        Целевой зуб должен быть определен строго как 47, а квадрант — 2 (CLAHE HD).
+        """
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            # Описание снимка с двумя зубами: 4.7 и ретенированный 4.8
+            vd_desc = vision.VisionDescription(
+                "На снимке зубов 4.7 и 4.8: ретенция и дистопия 4.8, коронка 4.7 с тенью в центре",
+                metadata={"modality": "PERIAPICAL_XRAY", "target_tooth": 48} # старая модель ошибочно выбрала 48
+            )
+
+            # Врач уточняет фокус: «Нет вопрос в шарике в центре коронки 7го зуба»
+            res = loop.run_until_complete(
+                visiodent_enhancer.analyze_xray_context_and_doubt_async(
+                    user_text="Нет вопрос в шарике в центре коронки 7го зуба",
+                    vision_description=vd_desc
+                )
+            )
+
+            # Целевой зуб ОБЯЗАН переключиться на 47 (семерка четвертого квадранта)
+            self.assertEqual(res["target_tooth"], "47", "Бот проигнорировал указание врача на 7-й зуб!")
+            self.assertEqual(res["recommended_quadrant"], 2, "Шарик в центре коронки обязан маршрутизироваться в Квадрант 2!")
+            self.assertTrue(res["has_clinical_doubt"])
+            self.assertIn("Зуб 47: ревизия пульпарной камеры (дентикли/петрификаты пульпы)", res["focus_area"])
+            self.assertIn("Квадрант 2", res["recommendation_text"])
+            self.assertIn("дентиклей", res["recommendation_text"])
+
+            # Проверка альтернативной фразы: «камень в пульпе 4.7»
+            res2 = loop.run_until_complete(
+                visiodent_enhancer.analyze_xray_context_and_doubt_async(
+                    user_text="Посмотри, там камень в пульпе 47?",
+                    vision_description="Радиовизиография 4.7"
+                )
+            )
+            self.assertEqual(res2["target_tooth"], "47")
+            self.assertEqual(res2["recommended_quadrant"], 2)
+            self.assertTrue(res2["has_clinical_doubt"])
+        finally:
+            loop.close()
+
+    def test_postop_crown_evaluation_prompt_and_zone1(self):
+        """Проверка протокола постоперационного аудита коронок в Зоне 1 (излишки цемента, уступ, зазоры)."""
+        src = inspect.getsource(vision.describe_image)
+
+        self.assertIn("ПОСТОПЕРАЦИОННЫЙ АУДИТ КОРОНОК ПОСЛЕ ФИКСАЦИИ", src)
+        self.assertIn("рентгеноконтрастность излишков цемента", src)
+        self.assertIn("точность посадки на уступ", src)
+        self.assertIn("отсутствие щелей и микрозазоров", src)
+        self.assertIn("open margin", src)
+
+    def test_anti_tunnel_vision_mandate_in_vision_prompt(self):
+        """Проверка запрета туннельного зрения и игнорирования центра коронки соседнего зуба."""
+        src = inspect.getsource(vision.describe_image)
+
+        self.assertIn("АНТИ-ТУННЕЛЬНОЕ ЗРЕНИЕ", src)
+        self.assertIn("ретенция/дистопия 4.8", src)
+        self.assertIn("шарик/дентикль 4.7", src)
+
+    def test_error_handling_corrupted_or_missing_images(self):
+        """Проверка безопасной обработки ошибок при поврежденных, пустых или отсутствующих файлах."""
+        import asyncio
+
+        # 1. Отсутствующий файл в generate_visiodent_collage
+        c_path, dims = visiodent_enhancer.generate_visiodent_collage("completely_missing_file_xyz_123.jpg")
+        self.assertIsNone(c_path)
+        self.assertIsNone(dims)
+
+        # 2. Поврежденные байты (битый заголовок)
+        c_path2, dims2 = visiodent_enhancer.generate_visiodent_collage(b"not_an_image_random_corrupted_payload")
+        self.assertIsNone(c_path2)
+        self.assertIsNone(dims2)
+
+        # 3. Пустые байты b""
+        c_path3, dims3 = visiodent_enhancer.generate_visiodent_collage(b"")
+        self.assertIsNone(c_path3)
+        self.assertIsNone(dims3)
+
+        # 4. Валидация кандидата на поврежденных данных
+        ok1, reason1 = visiodent_enhancer.validate_visiodent_candidate(b"garbage")
+        self.assertFalse(ok1)
+        self.assertIn("Поврежденный", reason1)
+
+        ok2, reason2 = visiodent_enhancer.validate_visiodent_candidate("missing_file.jpg")
+        self.assertFalse(ok2)
+        self.assertIn("Не удалось", reason2)
+
+        # 5. Парсеры vision на пустых/None строках
+        self.assertEqual(vision.extract_vision_metadata(""), {})
+        self.assertEqual(vision.extract_vision_metadata(None), {})
+        self.assertEqual(vision.parse_dual_vision_description(""), ("", ""))
+        self.assertEqual(vision.parse_dual_vision_description(None), ("", ""))
+
+        # 6. describe_image на отсутствующем пути
+        loop = asyncio.new_event_loop()
+        try:
+            res_desc = loop.run_until_complete(
+                vision.describe_image(["missing_img_test_123.jpg"], use_cache=False)
+            )
+            self.assertIsNone(res_desc)
+        finally:
+            loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()

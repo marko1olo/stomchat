@@ -325,5 +325,78 @@ class TestValidatorNewScanContext(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Бюрократический канцелярит", reason)
 
 
+    async def test_preventive_pediatric_guidance_approved_and_prompt_content(self):
+        """
+        Вопрос врача по профилактике, кривой Стефана и детской гигиене:
+        Валидатор обязан одобрять научно точные EBM-ответы и содержать профилактические директивы.
+        """
+        context_msgs = [
+            "Врач (сейчас): Сколько раз в день есть сладкое, когда, сколько вообще есть ребёнку?"
+        ]
+        draft = (
+            "Ключевые EBM-ориентиры по сахару и кариесогенезу:\n\n"
+            "1. Кривая Стефана: критический pH эмали — 5.5. Кислотная атака и деминерализация длятся 20–30 минут после КАЖДОГО приема сахара. "
+            "Опасен не разовый объем, а ЧАСТОТА приемов сахара: сладкое допустимо строго сразу после основного приема пищи как десерт.\n"
+            "2. Норма сахара (ВОЗ/AAPD): ребенку 5–6 лет — не более 19–24 г добавленного сахара в сутки (<5% суточной калорийности, ~4–5 чайных ложек). До 2 лет — 0 г.\n"
+            "3. После кислого (кола, соки, цитрусовые) чистить зубы щеткой запрещено 30 минут из-за риска механической абразии размягченной эмали."
+        )
+
+        captured_prompt = None
+
+        async def fake_gemini(prompt, ctx, timeout=None):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            resp = MagicMock()
+            resp.text = '{"ok": true, "reason": "Доказательные EBM-рекомендации по кривой Стефана и нормам сахара"}'
+            return resp, None
+
+        with patch.object(assistant, "generate_gemini_text_async", side_effect=fake_gemini):
+            ok, reason = await assistant.check_response_quality(
+                context_msgs=context_msgs,
+                draft_reply=draft,
+                invited=True
+            )
+
+        self.assertTrue(ok, f"Валидатор обязан одобрить EBM-ответ по профилактике: {reason}")
+        self.assertIn("Доказательные EBM-рекомендации", reason)
+        self.assertIsNotNone(captured_prompt)
+        self.assertIn("КРИВОЙ СТЕФАНА", captured_prompt)
+        self.assertIn("Spit don't rinse", captured_prompt)
+        self.assertIn("ПАМЯТКАМ ДЛЯ РОДИТЕЛЕЙ", captured_prompt)
+
+    async def test_kindergarten_lesson_plan_approved_and_not_rejected_for_format(self):
+        """
+        Урок гигиены на 20 минут в детском саду или памятка для родителей:
+        Если модель-валидатор возвращает отказ из-за 'слишком подробно / формат памятки / нет рентгена',
+        система снимает паранойю (overrule) и пропускает черновик.
+        """
+        context_msgs = [
+            "Врач (сейчас): Напиши сценарий урока гигиены в детском саду на 20 минут"
+        ]
+        draft = (
+            "Сценарий интерактивного урока гигиены в детском саду (20 минут):\n"
+            "0:00–3:00 — знакомство, сказка про микробов;\n"
+            "3:00–7:00 — демонстрация на модели челюсти 'Дракон';\n"
+            "7:00–14:00 — практическая отработка выметающих движений;\n"
+            "14:00–18:00 — игра 'Полезно — вредно';\n"
+            "18:00–20:00 — закрепление и вручение дипломов."
+        )
+
+        async def fake_gemini(prompt, ctx, timeout=None):
+            resp = MagicMock()
+            resp.text = '{"ok": false, "reason": "Слишком подробно, формат памятки, не указан зуб"}'
+            return resp, None
+
+        with patch.object(assistant, "generate_gemini_text_async", side_effect=fake_gemini):
+            ok, reason = await assistant.check_response_quality(
+                context_msgs=context_msgs,
+                draft_reply=draft,
+                invited=True
+            )
+
+        self.assertTrue(ok, "Ложный отказ за 'слишком подробно / формат памятки / не указан зуб' обязан быть оверрулен")
+        self.assertIn("chairside_concise_approved", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

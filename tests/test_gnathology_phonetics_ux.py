@@ -439,5 +439,179 @@ class TestCognitiveCoreGnathologyCompleteness(unittest.TestCase):
         self.assertIn("rugae palatinae", arch)
 
 
+
+class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
+    """Тестирование ответов на 6 реальных запросов врачей-стоматологов из живой базы."""
+
+    def test_query_1_sounds_and_words_for_vdo_summary(self):
+        """Запрос 1: «Напиши звуки и слова которые помогают определять высоту нижней трети лица»."""
+        q = "Напиши звуки и слова которые помогают определять высоту нижней трети лица"
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "speech_tests")
+        card = res["card"]
+
+        # Конкретные речевые тесты и слова
+        self.assertIn("«мама»", card)
+        self.assertIn("«шестьдесят шесть»", card)
+        self.assertIn("«миссисипи»", card)
+        self.assertIn("«Февраль»", card)
+        self.assertIn("«Валентин»", card)
+        self.assertIn("«И-и-и»", card)
+
+        # Что видит и слышит врач при гипер- и гипоокклюзии
+        self.assertIn("ГИПЕРОККЛЮЗИЯ", card)
+        self.assertIn("ГИПООККЛЮЗИЯ", card)
+        self.assertIn("m. mentalis", card)
+        self.assertIn("симптом наперстка", card)
+        self.assertIn("clattering", card)
+        self.assertIn("ангулярный хейлит", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("</code>", card)
+        self.assertIn("ПРОТОКОЛ РЕЧЕВЫХ ПРОБ VDO", card)
+
+    def test_query_2_lisping_etiology_full_reasons(self):
+        """Запрос 2: «Шепелявость при полном съемном протезировании причины»."""
+        q = "Шепелявость при полном съемном протезировании причины"
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "lisping")
+        card = res["card"]
+
+        # Все 4 причины
+        self.assertIn("rugae palatinae", card)
+        self.assertIn("1.5–2.0 мм", card)
+        self.assertIn("СУЖЕНИЕ ПЕРЕДНЕГО ОТДЕЛА", card)
+        self.assertIn("кончика языка", card)
+        self.assertIn("ЗАВЫШЕНИЕ ИЛИ ЗАНИЖЕНИЕ", card)
+        self.assertIn("ПРОТРУЗИЯ", card)
+        self.assertIn("НАКЛОН РЕЗЦОВ", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("ДИФДИАГНОСТИКА ШЕПЕЛЯВОСТИ", card)
+
+    def test_query_3_sound_s_how_to_verify(self):
+        """Запрос 3: «Звук с Как проверить»."""
+        q = "Звук с Как проверить"
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "s_test")
+        card = res["card"]
+
+        # Контрольные слова и счет
+        self.assertIn("«шестьдесят шесть»", card)
+        self.assertIn("«миссисипи»", card)
+        self.assertIn("«сосиска»", card)
+
+        # Разговорный зазор и стук зубов (завышение VDO)
+        self.assertIn("1–2 мм", card)
+        self.assertIn("СТУК ЗУБОВ", card)
+        self.assertIn("ВНОЛ ЗАВЫШЕНА", card)
+        self.assertIn("гиперокклюзия", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("ПРОБА «С»/«З»", card)
+
+    def test_query_4_sounds_fv_words_and_interpretation(self):
+        """Запрос 4: «Звуки ф и в какие слова сказать И как интерпритировать»."""
+        q = "Звуки ф и в какие слова сказать И как интерпритировать"
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "fv_test")
+        card = res["card"]
+
+        # Слова
+        self.assertIn("«Февраль»", card)
+        self.assertIn("«Валентин»", card)
+        self.assertIn("«Федор»", card)
+        self.assertIn("«Вера»", card)
+
+        # Линия Клейна и интерпретация контактов снаружи vs внутри
+        self.assertIn("Линия Клейна", card)
+        self.assertIn("сухо-влажная линия", card)
+        self.assertIn("Контакт снаружи", card)
+        self.assertIn("слишком длинные", card)
+        self.assertIn("протрузия", card)
+        self.assertIn("Контакт внутри", card)
+        self.assertIn("слишком короткие", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("ПРОБА «Ф»/«В»", card)
+
+    def test_query_5_sound_i_edentulous_verification(self):
+        """Запрос 5: «Звук и При полном отсутствии зубов что поможет нам проверить»."""
+        q = "Звук и При полном отсутствии зубов что поможет нам проверить"
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "i_test")
+        card = res["card"]
+
+        # Что помогает проверить звук «И» при ПСП:
+        self.assertIn("полном отсутствии зубов", card)
+        self.assertIn("Натяжение мимических мышц", card)
+        self.assertIn("m. risorius", card)
+        self.assertIn("m. zygomaticus", card)
+        self.assertIn("Стабильность и фиксация протеза", card)
+        self.assertIn("зрачковой линии", card)
+        self.assertIn("Положительная линия улыбки", card)
+        self.assertIn("Экспозиция резцов", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("ПРОБА «И»", card)
+
+    def test_query_6_optimal_vdo_criteria(self):
+        """Запрос 6: «Высота нижней трети оптимальна если...»."""
+        q = "Высота нижней трети оптимальна если..."
+        res = cgp.answer_gnathology_doctor_query(q)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["key"], "optimal_vdo")
+        card = res["card"]
+
+        # Все 5 объективных критериев
+        self.assertIn("Freeway Space", card)
+        self.assertIn("2.0–4.0 мм", card)
+        self.assertIn("БЕЗ напряжения мимических мышц", card)
+        self.assertIn("m. orbicularis oris", card)
+        self.assertIn("m. mentalis", card)
+        self.assertIn("«шестьдесят шесть»", card)
+        self.assertIn("БЕЗ стука зубов", card)
+        self.assertIn("сухо-влажной линии", card)
+        self.assertIn("Мышечно-суставной комфорт", card)
+
+        # 1-тап шаблон для МИС
+        self.assertIn("<code>", card)
+        self.assertIn("ВЕРИФИКАЦИЯ ВЫСОТЫ ПРИКУСА", card)
+
+    def test_unknown_query_returns_none(self):
+        """Неизвестный запрос возвращает None."""
+        self.assertIsNone(cgp.answer_gnathology_doctor_query(""))
+        self.assertIsNone(cgp.answer_gnathology_doctor_query("как готовить пиццу"))
+
+    def test_all_sub_cards_have_monospace_ehr_templates(self):
+        """Все специализированные суб-карточки содержат блок шаблона <code>...</code>."""
+        cards = [
+            cgp.format_vdr_vdo_protocol_card(),
+            cgp.format_fv_test_card(),
+            cgp.format_s_test_card(),
+            cgp.format_lisping_etiology_card(),
+            cgp.format_i_test_card(),
+            cgp.format_pound_line_card(),
+            cgp.format_functional_occlusion_card(),
+            cgp.format_occlusal_interferences_card(),
+            cgp.format_speech_tests_summary_card(),
+            cgp.format_optimal_vdo_criteria_card(),
+        ]
+        for card in cards:
+            self.assertIn("<code>", card)
+            self.assertIn("</code>", card)
+            self.assertEqual(card.count("<code>"), card.count("</code>"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -661,6 +661,103 @@ async def init_db():
                         )
                     )
                     logger.info("Default VDO clinical protocol seeded successfully.")
+
+                # Дополнительное сидирование протоколов по реальным врачебным запросам
+                curated_protocols = [
+                    (
+                        "Купирование гиперестезии дентина и боли от сладкого (Десенситизация и глубокое фторирование)",
+                        "Терапия",
+                        "Реакция зубов на сладкое, кислое, температурные и механические раздражители при оголении шеек зубов, клиновидных дефектах, эрозиях эмали и после препарирования.",
+                        "Необратимый пульпит (спонтанные ночные боли), некроз пульпы.",
+                        json.dumps([
+                            {"step": 1, "name": "Изоляция и антисептическая обработка", "description": "Изоляция операционного поля ватными валиками или коффердамом, бережное высушивание теплым воздухом."},
+                            {"step": 2, "name": "Механическая очистка поверхности", "description": "Очистка шеек зубов безабразивной пастой без фтора (Cleanic / Nupro) резиновой чашечкой на малых оборотах."},
+                            {"step": 3, "name": "Аппликация десенситайзера (Gluma / Shield Force Plus)", "description": "Нанесение десенситайзера аппликатором на 30–60 секунд для коагуляции белков в дентинных канальцах и блокирования гидродинамического тока жидкости."},
+                            {"step": 4, "name": "Глубокое фторирование эмали и дентина", "description": "Поочередное нанесение компонентов эмаль-герметизирующего ликвида (Tiefenfluorid) с образованием микрокристаллов CaF2 в глубине канальцев."},
+                            {"step": 5, "name": "Назначение домашней реминерализующей терапии", "description": "Зубная паста с фторидом 1450–5000 ppm (Duraphat / Sensodyne Pronamel) и реминерализующий гель (Tooth Mousse / GC MI Paste)."}
+                        ], ensure_ascii=False),
+                        "Десенситайзер Gluma Desensitizer / Tokuyama Shield Force Plus, эмаль-герметизирующий ликвид Tiefenfluorid, лак Duraphat 50 мг/мл (22600 ppm F-), Tooth Mousse.",
+                        "Гидродинамическая теория Бреннстрома: боль от сладкого вызвана осмотическим движением жидкости в дентинных трубочках. Устранение проницаемости канальцев снимает боль мгновенно.",
+                        "Martin Brännström / Клинические эксперты Docendo Discimus"
+                    ),
+                    (
+                        "Протокол фторпрофилактики и реминерализации эмали (Пасты с фтором 1450–5000 ppm / Duraphat)",
+                        "Терапия",
+                        "Профилактика кариеса, лечение начального кариеса в стадии белого пятна, гиперестезия эмали, ортодонтическое лечение, высокий кариесогенный риск.",
+                        "Эндемический флюороз тяжелой степени (III-IV степень по Дин).",
+                        json.dumps([
+                            {"step": 1, "name": "Оценка кариесогенного риска (CAMBRA)", "description": "Определение уровня гигиены (индекс OHI-S), наличия очагов деминерализации и диеты пациента."},
+                            {"step": 2, "name": "Профессиональная гигиена полости рта", "description": "Снятие минерализованных и мягких зубных отложений ультразвуком и Air-Flow с порошком на основе глицина/эритритола."},
+                            {"step": 3, "name": "Профессиональная аппликация фторлака", "description": "Нанесение лака Duraphat (22 600 ppm F-) тонким слоем на высушенные поверхности зубов. Не принимать пищу 2 часа, не чистить зубы жесткой щеткой в день процедуры."},
+                            {"step": 4, "name": "Подбор домашней пасты с фтором", "description": "Взрослым: паста с концентрацией фторида 1450 ppm (аминофторид или фторид натрия) дважды в день. При высоком риске: высокодозная паста 5000 ppm (Colgate Duraphat 5000) курсом 3–6 месяцев."},
+                            {"step": 5, "name": "Техника «Spit, don't rinse»", "description": "После чистки сплюнуть излишки пасты, но НЕ полоскать рот водой, сохраняя терапевтическую концентрацию фторид-ионов в слюне."}
+                        ], ensure_ascii=False),
+                        "Фторсодержащие зубные пасты 1450 ppm (Elmex Защита от кариеса, Curaprox Enzycal), Colgate Duraphat 5000 ppm, фторидный лак Duraphat 2.26%, Clinpro Tooth Creme.",
+                        "Фторид замещает гидроксильную группу в гидроксиапатите с образованием фторапатита, устойчивого к деминерализации при pH до 4.5 (критический pH гидроксиапатита 5.5).",
+                        "EAPD (European Academy of Paediatric Dentistry) / Эксперты Docendo Discimus"
+                    ),
+                    (
+                        "Фонетические пробы и коррекция окклюзии при шепелявости и присвистывании звука «С» (Silverman Closest Speaking Space)",
+                        "Гнатология",
+                        "Нарушения артикуляции и речи после фиксации коронок, виниров или протезов: шепелявость, присвистывание звуков «С», «З», стук зубов при разговоре, перегрузка ВНЧС.",
+                        "Острые воспалительные процессы в полости рта до заживления слизистой.",
+                        json.dumps([
+                            {"step": 1, "name": "Посадка и фонетическое тестирование", "description": "Пациент сидит строго вертикально без опоры на подголовник. Произнесение счета «шестьдесят шесть», слов «сисси», «миссисипи»."},
+                            {"step": 2, "name": "Оценка ближайшего разговорного расстояния по Сильверману", "description": "При звуке «С» резцы не должны контактировать! Норма Closest Speaking Space = 1.0–1.5 мм. Если зубы стучат — VDO завышена."},
+                            {"step": 3, "name": "Диагностика шепелявости (Lisping)", "description": "Если пациент шепелявит («шепелявость»): избыточная толщина небной поверхности верхних резцов или базиса протеза в зоне rugae palatinae стесняет кончик языка."},
+                            {"step": 4, "name": "Коррекция при шепелявости", "description": "Сошлифовывание небной поверхности реставраций с освобождением резонансного пространства для кончика языка."},
+                            {"step": 5, "name": "Коррекция при свисте (Whistling)", "description": "Если звук «С» свистит: воздушный зазор между резцами слишком узок или режущий край нижних резцов расположен чересчур вестибулярно. Пришлифовывание вестибулярного скоса нижних резцов под контролем фольги 8 мкм."}
+                        ], ensure_ascii=False),
+                        "Артикуляционная фольга Shimstock 8 мкм (Almore / Bausch), бумага 40 мкм, микрометр, алмазные финиры с белой/желтой полосой, керамические полиры.",
+                        "Фонетический тест Сильвермана (1953) — самый чувствительный маркер завышения высоты прикуса. Шепелявость — признак дефицита пространства для языка; присвистывание — избытка зазора.",
+                        "Meyer M. Silverman / Клинические эксперты Docendo Discimus"
+                    ),
+                    (
+                        "Диагностика и ультразвуковое удаление дентиклей (пульполитов / шаровидных кальцификатов) пульповой камеры",
+                        "Эндодонтия",
+                        "Кальцификат пульпы (свободный или пристеночный дентикль / «шарик в центре коронки»), блокирующий доступ к устьям корневых каналов при лечении пульпита или периодонтита.",
+                        "Глубокая резорбция дна пульповой камеры с риском перфорации фуркации.",
+                        json.dumps([
+                            {"step": 1, "name": "Визуализация и оценка рентгенограммы", "description": "Прицельный снимок: круглое плотное рентгеноконтрастное образование («шарик в центре коронки») в проекции пульповой камеры. Микроскоп 10–16х."},
+                            {"step": 2, "name": "Изоляция и создание прямого доступа", "description": "Коффердам. Формирование эндодонтического доступа с сохранением перицервикального дентина (PCD)."},
+                            {"step": 3, "name": "Ультразвуковая мобилизация контура", "description": "Специальная насадка (Start-X #2 или ProUltra #2) БЕЗ водяного охлаждения на мощности 2–3 обходит дентикль по периферии, разрушая точки прикрепления к стенкам камеры."},
+                            {"step": 4, "name": "Эвакуация дентикля", "description": "После появления подвижности дентикль аккуратно вымывается струей гипохлорита натрия или извлекается микропинцетом/эндозондом DG16."},
+                            {"step": 5, "name": "Финишная ревизия дна пульпарной камеры", "description": "Удаление остаточных кальцинатов 17% раствором ЭДТА с ультразвуковой активацией до четкой визуализации всех устьев каналов."}
+                        ], ensure_ascii=False),
+                        "Операционный микроскоп, ультразвуковой пьезоскейлер, насадки Start-X #2 / Start-X #3, эндодонтический зонд DG16, 17% раствор ЭДТА, 3% NaOCl.",
+                        "Категорически запрещено высверливать дентикль турбинным бором — высокий риск ятрогенной перфорации дна полости зуба (strip/bifurcation perforation). Только ультразвук под микроскопом!",
+                        "Yoshi Terauchi / Эксперты сообщества Docendo Discimus"
+                    ),
+                    (
+                        "Протокол оценки и создания феррул-эффекта (Ferrule Effect 1.5–2.0 мм) при восстановлении зубов под коронки",
+                        "Ортопедия",
+                        "Разрушение коронковой части зуба >50%, планирование восстановления культевой вкладкой или стекловолоконным штифтом с последующим покрытием коронкой.",
+                        "Поддесневое разрушение корня глубже 3 мм от гребня кости без возможности экструзии или удлинения.",
+                        json.dumps([
+                            {"step": 1, "name": "Удаление несостоятельных тканей и оценка феррула", "description": "Полная некрэктомия. Оценка высоты оставшегося дентина над уровнем десны пародонтологическим зондом UNC-15."},
+                            {"step": 2, "name": "Критерии надежного феррул-эффекта", "description": "Золотой стандарт: высота здоровых стенок дентина ≥ 1.5–2.0 мм циркулярно (минимум на 75% периметра зуба), толщина стенок ≥ 1.0 мм."},
+                            {"step": 3, "name": "Тактика при дефиците феррула", "description": "Если феррул < 1.5 мм: глубокая элевация края (DME) композитом при интактной биологической ширине ИЛИ хирургическое удлинение коронки (остеоэктомия на 3 мм от будущего края реставрации) ИЛИ ортодонтическая экструзия корня."},
+                            {"step": 4, "name": "Восстановление культи (Build-up)", "description": "Адгезивный билд-ап композитом двойного отверждения (LuxaCore) со стекловолоконным штифтом или литая культевая вкладка."},
+                            {"step": 5, "name": "Препарирование под коронку с охватом феррула", "description": "Край будущей коронки ОБЯЗАН перекрывать границу «культя-корень» минимум на 1.5–2.0 мм здорового дентина (циркулярный эффект обруча бочки — ferrule collar)."}
+                        ], ensure_ascii=False),
+                        "Пародонтологический зонд UNC-15, бинокуляры, композит LuxaCore Z / Core-It Dual, стекловолоконные штифты (RelyX Fiber Post), алмазные боры с закругленным концом.",
+                        "Феррул-эффект обеспечивает устойчивость зуба к изгибающим нагрузкам. Штифт лишь удерживает культю, но НЕ укрепляет корень; только круговой феррул 2 мм предотвращает перелом корня!",
+                        "Urs Belser / Pascal Magne / Эксперты сообщества Docendo Discimus"
+                    )
+                ]
+                for p_title, p_cat, p_ind, p_contra, p_steps, p_mat, p_nuances, p_doc in curated_protocols:
+                    existing = db.execute("SELECT 1 FROM clinical_protocols WHERE LOWER(title) = LOWER(?) LIMIT 1", (p_title,)).fetchone()
+                    if not existing:
+                        db.execute(
+                            """
+                            INSERT INTO clinical_protocols (
+                                title, category, indication, contraindications, steps_json,
+                                materials, key_nuances, author_doctor, source_msg_id, created_at, updated_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """,
+                            (p_title, p_cat, p_ind, p_contra, p_steps, p_mat, p_nuances, p_doc)
+                        )
                 try:
                     fts_c = db.execute("SELECT count(*) FROM clinical_protocols_fts").fetchone()
                     proto_c = db.execute("SELECT count(*) FROM clinical_protocols").fetchone()
@@ -1054,6 +1151,67 @@ async def update_media_description(msg_id, description, short_caption=None):
                 )
 
     return await _run_db(operation)
+
+
+def validate_media_file_safe(file_path: Optional[str], min_bytes: int = 100) -> bool:
+    """
+    Безопасная валидация медиа-файла:
+    Проверяет существование, доступность на чтение и ненулевой размер.
+    Предотвращает падения и сбои при битых/отсутствующих локальных путях.
+    """
+    if not file_path or not isinstance(file_path, str):
+        return False
+    clean_p = file_path.strip().strip("'\"")
+    if not clean_p:
+        return False
+    try:
+        if not os.path.exists(clean_p):
+            return False
+        if not os.path.isfile(clean_p):
+            return False
+        size = os.path.getsize(clean_p)
+        return size >= min_bytes
+    except (OSError, PermissionError) as err:
+        logger.debug("validate_media_file_safe failed for %s: %s", clean_p, err)
+        return False
+
+
+async def sanitize_broken_media_record(msg_id: int) -> bool:
+    """
+    Очищает битую/несуществующую медиа-ссылку в базе данных для указанного сообщения,
+    предотвращая повторные ошибки и сбои декодеров.
+    """
+    def operation():
+        with _connection() as db:
+            cur = db.execute(
+                "UPDATE messages SET media_remote_url = NULL, has_media = 0 WHERE msg_id = ?",
+                (msg_id,)
+            )
+            return cur.rowcount > 0
+    try:
+        return await _run_db(operation)
+    except Exception as exc:
+        logger.warning("sanitize_broken_media_record msg_id=%s failed: %s", msg_id, exc)
+        return False
+
+
+async def safe_get_media_url(msg_id: int) -> Optional[str]:
+    """
+    Безопасно возвращает media_remote_url сообщения.
+    Если указан локальный путь и файл отсутствует/поврежден — автоматически очищает запись и возвращает None.
+    """
+    def operation():
+        with _connection() as db:
+            row = db.execute("SELECT media_remote_url FROM messages WHERE msg_id = ?", (msg_id,)).fetchone()
+            return row[0] if row else None
+    url = await _run_db(operation)
+    if not url:
+        return None
+    if not url.startswith("http://") and not url.startswith("https://"):
+        if not validate_media_file_safe(url):
+            await sanitize_broken_media_record(msg_id)
+            return None
+    return url
 
 
 async def update_media_remote_url(msg_id, url):
@@ -2383,6 +2541,7 @@ _CLINICAL_PROTOCOL_SYNONYMS = {
     "гипохлорит": ["naocl", "ирригац", "апекс", "гипохлоритовая авария"],
     "emax": ["e.max", "дисиликат", "литий-дисиликат", "фиксаци", "цементировк", "цемент", "бондинг"],
     "e.max": ["emax", "дисиликат", "литий-дисиликат", "фиксаци", "цементировк"],
+    "фиксация e.max": ["дисиликат", "литий-дисиликат", "variolink", "плавиковая кислота", "силан", "адгезивная фиксация керамики", "e.max", "emax"],
     "анестезия": ["анестетик", "артикаин", "проводников", "инфильтрацион", "убистезин", "лидокаин", "мепивакаин"],
     "анестетик": ["анестезия", "артикаин", "лидокаин", "мепивакаин"],
     "артикаин": ["анестезия", "анестетик", "ультракаин", "септонест", "убистезин"],
@@ -2406,6 +2565,15 @@ _CLINICAL_PROTOCOL_SYNONYMS = {
     "депрограмматор": ["vdo", "высота прикуса", "койс", "jig", "окклюзия", "миорелаксация"],
     "коффердам": ["раббердам", "рабердам", "кламп", "изоляция"],
     "ирригация": ["naocl", "гипохлорит", "эдта", "edta", "активация", "pui"],
+    "сладкое": ["гиперестезия", "десенситайзер", "чувствительность", "фторлак", "кариес", "реминерализация", "gluma", "duraphat", "болит от сладкого", "реакция на сладкое"],
+    "паста с фтором": ["фтор", "фторид", "1450 ppm", "5000 ppm", "duraphat", "clinpro", "реминерализац", "фторпрофилактика", "фторлак"],
+    "шепелявость": ["звук с", "сильверман", "фонетическ", "окклюзия", "vdo", "высота прикуса", "режущий край", "шепелявит", "присвистывание"],
+    "звук с": ["сильверман", "шепелявость", "closest speaking space", "фонетическая проба", "звук «с»", "vdo", "высота прикуса"],
+    "звук": ["фонетическ", "сильверман", "звук с", "шепелявость"],
+    "шарик в центре коронки": ["дентикл", "пульполит", "кальцификат", "петрификат", "пульповой камеры", "шаровидный кальцификат", "пульпарный камень"],
+    "шарик": ["дентикл", "пульполит", "кальцификат", "петрификат"],
+    "феррул": ["ferrule", "ферул", "феррул-эффект", "биологическая ширина", "культевая вкладка", "удлинение коронки", "dme", "сохранение стенок"],
+    "феррул-эффект": ["ferrule", "феррул", "культевая вкладка", "dme"],
 }
 
 _RU_STEM_CUTS = (
@@ -2492,10 +2660,37 @@ async def get_clinical_protocols(category: Optional[str] = None, search: Optiona
                     else:
                         query += " AND (" + " OR ".join(clauses) + ")"
 
+                    intent_boosters = []
+                    if "сладк" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%сладк%' THEN -3")
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%гиперестези%' THEN -2")
+                    if "фтор" in clean_search or "паста" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%паст%' AND LOWER(title) LIKE '%фтор%' THEN -3")
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%фторпрофилактик%' OR LOWER(title) LIKE '%duraphat%' THEN -2")
+                    if "шепеляв" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%шепеляв%' THEN -3")
+                    if "звук" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%звук%' AND LOWER(title) NOT LIKE '%ультразвук%' THEN -3")
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%сильверман%' OR LOWER(title) LIKE '%фонетическ%' THEN -2")
+                    if "шарик" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%дентикл%' OR LOWER(title) LIKE '%шарик%' OR LOWER(title) LIKE '%пульполит%' THEN -3")
+                    if "феррул" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%феррул%' OR LOWER(title) LIKE '%ferrule%' THEN -3")
+                    if "e.max" in clean_search or "emax" in clean_search:
+                        intent_boosters.append("WHEN (LOWER(title) LIKE '%фиксац%' OR LOWER(title) LIKE '%адгезив%') AND (LOWER(title) LIKE '%e.max%' OR LOWER(title) LIKE '%дисиликат%') AND LOWER(title) NOT LIKE '%демонтаж%' THEN -4")
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%дисиликат%' OR LOWER(title) LIKE '%e.max%' THEN -3")
+                    if "vdo" in clean_search or "высота прикуса" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%vdo%' OR LOWER(title) LIKE '%высота прикуса%' THEN -3")
+                    if "сломан" in clean_search or "отломок" in clean_search or "байпас" in clean_search:
+                        intent_boosters.append("WHEN LOWER(title) LIKE '%сломан%' OR LOWER(title) LIKE '%отломок%' OR LOWER(title) LIKE '%байпас%' THEN -3")
+
+                    boost_sql = "\n                        ".join(intent_boosters) + "\n                        " if intent_boosters else ""
+
                     title_cases = " OR ".join(["LOWER(title) LIKE ?"] * len(expanded_terms))
                     mat_cases = " OR ".join(["LOWER(materials) LIKE ?"] * len(expanded_terms))
                     query += (
                         f" ORDER BY CASE "
+                        f"{boost_sql}"
                         f"WHEN LOWER(title) LIKE ? THEN 0 "
                         f"WHEN {title_cases} THEN 1 "
                         f"WHEN LOWER(materials) LIKE ? THEN 2 "
