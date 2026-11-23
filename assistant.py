@@ -11903,11 +11903,19 @@ def extract_pm_case_entities(prior_history: list, current_text: str = "") -> str
 
     entities = []
 
-    # 1. Зубы по FDI (двузначная нотация 11-48)
-    raw_teeth = re.findall(r'\b([1-4][1-8])\b', full_text)
+    # 1. Зубы по FDI (двузначная нотация 11-48 и с точкой 1.1-4.8)
+    # Исключаем физические единицы измерений (1.5 мм, 1.7 мл, 1.8 мл), чтобы не путать их с зубами
+    cleaned_teeth_text = re.sub(r'\b[1-4]\.[1-8]\s*(?:мм|см|мл|мг|%|°|град|г)\b', ' ', full_text, flags=re.IGNORECASE)
+    cleaned_teeth_text = re.sub(r'(?:около|~|до|>|<|≥|≤)\s*[1-4]\.[1-8]\b', ' ', cleaned_teeth_text, flags=re.IGNORECASE)
+
+    raw_undotted = re.findall(r'\b([1-4][1-8])\b', cleaned_teeth_text)
+    raw_dotted = re.findall(r'\b([1-4])\.([1-8])\b', cleaned_teeth_text)
+    raw_teeth = list(raw_undotted) + [f"{m[0]}{m[1]}" for m in raw_dotted]
+
     valid_teeth = []
     for t in raw_teeth:
-        if re.search(rf'(?:зуб[а-я]*|област[а-я]*|проекци[а-я]*|корень|корн[а-я]*|канал[а-я]*|дефект|коронк[а-я]*|культ[а-я]*)?\s*{t}', full_text, re.IGNORECASE):
+        t_pattern = rf'(?:{t[0]}\.{t[1]}|{t})'
+        if re.search(rf'(?:зуб[а-я]*|област[а-я]*|проекци[а-я]*|корень|корн[а-я]*|канал[а-я]*|дефект|коронк[а-я]*|культ[а-я]*)\s*(?:[,\s\d\./]+)?{t_pattern}', full_text, re.IGNORECASE) or re.search(rf'{t_pattern}\s*(?:зуб[а-я]*)', full_text, re.IGNORECASE) or t in raw_undotted:
             valid_teeth.append(t)
     if valid_teeth:
         unique_teeth = sorted(list(set(valid_teeth)))
@@ -11996,8 +12004,8 @@ def extract_pm_case_entities(prior_history: list, current_text: str = "") -> str
         "сканмаркер": "Сканмаркер (Scanbody)",
         "сканбоди": "Сканмаркер (Scanbody)",
         "формирователь": "Формирователь десны",
-        "1,2": "Шестигранник Hex 1.2 мм (сравнение с Neo)",
-        "1.2": "Шестигранник Hex 1.2 мм (сравнение с Neo)",
+        "hex": "Шестигранник Hex 1.2 мм (сравнение с Neo)",
+        "шестигранник": "Шестигранник Hex 1.2 мм (сравнение с Neo)",
         "винтов": "Винтовая фиксация",
     }
     for kw, label in proto_map.items():
@@ -13053,7 +13061,17 @@ async def handle_private_message(bot_client, event):
             detected = detect_user_intent(text)
 
             # Если детерминированный fast-path не сработал, запускаем семантический LLM-триаж
-            if not detected and len((text or "").strip()) >= 5:
+            # ТОЛЬКО если в тексте присутствуют маркеры потенциальных сервисных команд.
+            # Очевидные клинические вопросы и консультации направляются сразу в экспертный консилиум.
+            service_triggers = (
+                "найди", "поищи", "гугл", "google", "pubmed", "пабмед", "стать",
+                "посчитай", "рассчитай", "калькулятор", "дозировк", "карпул",
+                "квиз", "тест", "викторин", "симулятор", "кейс",
+                "меню", "закладк", "стиль"
+            )
+            text_l = (text or "").lower()
+            might_be_service = any(trig in text_l for trig in service_triggers)
+            if not detected and len((text or "").strip()) >= 5 and might_be_service:
                 try:
                     sem_res = await classify_pm_intent_semantic_async(text)
                     sem_intent = sem_res.get("intent")
@@ -14571,10 +14589,16 @@ async def handle_private_message(bot_client, event):
 
         # Анализ роли реплики врача в диалоге (ответ на вопрос бота / follow-up / новый вопрос)
         dialogue_turn, last_bot_context = classify_pm_dialogue_turn(text, prior_history, now_dt)
-        case_entities = extract_pm_case_entities(prior_history, text)
-        if dialogue_turn in ("DIALOGUE_ANSWER", "DIALOGUE_FOLLOWUP") and last_bot_context:
-            last_bot_snippet = last_bot_context[:300]
-            search_context_text = f"{last_bot_snippet} {case_entities} {search_context_text}".strip()
+        # Сущности кейса извлекаются ТОЛЬКО из текущей активной сессии (recent_session_history),
+        # и ТОЛЬКО если диалог продолжает активный кейс (DIALOGUE_ANSWER / DIALOGUE_FOLLOWUP).
+        # Для нового вопроса/снимка (STANDALONE_QUERY) контекст прошлых закрытых сессий НЕ переносится!
+        if dialogue_turn in ("DIALOGUE_ANSWER", "DIALOGUE_FOLLOWUP") and recent_session_history:
+            case_entities = extract_pm_case_entities(recent_session_history, text)
+            if last_bot_context:
+                last_bot_snippet = last_bot_context[:300]
+                search_context_text = f"{last_bot_snippet} {case_entities} {search_context_text}".strip()
+        else:
+            case_entities = "" 
 
         context_msgs = format_pm_history_timeline(prior_history, now_dt=now_dt)
 
@@ -15019,7 +15043,7 @@ async def handle_private_message(bot_client, event):
 {PM_FEW_SHOT_CONTRAST_BLOCK}
 ПРАВИЛА РАБОТЫ С ДИАЛОГОМ И ИСТОРИЕЙ:
 1. НЕПРЕРЫВНОСТЬ АКТИВНОГО ДИАЛОГА: Если снимок прислан в рамках продолжающегося обсуждения клинического случая, ты ОБЯЗАН сохранять преемственность контекста диалога (зуб, канал, ранее обсуждавшиеся детали).
-2. ИЗОЛЯЦИЯ СТАРЫХ ЗАКРЫТЫХ ТЕМ: Сообщения из истории с маркерами давности (более 6 часов / более дня / более недели назад) относятся к закрытым прошлым сессиям. Не переноси старые диагнозы и чужие зубы в текущий разбор.
+2. ИЗОЛЯЦИЯ СТАРЫХ ЗАКРЫТЫХ ТЕМ: Сообщения из истории с маркерами давности (более 6 часов / более дня / более недели назад) относятся к закрытым прошлым сессиям. Не переноси старые диагнозы и чужие зубы в текущий разбор. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО открывать ответ фразами-оправданиями или сравнениями со старыми темами («Этот кадр относится к..., а не к ранее обсуждавшемуся 27...»). Если вопрос или снимок новый — отвечай СРАЗУ и ТОЛЬКО по существу текущего изображения или текущего вопроса врача!
 1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ПАЦИЕНТСКИХ ДИСКЛЕЙМЕРОВ:
    - Полностью исключи любые фразы вида: «обратитесь к врачу», «необходим очный осмотр», «я всего лишь ИИ», «диагноз ставит только очный врач».
    - [MED-06 SOS ИСКЛЮЧЕНИЕ] Если в тексте/снимке признаки: флегмоны, ангины Людвига, отёка дна полости рта, острого асфиксирующего отёка, профузного кровотечения, анафилаксии — ОБЯЗАТЕЛЬНО первой строкой: «🚨 ВЫЗОВИТЕ СКОРУЮ ПОМОЩЬ 112 НЕМЕДЛЕННО» и опиши неотложную тактику. В SOS-ситуации приоритет безопасности жизни > тональных правил.

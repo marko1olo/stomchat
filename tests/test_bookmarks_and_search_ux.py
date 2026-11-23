@@ -23,10 +23,11 @@ from assistant import clean_html_formatting
 
 
 @pytest.fixture(autouse=True)
-async def setup_db_environment():
-    """Обеспечивает подключение к боевой базе stomat_bot.db и наличие всех таблиц."""
+async def setup_db_environment(tmp_path):
+    """Изолированная тестовая база данных для предотвращения загрязнения боевой stomat_bot.db."""
     orig_db = getattr(config, "DB_PATH", "stomat_bot.db")
-    config.DB_PATH = "stomat_bot.db"
+    test_db = str(tmp_path / "test_bookmarks_search.db")
+    config.DB_PATH = test_db
     await database.init_db()
     yield
     config.DB_PATH = orig_db
