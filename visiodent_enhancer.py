@@ -401,41 +401,13 @@ async def analyze_xray_context_and_doubt_async(
     denticle_kws = ["дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат", "шарик", "шаровидн", "камень в пульп", "интрапульпарн", "облитерац"]
     is_denticle = any(k in combined_lower for k in denticle_kws)
 
-    # Приоритет определения целевого зуба:
-    # 1. Явный FDI в реплике врача (напр. "зуб 47", "4.7")
-    user_tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', user_t)
-    target_tooth = None
-    if user_tooth_match:
-        target_tooth = user_tooth_match.group(1).replace(".", "")
+    # Определение целевого зуба:
+    # 1. Приоритетно берем из мультимодальных метаданных Vision (Gemini Vision нативно извлекает FDI зуб)
+    target_tooth = meta.get("target_tooth")
+    if target_tooth:
+        target_tooth = str(target_tooth).replace(".", "")
     else:
-        # 2. Разговорная форма в реплике врача ("7го зуба", "7-го", "семерка")
-        colloquial_tooth_m = re.search(r'(?<!\d)([1-8])(?:-?го|-й|-я|-ом|-е)?\s*зуб|семерк|восьмерк|шестерк|пятерк', user_t, re.IGNORECASE)
-        if colloquial_tooth_m:
-            c_digit = None
-            if colloquial_tooth_m.group(1):
-                c_digit = colloquial_tooth_m.group(1)
-            else:
-                c_word = colloquial_tooth_m.group(0).lower()
-                num_map = {"пятерк": "5", "шестерк": "6", "семерк": "7", "восьмерк": "8"}
-                for k_w, d_val in num_map.items():
-                    if k_w in c_word:
-                        c_digit = d_val
-                        break
-            if c_digit:
-                # Ищем квадрант в контексте снимка (напр., 4.7 или 47 в описании)
-                quad_m = re.search(r'\b([1-4])\.' + c_digit + r'\b|\b([1-4])' + c_digit + r'\b', combined_lower)
-                if quad_m:
-                    q_num = quad_m.group(1) or quad_m.group(2)
-                    target_tooth = f"{q_num}{c_digit}"
-                else:
-                    target_tooth = c_digit
-
-    # 3. Если в тексте врача зуб не назван, берем из метаданных Vision
-    if not target_tooth:
-        target_tooth = meta.get("target_tooth")
-
-    # 4. Если в метаданных нет, ищем любой FDI в описании снимка
-    if not target_tooth:
+        # 2. Если в метаданных не указан, извлекаем стандартную FDI-нотацию (11-48) из ввода врача или описания снимка
         tooth_match = re.search(r'(?<!\d)([1-4]\.?[1-8])(?!\d)', combined_lower)
         target_tooth = tooth_match.group(1).replace(".", "") if tooth_match else None
 

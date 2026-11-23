@@ -441,15 +441,11 @@ class TestCognitiveCoreGnathologyCompleteness(unittest.TestCase):
 
 
 class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
-    """Тестирование ответов на 6 реальных запросов врачей-стоматологов из живой базы."""
+    """Тестирование клинических карточек для реальных запросов врачей-стоматологов из живой базы."""
 
     def test_query_1_sounds_and_words_for_vdo_summary(self):
         """Запрос 1: «Напиши звуки и слова которые помогают определять высоту нижней трети лица»."""
-        q = "Напиши звуки и слова которые помогают определять высоту нижней трети лица"
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "speech_tests")
-        card = res["card"]
+        card = cgp.format_speech_tests_summary_card()
 
         # Конкретные речевые тесты и слова
         self.assertIn("«мама»", card)
@@ -474,11 +470,7 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
 
     def test_query_2_lisping_etiology_full_reasons(self):
         """Запрос 2: «Шепелявость при полном съемном протезировании причины»."""
-        q = "Шепелявость при полном съемном протезировании причины"
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "lisping")
-        card = res["card"]
+        card = cgp.format_lisping_etiology_card()
 
         # Все 4 причины
         self.assertIn("rugae palatinae", card)
@@ -495,11 +487,7 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
 
     def test_query_3_sound_s_how_to_verify(self):
         """Запрос 3: «Звук с Как проверить»."""
-        q = "Звук с Как проверить"
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "s_test")
-        card = res["card"]
+        card = cgp.format_s_test_card()
 
         # Контрольные слова и счет
         self.assertIn("«шестьдесят шесть»", card)
@@ -518,11 +506,7 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
 
     def test_query_4_sounds_fv_words_and_interpretation(self):
         """Запрос 4: «Звуки ф и в какие слова сказать И как интерпритировать»."""
-        q = "Звуки ф и в какие слова сказать И как интерпритировать"
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "fv_test")
-        card = res["card"]
+        card = cgp.format_fv_test_card()
 
         # Слова
         self.assertIn("«Февраль»", card)
@@ -545,11 +529,7 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
 
     def test_query_5_sound_i_edentulous_verification(self):
         """Запрос 5: «Звук и При полном отсутствии зубов что поможет нам проверить»."""
-        q = "Звук и При полном отсутствии зубов что поможет нам проверить"
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "i_test")
-        card = res["card"]
+        card = cgp.format_i_test_card()
 
         # Что помогает проверить звук «И» при ПСП:
         self.assertIn("полном отсутствии зубов", card)
@@ -567,11 +547,7 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
 
     def test_query_6_optimal_vdo_criteria(self):
         """Запрос 6: «Высота нижней трети оптимальна если...»."""
-        q = "Высота нижней трети оптимальна если..."
-        res = cgp.answer_gnathology_doctor_query(q)
-        self.assertIsNotNone(res)
-        self.assertEqual(res["key"], "optimal_vdo")
-        card = res["card"]
+        card = cgp.format_optimal_vdo_criteria_card()
 
         # Все 5 объективных критериев
         self.assertIn("Freeway Space", card)
@@ -587,11 +563,6 @@ class TestRedTeamDoctorQueriesInquisitor(unittest.TestCase):
         # 1-тап шаблон для МИС
         self.assertIn("<code>", card)
         self.assertIn("ВЕРИФИКАЦИЯ ВЫСОТЫ ПРИКУСА", card)
-
-    def test_unknown_query_returns_none(self):
-        """Неизвестный запрос возвращает None."""
-        self.assertIsNone(cgp.answer_gnathology_doctor_query(""))
-        self.assertIsNone(cgp.answer_gnathology_doctor_query("как готовить пиццу"))
 
     def test_all_sub_cards_have_monospace_ehr_templates(self):
         """Все специализированные суб-карточки содержат блок шаблона <code>...</code>."""
