@@ -284,19 +284,6 @@ def extract_vision_metadata(raw_text: str) -> dict:
                 parsed["target_tooth"] = int(tooth_m.group(1).replace(".", ""))
             except Exception:
                 parsed["target_tooth"] = None
-        else:
-            colloq_m = re.search(r'(?<!\d)([1-8])(?:-?го|-й|-я|-ом|-е)?\s*зуб|семерк|восьмерк|шестерк|пятерк', sec_text, re.IGNORECASE)
-            if colloq_m:
-                c_d = colloq_m.group(1)
-                if not c_d:
-                    c_w = colloq_m.group(0).lower()
-                    c_d = {"пятерк": "5", "шестерк": "6", "семерк": "7", "восьмерк": "8"}.get(c_w[:6])
-                if c_d:
-                    q_m = re.search(r'\b([1-4])\.' + c_d + r'\b|\b([1-4])' + c_d + r'\b', raw_text)
-                    if q_m:
-                        parsed["target_tooth"] = int(f"{q_m.group(1) or q_m.group(2)}{c_d}")
-                    else:
-                        parsed["target_tooth"] = int(c_d)
 
         denticle_keywords = [
             "дентикл", "петрификат", "пульполит", "кальцификат", "кальцинат",

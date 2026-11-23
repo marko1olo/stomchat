@@ -1834,6 +1834,14 @@ def _main():
     # ротирует родитель, а два процесса, ротирующих один файл, на Windows рвут
     # ротацию — открытый файл не переименовать. Секретов в этих строках нет,
     # gemini_client печатает только последние 5 символов ключа.
+    try:
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     logging.basicConfig(
         stream=sys.stderr,
         level=logging.INFO,
