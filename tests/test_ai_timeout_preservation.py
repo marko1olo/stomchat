@@ -1,5 +1,5 @@
 """
-Тесты сохранения щедрых таймаутов для рассуждающих моделей (gpt-6.1-sol / AgentRouter).
+Тесты сохранения щедрых таймаутов для рассуждающих моделей (gpt-6.2-sol / AgentRouter).
 
 Проверяет:
 1. compute_call_timeout для agentrouter при бюджетах 300с и 480с возвращает >= 280с.
@@ -22,14 +22,14 @@ import assistant
 
 
 def test_agentrouter_compute_call_timeout_budget_300():
-    """При бюджете 300с gpt-6.1-sol получает >= 280с (не режется до 180с или 90с)."""
+    """При бюджете 300с gpt-6.2-sol получает >= 280с (не режется до 180с или 90с)."""
     active_cascade = [
-        ("openai/gpt-6.1-sol", "agentrouter"),
+        ("openai/gpt-6.2-sol", "agentrouter"),
         ("llama-3.3-70b-versatile", "groq"),
     ]
     t = gemini_client.compute_call_timeout(
         provider="agentrouter",
-        model_name="openai/gpt-6.1-sol",
+        model_name="openai/gpt-6.2-sol",
         model_index=0,
         active_cascade=active_cascade,
         remaining_time=300.0,
@@ -47,14 +47,14 @@ def test_agentrouter_compute_call_timeout_budget_300():
 
 
 def test_agentrouter_compute_call_timeout_budget_480():
-    """При бюджете 480с gpt-6.1-sol получает щедрый таймаут >= 280с (до 465-480с)."""
+    """При бюджете 480с gpt-6.2-sol получает щедрый таймаут >= 280с (до 465-480с)."""
     active_cascade = [
-        ("openai/gpt-6.1-sol", "agentrouter"),
+        ("openai/gpt-6.2-sol", "agentrouter"),
         ("llama-3.3-70b-versatile", "groq"),
     ]
     t = gemini_client.compute_call_timeout(
         provider="agentrouter",
-        model_name="openai/gpt-6.1-sol",
+        model_name="openai/gpt-6.2-sol",
         model_index=0,
         active_cascade=active_cascade,
         remaining_time=480.0,
@@ -74,12 +74,12 @@ def test_agentrouter_compute_call_timeout_budget_480():
 def test_agentrouter_attempts_division_eliminated():
     """Наличие нескольких ключей в пуле AgentRouter не делит таймаут первой попытки пополам."""
     active_cascade = [
-        ("openai/gpt-6.1-sol", "agentrouter"),
+        ("openai/gpt-6.2-sol", "agentrouter"),
         ("llama-3.3-70b-versatile", "groq"),
     ]
     t_1key = gemini_client.compute_call_timeout(
         provider="agentrouter",
-        model_name="openai/gpt-6.1-sol",
+        model_name="openai/gpt-6.2-sol",
         model_index=0,
         active_cascade=active_cascade,
         remaining_time=300.0,
@@ -94,7 +94,7 @@ def test_agentrouter_attempts_division_eliminated():
     )
     t_3keys = gemini_client.compute_call_timeout(
         provider="agentrouter",
-        model_name="openai/gpt-6.1-sol",
+        model_name="openai/gpt-6.2-sol",
         model_index=0,
         active_cascade=active_cascade,
         remaining_time=300.0,
@@ -160,14 +160,14 @@ def test_assistant_clinical_timeouts():
 
 
 def test_agentrouter_compute_call_timeout_budget_650():
-    """При максимальном бюджете 650с gpt-6.1-sol сохраняет щедрый таймаут >= 600с (до 650с)."""
+    """При максимальном бюджете 650с gpt-6.2-sol сохраняет щедрый таймаут >= 600с (до 650с)."""
     active_cascade = [
-        ("openai/gpt-6.1-sol", "agentrouter"),
+        ("openai/gpt-6.2-sol", "agentrouter"),
         ("llama-3.3-70b-versatile", "groq"),
     ]
     t = gemini_client.compute_call_timeout(
         provider="agentrouter",
-        model_name="openai/gpt-6.1-sol",
+        model_name="openai/gpt-6.2-sol",
         model_index=0,
         active_cascade=active_cascade,
         remaining_time=650.0,

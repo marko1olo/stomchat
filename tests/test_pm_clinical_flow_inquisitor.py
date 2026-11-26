@@ -701,7 +701,7 @@ class TestPMProdRegressionFixes(unittest.IsolatedAsyncioTestCase):
     async def test_pm_validated_flagship_skips_redundant_supplement(self):
         """Если основной ответ флагмана прошёл check_response_quality, _async_pm_supplement_job не запускается."""
         ev = self._make_pm_event(555006, "Пульпит 3.6, алгоритм витальной ампутации?")
-        resp = MagicMock(text="<b>Протокол пульпотомии 3.6:</b> NaOCl 3%, Biodentine.", model="gpt-6.1-sol")
+        resp = MagicMock(text="<b>Протокол пульпотомии 3.6:</b> NaOCl 3%, Biodentine.", model="gpt-6.2-sol")
         mock_client = AsyncMock()
         action_cm = MagicMock()
         action_cm.__aenter__ = AsyncMock(return_value=None)

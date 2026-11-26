@@ -193,7 +193,7 @@ class TestAudit20hDeepRepair(unittest.IsolatedAsyncioTestCase):
         self.assertIn('provider == "groq" and model_name == "openai/gpt-oss-120b" and len(prompt) > 24000', gemini_code)
 
     def test_pm_supplement_timeout_capped(self):
-        """Verify generate_pm_supplement provides generous thinking time for gpt-6.1-sol without choking."""
+        """Verify generate_pm_supplement provides generous thinking time for gpt-6.2-sol without choking."""
         with open("gemini_client.py", "r", encoding="utf-8") as f:
             gemini_code = f.read()
 

@@ -430,9 +430,9 @@ check("боевые файлы не тронуты",
       and not os.path.exists(os.path.join(REPO_DIR, "banned_models.json.tmp")),
       f"{gc.BANNED_MODELS_FILE} / {runtime_guard.SUMMARY_STATUS_PATH}")
 
-print("\n[9] AgentRouter (gpt-6.1-sol) и Response Validator: новая архитектура")
+print("\n[9] AgentRouter (gpt-6.2-sol) и Response Validator: новая архитектура")
 config.AGENTROUTER_KEYS = ["ar-01-secretpart", "ar-02-secretpart"]
-ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.2-sol") or "gpt-6.2-sol"
 
 # 1. Валидатор ответов и триаж: ТОЛЬКО быстрые модели, AgentRouter и Gemini 3.8 строго запрещены
 val_cascade = gc.cascade_for_context({"kind": "response_validator"})
@@ -450,7 +450,7 @@ check("«llama_triage» НЕ содержит agentrouter", not any(p == "agentr
 check(f"«llama_triage» НЕ содержит {ar_model}", not any(m == ar_model for m, _ in triage_cascade))
 check("«llama_triage» НЕ содержит gemini-3.8-flash", not any(m == "gemini-3.8-flash" for m, _ in triage_cascade))
 
-# 2. Клинические ответы врачам (чат, ЛС, медиа): gpt-6.1-sol идёт ПЕРВЫМ
+# 2. Клинические ответы врачам (чат, ЛС, медиа): gpt-6.2-sol идёт ПЕРВЫМ
 chat_cascade = gc.cascade_for_context({"kind": "pm_chat", "thinking_level": "HIGH"})
 check(f"«pm_chat» начинает с {ar_model} (agentrouter)", chat_cascade[0] == (ar_model, "agentrouter"))
 check("«pm_chat» 2-я модель openai/gpt-oss-120b", chat_cascade[1] == ("openai/gpt-oss-120b", "groq"))
@@ -473,7 +473,7 @@ check("«assistant_media» 7-я модель gemini-3.5-flash-lite (в самы�
 prompt_media_cascade = gc.cascade_for_context({"kind": "pm_chat"}, prompt="[МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: снимок зуба 3.6]")
 check(f"Авто-детект медиа начинает с {ar_model} (agentrouter)", prompt_media_cascade[0] == (ar_model, "agentrouter"))
 
-# 3. Фоновое распознавание картинок (vision): быстрые Flash-модели без gpt-6.1-sol
+# 3. Фоновое распознавание картинок (vision): быстрые Flash-модели без gpt-6.2-sol
 vis_cascade = gc.cascade_for_context({"kind": "vision"})
 check("«vision» НЕ содержит agentrouter", not any(p == "agentrouter" for _, p in vis_cascade))
 check("«vision» 1-я модель gemini-3.5-flash-lite", vis_cascade[0] == ("gemini-3.5-flash-lite", "gemini"))

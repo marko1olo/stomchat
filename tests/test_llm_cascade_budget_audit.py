@@ -146,7 +146,7 @@ class TestLlmCascadeBudgetAudit(unittest.TestCase):
         При её сбое Groq (openai/gpt-oss-120b) должен гарантированно получить свой слот.
         """
         self.model_outcomes = {
-            "gpt-6.1-sol": Exception("504 Gateway Timeout"),
+            "gpt-6.2-sol": Exception("504 Gateway Timeout"),
             "openai/gpt-oss-120b": "Диагноз подтвержден: пульпит зуба 4.6",
         }
         self.spend_full_timeout = True
@@ -186,7 +186,7 @@ class TestLlmCascadeBudgetAudit(unittest.TestCase):
         никогда не превышает исходный бюджет при любых размерах бюджета (15c, 30c, 60c, 90c, 2100c).
         """
         self.model_outcomes = {m: Exception("deterministic error") for m in (
-            "gpt-6.1-sol", "openai/gpt-oss-120b", "gemini-3.6-flash", "gemini-3.8-flash",
+            "gpt-6.2-sol", "openai/gpt-oss-120b", "gemini-3.6-flash", "gemini-3.8-flash",
             "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "qwen/qwen3.8-27b"
         )}
         self.spend_full_timeout = True

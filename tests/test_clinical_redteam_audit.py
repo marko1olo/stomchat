@@ -3,7 +3,7 @@
 tests/test_clinical_redteam_audit.py — Тесты клинического и редтим-аудита PM и когнитивного ядра.
 
 Проверяет:
-1. Искоренение нейросетевых штампов GPT-6.1 Sol:
+1. Искоренение нейросетевых штампов GPT-6.2 Sol:
    Запрет заголовков «1. Клинико-рентгенологический и анатомический статус»,
    «2. Диагностические развилки», «3. Пошаговая тактика», «4. Завершение»,
    «Рентгенологический статус: 1. Локализация...».
@@ -36,10 +36,10 @@ import clinical_cognitive_core
 
 
 class TestClinicalBoilerplateBan(unittest.TestCase):
-    """Тестирование искоренения нейросетевых штампов GPT-6.1 Sol и шаблонных заголовков."""
+    """Тестирование искоренения нейросетевых штампов GPT-6.2 Sol и шаблонных заголовков."""
 
     def test_gpt_sol_headers_banned_in_ccc_rule22(self):
-        """В Правиле 22 когнитивного ядра зафиксирован строгий запрет заголовков GPT-6.1 Sol."""
+        """В Правиле 22 когнитивного ядра зафиксирован строгий запрет заголовков GPT-6.2 Sol."""
         core = clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE
         self.assertIn("1. Клинико-рентгенологический и анатомический статус", core)
         self.assertIn("2. Диагностические развилки", core)
@@ -47,7 +47,7 @@ class TestClinicalBoilerplateBan(unittest.TestCase):
         self.assertIn("4. Завершение", core)
 
     def test_gpt_sol_headers_banned_in_vision_cognitive_core(self):
-        """В VISION_COGNITIVE_ARCHITECTURE запрещены шаблонные заголовки GPT-6.1 Sol."""
+        """В VISION_COGNITIVE_ARCHITECTURE запрещены шаблонные заголовки GPT-6.2 Sol."""
         vision = clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE
         self.assertIn("1. Клинико-рентгенологический и анатомический статус", vision)
         self.assertIn("2. Диагностические развилки", vision)

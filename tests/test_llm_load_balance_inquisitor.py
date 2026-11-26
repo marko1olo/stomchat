@@ -36,7 +36,7 @@ class TestLLMLoadBalanceInquisitor(unittest.TestCase):
         )
         self.assertGreaterEqual(len(cascade), 3)
         has_ar = bool(gemini_client.provider_pool("agentrouter"))
-        expected_ar = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+        expected_ar = getattr(config, "AGENTROUTER_MODEL", "gpt-6.2-sol") or "gpt-6.2-sol"
         if has_ar:
             self.assertEqual(cascade[0], (expected_ar, "agentrouter"))
             self.assertEqual(cascade[1][0], "openai/gpt-oss-120b")

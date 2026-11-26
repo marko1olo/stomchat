@@ -873,7 +873,7 @@ def compute_call_timeout(
     # 4. Распределяем доступное время модели между оставшимися попытками (ключами)
     attempts_left = max(1, attempts_planned - attempt)
     if provider == "agentrouter":
-        # Для AgentRouter (gpt-6.1-sol) не делим время между ключами:
+        # Для AgentRouter (gpt-6.2-sol) не делим время между ключами:
         # глубокая рассуждающая модель CoT должна получить максимум доступного времени
         # на первой попытке (не менее 80-100% доступного бюджета).
         # В случае быстрого сбоя ключа (401/429) следующий ключ динамически получит остаток.
@@ -890,7 +890,7 @@ def compute_call_timeout(
     elif kind in summary_kinds:
         ceiling = 720.0 if provider == "agentrouter" else 240.0
     elif provider == "agentrouter":
-        # Флагман gpt-6.1-sol (AgentRouter) — глубокая рассуждающая модель CoT.
+        # Флагман gpt-6.2-sol (AgentRouter) — глубокая рассуждающая модель CoT.
         # Даем полный просторный потолок (300-650с) для глубокого контекстного синтеза без урезания.
         if timeout is None or timeout >= 650.0:
             ceiling = 650.0
@@ -980,7 +980,7 @@ def _record_failure(reason, detail="", api_key=None):
     LAST_FAILURE = {"reason": reason, "detail": text, "ts": time.time()}
 
 
-GPT_61_SOL_STEERING_PAYLOAD = """
+GPT_62_SOL_STEERING_PAYLOAD = """
 [КЛИНИЧЕСКИЙ ПРОТОКОЛ: РАВНЫЙ КОЛЛЕГА В ОРДИНАТОРСКОЙ / CHAIRSIDE PEER]
 Ты — опытный клиницист-стоматолог (хирург, ортопед, эндодонтист, пародонтолог).
 Твой собеседник — равный дипломированный врач с многолетней практикой. Ты сидишь с ним за одним столом у клинического кресла или в ординаторской.
@@ -1039,7 +1039,7 @@ def is_quick_reference_query(text: str, has_media: bool = False) -> bool:
     """
     Определяет, является ли вопрос врача у кресла лаконичным справочным запросом
     (дозировки, артикулы, торки, клампы, размеры инструментов), требующим быстрого отклика (3-8с)
-    вместо 45-60 секунд CoT-рассуждений gpt-6.1-sol.
+    вместо 45-60 секунд CoT-рассуждений gpt-6.2-sol.
     Для развернутых клинических кейсов, сомнений, дифдиагнозов и снимков возвращает False.
     """
     if has_media:
@@ -1171,19 +1171,19 @@ def _adapt_prompt_for_text_model(prompt: str, status_context: dict | None = None
 def cascade_for_context(status_context=None, prompt=None):
     """
     Формирует каскад (model_name, provider) в зависимости от контекста задачи.
-    - Для response_validator и triage: строго легкие быстрые модели (без gpt-6.1-sol и без gemini-3.8).
-    - Для клинических кейсов с медиа/фото: флагман gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ, затем Gemini резерв.
-    - Для CHAT_KINDS: флагман gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ при HIGH/MEDIUM.
+    - Для response_validator и triage: строго легкие быстрые модели (без gpt-6.2-sol и без gemini-3.8).
+    - Для клинических кейсов с медиа/фото: флагман gpt-6.2-sol (AgentRouter) идёт ПЕРВЫМ, затем Gemini резерв.
+    - Для CHAT_KINDS: флагман gpt-6.2-sol (AgentRouter) идёт ПЕРВЫМ при HIGH/MEDIUM.
     """
     kind = status_context.get("kind") if status_context else None
     has_agentrouter = bool(provider_pool("agentrouter"))
-    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.2-sol") or "gpt-6.2-sol"
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
     is_triage = kind in TRIAGE_KINDS
 
     # 1. response_validator и triage (быстрый фильтр безопасности и классификаторы):
-    # Строго быстрые модели с таймаутом <= 7-15с. НИКАКИХ gpt-6.1-sol и НИКАКИХ gemini-3.8-flash!
+    # Строго быстрые модели с таймаутом <= 7-15с. НИКАКИХ gpt-6.2-sol и НИКАКИХ gemini-3.8-flash!
     if is_triage or kind == "response_validator":
         return [
             ("gemini-3.1-flash-lite", "gemini"),
@@ -1193,7 +1193,7 @@ def cascade_for_context(status_context=None, prompt=None):
         ]
 
     # 2. Фоновое распознавание картинок (vision):
-    # Быстрые Flash-модели без AgentRouter / gpt-6.1-sol
+    # Быстрые Flash-модели без AgentRouter / gpt-6.2-sol
     if kind in ("vision", "image_description", "chairside_vision"):
         return [
             ("gemini-3.5-flash-lite", "gemini"),
@@ -1272,7 +1272,7 @@ def cascade_for_context(status_context=None, prompt=None):
     if is_chatbot and is_quick_ref:
         # Лаконичные справочные вопросы (дозировки, артикулы, торки, клампы) у кресла:
         # Быстрый отклик за 3-8 секунд через Groq (openai/gpt-oss-120b) или gemini-3.6-flash!
-        # AgentRouter (gpt-6.1-sol) выступает надежным глубоким резервом в хвосте каскада.
+        # AgentRouter (gpt-6.2-sol) выступает надежным глубоким резервом в хвосте каскада.
         cascade = [
             ("openai/gpt-oss-120b", "groq"),
             ("gemini-3.6-flash", "gemini"),
@@ -1299,7 +1299,7 @@ def cascade_for_context(status_context=None, prompt=None):
         return cascade
     elif is_chatbot:
         # Развернутые клинические кейсы, сомнения, дифдиагнозы (HIGH):
-        # БЕЗУСЛОВНЫЙ ПРИОРИТЕТ: gpt-6.1-sol (AgentRouter) идёт ПЕРВЫМ с полным CoT-бюджетом (300-650с)!
+        # БЕЗУСЛОВНЫЙ ПРИОРИТЕТ: gpt-6.2-sol (AgentRouter) идёт ПЕРВЫМ с полным CoT-бюджетом (300-650с)!
         cascade = []
         if has_agentrouter:
             cascade.append((agentrouter_model, "agentrouter"))
@@ -1447,7 +1447,7 @@ def generate_text(prompt, status_context=None, timeout=None):
         if is_triage:
             req_timeout = max(7.0 if budget >= 7.0 else 2.5, min(req_timeout, 15.0))
         elif is_chatbot:
-            # Не душить интерактивные рассуждающие модели (gpt-6.1-sol / AgentRouter) потолком 120с!
+            # Не душить интерактивные рассуждающие модели (gpt-6.2-sol / AgentRouter) потолком 120с!
             # Для AgentRouter и HIGH thinking потолок до 480.0с.
             is_reasoning_cascade = (thinking_level == "HIGH") or any(p == "agentrouter" for _, p in active_cascade)
             chat_max = 120.0 if thinking_level == "HIGH" else 45.0
@@ -1622,10 +1622,10 @@ def generate_text(prompt, status_context=None, timeout=None):
                         adapted_prompt = _adapt_prompt_for_text_model(prompt, status_context)
                         messages_payload = [{"role": "user", "content": adapted_prompt}]
 
-                    is_gpt_sol = (provider == "agentrouter") or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
+                    is_gpt_sol = (provider == "agentrouter") or ("gpt-6.2" in str(model_name).lower()) or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
                     if is_gpt_sol:
                         messages_payload = [
-                            {"role": "system", "content": GPT_61_SOL_STEERING_PAYLOAD.strip()}
+                            {"role": "system", "content": GPT_62_SOL_STEERING_PAYLOAD.strip()}
                         ] + messages_payload
 
                     # Using OpenAI SDK for BOTH Groq and Gemini now
@@ -1705,13 +1705,13 @@ def generate_text(prompt, status_context=None, timeout=None):
                                     raw_text = adapted_prompt if "adapted_prompt" in locals() else _adapt_prompt_for_text_model(prompt, status_context)
                                     content_items = [{"type": "input_text", "text": str(raw_text)}]
 
-                                is_gpt_sol = (provider == "agentrouter") or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
+                                is_gpt_sol = (provider == "agentrouter") or ("gpt-6.2" in str(model_name).lower()) or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
                                 if is_gpt_sol:
                                     ar_input = [
                                         {
                                             "type": "message",
                                             "role": "developer",
-                                            "content": [{"type": "input_text", "text": GPT_61_SOL_STEERING_PAYLOAD.strip()}]
+                                            "content": [{"type": "input_text", "text": GPT_62_SOL_STEERING_PAYLOAD.strip()}]
                                         },
                                         {
                                             "type": "message",
@@ -2642,7 +2642,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
 
     groq_primary = getattr(config, "GROQ_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b"
     groq_secondary = "openai/gpt-oss-120b"
-    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol") or "gpt-6.1-sol"
+    agentrouter_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.2-sol") or "gpt-6.2-sol"
     cascade = []
     if provider_pool("agentrouter"):
         cascade.append((agentrouter_model, "agentrouter"))
@@ -2697,10 +2697,10 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
             client = None
             try:
                 client = get_provider_client(provider, api_key, timeout=call_timeout)
-                is_gpt_sol = (provider == "agentrouter") or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
+                is_gpt_sol = (provider == "agentrouter") or ("gpt-6.2" in str(model_name).lower()) or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
                 supp_messages = []
                 if is_gpt_sol:
-                    supp_messages.append({"role": "system", "content": GPT_61_SOL_STEERING_PAYLOAD.strip()})
+                    supp_messages.append({"role": "system", "content": GPT_62_SOL_STEERING_PAYLOAD.strip()})
                 supp_messages.extend([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -2727,7 +2727,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
                                 {
                                     "type": "message",
                                     "role": "developer",
-                                    "content": [{"type": "input_text", "text": GPT_61_SOL_STEERING_PAYLOAD.strip()}]
+                                    "content": [{"type": "input_text", "text": GPT_62_SOL_STEERING_PAYLOAD.strip()}]
                                 },
                                 {
                                     "type": "message",

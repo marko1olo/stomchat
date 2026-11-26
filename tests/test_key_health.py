@@ -368,7 +368,7 @@ check("удача по живому ключу чужих пометок не с
 
 # Бан модели снимается тем же правилом: active_models принудительно берёт
 # последнюю забаненную, она отвечает — значит забанена она напрасно.
-_assistant_models = ("gpt-6.1-sol", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+_assistant_models = ("gpt-6.2-sol", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                      "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
                      "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
                      "llama-3.3-70b-versatile")

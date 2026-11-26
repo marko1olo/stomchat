@@ -214,7 +214,7 @@ class TestPMChairsideMentorToneAndContinuity(unittest.IsolatedAsyncioTestCase):
                     "Промпт обязан требовать лаконичный ответ в 2–4 предложения!"
                 )
 
-                # 4. Проверяем категорический запрет шаблонных заголовков GPT-6.1 Sol
+                # 4. Проверяем категорический запрет шаблонных заголовков GPT-6.2 Sol
                 self.assertIn(
                     "1. Клинико-рентгенологический",
                     prompt_text,

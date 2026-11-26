@@ -41,7 +41,7 @@ scrubbed_keys = gc._all_known_keys()
 check("AGENTROUTER_KEYS включен в _all_known_keys для очистки логов", "sk-test-agentrouter-key-12345" in scrubbed_keys)
 
 print("\n[2] AgentRouter: Маршрутизация каскада при наличии ключа")
-ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.1-sol")
+ar_model = getattr(config, "AGENTROUTER_MODEL", "gpt-6.2-sol")
 cascade_chat = gc.cascade_for_context({"kind": "pm_chat", "thinking_level": "MEDIUM"})
 check(f"В CHAT_KINDS (pm_chat) {ar_model} идет первым", cascade_chat[0] == (ar_model, "agentrouter"))
 
