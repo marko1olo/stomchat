@@ -2194,17 +2194,19 @@ async def set_user_portrait(user_id, portrait, last_msg_id):
     return await _run_db(operation)
 
 
-async def get_user_recent_group_messages(user_id, limit=20):
+async def get_user_recent_group_messages(user_id, limit=20, include_dates=False):
     def operation():
         with _connection() as db:
             rows = db.execute(
                 """
-                SELECT text FROM messages
+                SELECT text, date FROM messages
                 WHERE sender_id = ? AND text IS NOT NULL AND text != ''
                 ORDER BY date DESC, msg_id DESC LIMIT ?
                 """,
                 (user_id, limit)
             ).fetchall()
+            if include_dates:
+                return [{"text": r[0], "date": str(r[1] or "")} for r in rows[::-1]]
             return [r[0] for r in rows[::-1]]
     return await _run_db(operation)
 
