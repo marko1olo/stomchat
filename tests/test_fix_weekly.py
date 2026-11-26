@@ -105,6 +105,7 @@ class FakeClient:
     def __init__(self, send_result="ok"):
         self.send_result = send_result
         self.sends = []
+        self.files = []
         self.pins = []
         self.status_at_send = []
 
@@ -117,6 +118,10 @@ class FakeClient:
         if self.send_result is None:
             return None
         return type("Sent", (), {"id": 900 + len(self.sends)})()
+
+    async def send_file(self, chat_id, file_path, **params):
+        self.files.append({"chat_id": chat_id, "file": file_path, "params": params})
+        return type("SentFile", (), {"id": 950 + len(self.files)})()
 
     async def pin_message(self, chat_id, message_id, notify=False):
         self.pins.append((chat_id, message_id))
@@ -359,10 +364,27 @@ async def scenario_pin_guard():
 async def scenario_fallback_stage():
     print("\n[10] Аварийная ветка обновляет стадию для сторожа")
     install_stubs(SHORT_ARTICLE, telegraph_ok=False)
+    import digest_pdf
+    real_gen_pdf = digest_pdf.generate_digest_pdf
+    stub_pdf_path = os.path.join(TMP_DIR, "stub_weekly.pdf")
+    with open(stub_pdf_path, "wb") as f:
+        f.write(b"%PDF-1.4\n%stub\n" + b"0" * 1200)
+
+    async def fake_gen_pdf_ok(**kwargs):
+        return stub_pdf_path
+
+    async def fake_gen_pdf_fail(**kwargs):
+        return None
+
     client = FakeClient()
-    result = await S.process_weekly_batch(make_messages(), client, -100444)
+    digest_pdf.generate_digest_pdf = fake_gen_pdf_ok
+    try:
+        result = await S.process_weekly_batch(make_messages(), client, -100444)
+    finally:
+        digest_pdf.generate_digest_pdf = real_gen_pdf
 
     check("Telegraph отказал, но выпуск ушёл в чат", len(client.sends) == 1, f"got {client.sends}")
+    check("PDF доставлен вместо сырой простыни в чат", len(client.files) == 1, f"got {client.files}")
     check("отправлен аккуратный тизер с отсылкой к PDF, а не сырая простыня текста",
           len(result or "") <= 1500 and "pdf" in (result or "").lower(),
           f"got len={len(result or '')}, text={(result or '')[:60]!r}")
@@ -375,6 +397,21 @@ async def scenario_fallback_stage():
     check("закреп сделан", len(client.pins) == 1, f"got {client.pins}")
     check("стадия закрыта как успех",
           current_status().get("stage") == "weekly_summary_done", f"got {current_status()}")
+
+    print("\n[10b] Двойной отказ (Telegraph + PDF): резервные части без сырого <p>/<figure>/<h3>")
+    install_stubs(SHORT_ARTICLE, telegraph_ok=False)
+    dual_client = FakeClient()
+    digest_pdf.generate_digest_pdf = fake_gen_pdf_fail
+    try:
+        await S.process_weekly_batch(make_messages(), dual_client, -100445)
+    finally:
+        digest_pdf.generate_digest_pdf = real_gen_pdf
+    check("при отказе и Telegraph, и PDF ушёл прямой фоллбэк", len(dual_client.sends) >= 2,
+          f"got {len(dual_client.sends)}")
+    fallback_body = "\n".join(s["text"] for s in dual_client.sends[1:])
+    check("в прямом фоллбэке нет невалидных тегов <p>/<figure>/<h3>",
+          not any(tag in fallback_body.lower() for tag in ("<p>", "</p>", "<figure", "<h3")),
+          f"got {fallback_body[:160]!r}")
 
 
 async def scenario_footer():

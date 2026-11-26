@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import os
 import json
 import logging
@@ -53,6 +54,15 @@ def checkpoint_wal(mode: str = "TRUNCATE", max_retries: int = 5, retry_delay: fl
     """
     valid_modes = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
     mode_upper = mode.upper() if mode and mode.upper() in valid_modes else "TRUNCATE"
+    from pathlib import Path as _Path
+    db_path_str = str(getattr(config, "DB_PATH", "") or "")
+    if not db_path_str:
+        return False
+    db_path_obj = _Path(db_path_str)
+    if not db_path_obj.is_absolute():
+        db_path_obj = _Path(__file__).resolve().parent / db_path_obj
+    if not db_path_obj.exists():
+        return False
     for attempt in range(max_retries):
         try:
             with _connection() as db:
@@ -151,8 +161,6 @@ def verify_database_invariants() -> Dict[str, Any]:
 async def verify_database_invariants_async() -> Dict[str, Any]:
     """Асинхронная проверка инвариантов надежности базы данных."""
     return await _run_db(verify_database_invariants)
-    logger.error("WAL checkpoint (%s) не завершился после %d попыток из-за блокировок", mode_upper, max_retries)
-    return False
 
 
 async def checkpoint_wal_async(mode: str = "TRUNCATE", max_retries: int = 5, retry_delay: float = 0.25) -> bool:
@@ -1651,7 +1659,11 @@ async def set_user_interactive_state(user_id, state_type, current_step, case_id,
     return await _run_db(operation)
 
 
+_AUTO_EXPIRE_CASE = contextvars.ContextVar("auto_expire_case", default=True)
+
+
 async def get_user_interactive_state(user_id):
+    auto_expire_case = _AUTO_EXPIRE_CASE.get()
     def operation():
         with _connection() as db:
             try:
@@ -1663,7 +1675,7 @@ async def get_user_interactive_state(user_id):
                     return None
                 state_type, current_step, case_id, history = row
                 # Автоочистка зависших сессий (> 1 часа неактивности)
-                if state_type == "case" and history:
+                if auto_expire_case and state_type == "case" and history:
                     try:
                         h = json.loads(history)
                         if isinstance(h, dict):
@@ -3018,5 +3030,22 @@ async def mark_outbox_failed(outbox_id: int, error_message: str):
                 """,
                 (str(error_message)[:1000], outbox_id)
             )
+    return await _run_db(operation)
+
+
+async def cleanup_old_outbox_messages(days: int = 14) -> int:
+    """Удаляет завершённые (sent/failed) записи bot_outbox старше указанного числа дней."""
+    safe_days = max(1, int(days))
+    def operation():
+        with _connection() as db:
+            cur = db.execute(
+                """
+                DELETE FROM bot_outbox
+                WHERE status IN ('sent', 'failed')
+                  AND created_at < datetime('now', '-' || ? || ' days')
+                """,
+                (safe_days,),
+            )
+            return cur.rowcount or 0
     return await _run_db(operation)
 

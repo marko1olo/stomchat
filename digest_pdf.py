@@ -28,17 +28,19 @@ LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "d
 # Семафор строгого взаимного исключения: не более 1 процесса Chromium одновременно,
 # чтобы гарантированно укладываться в потолок 750M cgroup на 1GB micro-VPS.
 _PDF_SEMAPHORE = None
+_PDF_SEMAPHORE_LOOP = None
 
 
 def _get_pdf_semaphore():
-    global _PDF_SEMAPHORE
+    global _PDF_SEMAPHORE, _PDF_SEMAPHORE_LOOP
     try:
         current_loop = asyncio.get_running_loop()
     except RuntimeError:
         current_loop = None
 
-    if _PDF_SEMAPHORE is None or (current_loop and getattr(_PDF_SEMAPHORE, "_loop", None) not in (None, current_loop)):
+    if _PDF_SEMAPHORE is None or (current_loop is not None and _PDF_SEMAPHORE_LOOP is not current_loop):
         _PDF_SEMAPHORE = asyncio.Semaphore(1)
+        _PDF_SEMAPHORE_LOOP = current_loop
     return _PDF_SEMAPHORE
 
 
@@ -298,7 +300,14 @@ def _build_journal_html(
     html_body = re.sub(r'\[Отчет сокращен[^\]]*\]', '', html_body, flags=re.IGNORECASE)
     html_body = re.sub(r'<p>\s*(?:<i>)?\s*Сообщений за период[\s\S]*?</p>', '', html_body, flags=re.IGNORECASE)
 
-    # 1.1 Защита от повисшей пунктуации и пустых переносов после вставки медиа
+    # 1.1 Защита от повисшей пунктуации, вложенных <b><b> и пустых переносов после вставки медиа
+    for _tag in ("b", "strong"):
+        _nested_pat = re.compile(rf'<{_tag}>([^<]*)<{_tag}>([^<]*)</{_tag}>([^<]*)</{_tag}>', re.IGNORECASE)
+        for _ in range(4):
+            _nxt = _nested_pat.sub(rf'<{_tag}>\1\2\3</{_tag}>', html_body)
+            if _nxt == html_body:
+                break
+            html_body = _nxt
     html_body = re.sub(r'<p>\s*(?:<br[^>]*>)?\s*</p>', '', html_body, flags=re.IGNORECASE)
     html_body = re.sub(r'<p>\s*[.,;:!?—\-]\s*(?:<br[^>]*>)?\s*</p>', '', html_body, flags=re.IGNORECASE)
     html_body = re.sub(r'(<p[^>]*>)\s*[.,;:!?—\-]\s*(?:<br[^>]*>)?\s*', r'\1', html_body, flags=re.IGNORECASE)
@@ -351,8 +360,9 @@ def _build_journal_html(
     def _header_replacer(match):
         header_text = match.group(1).strip()
         header_text = re.sub(r'^##\s*', '', header_text).strip()
+        header_text = re.sub(r'</?(?:b|strong)\b[^>]*>', '', header_text, flags=re.IGNORECASE).strip()
         rest = (match.group(2) if len(match.groups()) > 1 and match.group(2) else "").strip()
-        rest = re.sub(r'^(?:[.,;:!?—\-\s]|<br[^>]*>)+', '', rest).strip()
+        rest = re.sub(r'^(?:[.,;:!?—\-\s]|<br[^>]*>|</?(?:b|strong)\b[^>]*>)+', '', rest, flags=re.IGNORECASE).strip()
         rest_html = f"\n<p>{rest}</p>" if rest else ""
         return (
             f'<div class="section-banner">'
@@ -419,9 +429,10 @@ def _build_journal_html(
         preceding_fig = (match.group(1) or "").strip()
         case_title = match.group(2).strip()
         case_title = re.sub(r'^###\s*', '', case_title).strip()
+        case_title = re.sub(r'</?(?:b|strong)\b[^>]*>', '', case_title, flags=re.IGNORECASE).strip()
         clean_case_title = re.sub(r'^(?:Кейс|Случай|Клинический кейс)\s*№?\s*\d+[:\s\-–—.]*', '', case_title, flags=re.IGNORECASE).strip() or case_title
         rest = (match.group(3) or "").strip()
-        rest = re.sub(r'^(?:<br\s*/?>|\s+)+', '', rest).strip()
+        rest = re.sub(r'^(?:<br\s*/?>|\s+|</?(?:b|strong)\b[^>]*>)+', '', rest, flags=re.IGNORECASE).strip()
         rest_html = f"\n<p>{rest}</p>" if rest else ""
         case_body = (match.group(4) or "").strip()
         fig_html = f"  {preceding_fig}\n" if preceding_fig else ""
@@ -441,7 +452,7 @@ def _build_journal_html(
         rf'<p>\s*(?:<b>|<strong>)\s*(?:###\s*)?({case_start_pat})'
         rf'(?:</b>|</strong>)(?:\s*<br\s*/?>|\s+)?([\s\S]*?)</p>'
         rf'\s*([\s\S]*?)'
-        rf'(?=(?:<div class="section-banner"|{case_bound_pat}|<div class="heroes-card"|<div class="journal-footer"|\Z))',
+        rf'(?=(?:<div class="section-banner"|{case_bound_pat}|<div class="heroes-card"|<div class="journal-footer"|<h[2-4]\b|<hr\b|<p>\s*(?:<b>|<strong>)\s*Другие\s+клинические\s+ситуации|\Z))',
         _case_replacer,
         processed_body,
         flags=re.IGNORECASE,
@@ -552,12 +563,20 @@ def _build_journal_html(
     processed_body = gallery_pattern.sub(r'<div class="figures-gallery-2col">\1\2</div>', processed_body)
 
     # 6. Микротипографика: неразрывные пробелы после коротких предлогов и правильные тире
+    # Обрабатываем только текстовые сегменты (не трогаем HTML-теги, href и атрибуты)
+    _prep_re = re.compile(r'(?i)(?<![\wа-яё])(в|во|у|и|с|к|ко|о|на|по|под|из|до|за|от)\s+')
+    _dash_re = re.compile(r'(\s+)[-—–](\s+)')
+
     def _apply_microtypography(t: str) -> str:
-        # Неразрывный пробел после одно- и двухбуквенных предлогов/союзов
-        t = re.sub(r'(?i)\b([ввоуиснапоподккоиздозаот])\s+', r'\1&nbsp;', t)
-        # Длинное тире с неразрывным пробелом перед ним
-        t = re.sub(r'(\s+)[-—–](\s+)', r'&nbsp;&mdash;\2', t)
-        return t
+        parts = re.split(r'(<[^>]+>)', t)
+        for i in range(0, len(parts), 2):
+            seg = parts[i]
+            if not seg:
+                continue
+            seg = _prep_re.sub(r'\1&nbsp;', seg)
+            seg = _dash_re.sub(r'&nbsp;&mdash;\2', seg)
+            parts[i] = seg
+        return "".join(parts)
 
     processed_body = re.sub(
         r'(<(?:p|figcaption|li|blockquote)[^>]*>)([\s\S]*?)(</(?:p|figcaption|li|blockquote)>)',
@@ -1101,7 +1120,7 @@ def _build_journal_html(
             </div>
         </div>
         <div class="journal-meta">
-            <div>Выпуск от <strong>{now_date}</strong></div>
+            <div>Выпуск от <strong>{html.escape(str(now_date))}</strong></div>
             {f'<div style="margin-top: 4px;"><span class="meta-pill">Сообщений: {msg_count}</span></div>' if msg_count else ''}
         </div>
     </div>
@@ -1251,12 +1270,15 @@ async def generate_digest_pdf(
                         except Exception as dcl_err:
                             logger.warning("page.set_content(domcontentloaded) fallback error: %s", dcl_err)
 
-                    # Рендерим в PDF с точными настройками печати
-                    await page.pdf(
-                        path=output_path,
-                        format="A4",
-                        print_background=True,
-                        prefer_css_page_size=True,
+                    # Рендерим в PDF с точными настройками печати и жёстким таймаутом
+                    await asyncio.wait_for(
+                        page.pdf(
+                            path=output_path,
+                            format="A4",
+                            print_background=True,
+                            prefer_css_page_size=True,
+                        ),
+                        timeout=45.0,
                     )
                 finally:
                     if browser:

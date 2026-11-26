@@ -160,7 +160,7 @@ async def run():
         check(f"шаг {step}: счётчик продвинулся до {step + 1}",
               saved is not None and saved["current_step"] == step + 1, f"got {saved}")
         check(f"шаг {step}: финального экрана нет",
-              not any("Разбор случая завершен" in t for t in sent_texts()), f"got {sent_texts()}")
+              not any(("Разбор случая завершен" in t or "Итоги разбора" in t) for t in sent_texts()), f"got {sent_texts()}")
 
     print("\n[5] Заголовок шага согласован с CASE_TOTAL_STEPS")
     reset()
@@ -176,7 +176,7 @@ async def run():
         BOT, USER_ID, "фиксирую коронку", state(assistant.CASE_TOTAL_STEPS)
     )
     check("показан финальный экран",
-          any("Разбор случая завершен" in t for t in sent_texts()), f"got {sent_texts()}")
+          any(("Разбор случая завершен" in t or "Итоги разбора" in t) for t in sent_texts()), f"got {sent_texts()}")
     cleared = await database.get_user_interactive_state(USER_ID)
     check("состояние симулятора очищено", cleared is None, f"got {cleared}")
 
@@ -188,7 +188,7 @@ async def run():
     for turn in range(1, assistant.CASE_TOTAL_STEPS + 1):
         reset()
         await assistant.handle_interactive_case_step(BOT, USER_ID, f"ход {turn}", step_state)
-        if any("Разбор случая завершен" in t for t in sent_texts()):
+        if any(("Разбор случая завершен" in t or "Итоги разбора" in t) for t in sent_texts()):
             finished_at = turn
             break
         saved = await database.get_user_interactive_state(USER_ID)
@@ -241,16 +241,30 @@ async def run():
     check("финальный экран содержит кнопку возврата в меню (nav:main)", "nav:main" in fin_btn_datas, f"got {fin_btn_datas}")
 
 
-try:
-    asyncio.run(run())
-finally:
+def test_case_simulator():
+    PASS.clear()
+    FAIL.clear()
     try:
-        database._DB_EXECUTOR.shutdown(wait=True)
-    except Exception:
-        pass
-    shutil.rmtree(_TMPDIR, ignore_errors=True)
+        asyncio.run(run())
+    finally:
+        try:
+            database._DB_EXECUTOR.shutdown(wait=True)
+        except Exception:
+            pass
+    assert not FAIL, "Провалено: " + ", ".join(FAIL)
 
-print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run())
+    finally:
+        try:
+            database._DB_EXECUTOR.shutdown(wait=True)
+        except Exception:
+            pass
+        shutil.rmtree(_TMPDIR, ignore_errors=True)
+
+    print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    sys.exit(1 if FAIL else 0)

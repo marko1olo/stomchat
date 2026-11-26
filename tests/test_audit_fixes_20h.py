@@ -14,7 +14,19 @@ import gemini_client
 import question_lifeline
 import reaction_engine
 import clinical_rescue
+import tempfile
 import assistant
+
+_ORIG_AUDIT_STATE_PATH = getattr(assistant, "STATE_PATH", "assistant_state.json")
+
+
+def setUpModule():
+    tmp_dir = tempfile.mkdtemp(prefix="stomchat_audit20h_")
+    assistant.STATE_PATH = os.path.join(tmp_dir, "assistant_state.json")
+
+
+def tearDownModule():
+    assistant.STATE_PATH = _ORIG_AUDIT_STATE_PATH
 
 
 class TestAuditFixes20h(unittest.IsolatedAsyncioTestCase):

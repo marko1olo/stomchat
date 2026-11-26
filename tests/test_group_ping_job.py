@@ -29,17 +29,8 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import config
-
-_TMPDIR = tempfile.mkdtemp(prefix="stomchat_gping_")
-config.DB_PATH = os.path.join(_TMPDIR, "test_messages.db")
-config.SOURCE_CHAT_ID = -1001234567890
-
 import database
 import assistant
-
-assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
-assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
-assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
 
 PASS, FAIL = [], []
 
@@ -74,7 +65,7 @@ async def fake_llm(prompt, status_ctx=None, timeout=None):
     return FakeResponse(json.dumps(payload, ensure_ascii=False)), None
 
 
-assistant.generate_gemini_text_async = fake_llm
+
 
 
 def write_state(pings):
@@ -214,16 +205,52 @@ async def run():
     check("но никому не написано", SENT == [], f"got {SENT}")
 
 
-try:
-    asyncio.run(run())
-finally:
-    try:
-        database._DB_EXECUTOR.shutdown(wait=True)
-    except Exception:
-        pass
-    shutil.rmtree(_TMPDIR, ignore_errors=True)
+def run_all(shutdown_executor: bool = False) -> bool:
+    PASS.clear()
+    FAIL.clear()
+    reset()
+    tmpdir = tempfile.mkdtemp(prefix="stomchat_gping_")
+    old_db = config.DB_PATH
+    old_chat = config.SOURCE_CHAT_ID
+    old_state = assistant.STATE_PATH
+    old_tmp = assistant.STATE_TMP_PATH
+    old_bak = assistant.STATE_BAK_PATH
+    old_llm = assistant.generate_gemini_text_async
+    old_quiet = assistant.is_ping_quiet_hours
 
-print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+    config.DB_PATH = os.path.join(tmpdir, "test_messages.db")
+    config.SOURCE_CHAT_ID = -1001234567890
+    assistant.STATE_PATH = os.path.join(tmpdir, "assistant_state.json")
+    assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
+    assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
+    assistant.generate_gemini_text_async = fake_llm
+    try:
+        asyncio.run(run())
+    finally:
+        config.DB_PATH = old_db
+        config.SOURCE_CHAT_ID = old_chat
+        assistant.STATE_PATH = old_state
+        assistant.STATE_TMP_PATH = old_tmp
+        assistant.STATE_BAK_PATH = old_bak
+        assistant.generate_gemini_text_async = old_llm
+        assistant.is_ping_quiet_hours = old_quiet
+        if shutdown_executor:
+            try:
+                database._DB_EXECUTOR.shutdown(wait=True)
+            except Exception:
+                pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    return len(FAIL) == 0
+
+
+def test_group_ping_job_suite():
+    assert run_all(shutdown_executor=False), f"Failed checks in test_group_ping_job: {FAIL}"
+
+
+if __name__ == "__main__":
+    ok = run_all(shutdown_executor=True)
+    sys.exit(0 if ok else 1)

@@ -312,6 +312,7 @@ async def run():
     real_mark = database.mark_messages_as_summarized
     real_batch = summarizer.process_summary_batch
     real_weekly = summarizer.process_weekly_batch
+    real_get_msk_now = assistant.get_msk_now
 
     generations = []   # None -> генерация с нуля, текст -> отправка кэша
     marked = []
@@ -351,6 +352,7 @@ async def run():
         database.get_messages_for_range = fake_range_query
         database.mark_messages_as_summarized = fake_mark
         summarizer.process_summary_batch = fake_batch
+        assistant.get_msk_now = lambda: now
         # Недельную ветку в этом прогоне глушим: её проверяет раздел [4].
         main.save_scheduler_state((now - timedelta(days=1)).date(), now.date(), {})
         asyncio.sleep = counting_sleep
@@ -367,6 +369,7 @@ async def run():
         database.mark_messages_as_summarized = real_mark
         summarizer.process_summary_batch = real_batch
         summarizer.process_weekly_batch = real_weekly
+        assistant.get_msk_now = real_get_msk_now
 
     check("планировщик отработал три круга и остановлен", cycles["n"] >= 3, f"got {cycles}")
     check("генерация с нуля произошла РОВНО один раз",
@@ -385,6 +388,7 @@ async def run():
     print("\n[6] Зависшая фаза пингов больше не останавливает цикл навсегда")
     real_pm = assistant.check_and_send_pm_pings
     real_group = assistant.check_and_send_group_activity_pings
+    real_quiet_hours = assistant.is_ping_quiet_hours
     saved_ping_timeout = main.PING_PHASE_TIMEOUT_SECONDS
     pm_calls, group_calls, hour_sleeps = [], [], []
 
@@ -403,6 +407,7 @@ async def run():
 
     try:
         main.PING_PHASE_TIMEOUT_SECONDS = 0.05
+        assistant.is_ping_quiet_hours = lambda: False
         assistant.check_and_send_pm_pings = hanging_pm
         assistant.check_and_send_group_activity_pings = quick_group
         asyncio.sleep = watching_sleep
@@ -438,6 +443,7 @@ async def run():
         main.PING_PHASE_TIMEOUT_SECONDS = saved_ping_timeout
         assistant.check_and_send_pm_pings = real_pm
         assistant.check_and_send_group_activity_pings = real_group
+        assistant.is_ping_quiet_hours = real_quiet_hours
 
     # ------------------------------------------------------------------- медиа
     print("\n[7] Догон медиа не оплачивает Vision дважды за один снимок")

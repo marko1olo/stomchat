@@ -38,6 +38,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 # Защита от отсутствующих опциональных модулей при изолированном тестировании
+_saved_modules = {name: sys.modules.get(name) for name in ("database", "config", "blocking_tools", "runtime_guard", "user_memory")}
 for name in ("database", "config", "blocking_tools", "runtime_guard", "user_memory"):
     if name not in sys.modules:
         sys.modules[name] = types.ModuleType(name)
@@ -45,7 +46,17 @@ for name in ("database", "config", "blocking_tools", "runtime_guard", "user_memo
 if not hasattr(sys.modules["config"], "DENTAL_KEYWORDS"):
     sys.modules["config"].DENTAL_KEYWORDS = []
 
+import tempfile
 import assistant as A
+_SOS_TMPDIR = tempfile.mkdtemp(prefix="stomchat_sos_ux_")
+A.STATE_PATH = os.path.join(_SOS_TMPDIR, "assistant_state.json")
+
+# Restore modules in sys.modules so other tests are not poisoned
+for name, orig in _saved_modules.items():
+    if orig is None:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = orig
 
 PASS, FAIL = [], []
 

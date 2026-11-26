@@ -34,6 +34,7 @@ from dental_vocab import (
     DENTAL_SYNONYMS,
 )
 import html_safe
+import intent_router
 import media_tools
 import protocol_extractor
 import taxonomy
@@ -168,6 +169,7 @@ def is_author_group_cooldown_active(sender_id: int, cooldown_seconds: float = 60
 # Защищает от параллельных гонок между handle_group_direct_ask, check_and_trigger_assistant_media
 # и check_and_trigger_assistant на одном и том же сообщении или кадрах альбома.
 _IN_FLIGHT_GROUP_REPLIES = set()
+_LLM_SILENCED_MSG_IDS = TTLCache(maxsize=2000, ttl=600)
 
 
 @contextlib.contextmanager
@@ -1276,185 +1278,10 @@ INTENT_HELP = "INTENT_HELP"
 def detect_user_intent(text: str) -> UserIntent:
     """
     Определяет клиническое намерение пользователя на естественном языке (Zero-Slash Routing).
-    Позволяет врачу использовать бота без обязательного набора слэш-команд.
+    Единая реализация живёт в intent_router.detect_user_intent.
     """
-    if not text or not isinstance(text, str):
-        return UserIntent(None)
-
-    clean = text.strip()
-    norm = clean.lower()
-    norm_no_punct = re.sub(r'[?!.,;:]+$', '', norm).strip()
-
-    # 1. INTENT_MENU / INTENT_HELP
-    is_clinical_emergency_help = bool(
-        re.search(r'\b(первая|неотложная|скорая|доврачебная|оказание)\s+помощ', norm) or
-        re.search(r'\bпомощь\s+(при|пациент|взросл|дет)', norm)
-    )
-
-    if not is_clinical_emergency_help:
-        if norm_no_punct in ('меню', 'главное меню', 'открой меню', 'покажи меню', 'кнопки меню',
-                             'вызови меню', 'назад в меню', 'открой главное меню', 'покажи главное меню',
-                             '/menu', '/меню', '/start', '⌨️ меню') or \
-           re.match(r'^(?:открой|покажи|вызови|перейди\s+в|вернуться\s+в|назад\s+в)?\s*(?:главное\s+)?меню$', norm_no_punct):
-            return UserIntent(INTENT_MENU)
-
-        if norm_no_punct in ('помощь', 'хелп', 'help', 'справка', 'памятка', 'инструкция', 'инструкция к боту', 'команды', 'список команд', '/help') or \
-           re.match(r'^(что\s+ты\s+умеешь|что\s+ты\s+можешь|что\s+умеешь|что\s+можешь|твои\s+возможности|возможности\s+бота)$', norm_no_punct) or \
-           re.match(r'^(как\s+тобой\s+пользоваться|как\s+пользоваться\s+ботом|как\s+пользоваться)$', norm_no_punct) or \
-           re.match(r'^(список\s+команд|какие\s+команды)$', norm_no_punct):
-            return UserIntent(INTENT_MENU)
-
-    # 2. INTENT_STYLE
-    if norm_no_punct in ('стиль', 'стиль общения', 'настройка стиля', 'настройки стиля', 'выбор стиля', '/style') or \
-       re.match(r'^(смени|сменить|измени|изменить|поменяй|поменять|переключи|переключить|настрой|настроить|выбери|выбрать)\s+(стиль|стиль\s+общения|тон|тон\s+общения)$', norm_no_punct) or \
-       re.match(r'^хочу\s+другой\s+(стиль|тон)$', norm_no_punct) or \
-       re.match(r'^(смени|поменяй|измени)\s+тон$', norm_no_punct) or \
-       re.match(r'^(настройка|настройки|выбор)\s+(стиля|тона)$', norm_no_punct):
-        return UserIntent(INTENT_STYLE)
-
-    # 3. INTENT_BOOKMARKS
-    bm_match = re.match(r'^(?:покажи\s+|открой\s+|список\s+|где\s+)?(?:мои\s+)?(?:клинические\s+)?(закладки|сохраненки|сохранёнки|сохраненные|сохранённые)(?:\s+(.*))?$', norm_no_punct)
-    if bm_match:
-        query_arg = (bm_match.group(2) or '').strip()
-        if query_arg in ('посты', 'сообщения', 'статьи'):
-            query_arg = ''
-        return UserIntent(INTENT_BOOKMARKS, query_arg)
-
-    if re.match(r'^(что|покажи\s+что)\s+я\s+(сохранил|сохранял|сохранила|сохраняла)(\s+(.*))?$', norm_no_punct):
-        m = re.match(r'^(что|покажи\s+что)\s+я\s+(сохранил|сохранял|сохранила|сохраняла)(\s+(.*))?$', norm_no_punct)
-        query_arg = (m.group(4) or '').strip()
-        return UserIntent(INTENT_BOOKMARKS, query_arg)
-
-    if re.match(r'^(сохраненные|сохранённые)\s+(посты|сообщения|статьи)(\s+(.*))?$', norm_no_punct):
-        m = re.match(r'^(сохраненные|сохранённые)\s+(посты|сообщения|статьи)(\s+(.*))?$', norm_no_punct)
-        query_arg = (m.group(4) or '').strip()
-        return UserIntent(INTENT_BOOKMARKS, query_arg)
-
-    # Быстрые кнопки постоянной клавиатуры
-    if norm_no_punct in ('💊 препараты и дозы', 'препараты и дозы', '💊 препараты', 'дозы препаратов'):
-        return UserIntent(INTENT_CALCULATOR, clean)
-
-    if norm_no_punct in ('🔍 найти статью', 'найти статью', '🔍 найти', 'найти статьи'):
-        return UserIntent(INTENT_WEB_SEARCH, '')
-
-    if norm_no_punct in ('⭐ закладки', '⭐ мои закладки'):
-        return UserIntent(INTENT_BOOKMARKS, '')
-
-    # 4. INTENT_QUIZ
-    if not re.match(r'^(мой\s+ответ|ответ|вариант)\s+[a-dа-г]\b', norm):
-        if norm_no_punct in ('викторина', 'квиз', 'клиническая викторина', 'стоматологический квиз', 'тест по стоматологии', 'клинический квиз', 'клиническая задача', '/quiz') or \
-           re.match(r'^(давай|хочу|запусти|проведи|сыграем\s+в|поиграем\s+в|го)\s+(клиническую\s+)?(викторину|квиз)$', norm_no_punct) or \
-           re.match(r'^(проверь|проэкзаменуй|протестируй)\s+(мои\s+)?(знания|меня)$', norm_no_punct) or \
-           re.match(r'^(дай|задай|хочу)\s+(мне\s+)?(клинический\s+)?(вопрос|задачу|задачку|тест)$', norm_no_punct) or \
-           re.match(r'^хочу\s+тест$', norm_no_punct):
-            return UserIntent(INTENT_QUIZ)
-
-    # 5. INTENT_CASE
-    is_case_description = bool(
-        re.search(r'пациент(ка)?\s+\d+', norm) or
-        re.search(r'жалобы\s+на', norm) or
-        re.search(r'у\s+меня\s+(кейс|клинический\s+случай|пациент)', norm) or
-        re.search(r'разбор\s+(кейса|случая)', norm) or
-        re.search(r'клинический\s+случай\s*:', norm) or
-        re.search(r'\b(зуб|зуба|зубе|зубом)\s+\d{2}\b', norm) or
-        re.search(r'\b\d{2}\s+(зуб|зуба|зубе|зубом)\b', norm)
-    )
-    if not is_case_description:
-        if norm_no_punct in ('клинический кейс', 'клинический симулятор', 'симулятор', 'интерактивный кейс', 'диагностический симулятор', 'симулятор кейсов', '/case') or \
-           re.match(r'^(давай|хочу|запусти|начни|начать|сыграем\s+в|поиграем\s+в|го|включи)\s+(клинический\s+)?(кейс|симулятор)$', norm_no_punct) or \
-           re.match(r'^(давай|хочу|запусти|начни|начать)\s+клинический\s+случай$', norm_no_punct) or \
-           re.match(r'^(сыграем|поиграем|сыграть|поиграть)\s+в\s+диагностику$', norm_no_punct) or \
-           re.match(r'^(сыграть|поиграть)\s+в\s+(кейс|симулятор)$', norm_no_punct) or \
-           re.match(r'^(давай|хочу|запусти|включи|начни|начать)\s+симулятор$', norm_no_punct) or \
-           re.match(r'^начать\s+кейс$', norm_no_punct):
-            return UserIntent(INTENT_CASE)
-
-    # 6. INTENT_CALCULATOR
-    _anesthetic_drugs = r'(артикаин|ультракаин|убистезин|септонест|скандонест|мепивакаин|лидокаин|новокаин|бупивакаин|примакаин|брилокаин|анестетик)'
-    if norm_no_punct in ('калькулятор', 'калькулятор анестезии', 'шпаргалка по анестезии', 'расчет анестезии', 'расчёт анестезии', 'дозы анестетиков', 'максимальная доза анестезии', 'расчет карпул', 'расчёт карпул', '/calc'):
-        return UserIntent(INTENT_CALCULATOR, clean)
-
-    # Red-Team Guard: исключаем запросы антибиотиков, НПВС и тяжелой соматики (инфаркт, криз, блокада)
-    # из детерминированного калькулятора, направляя их в LLM-триаж (CLINICAL_CHAT)
-    is_non_anesthetic = bool(re.search(
-        r'\b(?:амоксиклав|амоксициллин|аугментин|ибупрофен|парацетамол|нурофен|линкомицин|ципролет|'
-        r'цефтриаксон|кеторол|нимесил|найз|супрастин|дексаметазон|антибиотик|нпвс|нпвп)\w*\b',
-        norm
-    ))
-    is_somatic_clinical = bool(re.search(
-        r'\b(?:криз|инфаркт|стенокарди|преэклампси|эклампси|блокад|аритми|гипертензи|давлен|'
-        r'кардиостимулятор|пейсмейкер|порок|аллерги)\w*\b',
-        norm
-    ))
-
-    if not is_non_anesthetic and not is_somatic_clinical:
-        if re.match(r'^(посчитай|рассчитай|расчет|расчёт|калькулятор)\s+(мне\s+)?(анестези[юия]|дозировк[уи]|доз[уа]|карпул[ы]?)\b', norm_no_punct) or \
-           re.match(r'^(посчитай|рассчитай)\s+доз[уа]\b', norm_no_punct) or \
-           re.match(rf'^(сколько|какая)\s+(карпул|дозировка|доза|максимальная\s+доза)\s+(?:препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
-           re.match(rf'^(дозировк[аиеу]?|доза|дозы|расчет|расчёт)\s+(препарата\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
-           re.match(rf'^(посчитай|рассчитай)\s+(дозировку\s+)?{_anesthetic_drugs}[а-я]*\b', norm_no_punct) or \
-           re.match(r'^(дозировка|расчет|расчёт)\s+анестезии\b', norm_no_punct):
-            return UserIntent(INTENT_CALCULATOR, clean)
-
-    # 7. INTENT_WEB_SEARCH
-
-    m_goog = re.match(r'^(?:погугли|загугли|гугли|погуглить)\s*(.*)$', norm, re.IGNORECASE)
-    if m_goog:
-        prefix_len = len(norm) - len(m_goog.group(1))
-        q = clean[prefix_len:].strip()
-        return UserIntent(INTENT_WEB_SEARCH, q)
-
-    m_net = re.match(r'^(?:поищи|найди|поиск)\s+в\s+(?:интернете|инете|сети|гугле|google)\s*(.*)$', norm, re.IGNORECASE)
-    if m_net:
-        prefix_len = len(norm) - len(m_net.group(1))
-        q = clean[prefix_len:].strip()
-        return UserIntent(INTENT_WEB_SEARCH, q)
-
-    m_art = re.match(r'^(?:найди|поищи)\s+статьи(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_art:
-        prefix_len = len(norm) - len(m_art.group(1))
-        raw_q = clean[prefix_len:].strip()
-        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub_full = re.match(r'^(?:статьи\s+на\s+pubmed|публикации\s+на\s+pubmed)(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub_full:
-        prefix_len = len(norm) - len(m_pub_full.group(1))
-        raw_q = clean[prefix_len:].strip()
-        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub = re.match(r'^(?:что|посмотри\s+что)\s+(?:говорит|пишет|есть\s+в)\s+pubmed(?:\s+(?:про|о|об|по)\b)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub:
-        prefix_len = len(norm) - len(m_pub.group(1))
-        raw_q = clean[prefix_len:].strip()
-        raw_q = re.sub(r'^(?:про|о|об|по)\s+', '', raw_q, flags=re.IGNORECASE).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    m_pub_short = re.match(r'^(?:pubmed|пабмед)\s*[:\s]\s*(.*)$', norm, re.IGNORECASE)
-    if m_pub_short:
-        prefix_len = len(norm) - len(m_pub_short.group(1))
-        q = clean[prefix_len:].strip()
-        return UserIntent(INTENT_WEB_SEARCH, q)
-
-    m_res = re.match(r'^(?:какие|есть\s+ли)\s+(?:свежие|новые|последние|научные)\s+исследования(?:\s+(?:по|про|о|об)\b)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_res:
-        prefix_len = len(norm) - len(m_res.group(1))
-        raw_q = clean[prefix_len:].strip()
-        raw_q = re.sub(r'^(?:по|про|о|об)\s+', '', raw_q, flags=re.IGNORECASE).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    # Клинические протоколы («найди протокол адгезивной фиксации emax») обрабатываются
-    # клиническим ядром/LLM (CLINICAL_CHAT), а не отправляются слепо в веб-поиск
-
-    m_proto = re.match(r'^(?:найди|поищи)\s+протокол(?:\s+(?:про|о|об|по|для)\b)?\s*(.*)$', norm, re.IGNORECASE)
-    if m_proto:
-        prefix_len = len(norm) - len(m_proto.group(1))
-        raw_q = clean[prefix_len:].strip()
-        raw_q = re.sub(r'^(?:про|о|об|по|для)\s+', '', raw_q, flags=re.IGNORECASE).strip()
-        return UserIntent(INTENT_WEB_SEARCH, raw_q)
-
-    return UserIntent(None)
+    res = intent_router.detect_user_intent(text)
+    return UserIntent(getattr(res, "name", None), getattr(res, "query", ""))
 
 
 async def classify_pm_intent_semantic_async(text: str) -> dict:
@@ -1753,11 +1580,41 @@ get_main_reply_keyboard = build_reply_keyboard
 get_main_inline_keyboard = build_main_menu_markup
 
 
-def build_nba_markup(topic_query="", has_media=False, tooth_num=None, msg_id=None, is_xray=False):
+_NBA_STOPWORDS = frozenset({
+    "если", "сколько", "когда", "чтобы", "какой", "какая", "какие", "какое", "каков",
+    "можно", "нужно", "надо", "стоит", "лучше", "хуже", "быстро", "очень", "просто",
+    "сняли", "убрать", "сделать", "делать", "помоги", "подскажи", "расскажи", "опиши",
+    "методику", "вопрос", "врача", "пациент", "пациента", "пациенту", "пациентка", "пациентки",
+    "зуб", "зуба", "зубе", "зубы", "зубов", "после", "через", "перед", "вообще",
+    "такое", "такой", "будет", "может", "берет", "берёт", "есть", "нету", "ли",
+    "при", "для", "без", "под", "над", "или", "как", "что", "чем", "где",
+    "день", "дня", "дней", "раза", "года", "недели", "месяц", "минут", "часов",
+    "ребёнок", "ребенок", "ребёнку", "ребенку", "челюсти", "нижней", "верхней",
+    "продолжай", "дальше", "хорошо", "спасибо", "понял", "привет", "здравствуйте",
+})
+
+
+def _extract_nba_topic_tag(text: str = "", reply_text: str = "", search_keywords=None) -> str:
+    """Выбирает содержательный клинический тег для кнопок NBA (без стоп-слов вроде 'если', 'сколько')."""
+    if search_keywords:
+        for kw in search_keywords:
+            kw_s = str(kw or "").strip().lower()
+            if len(kw_s) >= 3 and kw_s not in _NBA_STOPWORDS and not kw_s.isdigit():
+                return kw_s[:20]
+
+    for source in (text or "", re.sub(r"<[^>]+>", " ", reply_text or "")[:300]):
+        words = re.findall(r"[а-яёa-z][а-яёa-z0-9-]{2,}", source.lower())
+        for w in words:
+            if w not in _NBA_STOPWORDS and len(w) >= 4:
+                return w[:20]
+    return "dental"
+
+
+def build_nba_markup(topic_query="", has_media=False, tooth_num=None, msg_id=None, is_xray=False, include_case_actions=False):
     """
     Формирует интерактивные кнопки Next Best Action под клиническим ответом в ЛС:
     мгновенное сохранение в закладки, связанные протоколы, поиск в PubMed, экспорт в PDF,
-    а также прямой переход в клинические суперсилы (Карта 043/у, Соматика Rx, SOS-Rescue, Батл VS, FDI).
+    проактивные 1-тап действия по случаю (043/у, памятка) и инструменты (Соматика Rx, SOS-Rescue, Батл VS, FDI).
     """
     from telethon import Button
     tag = (topic_query or "").strip().lower()
@@ -1781,6 +1638,12 @@ def build_nba_markup(topic_query="", has_media=False, tooth_num=None, msg_id=Non
         buttons.append([
             Button.inline(f"🦷 Зуб {resolved_tooth}: Анатомия и риски", data=f"fdi:tooth:{resolved_tooth}"),
             Button.inline("📐 Сложность AAE", data=f"aae:start:{resolved_tooth}")
+        ])
+
+    if include_case_actions:
+        buttons.append([
+            Button.inline("📝 043/у по кейсу", data="nba:rec"),
+            Button.inline("🗣 Памятка пациенту", data="nba:memo"),
         ])
 
     buttons.extend([
@@ -1859,6 +1722,7 @@ async def init_assistant(bot_client):
                 types.BotCommand(command='record', description='Сформировать запись в медкарту (Форма 043/у)'),
                 types.BotCommand(command='rx', description='Чекер соматических рисков и фармакологии'),
                 types.BotCommand(command='concilium', description='Виртуальный мультидисциплинарный консилиум'),
+                types.BotCommand(command='consultation', description='Экспертиза и обоснование для ДМС/страховой'),
                 types.BotCommand(command='sos', description='Протоколы действий при осложнениях и ятрогениях'),
                 types.BotCommand(command='translate', description='Переводчик с пациентского на медицинский + юмор'),
                 types.BotCommand(command='vs', description='Батл стоматологических материалов и протоколов'),
@@ -1891,6 +1755,7 @@ async def init_assistant(bot_client):
                 types.BotCommand(command='case', description='Запустить интерактивный клинический симулятор'),
                 types.BotCommand(command='abort', description='Сбросить активный клинический симулятор'),
                 types.BotCommand(command='style', description='Настроить стиль общения ассистента'),
+                types.BotCommand(command='support', description='Связаться с разработчиком и техподдержкой'),
             ]),
             # Групповые команды. Обработчик у них в main.run_group_features, и до
             # этой регистрации врач в чате не видел ни одной из них.
@@ -4142,7 +4007,7 @@ def clean_vertex_redirect_urls(text: str) -> str:
     return res
 
 
-def clean_html_formatting(text):
+def clean_html_formatting(text, allow_long: bool = False):
     if not text:
         return ""
     # Unescape HTML entities (resolving double-escaped &amp;gt; down to raw character)
@@ -4158,26 +4023,27 @@ def clean_html_formatting(text):
     text = re.sub(r'\s*\[\d{1,2}(?:\.\d{1,2}){1,3}\]', '', text)
 
     plain = re.sub(r'<[^>]+>', '', text)
-    if len(plain) > _ARTICLE_PLAIN_MAX_CHARS:
-        # Обрезка с потерей — только когда врачу физически не отдать всё.
-        # Порог стоял по длине С РАЗМЕТКОЙ, а резалась длина ПЛОСКОГО текста:
-        # 3 статьи вики (4003, 4020, 4043 символа) помещаются в предел Telegram,
-        # но получали приписку «ещё 931 не поместились», и в отрезанном хвосте
-        # были дозировки. Само число тоже было неправдой: из 931 символа не
-        # влезали 103, остальные 828 выбрасывал слепой поиск границы.
-        shown, hidden = html_safe.clip_at_sentence(plain, _ARTICLE_SHOWN_MAX_CHARS)
-        notice = (f"\n\n[Показано {len(shown)} символов из {len(plain)}; "
-                  f"ещё {hidden} не поместились в одно сообщение]")
-        body = shown.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return body + notice
+    if not allow_long:
+        if len(plain) > _ARTICLE_PLAIN_MAX_CHARS:
+            # Обрезка с потерей — только когда врачу физически не отдать всё.
+            # Порог стоял по длине С РАЗМЕТКОЙ, а резалась длина ПЛОСКОГО текста:
+            # 3 статьи вики (4003, 4020, 4043 символа) помещаются в предел Telegram,
+            # но получали приписку «ещё 931 не поместились», и в отрезанном хвосте
+            # были дозировки. Само число тоже было неправдой: из 931 символа не
+            # влезали 103, остальные 828 выбрасывал слепой поиск границы.
+            shown, hidden = html_safe.clip_at_sentence(plain, _ARTICLE_SHOWN_MAX_CHARS)
+            notice = (f"\n\n[Показано {len(shown)} символов из {len(plain)}; "
+                      f"ещё {hidden} не поместились в одно сообщение]")
+            body = shown.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return body + notice
 
-    if len(text) > _TELEGRAM_HARD_LIMIT:
-        # Слова помещаются, за предел текст вывела только разметка. Платим
-        # тремя тегами, а не последним предложением статьи: отдать врачу
-        # протокол без концовки ради сохранённого <b> — не обмен, а потеря.
-        # Ниже жёсткого предела разметку не трогаем: отправка длинного ответа
-        # идёт через html_safe.split_html, и там каждая часть валидна сама.
-        return plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if len(text) > _TELEGRAM_HARD_LIMIT:
+            # Слова помещаются, за предел текст вывела только разметка. Платим
+            # тремя тегами, а не последним предложением статьи: отдать врачу
+            # протокол без концовки ради сохранённого <b> — не обмен, а потеря.
+            # Ниже жёсткого предела разметку не трогаем: отправка длинного ответа
+            # идёт через html_safe.split_html, и там каждая часть валидна сама.
+            return plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     # 1. Convert Markdown code blocks ``` ... ``` to <pre><code> ... </code></pre>
     def _convert_code_block(m):
@@ -4518,6 +4384,12 @@ CLINICAL_PROGRESS_RE = re.compile(
     r')\b'
 )
 
+_PM_CONTINUATION_RE = re.compile(
+    r'^(?:ну\s+)?(?:продолжай(?:те)?|продолжи(?:те)?|допиши(?:те)?|дорасскажи(?:те)?|'
+    r'дальше|далее|и\s+что\s+дальше|подробнее(?:\s+про\s+это)?|ещ[её]|следующий\s+шаг)[.!?\s]*$',
+    re.IGNORECASE
+)
+
 
 def sanitize_and_validate_chad_output(candidate_text: str) -> tuple[bool, str, str]:
     """
@@ -4704,9 +4576,9 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
        - Роботизированных отписках («Уточните номер зуба», «1. Клинико-рентгенологический статус», «Я как ИИ...»).
      Если черновик доброжелателен, клинически безопасен, помнит контекст и направляет на следующий шаг — МГНОВЕННО ОДОБРИ (ok: true).
    — ВОПРОСЫ ПО МАТЕРИАЛАМ И ТЕХНОЛОГИЧЕСКИМ ПРОТОКОЛАМ: На любые вопросы по материалам, протоколам фиксации (E.max, цирконий), геометрии уступов и препарированию (chamfer, vertiprep / BOPT, скосы), регламенту торков (абатменты, формирователи десны, мультиюниты, имплантаты), восстановлению культи и феррулу (билдап, СВШ), адгезивным системам, цементам, силерам и инструментам черновик ОБЯЗАН давать прямой EBM-протокол.
-   — КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ТРЕБОВАНИЯ СНИМКОВ/КТ И ВЫМОГАТЕЛЬСТВА ВЕСА НА ТЕХНОЛОГИЧЕСКИЕ ВОПРОСЫ:
+   — КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ТРЕБОВАНИЯ СНИМКОВ И ЛОКАЛИЗАЦИИ НА ТЕХНОЛОГИЧЕСКИЕ ВОПРОСЫ (СНИМКОВ/КТ И ВЫМОГАТЕЛЬСТВА ВЕСА):
      * На чисто материаловедческие и технологические вопросы (фиксация коронок/вкладок E.max и циркония, уступы chamfer vs vertiprep, торки 30–35 Н·см vs 10–15 Н·см, билдап и правило феррула ≥1.5 мм, адгезивы) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО требовать рентген, КТ, снимок, номер зуба или вес пациента!
-     * Ответ обязан давать готовый технологический протокол мгновенно с форматированием в блоке <code>...</code> для 1-тап копирования в МИС (IDENT, Инфодент).
+     * Ответ обязан давать готовый технологический протокол мгновенно обычным текстом с выделением ключевых параметров тегом <b>...</b> (а блок <code>...</code> использовать только для готовых к 1-тап копированию записей в карту 043/у МИС IDENT/Инфодент, рецептов Rp. или памяток, если они запрошены).
      * Если черновик вместо технологического протокола требует рентген, КТ, вес или пишет отписку «недостаточно данных» — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
      * Если черновик даёт чёткий готовый протокол по существу без лишних расспросов — ОБЯЗАТЕЛЬНО ОДОБРИ (ok: true).
    — ВОПРОСЫ ПО ПРОФИЛАКТИКЕ, КАРИЕСОЛОГИИ, ГИГИЕНЕ, КРИВОЙ СТЕФАНА, ДЕТСКИМ ПАСТАМ, ПАМЯТКАМ ДЛЯ РОДИТЕЛЕЙ И УРОКАМ ГИГИЕНЫ:
@@ -6509,7 +6381,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sanitize_user_input_xml(sender_first_name or "коллеги")}. Оно завершает переписку выше. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но отвечай именно на этот конкретный вопрос! Если ты видишь свои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и не соглашаться с самим собой!
 {rag_prompt_section}{web_prompt_section}
-{GROUP_FEW_SHOT_CONTRAST_BLOCK}
+{GROUP_RUNTIME_CONTRAST_EXAMPLES}
 ИНСТРУКЦИИ:
 1. {address_line}
 2. АДАПТИВНАЯ ДЛИНА И ВЕРБОЗИТИ:
@@ -6521,7 +6393,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 3. СТРОЖАЙШИЙ ЗАПРЕТ ОБРАЩЕНИЯ «КОЛЛЕГА» И «КОЛЛЕГИ»: Категорически запрещено использовать слова «коллега», «коллеги», «уважаемые коллеги» в качестве обращения, приветствия или вводного слова! Не называй участников коллегами. Никаких приветствий, вводных фраз и пожеланий в конце. Сразу по делу.
 4. Тон: живой, практический chairside-стиль оперирующего клинициста у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
    ЗАПРЕТ ЖОНГЛИРОВАНИЯ АББРЕВИАТУРАМИ: Запрещено без прямого повода пихать аббревиатуры вроде EBM, AAE, ESE, ITI, Cochrane и душные клише («По канонам EBM...», «Согласно гайдлайнам AAE...»). Врачу у кресла важна клиническая суть, биология и биомеханика, а не лекторские штампы.
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
+{_runtime_cognitive_core()}
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению (например, приплетать BOPT, протоколы фиксации циркона и т.п.) из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
 6. КУЛЬТУРА КЛИНИЧЕСКОГО МЫШЛЕНИЯ И EBM (FIRST PRINCIPLES НА ПАЛЬЦАХ):
    - Опирайся на фундаментальные законы: биомеханику, физиологию, физико-химию материалов и современную доказательную медицину. Объясняй суть просто, наглядно и применимо к креслу — так, как опытный врач объясняет коллеге в ординаторской, без лекторской зауми.
@@ -6621,7 +6493,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
 ТЕБЕ НУЖНО СГЕНЕРИРОВАТЬ ОТВЕТ НА СООБЩЕНИЕ #{msg_id} от {sanitize_user_input_xml(sender_first_name or "коллеги")}. Оно находится в конце переписки. Учитывай хронологию и иерархию (кто кому отвечает через ID сообщений и ссылки "в ответ на #ID"), но твой ответ должен отвечать строго на суть этого сообщения! Если в переписке есть твои предыдущие ответы ([ЭТО ТВОЙ ПРЕДЫДУЩИЙ ОТВЕТ]), учитывай их, чтобы не повторяться и ни в коем случае не соглашаться с самим собой от третьего лица!
 {rag_prompt_section}{web_prompt_section}
-{GROUP_FEW_SHOT_CONTRAST_BLOCK}
+{GROUP_RUNTIME_CONTRAST_EXAMPLES}
 ИНСТРУКЦИИ:
 1. {address_line}
 2. АДАПТИВНАЯ ДЛИНА И ВЕРБОЗИТИ:
@@ -6633,7 +6505,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 3. СТРОЖАЙШИЙ ЗАПРЕТ ОБРАЩЕНИЯ «КОЛЛЕГА» И «КОЛЛЕГИ»: Категорически запрещено использовать слова «коллега», «коллеги», «уважаемые коллеги» в качестве обращения, приветствия или вводного слова! Не называй участников коллегами. Никаких вводных («Согласно справке», «Исходя из переписки»), приветствий и концовок. Сразу суть.
 4. Тон: живой, practical chairside-стиль оперирующего клинициста у кресла. Без академической духоты, без занудства и без менторского тона доцента на кафедре. Говори на равных, по-деловому, профессионально и по-человечески. Никаких шаблонных фраз типа "Как ИИ...", "Рад помочь", "С уважением" и никакого кривляния.
    ЗАПРЕТ ЖОНГЛИРОВАНИЯ АББРЕВИАТУРАМИ: Запрещено без прямого повода пихать аббревиатуры вроде EBM, AAE, ESE, ITI, Cochrane и душные клише («По канонам EBM...», «Согласно гайдлайнам AAE...»). Врачу у кресла важна клиническая суть, биология и биомеханика, а не лекторские штампы.
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
+{_runtime_cognitive_core()}
 
 5. Ограничение по теме: Используй термины и Базу Знаний строго по контексту разговора. Если врачи обсуждают объёмы работы, графики, усталость, деньги или другие организационные темы, а не конкретный лечебный случай — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать клинические лекции и давать медицинские советы по лечению из Базы Знаний, если об этом прямо не спросили. В таких случаях общайся только по теме диалога (объёмы, выгорание и т.д.).
 6. КУЛЬТУРА КЛИНИЧЕСКОГО МЫШЛЕНИЯ И ФУНДАМЕНТАЛЬНЫЕ ЗАКОНЫ (FIRST PRINCIPLES НА ПАЛЬЦАХ):
@@ -6769,6 +6641,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             if not chad_ok:
                 if chad_reason in ("silence_token", "meta_leak"):
                     logger.info("Assistant text output dropped by chad sanitizer (%s) for msg_id=%s. Staying silent.", chad_reason, msg_id)
+                    if msg_id:
+                        _LLM_SILENCED_MSG_IDS[msg_id] = True
                     return False
                 logger.warning("Assistant text draft rejected by chad sanitizer (%s) on attempt %s: %s", chad_reason, attempt, candidate_text[:80])
                 last_quality_reason = f"chad_sanitizer_{chad_reason}"
@@ -6779,6 +6653,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 reply_clean = re.sub(r'[^A-Z_\[\]]', '', candidate_text.strip().upper())
                 if reply_clean in _SILENCE_OUTPUT_TOKENS:
                     logger.info("Assistant: Query was classified as off-topic or chitchat (%s). Ignoring.", reply_clean)
+                    if msg_id:
+                        _LLM_SILENCED_MSG_IDS[msg_id] = True
                     return False
 
             if pediatric_safety:
@@ -6809,6 +6685,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             is_group = bool(event.chat_id and event.chat_id < 0)
             if is_group:
                 logger.info("All %s attempts rejected or failed for msg_id=%s in public group %s. Staying silent (zero fallback in public group).", max_retries + 1, msg_id, event.chat_id)
+                if msg_id:
+                    _LLM_SILENCED_MSG_IDS[msg_id] = True
                 return False
 
             is_offtopic_or_meta = any(
@@ -6890,14 +6768,20 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                 group_buttons = [[Button.url(f"🦷 Анатомия и зоны риска {t_num}", f"https://t.me/{bot_u}?start=fdi_{t_num}")]]
 
             sent_msg = None
+            _sent_ok = False
+            _send_kwargs = {
+                "entity": event.chat_id,
+                "message": reply_message,
+                "parse_mode": 'html',
+            }
+            if group_buttons:
+                _send_kwargs["buttons"] = group_buttons
             try:
                 sent_msg = await bot_client.send_message(
-                    entity=event.chat_id,
-                    message=reply_message,
                     reply_to=msg_id,
-                    buttons=group_buttons,
-                    parse_mode='html'
+                    **_send_kwargs,
                 )
+                _sent_ok = True
             except Exception as send_err:
                 # В чате работает бот-сторож/антиспам, который удаляет ссылки и теги @bot,
                 # либо HTML содержит непарный тег.
@@ -6907,27 +6791,26 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     msg_id, send_err
                 )
                 try:
-                    sent_msg = await bot_client.send_message(
-                        entity=event.chat_id,
-                        message=reply_message,
-                        buttons=group_buttons,
-                        parse_mode='html'
-                    )
+                    sent_msg = await bot_client.send_message(**_send_kwargs)
+                    _sent_ok = True
                 except Exception as send_err2:
                     try:
                         import html_safe
                         plain_msg = html_safe.html_to_plain(reply_message)
-                        sent_msg = await bot_client.send_message(
-                            entity=event.chat_id,
-                            message=plain_msg,
-                            buttons=group_buttons
-                        )
+                        _plain_kwargs = {
+                            "entity": event.chat_id,
+                            "message": plain_msg,
+                        }
+                        if group_buttons:
+                            _plain_kwargs["buttons"] = group_buttons
+                        sent_msg = await bot_client.send_message(**_plain_kwargs)
+                        _sent_ok = True
                     except Exception as send_err3:
                         logger.error(f"Failed to send direct assistant reply completely: {send_err3}")
                         sent_msg = None
 
-            if sent_msg:
-                bot_msg_id = getattr(sent_msg, 'id', msg_id)
+            if _sent_ok or sent_msg:
+                bot_msg_id = getattr(sent_msg, 'id', msg_id) if sent_msg is not None else msg_id
                 logger.info(f"Sent direct assistant reply to chat {event.chat_id}, message {msg_id}.")
                 # Сообщение помечаем отвеченным ДО списания окна: гард на входе
                 # функции читает именно этот кэш, и повторный прогон того же
@@ -7396,7 +7279,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
    - Практикующий оперирующий стоматолог/ортопед/хирург у кресла с 15-летним стажем.
    - Живой, уверенный chairside-стиль без академической духоты, менторства, лекторской зауми и псевдонаучных штампов.
    - Разбирай снимок профессионально, по существу, на равных с коллегами.
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
+{_runtime_cognitive_core()}
 {clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE}
 3. РАЗМЕТКА — СТРОГО HTML:
    - Используй только HTML-теги: <b>жирный</b>, <i>курсив</i>.
@@ -9348,9 +9231,7 @@ MATERIAL_BATTLE_CARDS = {   'adhesion': {   'crosslinks': [   ('record', 'record
 CLINICAL_RECORD_TEMPLATES = {'complication': {'crosslinks': [('sos', 'sos:file', '🚨 Сломан инструмент'),
                 ('sos', 'sos:perf', '🚨 Перфорация дна'),
                 ('sos', 'sos:emphysema', '💨 SOS: Эмфизема ЧЛО'),
-                ('sos', 'sos:sinus_perf', '🦴 SOS: Соустье пазухи'),
-                ('rx', 'rx:cardio', '💊 Неотложная помощь'),
-                ('trans', 'trans:nerve', '🗣 Деэскалация с пациентом')],
+                ('sos', 'sos:sinus_perf', '🦴 SOS: Соустье пазухи')],
  'text': '📋 <b>Шаблон 043/у: Фиксация интраоперационного осложнения (Юридическая защита)</b>\n'
          '\n'
          '💡 <i>Нажмите на текст ниже, чтобы скопировать протокол для МИС (в 1 тап):</i>\n'
@@ -10741,7 +10622,7 @@ async def start_interactive_case(bot_client, chat_id, callback_event=None):
                 )
                 starting_text = fallback_case
             else:
-                starting_text = clean_html_formatting(response.text.strip())
+                starting_text = clean_html_formatting(response.text.strip(), allow_long=(callback_event is None))
                 starting_text = clean_case_step_header(starting_text)
                 starting_text = ensure_case_options(starting_text)
 
@@ -11001,7 +10882,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             return
 
         reply_text = response.text.strip()
-        reply_text = clean_html_formatting(reply_text)
+        reply_text = clean_html_formatting(reply_text, allow_long=True)
         reply_text = clean_case_step_header(reply_text)
         if not is_last_step:
             reply_text = ensure_case_options(reply_text)
@@ -11112,8 +10993,8 @@ PM_CLINICAL_COGNITIVE_DIRECTIVE = """
 5. ТОТАЛЬНЫЙ ЗАПРЕТ СОСЛАГАТЕЛЬНОГО И СУБЪЕКТИВНОГО «Я БЫ» (ZERO SUBJUNCTIVE MOOD):
    Категорически запрещено использовать первое лицо («я», «мне») и сослагательное наклонение:
    «я бы», «я бы сначала», «я считаю», «я рекомендую», «я бы выбрал», «я бы не стал», «я не советую», «на вашем месте я бы».
-   Клинический диалог строится ИСКЛЮЧИТЕЛЬНО в строгом безличном императиве доказательной медицины:
-   «Показано...», «Противопоказано...», «Рекомендуется...», «Оптимально применить...», «Протокол: 1)...».
+   Клинический диалог строится на равных в живом рабочем императиве практикующего врача у кресла:
+   «Начинай с...», «Проверь...», «Показано...», «Противопоказано...», «Рекомендуется...», «Оптимально применить...», «Протокол: 1)...». Избегай сухой учебниковой канцеляризации («Причиной ... является», «представляет собой»).
 
 6. ЗАПРЕТ ЗЕРКАЛИРОВАНИЯ И ЭХО-ЗАЧИНОВ (ZERO MIRRORING & DIRECT ACTION):
    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО зеркалить, копировать или перефразировать вопрос врача в первой строке («Вы спрашиваете о...», «Итак, в случае...»). Собеседник сам знает свой кейс! Начинай сразу с клинического действия или конкретной рекомендации.
@@ -11139,7 +11020,7 @@ PM_CLINICAL_COGNITIVE_DIRECTIVE = """
         3) Пошаговый EBM-протокол манипуляции: конкретные поколения, торговые бренды, ирриганты, секунды экспозиции, рабочие концентрации, торк затяжки в Нсм, тип композита или цемента двойного отверждения.
         4) Фармакотерапия: точные дозировки, кратность и длительность приема препаратов.
         5) Профилактика осложнений и предел безопасности: экстренное первичное действие (что прекратить, что ввести), предупреждения об опасных ошибках и четкие критерии направления к ЧЛХ/стационар.
-        6) Оформление протоколов и рецептов строго в тег <code>...</code>: пошаговые протоколы, рецепты фармакотерапии и шаблоны для медицинской карты (043/у, IDENT) ОБЯЗАТЕЛЬНО оборачивать в <code>...</code> для копирования в 1 тап!
+        6) Оформление готовых шаблонов для МИС (043/у, IDENT) и рецептов (Rp.): ТОЛЬКО готовый фрагмент записи в карту 043/у, формальный рецепт Rp. или памятку пациенту оборачивать в тег <code>...</code> для копирования в 1 тап! НЕ дублируй в <code>...</code> уже разобранный выше пошаговый алгоритм консультации, обычные рассуждения, боры и миллиметры — обычный клинический текст выделяй через <b>...</b>.
      Б) НА КОРОТКИЕ РЕПЛИКИ И ХОД ЛЕЧЕНИЯ У КРЕСЛА («достал», «извлек», «обошел», «спилил», «достал отломок», «спилил коронку», «не садится трансфер», «а если композит?», «не садится», «застрял файл», «заклинило», «какой торк?», «чем промыть?», «что дальше?», «были под коронками», «артикаина нет»):
         - Живой диалог оперирующего врача-наставника у кресла стоматологической установки.
         - Распознавание статуса процедуры и коллегиальная поддержка: когда врач сообщает о действии («достал», «извлек», «обошел», «спилил»), бот подтверждает успешный этап и мгновенно дает следующий прикладной шаг процедуры у кресла.
@@ -11148,10 +11029,10 @@ PM_CLINICAL_COGNITIVE_DIRECTIVE = """
         - БОТ НА 100% ПОМНИТ КОНТЕКСТ КЕЙСА: номер зуба по FDI, корневые каналы, установленную систему и платформу имплантата (Neodent GM, Straumann, Osstem), ранее описанные материалы и анамнез.
         - БОТ НЕ ИМЕЕТ ПРАВА ПЕРЕСПРАШИВАТЬ ОЧЕВИДНОЕ («Уточните номер зуба», «Какая система?», «О какой коронке речь?»). Все сущности зафиксированы в диалоге!
         - БОТ НЕ ИМЕЕТ ПРАВА НАЧИНАТЬ ЛЕКЦИЮ С НУЛЯ ИЛИ ВЫДАВАТЬ ШАБЛОННЫЕ ЗАГОЛОВКИ («1. Клинико-рентгенологический статус», «1. Клинический статус», «Диагностические развилки», «3. Пошаговая тактика»).
-        - ОТВЕТ ОБЯЗАН БЫТЬ ЕСТЕСТВЕННЫМ, ЛАКОНИЧНЫМ (СТРОГО 2–4 ЕМКИХ ПРЕДЛОЖЕНИЯ) по формуле консилиума у кресла:
+        - ОТВЕТ ОБЯЗАН БЫТЬ ЕСТЕСТВЕННЫМ, ЛАКОНИЧНЫМ (ЛАКОНИЧНЫМ И ЕМКИМ) по формуле консилиума у кресла:
           1) Коллегиальное подтверждение («Отлично, что прошли / извлекли!» при успехе; четкое практическое решение при сомнении «Для зуба 3.6 прямой композит допустим только...»; спокойная поддержка при осложнении);
           2) Четкий следующий практический шаг (промывание подогретым 3% NaOCl без давления на 1 мм короче длины, высушивание пинами, рентген-контроль, костный профилер GM, оценка кругового феррула);
-          3) Ровно 1 точечный контрольный вопрос у кресла («Снимок сделали? Канал сухой?», «Зазор между шейкой и трансфером закрыт?»).
+          3) Если этап прямо сейчас оставляет диагностическую развилку — допустим 1 точечный контрольный вопрос у кресла («Снимок сделали? Канал сухой?», «Зазор между шейкой и трансфером закрыт?»); если решение ясно и шаг закрыт — заканчивай точкой без дежурного вопроса.
 
 10. НЕОТЛОЖНЫЙ ПРОТОКОЛ: ПОДКОЖНАЯ ЭМФИЗЕМА ЛИЦА И ШЕИ (SUBCUTANEOUS EMPHYSEMA EMERGENCY PROTOCOL):
    - ЭТИОЛОГИЯ: нагнетание сжатого воздуха под давлением из турбинного наконечника без обратного клапана, пустера (воздушного пистолета), ультразвукового скейлера или порошкоструйного аппарата в корневой канал, пародонтальный карман, под десневой лоскут или в область удаленного моляра.
@@ -11238,7 +11119,7 @@ PM_CLINICAL_COGNITIVE_DIRECTIVE = """
       4) Адгезивный слой: ненаполненная гидрофобная смола (Heliobond) или чистый бонд без мономеров растворителя (OptiBond FL adhesive, 2-й флакон) либо универсальный адгезив с 10-MDP (Tokuyama Universal Bond), раздуть в тонкую пленку, полимеризация 20 с.
       5) Биомеханика скоса (Bevel): волнообразный / диффузный фальц (scalloped bevel) 1.5–2.0 мм по эмали до зоны блика (highlight zone) для маскировки границы и предупреждения «белой линии» (white line).
     - СТАНДАРТ ОФОРМЛЕНИЯ В МЕДИЦИНСКУЮ КАРТУ (ФОРМА 043/У, IDENT, ИНФОДЕНТ):
-      * Все клинические рецепты, протоколы адгезии, дозировки препаратов и шаблоны записей в карту 043/у ОБЯЗАТЕЛЬНО оформлять в тегах <code>...</code> для 1-тапового копирования в МИС без ручного перенабора!
+      * В тег <code>...</code> оборачивать ТОЛЬКО готовый блок записи для копирования в карту 043/у или формальный рецепт (Rp.); пояснительный текст, этапы манипуляции и отдельные измерения (мм, %, сек) оформлять обычным текстом с выделением через <b>...</b>!
 
 16. ПРОТОКОЛ: ПРОФИЛАКТИЧЕСКАЯ СТОМАТОЛОГИЯ, КАРИЕСОЛОГИЯ, КРИВАЯ СТЕФАНА И ДЕТСКАЯ ГИГИЕНА (PREVENTIVE DENTISTRY, CARIOLOGY, STEPHAN CURVE & PEDIATRIC HYGIENE):
     - КРИВАЯ СТЕФАНА И БИОХИМИЯ САХАРНОЙ НАГРУЗКИ (STEPHAN CURVE & SUGAR ATTACKS):
@@ -11520,18 +11401,52 @@ GROUP_FEW_SHOT_CONTRAST_BLOCK = """
 «Для зуба 3.6 прямая композитная реставрация допустима только при сохранении более 50% коронковой части и наличии кругового феррула ≥1.5 мм. Если разрушение глубже или отсутствует краевой гребень под жевательной нагрузкой — прямой композит даст скол стенки, здесь надежнее композитный оверлей или коронка. Сколько интактных стенок осталось после препарирования?»
 """
 
+PM_RUNTIME_DIALOGUE_DIRECTIVE = """
+[КЛИНИЧЕСКИЙ ДИАЛОГ У КРЕСЛА — ЖИВОЙ ЭКСПЕРТНЫЙ СТАНДАРТ]:
+1. ГОЛОС И МЫШЛЕНИЕ ОПЕРИРУЮЩЕГО КОЛЛЕГИ ("ДУМАЙ НА ШАГ ВПЕРЁД"):
+   - С первой строки вскрывай неочевидную корневую причину или клиническую ловушку, называй точный порог принятия решения (мм, °C, Н·см, мкм, сек) и сразу давай рабочий Chairside План Б («Если шаг 1 не пошёл — ...»).
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: эхо-пересказ вопроса врача, учебниковые зачины («Причиной ... является», «Представляет собой»), субъективное «я бы / я считаю / не стал бы», клише («в данном клиническом случае», «следует отметить», «давайте разберём»), академические аббревиатуры (ESE, AAE, ITI, Cochrane, EFP, EBM) и шаблонные рубрики («1. Клинико-рентгенологический статус», «2. Диагностические развилки», «3. Пошаговая тактика», «4. Завершение»).
+   - Говори прямо в клиническом императиве без нумерованных списков в обсуждении (нумерованный список — строго только для хронологических шагов манипуляции). Заканчивай цельной точкой; 1 контрольный вопрос допустим ТОЛЬКО если без него физически блокируется следующий шаг.
+
+2. ДВА РЕЖИМА ПО ТИПУ РЕПЛИКИ:
+   - КОРОТКИЙ FOLLOW-UP / ХОД ПРОЦЕДУРЫ («достал», «обошёл», «спилил», «термоплаггером», «не садится трансфер», «Продолжай»):
+     * Формат CHAIRSIDE MENTOR: 2–4 плотных предложения со 100% преемственностью зуба, канала и имплантационной системы из истории (никогда не переспрашивать известные факты и не читать лекцию с нуля). Подтверди этап + дай следующий практический шаг + при необходимости 1 точечный контроль у кресла.
+   - ПОЛНЫЙ КЛИНИЧЕСКИЙ ЗАПРОС:
+     * Формат ДИРЕКТИВА CHAIRSIDE COMPLETENESS: самодостаточный ответ с первого раза — дифдиагноз и критический порог безопасности, конкретные инструменты/боры/материалы/бренды, точные концентрации/экспозиции/торки/дозировки мг/кг, ограничения (чего делать нельзя) и План Б.
+     * На вопросы по материалам/фиксации/торкам/уступам/профилактике ЗАПРЕЩЕНО вымогать КТ, снимки, номер зуба или вес (если доза анестетика по весу не запрашивалась). При фото/снимке без текста — проводи автономный разбор, не жалуясь на отсутствие текста.
+
+3. РАЗМЕТКА И КРИТИЧЕСКИЕ ГРАНИЦЫ БЕЗОПАСНОСТИ:
+   - Выделяй ключевые параметры и термины через <b>...</b>; тег <code>...</code> используй СТРОГО ТОЛЬКО для готовых к 1-тап копированию блоков записи в карту 043/у (IDENT/Инфодент), формальных рецептов Rp. или памяток пациенту по запросу (НИКОГДА не дублируй в <code>...</code> обычные шаги протокола и числа).
+   - Табу: Солкосерил и Актовегин (только Асепта/Холисал/Винилин); при гипохлоритовой аварии запрещены ЭДТА/кислоты (только 0.9% NaCl); верхняя челюсть 1.1–2.8 и MB2 — строго «нёбно/палатально» (не «лингвально»); артикаин 4%: 1.7 мл = 68 мг, 1.8 мл = 72 мг (дельта 4.0 мг), у детей <12 лет / <40 кг ≤ 5 мг/кг с округлением строго вниз, антиоксидант — метабисульфит натрия; не выдумывай артикулы/эпонимы — при отсутствии спецификации отсылай к IFU производителя.
+   - ПРОТОКОЛ ИДЕНТИФИКАЦИИ И ПОДБОРА ИМПЛАНТАЦИОННЫХ КОМПОНЕНТОВ (CLINICAL ENTITY CONTINUITY): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО требовать повторно назвать систему из контекста; сразу давай совместимость, отвертку (для Neodent GM — отвертка Neo, не Hex 1.2), торк (трансфер 15 Нсм, абатмент 32 Нсм) и 3D-аналог (Ø5.0 REF 101.090 vs Ø4.0/4.3 — 101.089).
+"""
+
+GROUP_RUNTIME_CONTRAST_EXAMPLES = """
+=== ЭТАЛОННЫЕ КОНТРАСТЫ ОБЩЕНИЯ В ЧАТЕ (BAD vs GOOD) ===
+ПРИМЕР 1 (Короткая реплика / ход работы у кресла: «бот живой?», «обошёл», «не садится трансфер»):
+❌ BAD: «1. Клинико-рентгенологический статус. Уточните номер зуба и систему имплантатов. В данном клиническом случае я бы рекомендовал сделать снимок. А как у вас в клинике?»
+✅ GOOD: «На платформе Neodent GM трансфер обычно упирается в нависающий костный край над шейкой или манжету. Пройди костным профилером GM, промой шахту 0.9% NaCl и затяни отвёрткой Neo на 15 Н·см — если зазор сохранится, проверь посадку прицельным снимком.»
+
+ПРИМЕР 2 (Спор по материалам или протоколу: «циркон или e.max?», «какой силер?»):
+❌ BAD: «Вы спрашиваете, что выбрать — циркон или e.max. В данном случае следует отметить плюсы обоих вариантов. Я бы взял e.max. А чем работаете вы?»
+✅ GOOD: «Порог выбора — сохранность эмалевого кольца и толщина разобщения ≥1.2–1.5 мм: при эмалевой границе и ферруле ≥1.5 мм выигрывает e.max (адгезия, модуль ≈68 ГПа ближе к дентину); при поддесневом крае или редукции 0.6–0.8 мм — монолитный 4Y/5Y-цирконий на 10-MDP праймере с зеркальной полировкой окклюзии. Если при примерке цирконий дал засветку на слюне — очисти Ivoclean 20 с до праймера.»
+"""
+
+
+def _runtime_cognitive_core() -> str:
+    """Возвращает компактное когнитивное ядро для рантайма с фоллбеком на MASTER_COGNITIVE_ARCHITECTURE."""
+    return getattr(clinical_cognitive_core, "RUNTIME_COGNITIVE_CORE", clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE)
+
+
 _ACTIVE_PM_REQUESTS = TTLCache(maxsize=5000, ttl=600)  # [SYS-05 FIX] was plain dict — leaked forever
 
 
 def _query_groq_supplement_sync(user_question: str, initial_answer: str, timeout: float = 12.0) -> Optional[str]:
-    """Быстрый синхронный опрос Groq (qwen/qwen3.8-27b или llama-3.3-70b-versatile) с генерацией за 1.5-3с."""
+    """Быстрый синхронный опрос Groq (qwen/qwen3.8-27b или llama-3.3-70b-versatile) с по-модельным кулдауном и паузой на 429."""
     try:
         import gemini_client as _gc
         keys = list(_gc.provider_pool("groq"))
         if not keys:
-            return None
-        fresh, _, _ = _gc.available_keys("groq", keys)
-        if not fresh:
             return None
 
         system_prompt = (
@@ -11566,34 +11481,37 @@ def _query_groq_supplement_sync(user_question: str, initial_answer: str, timeout
         )
 
         models = ("qwen/qwen3.8-27b", "llama-3.3-70b-versatile")
-        for key in fresh:
-            try:
-                client = _gc.get_provider_client("groq", key, timeout=timeout)
-                for model_name in models:
-                    try:
-                        resp = client.chat.completions.create(
-                            model=model_name,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            temperature=0.2,
-                            max_tokens=600,
-                        )
-                        content = (resp.choices[0].message.content or "").strip() if resp.choices else ""
-                        if content:
-                            _gc.note_success("groq", key)
-                            cleaned = _gc.sanitize_supplement_output(content)
-                            return _gc.strip_reasoning(cleaned).strip()
-                    except Exception as m_err:
-                        err_s = str(m_err).lower()
-                        if any(term in err_s for term in ("rate limit", "429", "exhausted", "quota")):
-                            _gc.note_key_failure("groq", key, str(m_err))
-                            break
-                        continue
-            except Exception as k_err:
-                _gc.note_key_failure("groq", key, str(k_err))
+        for model_name in models:
+            fresh_for_model, _, _ = _gc.available_keys("groq", keys, model_name=model_name)
+            if not fresh_for_model:
                 continue
+            candidates = fresh_for_model[:2]
+            for idx, key in enumerate(candidates):
+                try:
+                    client = _gc.get_provider_client("groq", key, timeout=timeout)
+                    resp = client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.2,
+                        max_tokens=600,
+                    )
+                    content = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+                    if content:
+                        _gc.note_success("groq", key, model_name=model_name)
+                        cleaned = _gc.sanitize_supplement_output(content)
+                        return _gc.strip_reasoning(cleaned).strip()
+                except Exception as m_err:
+                    err_s = str(m_err).lower()
+                    if any(term in err_s for term in ("rate limit", "429", "exhausted", "quota")):
+                        _gc.note_key_failure("groq", key, str(m_err), model_name=model_name)
+                        if idx + 1 < len(candidates):
+                            time.sleep(2.5)
+                        continue
+                    _gc.note_key_failure("groq", key, str(m_err), model_name=model_name)
+                    break
     except Exception as exc:
         logger.warning(f"Error in _query_groq_supplement_sync: {exc}")
     return None
@@ -11904,9 +11822,20 @@ def extract_pm_case_entities(prior_history: list, current_text: str = "") -> str
     entities = []
 
     # 1. Зубы по FDI (двузначная нотация 11-48 и с точкой 1.1-4.8)
-    # Исключаем физические единицы измерений (1.5 мм, 1.7 мл, 1.8 мл), чтобы не путать их с зубами
-    cleaned_teeth_text = re.sub(r'\b[1-4]\.[1-8]\s*(?:мм|см|мл|мг|%|°|град|г)\b', ' ', full_text, flags=re.IGNORECASE)
-    cleaned_teeth_text = re.sub(r'(?:около|~|до|>|<|≥|≤)\s*[1-4]\.[1-8]\b', ' ', cleaned_teeth_text, flags=re.IGNORECASE)
+    # Исключаем физические единицы измерений, возраст, длительность и давление, чтобы не путать их с зубами
+    cleaned_teeth_text = re.sub(
+        r'\b[1-4]\.[1-8]\s*(?:мм|см|мкм|мл|мг|%|°|град|г|н[·\s]*см|bar|бар)\b',
+        ' ', full_text, flags=re.IGNORECASE
+    )
+    cleaned_teeth_text = re.sub(
+        r'\b[1-4][1-8]\s*(?:лет|год\w*|мес\w*|нед\w*|дн\w*|день|суток|сут|час\w*|мин\w*|сек\w*|мм\s*рт|мм|см|мкм|мл|мг|кг|%|°|град|н[·\s]*см|ncm|бар|атм|об/мин|rpm|таб\w*|кап\w*|ед|раз\w*|мкА)\b',
+        ' ', cleaned_teeth_text, flags=re.IGNORECASE
+    )
+    cleaned_teeth_text = re.sub(
+        r'\b(?:возраст\w*|пациент\w*|женщин\w*|мужчин\w*|ребен\w*|девочк\w*|мальчик\w*|ад|давлен\w*|вес|торк\w*|этап|шаг|класс|температур\w*)\s*[:№#]?\s*[1-4][1-8]\b',
+        ' ', cleaned_teeth_text, flags=re.IGNORECASE
+    )
+    cleaned_teeth_text = re.sub(r'(?:около|~|до|>|<|≥|≤|±)\s*[1-4](?:\.[1-8]|[1-8])\b', ' ', cleaned_teeth_text, flags=re.IGNORECASE)
 
     raw_undotted = re.findall(r'\b([1-4][1-8])\b', cleaned_teeth_text)
     raw_dotted = re.findall(r'\b([1-4])\.([1-8])\b', cleaned_teeth_text)
@@ -11915,7 +11844,7 @@ def extract_pm_case_entities(prior_history: list, current_text: str = "") -> str
     valid_teeth = []
     for t in raw_teeth:
         t_pattern = rf'(?:{t[0]}\.{t[1]}|{t})'
-        if re.search(rf'(?:зуб[а-я]*|област[а-я]*|проекци[а-я]*|корень|корн[а-я]*|канал[а-я]*|дефект|коронк[а-я]*|культ[а-я]*)\s*(?:[,\s\d\./]+)?{t_pattern}', full_text, re.IGNORECASE) or re.search(rf'{t_pattern}\s*(?:зуб[а-я]*)', full_text, re.IGNORECASE) or t in raw_undotted:
+        if re.search(rf'(?:зуб[а-я]*|област[а-я]*|проекци[а-я]*|позици[а-я]*|корень|корн[а-я]*|канал[а-я]*|дефект|коронк[а-я]*|культ[а-я]*|имплантат[а-я]*)\s*(?:[,\s\d\./]+)?{t_pattern}', cleaned_teeth_text, re.IGNORECASE) or re.search(rf'{t_pattern}\s*(?:зуб[а-я]*)', cleaned_teeth_text, re.IGNORECASE) or t in raw_undotted:
             valid_teeth.append(t)
     if valid_teeth:
         unique_teeth = sorted(list(set(valid_teeth)))
@@ -12496,6 +12425,45 @@ def format_emergency_response(sos_category: str, is_group: bool = False) -> Tupl
     return "", []
 
 
+_VALID_PM_CODE_MARKERS_RE = re.compile(
+    r'(?i)(?:'
+    r'043/у|МИС|IDENT|Инфодент|МКБ-?10|'
+    r'(?:Жалобы|Анамнез|Объективно|Статус|Диагноз|Проведено|Лечение|Назначения|Рекомендации|План\s+лечения)\s*:|'
+    r'\bRp\.?\s*:?|\bD\.t\.d\.|\bD\.S\.|\bS\.:|'
+    r'^\s*/[a-z0-9_]+|^\s*[A-Za-z0-9_]+\s*='
+    r')'
+)
+_BARE_MEASUREMENT_CODE_RE = re.compile(
+    r'^\s*[~≈<>≤≥±]?\s*\d+(?:[.,–-]\d+)?(?:\s*[–-]\s*\d+(?:[.,]\d+)?)?\s*'
+    r'(?:мм|см|мкм|мл|мг|г|кг|%|°|град|сек|с|мин|ч|сут|дн(?:ей|я)?|н[·\s]*см|ncm|бар|атм|об/мин|rpm|раз|таб|ед|мм\s*рт\.?\s*ст\.?)\s*\.?\s*$',
+    re.IGNORECASE
+)
+
+
+def _unwrap_misused_pm_code_tags(text: str) -> str:
+    """Снимает случайные <code>...</code> с обычной клинической прозы и голых измерений, сохраняя 043/у, Rp. и <pre>."""
+    if not text or "<code>" not in text.lower():
+        return text
+
+    def _repl(m):
+        if m.group(1):
+            return m.group(1)
+        inner = m.group(2)
+        stripped = inner.strip()
+        if not stripped or _VALID_PM_CODE_MARKERS_RE.search(stripped):
+            return m.group(0)
+        if _BARE_MEASUREMENT_CODE_RE.match(stripped) or len(stripped) > 55:
+            return inner
+        return m.group(0)
+
+    return re.sub(
+        r'(<pre[^>]*>[\s\S]*?</pre>)|<code>([\s\S]*?)</code>',
+        _repl,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def sanitize_clinical_pm_output(reply_text: str) -> str:
     """
     Бескомпромиссная санитария клинического ответа в ЛС (Врач — Врачу):
@@ -12547,11 +12515,14 @@ def sanitize_clinical_pm_output(reply_text: str) -> str:
     if solcoseryl_pat.search(text):
         text = solcoseryl_pat.sub("Асепта (адгезивный бальзам) или Холисал (гель)", text)
 
-    # 4. Удаление паразитного и менторского «Коллега»
+    # 4. Удаление паразитного и менторского «Коллега» (не трогая «опыт коллеги» в середине фразы)
     text = re.sub(r'(?i)\bуважаемые\s+коллеги,?\s*', '', text)
-    text = re.sub(r'(?i)\bколлег[аи],?\s*', '', text)
+    text = re.sub(r'(?i)\bколлега,?\s*', '', text)
+    text = re.sub(r'(?im)(?:^|(?<=[.!?\n]\s))коллеги,\s*', '', text)
     # 6. Визуальная гигиена разметки Telegram:
-    # Разворачивание длинного тега <b> в начале ответа (>45 символов)
+    # Разворачивание длинного тега <b> в начале ответа (>45 символов) и снятие случайного <code> с прозы
+    text = _unwrap_oversized_opening_bold(text)
+    text = _unwrap_misused_pm_code_tags(text)
     text = _unwrap_oversized_opening_bold(text)
     # Нормализация HTML-списков <ul>, <ol>, <li> в чистые буллеты •
     text = re.sub(r'<li[^>]*>\s*(?:[•\-\*]\s*)?', '\n• ', text, flags=re.IGNORECASE)
@@ -12654,32 +12625,6 @@ TEXT_MENU_COMMAND_MAP = {
     "главное меню": "/menu",
     "кнопка меню": "/menu",
     "навигация": "/menu",
-    "chairside инструменты": "/chairside",
-    "🛠 chairside": "/chairside",
-    "🪑 chairside": "/chairside",
-    "chairside": "/chairside",
-    "у кресла": "/chairside",
-    "🦷 зубная формула fdi": "/fdi",
-    "зубная формула fdi": "/fdi",
-    "зубная формула": "/fdi",
-    "формула fdi": "/fdi",
-    "fdi": "/fdi",
-    "📐 сложность aae": "/aae",
-    "сложность aae": "/aae",
-    "aae": "/aae",
-
-    "💊 препараты и дозы": "/calc",
-    "препараты и дозы": "/calc",
-    "💊 препараты": "/calc",
-    "препараты": "/calc",
-    "дозы препаратов": "/calc",
-    "дозы": "/calc",
-    "дозировки": "/calc",
-    "🧮 калькулятор": "/calc",
-    "калькулятор": "/calc",
-    "калькулятор анестезии": "/calc",
-    "расчет анестезии": "/calc",
-    "расчёт анестезии": "/calc",
 
     "🔍 найти статью": "/web",
     "найти статью": "/web",
@@ -12692,19 +12637,6 @@ TEXT_MENU_COMMAND_MAP = {
     "🔍 поиск": "/web",
     "поиск": "/web",
     "найти": "/web",
-
-    "⭐ закладки": "/bookmarks",
-    "мои закладки": "/bookmarks",
-    "закладки": "/bookmarks",
-    "сохраненки": "/bookmarks",
-    "сохранёнки": "/bookmarks",
-
-    "⌨️ меню": "/menu",
-    "меню": "/menu",
-    "⌨️ главное меню": "/menu",
-    "главное меню": "/menu",
-    "кнопка меню": "/menu",
-    "навигация": "/menu",
 
     # Протоколы и база знаний
     "📚 клинические протоколы": "/protocols",
@@ -12785,7 +12717,7 @@ async def handle_private_message(bot_client, event):
             # пингов сбрасывался при каждом входящем ЛС и фактически работал
             # только 24-часовой порог по last_activity.
             user_ping = pings.setdefault(str(chat_id), {})
-            user_ping["last_activity"] = datetime.now().isoformat()
+            user_ping["last_activity"] = get_msk_now().isoformat()
             user_ping["ping_sent"] = False
             user_ping["unanswered_pings"] = 0
             user_ping["unanswered_group_pings"] = 0
@@ -12800,17 +12732,26 @@ async def handle_private_message(bot_client, event):
         # инициативу бота — на вопросы он отвечать не перестаёт, поэтому цена
         # ложного срабатывания невелика, а цена пропуска — навязчивые DM.
         if text and is_ping_opt_out_request(text):
-            try:
-                set_ping_opt_out(chat_id, text)
-                await tg_safety.send_message(
-                    bot_client,
-                    chat_id,
-                    "Принято, проактивные сообщения и напоминания полностью отключены. Вы всегда можете обратиться ко мне с любым клиническим вопросом — я на связи.",
-                    timeout=10.0,
-                )
-            except Exception as opt_err:
-                logger.error(f"Failed to process ping opt-out for {chat_id}: {opt_err}")
-            return
+            skip_opt_out_for_case = False
+            if text.strip().lower() in ("стоп", "stop", "выход", "отмена", "завершить", "прервать"):
+                try:
+                    active_state = await database.get_user_interactive_state(chat_id)
+                    if active_state and active_state.get("state_type") == "case":
+                        skip_opt_out_for_case = True
+                except Exception as st_err:
+                    logger.debug("Failed to check interactive state before opt-out for %s: %s", chat_id, st_err)
+            if not skip_opt_out_for_case:
+                try:
+                    set_ping_opt_out(chat_id, text)
+                    await tg_safety.send_message(
+                        bot_client,
+                        chat_id,
+                        "Принято, проактивные сообщения и напоминания полностью отключены. Вы всегда можете обратиться ко мне с любым клиническим вопросом — я на связи.",
+                        timeout=10.0,
+                    )
+                except Exception as opt_err:
+                    logger.error(f"Failed to process ping opt-out for {chat_id}: {opt_err}")
+                return
 
         # Pre-LLM adversarial filter against jailbreaks & controlled substances
         is_adv, adv_refusal = check_adversarial_input(text)
@@ -12986,7 +12927,13 @@ async def handle_private_message(bot_client, event):
                     logger.error(f"Failed to persist PM message in primary entrypoint for chat_id={chat_id}: {save_err}")
 
         # 0.5. Interactive Simulator State Routing & Abort Check
-        user_state = await database.get_user_interactive_state(chat_id)
+        _auto_exp_var = getattr(database, "_AUTO_EXPIRE_CASE", None)
+        _auto_exp_tok = _auto_exp_var.set(False) if _auto_exp_var is not None else None
+        try:
+            user_state = await database.get_user_interactive_state(chat_id)
+        finally:
+            if _auto_exp_tok is not None and _auto_exp_var is not None:
+                _auto_exp_var.reset(_auto_exp_tok)
 
         # Check for case expiration (1 hour inactivity)
         if user_state and user_state.get("state_type") == "case":
@@ -13536,12 +13483,13 @@ async def handle_private_message(bot_client, event):
                 "• /record &lt;описание&gt; — сформировать запись в карту Формы 043/у для МИС. Синонимы — /043, /дневник, /карта.\n"
                 "• /rx &lt;препарат/болезнь&gt; — чекер соматических рисков и фармакологии (MRONJ, ПОАК, кардио). Синонимы — /риск, /риски, /соматика.\n"
                 "• /concilium &lt;случай&gt; — мультидисциплинарный консилиум (4 специалиста + Roadmap). Синонимы — /консилиум, /план.\n"
-                "• /sos &lt;описание&gt; — экстренный EBM-протокол при осложнениях (файлолом, перфорация, силер). Синонимы — /осложнение, /факап, /спасите.\n"
+                "• /consultation &lt;случай&gt; — клиническая экспертиза и обоснование для страховой/ДМС. Синонимы — /согласование, /экспертиза, /дмс, /insurance, /консультация.\n"
+                "• /sos &lt;описание&gt; — экстренный EBM-протокол при осложнениях (файлолом, перфорация, силер). Синонимы — /emergency, /неотложка, /осложнение, /осложнения, /факап, /спасите.\n"
                 "• /translate &lt;фраза&gt; — переводчик с «пациентского» на медицинский + скрипт + юмор. Синонимы — /переводчик, /пациент, /сленг.\n"
                 "• /vs &lt;материалы&gt; — батл материалов и адгезивов (цирконий vs emax, OptiBond vs Universal). Синонимы — /сравнить, /материал, /выбор.\n"
                 "• /style — настроить стиль общения (коллега, сухие факты, циник).\n"
                 "• /profile — показать мой клинический профиль, специализацию и память бота. Синонимы — /me, /профиль.\n"
-                "• /protocols — вывести список доступных клинических протоколов.\n"
+                "• /protocols — вывести список доступных клинических протоколов. Синонимы — /protocol, /протокол, /протоколы.\n"
                 "• /wiki — открыть интерактивную стоматологическую энциклопедию. Синоним — /encyclopedia.\n"
                 "• /calc — открыть шпаргалку-калькулятор по анестезии.\n"
                 "• /xray — рентген-фильтры 2х2 HD (визиограф: CLAHE, негатив, шарп). Синонимы — /рентген, /визиограф, /x_ray.\n"
@@ -13669,6 +13617,10 @@ async def handle_private_message(bot_client, event):
         if await chairside_tools.dispatch_chairside_pm_command(bot_client, event, text):
             return
 
+        if is_xray_command(text):
+            await handle_group_xray(bot_client, event)
+            return
+
         if text.lower() == "/calc" or text.lower().startswith("/calc "):
             calc_arg = text[5:].strip() if text.lower().startswith("/calc ") else ""
             if calc_arg:
@@ -13756,7 +13708,7 @@ async def handle_private_message(bot_client, event):
                 if not error and response and getattr(response, "text", None):
                     cand = response.text.strip()
                     if cand and len(cand) > 30:
-                        reply_text = clean_html_formatting(cand)
+                        reply_text = clean_html_formatting(cand, allow_long=True)
 
                 if not reply_text:
                     logger.warning("PM /quiz generation failed, using fallback clinical quiz from pool")
@@ -13825,7 +13777,7 @@ async def handle_private_message(bot_client, event):
 
             if query_filter:
                 rows = await database.get_clinical_bookmarks(chat_id, query=query_filter)
-                title = f"📌 <b>Результаты поиска в закладках по запросу «{query_filter}»:</b>\n\n"
+                title = f"📌 <b>Результаты поиска в закладках по запросу «{html.escape(query_filter)}»:</b>\n\n"
             else:
                 rows = await database.get_clinical_bookmarks(chat_id)
                 title = f"📌 <b>Ваши сохраненные клинические закладки (Страница {page}):</b>\n\n"
@@ -14851,9 +14803,9 @@ async def handle_private_message(bot_client, event):
             from telethon import Button
             if is_support_request:
                 support_reply = (
-                    f"🛠 <b>Техническая поддержка / Разработчик {community_title}</b>\\n\\n"
-                    "Доктор, если вы столкнулись с технической неполадкой, сбоем в работе бота или хотите передать обратную связь:\\n\\n"
-                    "👨‍💻 <b>Разработчик:</b> Николай Романов (@sagishida)\\n"
+                    f"🛠 <b>Техническая поддержка / Разработчик {community_title}</b>\n\n"
+                    "Доктор, если вы столкнулись с технической неполадкой, сбоем в работе бота или хотите передать обратную связь:\n\n"
+                    "👨‍💻 <b>Разработчик:</b> Николай Романов (@sagishida)\n"
                     "💬 <b>Формат обращения:</b> опишите суть проблемы, перешлите проблемное сообщение или прикрепите скриншот.\n\n"
                     "<i>По клиническим вопросам (разбор снимков, протоколы лечения, эндодонтия, реставрация) бот функционирует 24/7 в автоматическом режиме — просто задайте вопрос или отправьте снимок.</i>"
                 )
@@ -14868,7 +14820,7 @@ async def handle_private_message(bot_client, event):
                     f"👋 <b>Запись на консультацию и техническая поддержка {community_title}</b>\n\n"
                     "Доктор, по техническим вопросам, сбоям в работе бота или для передачи обратной связи "
                     "и записи в клинику вы можете напрямую связаться с нашим куратором:\n\n"
-                    "👨‍💻 <b>Разработчик / Поддержка:</b> Николай Романов (@sagishida)\\n"
+                    "👨‍💻 <b>Разработчик / Поддержка:</b> Николай Романов (@sagishida)\n"
                     "💬 <b>Формат:</b> напишите разработчику, опишите суть проблемы или прикрепите скриншот.\n\n"
                     "<i>Если вам требуется разобрать снимок или получить EBM-протокол онлайн прямо сейчас — "
                     "просто пришлите рентген или опишите клиническую картину зуба сюда в чат.</i>"
@@ -14923,6 +14875,7 @@ async def handle_private_message(bot_client, event):
         # c) Прошлые реплики врача (search_context_text) подключаются ТОЛЬКО если текущая реплика — уточняющий вопрос (follow-up)
         current_text = (text or "").strip()
         is_conversational_turn = bool(_CONVERSATIONAL_INTENT_RE.match(current_text)) and not has_media
+        is_continuation_request = bool(_PM_CONTINUATION_RE.match(current_text)) and not has_media and bool(context_msgs)
         is_clinical_progress = bool(CLINICAL_PROGRESS_RE.search(current_text)) and not has_media
 
         current_clinical_str = (text or "") + " " + (media_description or "")
@@ -14943,10 +14896,10 @@ async def handle_private_message(bot_client, event):
                 if search_keywords:
                     wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=rag_query_str, context_type="pm")
             elif search_context_text and has_dental_term(search_context_text):
-                # Проверяем, является ли реплика уточняющим вопросом или ответом в диалоге (follow-up / answer)
+                # Проверяем, является ли реплика уточняющим вопросом, запросом продолжения или ответом в диалоге (follow-up / answer)
                 is_followup = bool(
                     re.search(r'\?|\b(?:а\s+|сколько|почему|как|если|можно(?:\s+ли)?|что|куда|зачем)\b', current_text, re.IGNORECASE)
-                ) or (dialogue_turn in ("DIALOGUE_ANSWER", "DIALOGUE_FOLLOWUP")) or is_clinical_progress
+                ) or (dialogue_turn in ("DIALOGUE_ANSWER", "DIALOGUE_FOLLOWUP")) or is_clinical_progress or is_continuation_request
                 if is_followup:
                     has_dental_topic = True
                     rag_query_str = current_clinical_str + " " + search_context_text
@@ -15037,10 +14990,9 @@ async def handle_private_message(bot_client, event):
 {uncaptioned_clinical_directive}
 {rag_prompt_section}
 КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
+{_runtime_cognitive_core()}
 {clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE}
-{PM_CLINICAL_COGNITIVE_DIRECTIVE}
-{PM_FEW_SHOT_CONTRAST_BLOCK}
+{PM_RUNTIME_DIALOGUE_DIRECTIVE}
 ПРАВИЛА РАБОТЫ С ДИАЛОГОМ И ИСТОРИЕЙ:
 1. НЕПРЕРЫВНОСТЬ АКТИВНОГО ДИАЛОГА: Если снимок прислан в рамках продолжающегося обсуждения клинического случая, ты ОБЯЗАН сохранять преемственность контекста диалога (зуб, канал, ранее обсуждавшиеся детали).
 2. ИЗОЛЯЦИЯ СТАРЫХ ЗАКРЫТЫХ ТЕМ: Сообщения из истории с маркерами давности (более 6 часов / более дня / более недели назад) относятся к закрытым прошлым сессиям. Не переноси старые диагнозы и чужие зубы в текущий разбор. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО открывать ответ фразами-оправданиями или сравнениями со старыми темами («Этот кадр относится к..., а не к ранее обсуждавшемуся 27...»). Если вопрос или снимок новый — отвечай СРАЗУ и ТОЛЬКО по существу текущего изображения или текущего вопроса врача!
@@ -15082,14 +15034,22 @@ async def handle_private_message(bot_client, event):
             if has_clinical_topic:
                 query_lower = (text or "").lower()
                 query_words = len((text or "").split())
-                is_short_progress_update = not has_media and (
+                is_short_progress_update = not has_media and not is_continuation_request and (
                     is_clinical_progress
                     or (dialogue_turn == "DIALOGUE_ANSWER" and query_words <= 15)
                     or (dialogue_turn == "DIALOGUE_FOLLOWUP" and query_words <= 12)
                     or (query_words <= 8 and dialogue_turn in ("DIALOGUE_ANSWER", "DIALOGUE_FOLLOWUP"))
                 )
 
-                if is_short_progress_update:
+                if is_continuation_request:
+                    length_guideline = (
+                        "ДИРЕКТИВА CONTINUATION (прямое продолжение прерванного или краткого разбора): "
+                        "врач просит продолжить предыдущий ответ («Продолжай», «Дальше»). "
+                        "Сразу продолжай с того места, на котором остановился предыдущий ответ, без повтора уже разобранных этапов, "
+                        "без вводных приветствий и без оборачивания обычных предложений, шагов и миллиметров в тег <code>...</code> "
+                        "(тег <code> допустим только для готового шаблона карты 043/у или формального рецепта Rp.)."
+                    )
+                elif is_short_progress_update:
                     length_guideline = (
                         "ДИРЕКТИВА CHAIRSIDE MENTOR (ход процедуры у кресла): "
                         "врач сообщает оперативный результат или краткое тактическое уточнение в рамках текущего кейса. "
@@ -15099,14 +15059,14 @@ async def handle_private_message(bot_client, event):
                         "4) СТРУКТУРА ОТВЕТА: живое коллегиальное подтверждение («Отлично, что извлекли / обошли!» при успехе или спокойный первый шаг при заклинивании) "
                         "+ четкий следующий процедурный шаг (раствор, концентрация, экспозиция, снимок) "
                         "+ четкий следующий шаг у кресла без лишних дежурных расспросов. "
-                        "Протоколы и параметры оформляй в тег <code>...</code>."
+                        "Пиши обычным связным текстом с <b>...</b> для ключевых параметров; НЕ оборачивай обычный текст в <code>...</code>."
                     )
                 elif dialogue_turn == "DIALOGUE_FOLLOWUP":
                     length_guideline = (
                         "ДИРЕКТИВА CHAIRSIDE COMPLETENESS (уточняющий вопрос follow-up): "
                         "исчерпывающий клинический ответ со всеми практическими нюансами, точными параметрами, "
                         "последовательностью действий и границами безопасности. Без утаивания шагов протокола. "
-                        "Протоколы и рецепты оформляй в тег <code>...</code>."
+                        "Тег <code>...</code> используй ТОЛЬКО для готовой записи 043/у или рецепта Rp., не для обычного текста."
                     )
                 else:
                     length_guideline = (
@@ -15117,7 +15077,7 @@ async def handle_private_message(bot_client, event):
                         "концентрациями растворов, секундами экспозиции и торком в Нсм; "
                         "3) точные дозировки фармакотерапии, кратность и длительность приема; "
                         "4) профилактика осложнений, границы безопасности (чего делать нельзя), домашний режим пациенту и сроки контроля. "
-                        "Пошаговые протоколы и рецепты ОБЯЗАТЕЛЬНО оформляй в тег <code>...</code> для копирования в МИС в 1 тап! "
+                        "В тег <code>...</code> оборачивай ТОЛЬКО готовый блок записи в карту 043/у или формальный рецепт Rp., а не обычный текст протокола и не отдельные числа! "
                         "Категорически запрещено выдавать обрезанные ответы-тизеры, вынуждающие врача дополнительно вытягивать шаги протокола."
                     )
 
@@ -15131,9 +15091,8 @@ async def handle_private_message(bot_client, event):
 {group_msgs_str}
 """
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ ДЛЯ КОНСИЛИУМА:
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
-{PM_CLINICAL_COGNITIVE_DIRECTIVE}
-{PM_FEW_SHOT_CONTRAST_BLOCK}
+{_runtime_cognitive_core()}
+{PM_RUNTIME_DIALOGUE_DIRECTIVE}
 1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ПАЦИЕНТСКИХ ДИСКЛЕЙМЕРОВ: Никаких «обратитесь к очному врачу», «нужен очный осмотр», «как ИИ...». Твой собеседник — врач-стоматолог. Диалог ведется строго на уровне высококвалифицированного консилиума «Врач — Врачу».
    [MED-06 SOS ИСКЛЮЧЕНИЕ] Если запрос содержит признаки: флегмона, ангина Людвига, отёк дна рта, острое нарушение дыхания, профузное кровотечение, анафилаксия — первой строкой ОБЯЗАТЕЛЬНО «🚨 СКОРАЯ 112 НЕМЕДЛЕННО» + неотложная тактика. Жизнь > тон.
 2. ГЛУБИНА И СУТЬ (ZERO MIRRORING & DIRECT ACTION):
@@ -15147,8 +15106,8 @@ async def handle_private_message(bot_client, event):
 3. ССЫЛКИ НА СООБЩЕНИЯ ИЗ ЧАТА: В блоке обсуждений указаны сообщения чата вида [Сообщение #ID от Имя]: текст. Если коллега спрашивает ссылку, где это обсуждалось, или кто делился опытом — давай прямую ссылку: https://t.me/c/{clean_chat_id}/<msg_id> или ссылайся на пост #<msg_id>.
 4. ДЛИНА ОТВЕТА: {length_guideline}
 5. ЭРГОНОМИКА МИС И РАЗМЕТКА (1-ТАП КОПИРОВАНИЕ):
-   - Выделение только через <b>...</b> ключевых препаратов, анатомических ориентиров и параметров.
-   - Пошаговые протоколы манипуляций, дозировки препаратов, рецепты фармакотерапии, режимы экспозиции/активации и готовые фрагменты записи в карту 043/у ОБЯЗАТЕЛЬНО оборачивай в тег <code>...</code> для копирования врачом в МИС (IDENT, Инфодент) в 1 тап!
+   - Выделение ключевых препаратов, анатомических ориентиров, боров и параметров (мм, %, сек, Нсм) — обычным текстом с выделением через <b>...</b>.
+   - Тег <code>...</code> используй ИСКЛЮЧИТЕЛЬНО для готовых к вставке в МИС (IDENT, Инфодент) блоков записи в карту 043/у, формальных рецептов (Rp.) или памятки пациенту. НИКОГДА не дублируй свой же пошаговый протокол в <code>...</code> и не оборачивай в <code>...</code> обычные абзацы, шаги или числа!
    - Разрешены ИСКЛЮЧИТЕЛЬНО валидные HTML-теги: <b>, <i>, <code>, <pre>.
    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕН Markdown (**жирный**, *курсив*, ### заголовки, ``` блоки) и неподдерживаемые HTML-теги (<mark>, <span>, <div>, <p>).
 6. СМАЙЛИКИ: Никаких смайликов и эмодзи.
@@ -15165,7 +15124,7 @@ async def handle_private_message(bot_client, event):
    В карпулах с адреналином антиоксидант — строго дисульфит (метабисульфит) натрия; парабены (метилпарабен) категорически запрещены и полностью отсутствуют в современных стоматологических карпулах.
    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать авторские эпонимы («метод Рокитянского»).
 12. ИСКОРЕНЕНИЕ СУБЪЕКТИВНОГО «Я БЫ» И НЕЙРОСЕТЕВЫХ КЛИШЕ:
-   Отвечай исключительно строгими безличными клиническими императивами («Рекомендуется», «Показано», «Оптимально выбрать», «Целесообразно», «Протокол: 1)...»). Категорически запрещены любые формы сослагательного наклонения и первого лица: «Я бы...», «Я бы сначала...», «Не стал бы...», «Не назначал бы...», «на вашем месте я бы». Никаких клише («в данном клиническом случае», «следует отметить», «важно подчеркнуть», «давайте разберем»).
+   Живой, прямой слог опытного клинициста у кресла на равных («Начинай с...», «Проверь...», «Оптимально выбрать», «Показано», «Рекомендуется», «Целесообразно», «Протокол: 1)...») — без учебниковых оборотов («Причиной ... является...»). Категорически запрещены любые формы первого лица и сослагательного наклонения: «Я бы...», «Я бы сначала...», «Не стал бы...», «Не назначал бы...», «на вашем месте я бы». Никаких клише («в данном клиническом случае», «следует отметить», «важно подчеркнуть», «давайте разберем»).
 13. ГИГИЕНА РАЗМЕТКИ <b>:
    Выделяй тегом <b> только ключевые термины, цифры и дозировки! Запрещено оборачивать в <b> всё предложение целиком."""
             else:
@@ -15185,9 +15144,8 @@ async def handle_private_message(bot_client, event):
 {group_msgs_str}
 """
                 instructions = f"""КРИТИЧЕСКИЕ ИНСТРУКЦИИ:
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
-{PM_CLINICAL_COGNITIVE_DIRECTIVE}
-{PM_FEW_SHOT_CONTRAST_BLOCK}
+{_runtime_cognitive_core()}
+{PM_RUNTIME_DIALOGUE_DIRECTIVE}
 1. Тон: живой, практический, доброжелательный коллега-стоматолог. Говори на равных, емко и по-человечески, без академической духоты и без эмодзи-кривляния. Отвечай строго к месту, без цитирования лишней теории и без зацикливания.
 2. ДЛИНА ОТВЕТА: {length_guideline}
 3. ЗАПРЕТ ОТЗЕРКАЛИВАНИЯ, ШТАМПОВ И НЕЙРОСЕТЕВЫХ КЛИШЕ:
@@ -15227,7 +15185,17 @@ async def handle_private_message(bot_client, event):
    - Безличный стиль: «Рекомендуется», «Показано», «Целесообразно» (без «Я бы»).
    - Разметка <b>: только ключевые термины, цифры и дозы, не все предложение целиком."""
 
-            if dialogue_turn == "DIALOGUE_ANSWER":
+            if is_continuation_request:
+                dialogue_focus_block = f"""[ПРОДОЛЖЕНИЕ ПРЕДЫДУЩЕГО КЛИНИЧЕСКОГО РАЗБОРА (CONTINUATION)]:
+Предыдущий фрагмент ответа консилиума: «{last_bot_context}»
+Запрос врача (СЕЙЧАС): «{text}»
+АКТИВНЫЕ СУЩНОСТИ КЕЙСА: {case_entities if case_entities else '(извлекай все анатомические и клинические ориентиры напрямую из контекста истории переписки)'}
+
+ИНСТРУКЦИЯ ПО ПРОДОЛЖЕНИЮ:
+1. Начинай СРАЗУ с недостающих последующих этапов протокола / разбора, которые не вошли в предыдущий ответ. Не повторяй уже написанное и не начинай разбор с нуля!
+2. Сохраняй 100% непрерывность случая ({case_entities}).
+3. Оформляй текст естественными абзацами и списками через «•» с выделением параметров через <b>...</b>; тег <code>...</code> используй ТОЛЬКО для готового шаблона записи в карту 043/у или рецепта Rp., но НЕ для обычных предложений или параметров."""
+            elif dialogue_turn == "DIALOGUE_ANSWER":
                 is_short_update = is_clinical_progress or len((text or "").split()) <= 12
                 if is_short_update:
                     dialogue_focus_block = f"""[АКТИВНЫЙ ДИАЛОГ: РЕПЛИКА / ОТВЕТ ВРАЧА В ТЕКУЩЕМ КЛИНИЧЕСКОМ КЕЙСЕ]:
@@ -15260,7 +15228,7 @@ async def handle_private_message(bot_client, event):
    - Полный пошаговый протокол с брендами, материалами, экспозицией и дозировками;
    - Строгие запреты и границы безопасности (чего категорически нельзя делать);
    - Режим для пациента на дому и точные сроки контрольного осмотра.
-4. Пошаговые протоколы и рецепты фармакотерапии оформляй строго в тег <code>...</code>.
+4. Готовый шаблон записи в карту 043/у или рецепт (Rp.) оформляй в тег <code>...</code>; пошаговые объяснения и миллиметры пиши обычным текстом с <b>...</b>.
 5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
    - Выдавать ответы-тизеры или утаивать шаги протокола на глубокие вопросы!
    - Требовать от врача повторного ввода данных («уточнить, что означает», «указать процедуру»). Все данные уже зафиксированы в контексте диалога!
@@ -15290,7 +15258,7 @@ async def handle_private_message(bot_client, event):
 
 ИНСТРУКЦИЯ ПО ФОКУСУ:
 Вопрос развивает текущий клинический случай ({case_entities}). Отвечай с полной опорой на установленный контекст диалога.
-ДИРЕКТИВА CHAIRSIDE COMPLETENESS: дай исчерпывающий клинический ответ с первого раза со всеми практическими нюансами, точными параметрами, последовательностью действий у кресла и границами безопасности. Пошаговые протоколы и рецепты оформляй в теге <code>...</code>. Без урезания до тизеров!"""
+ДИРЕКТИВА CHAIRSIDE COMPLETENESS: дай исчерпывающий клинический ответ с первого раза со всеми практическими нюансами, точными параметрами, последовательностью действий у кресла и границами безопасности. В <code>...</code> оборачивай только готовый блок 043/у или рецепт Rp., не обычный текст. Без урезания до тизеров!"""
             else:
                 dialogue_focus_block = f"""[АКТУАЛЬНЫЙ ВОПРОС ВРАЧА (СЕЙЧАС)]:
 {text}
@@ -15303,7 +15271,7 @@ async def handle_private_message(bot_client, event):
 2) пошаговый протокол действий у кресла с конкретными параметрами, инструментами, борами, размерами, концентрациями, экспозицией и торком в Нсм;
 3) фармакотерапия с точными препаратами и дозировками;
 4) границы безопасности, профилактика осложнений, домашний режим и сроки контроля.
-Пошаговые протоколы и рецепты оформляй строго в теге <code>...</code> для 1-тапового копирования в МИС.
+В тег <code>...</code> оборачивай только готовый шаблон записи в карту 043/у или формальный рецепт Rp. для 1-тапового копирования в МИС (не обычный текст).
 Без обрезанных тизеров!"""
 
             prompt = f"""
@@ -15344,6 +15312,7 @@ async def handle_private_message(bot_client, event):
         # 6. Отправка статуса "печатает" и генерация с циклом рецензирования (до 2 ретраев, для коротких реплик у кресла - 1 ретрай)
         max_retries = 1 if is_short_progress_update else 2
         reply_text = None
+        pm_primary_validated = False
         current_prompt = prompt
         current_context_msgs = list(context_msgs)
         last_pm_reason = ""
@@ -15419,7 +15388,7 @@ async def handle_private_message(bot_client, event):
                             "Сохраняй непрерывность контекста (зуб, диагноз, анестетики, материалы)! "
                             "ДИРЕКТИВА CHAIRSIDE COMPLETENESS: на короткие реплики у кресла отвечай лаконично и прицельно (2–4 предложения) без чтения лекций с нуля. "
                             "На новые вопросы — выдавай исчерпывающий структурированный протокол с брендами, дозировками и пределами безопасности. "
-                            "Протоколы и рецепты оформляй строго в теге <code>...</code>. Без усеченных ответов-тизеров."
+                            "В тег <code>...</code> оборачивай только готовый блок 043/у или рецепт Rp., не обычный текст. Без усеченных ответов-тизеров."
                         )
                     else:
                         continuation_guidance = "Отвечай строго по текущему клиническому вопросу врача. Не смешивай темы, не используй старые зубы/осложнения из давней истории."
@@ -15512,6 +15481,11 @@ async def handle_private_message(bot_client, event):
 
                 if pm_ok:
                     reply_text = candidate_text
+                    used_model = getattr(response, "model", None)
+                    # Если ответ пришёл от флагмана (или без явного даунгрейд-тега) и прошёл рецензента,
+                    # фоновый Groq-дополнитель не нужен — экономит квоту и токены.
+                    if not isinstance(used_model, str) or "flash-lite" not in used_model.lower():
+                        pm_primary_validated = True
                     logger.info("PM validator approved chat_id=%s (attempt %s): %s", chat_id, attempt, pm_reason)
                     break
 
@@ -15564,7 +15538,7 @@ async def handle_private_message(bot_client, event):
                             logger.error("Failed to persist PM reply in DB: %s", db_save_err)
                         return
 
-            reply_text = clean_html_formatting(reply_text)
+            reply_text = clean_html_formatting(reply_text, allow_long=True)
             reply_text = sanitize_clinical_pm_output(reply_text)
             reply_text = re.sub(
                 r'(?i)^[,\s—–-]*(?:коллег[аи],?\s*|уважаемые\s+коллеги,?\s*|здравствуйте,?\s*коллег[аи],?\s*|добрый\s+(?:день|вечер),?\s*коллег[аи],?\s*)',
@@ -15574,14 +15548,25 @@ async def handle_private_message(bot_client, event):
             if reply_text and reply_text[0].islower():
                 reply_text = reply_text[0].upper() + reply_text[1:]
 
-            # Генерация кнопок Next Best Action (сохранение в закладки, протоколы, статьи, PDF, FDI)
-            nba_tag = ""
-            if has_dental_topic or wiki_corpus:
-                words = re.findall(r'[а-яёa-z]{4,}', (text or '').lower())
-                nba_tag = words[0] if words else "dental"
-            tooth_match_pm = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{text or ''} {reply_text}")
-            detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
-            nba_markup = build_nba_markup(topic_query=nba_tag, has_media=has_media, tooth_num=detected_tooth, msg_id=getattr(event.message, 'id', None) if hasattr(event, 'message') else None, is_xray=bool(locals().get('is_periapical_xray_confirmed', False)))
+            # Генерация кнопок Next Best Action (только на содержательный разбор, без спама на "спасибо" / ошибку открытия снимка)
+            nba_markup = None
+            only_unreadable_media = bool(locals().get('media_failed')) and not (text or "").strip()
+            if not is_conversational_turn and not only_unreadable_media:
+                nba_tag = _extract_nba_topic_tag(
+                    text=text or "",
+                    reply_text=reply_text,
+                    search_keywords=locals().get("search_keywords"),
+                )
+                tooth_match_pm = re.search(r'(?<!\d)([1-4][1-8])(?!\d)', f"{text or ''} {reply_text}")
+                detected_tooth = int(tooth_match_pm.group(1)) if tooth_match_pm else None
+                nba_markup = build_nba_markup(
+                    topic_query=nba_tag,
+                    has_media=has_media,
+                    tooth_num=detected_tooth,
+                    msg_id=getattr(event.message, 'id', None) if hasattr(event, 'message') else None,
+                    is_xray=bool(locals().get('is_periapical_xray_confirmed', False)),
+                    include_case_actions=bool(has_dental_topic or wiki_corpus or media_description or is_clinical_progress),
+                )
 
             # Удаляем статусное сообщение прямо перед доставкой итогового ответа
             if ticker:
@@ -15648,8 +15633,8 @@ async def handle_private_message(bot_client, event):
             except Exception as mem_err:
                 logger.debug(f"Could not spawn clinician memory update: {mem_err}")
 
-            # Запуск асинхронного фонового аудита и дополнения (Этап 2: Только для клинических консультаций)
-            if is_clinical_consultation_query(text, has_media, has_dental_topic) and not is_command:
+            # Запуск асинхронного фонового аудита и дополнения (Этап 2: только если основной ответ не прошёл валидацию флагмана)
+            if not pm_primary_validated and is_clinical_consultation_query(text, has_media, has_dental_topic) and not is_command:
                 req_id = time.time()
                 _ACTIVE_PM_REQUESTS[chat_id] = req_id
                 user_q = text or (f"Клинический снимок: {media_description}" if media_description else "Клинический вопрос")
@@ -15752,6 +15737,10 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     # Триггер: упомянули "бот" во всех возможных падежах и числах через быстрый regex
     # или тегнули юзернейм бота
     if not is_uname_mention and not _BOT_WORD_RE.search(text_lower):
+        return False
+
+    if msg_id and msg_id in _LLM_SILENCED_MSG_IDS and not is_uname_mention:
+        logger.info("Bot mention triage skipped: msg_id=%s already returned [SILENCE] from assistant LLM.", msg_id)
         return False
 
     # Pre-LLM adversarial filter against jailbreaks & controlled substances
@@ -15881,8 +15870,8 @@ NO — если это:
 {mention_rag_block}
 
 Задачи:
-{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}
-{GROUP_FEW_SHOT_CONTRAST_BLOCK}
+{_runtime_cognitive_core()}
+{GROUP_RUNTIME_CONTRAST_EXAMPLES}
 1. Ответь сдержанно, коротко и по делу.
 1.1. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ЗЕРКАЛИРОВАНИЯ И ПЕРЕСКАЗА (ZERO MIRRORING & DEEP SYNTHESIS):
      - Категорически запрещено пересказывать вопрос, клинический кейс или реплику врача с другого ракурса («Вы описываете...», «Итак, вопрос касается...»). Врач сам знает, что он спросил!
@@ -17990,6 +17979,96 @@ async def handle_onboarding_callback(bot_client, event, data_str):
     await event.answer("Специализация сохранена!")
 
 
+async def _is_pm_consultation_callback(event) -> bool:
+    """True если нажата кнопка под клиническим ответом в ЛС (нельзя затирать ответ правкой сообщения)."""
+    try:
+        if not hasattr(event, "get_message") or not callable(event.get_message):
+            return False
+        msg = await event.get_message()
+        if not msg:
+            return False
+        markup = getattr(msg, "reply_markup", None)
+        rows = getattr(markup, "rows", None) or []
+        for row in rows:
+            for btn in getattr(row, "buttons", None) or []:
+                raw = getattr(btn, "data", b"")
+                d = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw or "")
+                if d.startswith(("nba:", "xray_filt:", "fdi:tooth:")):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+async def _generate_pm_case_derived_doc(bot_client, event, chat_id: int, mode: str):
+    """Генерирует производный 1-тап документ из последнего разбора в ЛС: 043/у (mode='rec') или памятку пациенту (mode='memo')."""
+    from telethon import Button
+    msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
+    user_msg = next(
+        (m.get("text", "") for m in reversed(msgs) if (m.get("sender_name") == "User" or m.get("role") == "User") and m.get("text")),
+        "",
+    )
+    assistant_msg = next(
+        (m.get("text", "") for m in reversed(msgs) if (m.get("sender_name") == "Assistant" or m.get("role") == "Assistant") and m.get("text")),
+        "",
+    )
+    if not assistant_msg and not user_msg:
+        await event.answer("Нет недавнего клинического разбора в диалоге.", alert=False)
+        return
+
+    await event.answer("📝 Формирую запись 043/у..." if mode == "rec" else "🗣 Готовлю памятку пациенту...", alert=False)
+    case_ctx = f"Запрос врача: {re.sub(r'<[^>]+>', '', user_msg)[:1200]}\n\nРазбор консилиума: {re.sub(r'<[^>]+>', '', assistant_msg)[:2500]}"
+
+    if mode == "rec":
+        doc_prompt = (
+            "Ты — врач-стоматолог и начмед. На основе клинического случая ниже составь готовую, "
+            "юридически выверенную запись для амбулаторной карты 043/у (МИС IDENT / Инфодент, Приказ № 834н).\n\n"
+            f"{case_ctx}\n\n"
+            "Правила:\n"
+            "1. Короткий заголовок на 1 строку: 📋 <b>Запись для карты 043/у по случаю</b>\n"
+            "2. Весь готовый шаблон для вставки в МИС оберни строго в ОДИН тег <code>...</code> без внутренних HTML-тегов.\n"
+            "3. Включи только относящиеся к кейсу поля: Диагноз (МКБ-10), Жалобы/Анамнез, Status praesens, Проведённое лечение / манипуляции, Назначения/рекомендации, Явка/ИДС.\n"
+            "4. Не придумывай отсутствующие данные (если неизвестно — оставь краткий ориентир в [квадратных скобках])."
+        )
+        fallback_msg = "📋 <i>Не удалось сгенерировать запись 043/у по текущему диалогу. Попробуйте команду <code>/record</code> с кратким описанием приёма.</i>"
+    else:
+        doc_prompt = (
+            "Ты — внимательный практикующий стоматолог. На основе клинического случая ниже напиши понятную, "
+            "спокойную и практичную памятку для пациента (или родителей, если речь о ребёнке), которую врач может "
+            "в 1 тап скопировать и отправить в WhatsApp/Telegram.\n\n"
+            f"{case_ctx}\n\n"
+            "Правила:\n"
+            "1. Заголовок на 1 строку: 🗣 <b>Памятка пациенту (готова к отправке)</b>\n"
+            "2. Текст самой памятки оберни в ОДИН тег <code>...</code> (без внутренних HTML-тегов), простым доброжелательным русским языком без тяжелого врачебного жаргона.\n"
+            "3. Чётко распиши: что можно/нельзя по режиму, уход/гигиена, нормальная реакция vs тревожные симптомы для срочного обращения к врачу."
+        )
+        fallback_msg = "🗣 <i>Не удалось подготовить памятку по текущему диалогу. Напишите пару слов о рекомендациях, и я оформлю текст для пациента.</i>"
+
+    resp, err = await generate_gemini_text_async(doc_prompt, {"kind": f"pm_nba_{mode}", "chat_id": chat_id, "thinking_level": "MEDIUM"}, timeout=90.0)
+    out_text = getattr(resp, "text", None) if not err else None
+    if out_text and out_text.strip():
+        out_text = clean_html_formatting(out_text.strip(), allow_long=True)
+        out_text = sanitize_clinical_pm_output(out_text)
+        if not out_text or _TOXIC_PRACTICE_RE.search(out_text):
+            logger.warning("PM derived doc (%s) blocked by sanitizer/toxic check for chat_id=%s", mode, chat_id)
+            out_text = fallback_msg
+        else:
+            is_valid, val_reason = await check_response_quality(
+                [user_msg or assistant_msg],
+                out_text,
+                invited=True,
+                reference=assistant_msg,
+            )
+            if not is_valid:
+                logger.warning("PM derived doc (%s) rejected by check_response_quality for chat_id=%s: %s", mode, chat_id, val_reason)
+                out_text = fallback_msg
+    else:
+        out_text = fallback_msg
+
+    btns = [[Button.inline("📌 В закладки", data="nba:bm"), Button.inline("⬅️ Главное меню", data="nav:main")]]
+    await send_message_chunks_async(bot_client, chat_id, out_text, buttons=btns, parse_mode='html')
+
+
 async def handle_nba_callback(bot_client, event, data_str):
     from telethon import Button
     nba_parts = data_str.split(":", 2)
@@ -17999,7 +18078,10 @@ async def handle_nba_callback(bot_client, event, data_str):
 
     if action == "bm":
         msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
-        assistant_msg = next((m for m in reversed(msgs) if m.get("role") == "Assistant"), None)
+        assistant_msg = next(
+            (m for m in reversed(msgs) if (m.get("sender_name") == "Assistant" or m.get("role") == "Assistant")),
+            None,
+        )
         if assistant_msg and assistant_msg.get("text"):
             clean_bm = re.sub(r"<[^>]+>", "", assistant_msg["text"])[:400]
             await database.save_clinical_bookmark(
@@ -18017,18 +18099,30 @@ async def handle_nba_callback(bot_client, event, data_str):
             await event.answer("ℹ️ Сообщение сохранено.", alert=False)
         return
 
+    elif action in ("rec", "memo"):
+        await _generate_pm_case_derived_doc(bot_client, event, chat_id, action)
+        return
+
     elif action == "proto":
         search_tag = param.replace("_", " ").strip()
+        if not search_tag or search_tag in _NBA_STOPWORDS or search_tag in ("case", "dental"):
+            msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
+            user_text = next(
+                (m.get("text", "") for m in reversed(msgs) if (m.get("sender_name") == "User" or m.get("role") == "User") and m.get("text")),
+                "",
+            )
+            if user_text:
+                search_tag = _extract_nba_topic_tag(user_text, "")
         found = await database.search_clinical_protocols(search_tag, limit=3)
         if not found and search_tag != "case":
             found = await database.search_clinical_protocols("", limit=3)
         if found:
-            p_text = f"📚 <b>Клинические протоколы по теме «{search_tag}»:</b>\n\n"
+            p_text = f"📚 <b>Клинические протоколы по теме «{html.escape(search_tag)}»:</b>\n\n"
             p_btns = []
             for p in found:
                 title = p.get("title") or f"Протокол #{p.get('id')}"
                 code = p.get("protocol_code") or str(p.get("id"))
-                p_text += f"• <b>{title}</b>\n"
+                p_text += f"• <b>{html.escape(str(title))}</b>\n"
                 p_btns.append([Button.inline(f"📖 {title[:30]}", data=f"proto:view:{code}")])
             p_btns.append([Button.inline("⬅️ Назад в меню", data="nav:main")])
             await bot_client.send_message(entity=chat_id, message=p_text, buttons=p_btns, parse_mode='html')
@@ -18039,15 +18133,71 @@ async def handle_nba_callback(bot_client, event, data_str):
 
     elif action == "web":
         search_query = param.replace("_", " ").strip()
+        msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
+        last_user_q = next(
+            (m.get("text", "") for m in reversed(msgs) if (m.get("sender_name") == "User" or m.get("role") == "User") and m.get("text")),
+            "",
+        )
+        effective_query = (re.sub(r"<[^>]+>", " ", last_user_q).strip()[:160] if last_user_q else "") or search_query
+        if not effective_query or effective_query in _NBA_STOPWORDS:
+            effective_query = search_query or "стоматологический протокол"
+
+        await event.answer("🌐 Ищу статьи и гайдлайны...", alert=False)
+        try:
+            import web_lookup
+            import blocking_tools
+            import inspect
+
+            async def _nba_search(query, timeout):
+                return await blocking_tools.web_search_async(query, web_lookup.SEARCH_MAX_RESULTS, timeout=timeout)
+
+            async def _nba_answer(prompt, timeout):
+                web_ctx = {"kind": "pm_web_lookup", "chat_id": chat_id, "thinking_level": "MEDIUM"}
+                resp, err = await generate_gemini_text_async(prompt, web_ctx, timeout=timeout)
+                return (getattr(resp, "text", None) or "").strip(), err
+
+            lookup_kwargs = {}
+            sig = inspect.signature(web_lookup.run_lookup)
+            if "grounding_call" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                async def _nba_grounding(query, timeout):
+                    return await blocking_tools.google_grounding_async(query, timeout=timeout)
+                lookup_kwargs["grounding_call"] = _nba_grounding
+
+            lookup = await web_lookup.run_lookup(
+                effective_query, _nba_search, _nba_answer,
+                budget=min(WEB_LOOKUP_BUDGET_SECONDS, 75.0), log=logger,
+                **lookup_kwargs,
+            )
+            if lookup and lookup.get("outcome") not in ("no_sources", "lookup_failed") and (lookup.get("text") or "").strip():
+                answer_text = clean_html_formatting(WEB_ANSWER_HEADER + lookup["text"], allow_long=True)
+                answer_text = sanitize_clinical_pm_output(answer_text)
+                if answer_text and not _TOXIC_PRACTICE_RE.search(answer_text):
+                    is_valid = True
+                    val_reason = ""
+                    if lookup.get("sources"):
+                        is_valid, val_reason = await check_response_quality(
+                            [effective_query],
+                            answer_text,
+                            invited=True,
+                            reference=lookup.get("text") or "",
+                        )
+                    if is_valid:
+                        await send_message_chunks_async(bot_client, chat_id, answer_text, parse_mode='html')
+                        return
+                    logger.warning("NBA web lookup rejected by check_response_quality for chat_id=%s: %s", chat_id, val_reason)
+                else:
+                    logger.warning("NBA web lookup blocked by sanitizer/toxic check for chat_id=%s", chat_id)
+        except Exception as nba_web_err:
+            logger.warning("NBA live web lookup failed for chat_id=%s query=%r: %s", chat_id, effective_query[:60], nba_web_err)
+
+        safe_query = html.escape(effective_query)
         hint_msg = (
             f"🌐 <b>Поиск в PubMed и открытых научных базах</b>\n\n"
-            f"Чтобы найти свежие исследования и метаанализы по теме <b>«{search_query}»</b>, "
-            f"отправьте команду:\n\n"
-            f"<code>/web {search_query} clinical protocol guidelines</code>\n\n"
-            f"<i>Я проанализирую первоисточники и выдам клиническое резюме со ссылками.</i>"
+            f"Прямой экспресс-поиск не дал релевантных ссылок. Уточните запрос командой:\n\n"
+            f"<code>/web {safe_query}</code>\n\n"
+            f"<i>Можно дописать препарат, материал или англоязычный термин.</i>"
         )
         await bot_client.send_message(entity=chat_id, message=hint_msg, parse_mode='html')
-        await event.answer()
         return
 
     elif action == "pdf":
@@ -18059,7 +18209,8 @@ async def handle_nba_callback(bot_client, event, data_str):
             msgs = await database.get_last_pm_messages(user_id=chat_id, limit=4)
             html_body = "<h2>Клиническая консультация StomChat</h2>\n"
             for m in msgs:
-                role_title = "Врач-стоматолог" if m.get("role") == "User" else "Консилиум StomChat"
+                is_user_msg = (m.get("sender_name") == "User" or m.get("role") == "User")
+                role_title = "Врач-стоматолог" if is_user_msg else "Консилиум StomChat"
                 clean_m = clean_markdown_to_html(m.get('text', '') or '')
                 html_body += f"<p><b>{role_title}:</b></p>\n{clean_m}\n<hr>\n"
 
@@ -18376,7 +18527,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     cached_dict = cached_dict_map.get(section_type, CLINICAL_SOS_CARDS)
 
     if not error and response and getattr(response, "text", None):
-        res_text = clean_html_formatting(response.text.strip())
+        res_text = clean_html_formatting(response.text.strip(), allow_long=True)
 
         # Для 043/у: гарантируем оформление блока в <code> для 1-тапового копирования в МИС
         if section_type == "record" and "<code>" not in res_text and "<pre>" not in res_text:
@@ -18611,14 +18762,27 @@ async def handle_quiz_callback(bot_client, event):
         return
 
     # CHAIRSIDE CLINICAL SUITE & TOOLS
-    if data_str.startswith(("chairside:", "fdi:", "aae:", "files:", "file_sys:", "pres_st:", "pres_eval:", "preserve:", "anes_sos:", "sos:anesthesia_buffering", "sos:file_matrix", "file_frag:", "pharma:")):
-        import chairside_tools
+    import chairside_tools
+    if chairside_tools.is_chairside_callback(data_str):
         if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
             return
 
     # 1. ОБЩИЙ НАВИГАЦИОННЫЙ ДИСПЕТЧЕР nav:* И menu:*
     if data_str.startswith("nav:") or data_str.startswith("menu:"):
         nav_target = data_str.split(":", 1)[1]
+        is_from_pm_answer = await _is_pm_consultation_callback(event)
+        nav_chat_id = event.chat_id or getattr(event, "sender_id", 0)
+
+        async def _deliver_nav(text_payload, op_name, nav_buttons, **nav_kwargs):
+            if is_from_pm_answer and nav_target not in ("main", "home"):
+                await send_message_chunks_async(
+                    bot_client, nav_chat_id, text_payload,
+                    buttons=nav_buttons, parse_mode=nav_kwargs.get("parse_mode", "html"),
+                )
+            else:
+                await edit_callback_message(
+                    bot_client, event, text_payload, op_name, buttons=nav_buttons, **nav_kwargs
+                )
 
         if nav_target in ("main", "home"):
             await edit_callback_message(
@@ -18696,9 +18860,7 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, calc_msg,
-                                       "edit_message:nav_calc", buttons=buttons,
-                                       parse_mode='html')
+            await _deliver_nav(calc_msg, "edit_message:nav_calc", buttons, parse_mode='html')
             await event.answer()
             return
 
@@ -18706,9 +18868,7 @@ async def handle_quiz_callback(bot_client, event):
             import protocol_extractor
             all_protos = await database.get_clinical_protocols(limit=100)
             msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
-            await edit_callback_message(bot_client, event, msg_text,
-                                       "edit_message:proto_list", buttons=btns,
-                                       parse_mode='html')
+            await _deliver_nav(msg_text, "edit_message:proto_list", btns, parse_mode='html')
             await event.answer()
             return
 
@@ -18883,7 +19043,7 @@ async def handle_quiz_callback(bot_client, event):
                 "• <i>«Пациент 45 лет, периодонтит 3.6, гной по переходной складке. Лечение?»</i>\n"
                 "• <i>«Чем зафиксировать e.max на культевую вкладку на 2.4?»</i>\n"
                 "• <i>«Что нужно учесть при имплантации у пациента на варфарине?»</i>\n\n"
-                "<i>Помню контекст последних 30 сообщений — можно уточнять и продолжать диалог без повтора условий.</i>"
+                f"<i>Помню контекст последних {PM_HISTORY_LIMIT} сообщений — можно уточнять и продолжать диалог без повтора условий.</i>"
             )
             buttons = [[Button.inline("⬅️ Назад в меню", data="nav:main")]]
             await edit_callback_message(bot_client, event, chat_text,
@@ -18939,7 +19099,9 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("🧸 Пульпотомия (Детство)", data="record:pediatric"), Button.inline("⚠️ Осложнение (Юр. защита)", data="record:complication")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, record_info, "edit_message:nav_record", buttons=buttons, parse_mode='html')
+            if is_from_pm_answer:
+                buttons.insert(0, [Button.inline("📝 Заполнить 043/у по этому случаю", data="nba:rec")])
+            await _deliver_nav(record_info, "edit_message:nav_record", buttons, parse_mode='html')
             await event.answer()
             return
 
@@ -18966,7 +19128,9 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("🫁 Астма & Аллергия", data="rx:asthma_allergy"), Button.inline("🧪 Почки & Печень", data="rx:renal_liver")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, rx_info, "edit_message:nav_rx", buttons=buttons, parse_mode='html')
+            if is_from_pm_answer:
+                buttons.insert(1, [Button.inline("🗣 Памятка пациенту по случаю", data="nba:memo")])
+            await _deliver_nav(rx_info, "edit_message:nav_rx", buttons, parse_mode='html')
             await event.answer()
             return
 
@@ -19016,7 +19180,7 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("🔩 Срыв торка имплантата", data="sos:torque_loss"), Button.inline("💥 Вывих ВНЧС в кресле", data="sos:dislocation")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, sos_info, "edit_message:nav_sos", buttons=buttons, parse_mode='html')
+            await _deliver_nav(sos_info, "edit_message:nav_sos", buttons, parse_mode='html')
             await event.answer()
             return
 
@@ -19072,7 +19236,7 @@ async def handle_quiz_callback(bot_client, event):
                 [Button.inline("🛡 Коффердам vs Валики", data="vs:isolation"), Button.inline("👶 СИЦ vs Композит у детей", data="vs:gi_composite")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
-            await edit_callback_message(bot_client, event, vs_info, "edit_message:nav_vs", buttons=buttons, parse_mode='html')
+            await _deliver_nav(vs_info, "edit_message:nav_vs", buttons, parse_mode='html')
             await event.answer()
             return
 
@@ -21087,6 +21251,11 @@ async def check_and_send_pm_pings(bot_client):
                 if unanswered_pings >= 1 or ping_sent:
                     continue
 
+                # Не перепроверять ту же неизменившуюся историю через LLM каждые 4 часа
+                last_triage_dt = _parse_state_dt(info.get("last_triage_evaluated"), default=None)
+                if last_triage_dt and last_triage_dt >= last_activity and (now - last_triage_dt).total_seconds() < 24 * 3600:
+                    continue
+
                 hours_since = (now - last_activity).total_seconds() / 3600.0
 
                 # 1. Пинговать ТОЛЬКО активных врачей: от 12 до 72 часов с последнего сообщения
@@ -21198,8 +21367,8 @@ async def check_and_send_pm_pings(bot_client):
                         f"PM ping triage for chat_id={chat_id}: no active follow-up needed "
                         f"(active={has_active}, resolved={is_resolved}, consult={consult_expert}, reason={triage_data.get('reason')})."
                     )
-                    if hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
-                        commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                    if not has_active or is_resolved or hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
+                        commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1, last_triage_evaluated=now.isoformat())
                     else:
                         commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
                     continue
@@ -21223,17 +21392,18 @@ async def check_and_send_pm_pings(bot_client):
 Задачи консилиума:
 1. Проанализируй динамику: действительно ли спустя {time_hint} коллегиальный контроль исхода уместен и несёт практическую ценность?
    Если кейс физиологически благополучно завершен, не требует вмешательства или вопрос будет навязчивым — выведи СТРОГО: NO_PING.
-2. Если контроль оправдан: сформулируй строго 1 точечную, коллегиальную реплику у кресла (1–2 предложения), адресованную врачу на равных.
-   Задай конкретный вопрос по исходу (динамика боли при накусывании, состояние слизистой, результат прохождения или обтурации).
+2. Если контроль оправдан: сформулируй строго 1 короткую, живую, коллегиальную реплику на «ты» у кресла (1 предложение, один конкретный вопрос по исходу: динамика боли при накусывании, состояние слизистой, удалось ли пройти канал или проверить прилегание).
+   Не склеивай два вопроса подряд и не оборачивай вопрос в <i>курсив</i>.
 3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
    • Обращения «коллега», «коллеги», «дорогой коллега». Обращайся напрямую по существу ситуации, без шаблонных приветствий.
-   • Клиентский сервис и спам-фразы: «как дела», «куда вы пропали», «я ждал ответа», «надеюсь у вас всё хорошо».
-   • Длинные поучения, лекции, общие рассуждения или пересказ кейса.
+   • Канцелярщина и анкетный тон («Каков текущий уровень...», «Отмечаете ли пациентка...», «Отмечаете ли...», «каковы результаты...»), а также клиентский сервис («как дела», «куда вы пропали», «я ждал ответа», «надеюсь у вас всё хорошо»).
+   • Несогласованное склонение и лишние пересказы уже сказанного.
+   • Длинные поучения, лекции, общие рассуждения.
    • Смайлики и эмодзи.
    • Любые отозванные препараты (Солкосерил, Актовегин) и токсические методики (депофорез, мышьяк, народные средства).
-4. Тон: живой, профессиональный, коллегиальный («Врач — Врачу»).
-5. Разметка: только валидный HTML (<b>жирный</b>, <i>курсив</i>). Никакого Markdown.
-Начинай сразу с сути обращения к врачу (или выведи NO_PING)."""
+4. Тон: живой, естественный разговор двух практикующих врачей («Удалось пройти мезиальный канал после снятия навеса?», «Как ведёт себя зуб при накусывании сегодня?»).
+5. Разметка: только валидный HTML (<b>жирный</b> при необходимости). Без Markdown и без оборачивания всего вопроса в <i>...</i>.
+Начинай сразу с сути вопроса к врачу (или выведи NO_PING)."""
 
                 status_ctx = {"kind": "pm_ping", "chat_id": chat_id, "thinking_level": "HIGH"}
                 response, error = await generate_gemini_text_async(expert_prompt, status_ctx, timeout=180.0)
@@ -21243,7 +21413,7 @@ async def check_and_send_pm_pings(bot_client):
                     if not reply_text or "NO_PING" in reply_text.upper() or reply_text.upper() == "NONE" or len(reply_text) < 15:
                         logger.info(f"PM ping for chat_id={chat_id}: expert model decided NO_PING/NONE (no follow-up needed).")
                         if hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
-                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1, last_triage_evaluated=now.isoformat())
                         else:
                             commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
                         continue

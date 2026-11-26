@@ -40,14 +40,17 @@ if not os.path.exists(UPLOADED_DIR):
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
 def extract_frame(video_path):
-    """Вырезает первый кадр из видео с помощью OpenCV."""
+    """Вырезает первый кадр из видео с помощью OpenCV (безопасно к Unicode-путям)."""
     vid_cap = None
     try:
-        vid_cap = cv2.VideoCapture(video_path)
+        vid_cap = cv2.VideoCapture(os.fspath(video_path))
         success, image = vid_cap.read()
-        if success:
+        if success and image is not None:
             frame_path = video_path + ".jpg"
-            if cv2.imwrite(frame_path, image):
+            ok_enc, enc_buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok_enc:
+                with open(frame_path, "wb") as out_f:
+                    out_f.write(enc_buf.tobytes())
                 return frame_path
     except Exception as e:
         logger.error(f"❌ Ошибка извлечения кадра (OpenCV): {e}")
@@ -57,19 +60,22 @@ def extract_frame(video_path):
     return None
 
 def resize_and_save_final(source_path, dest_dir, max_size=768):
-    """Ресайзит изображение до max_size и сохраняет в целевую папку."""
+    """Ресайзит изображение до max_size (с учетом EXIF, альфа-канала и 16-bit) и сохраняет как JPEG."""
+    from media_tools import _pil_to_rgb_normalized
+    img = None
     try:
-        with Image.open(source_path) as img:
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+        Image.MAX_IMAGE_PIXELS = 49_000_000
+        with Image.open(source_path) as src:
+            src.load()
+            img = _pil_to_rgb_normalized(src)
 
-            if max(img.size) > max_size:
-                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        if max(img.size) > max_size:
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
-            # Сохраняем с оптимизацией
-            final_path = os.path.join(dest_dir, os.path.basename(source_path))
-            img.save(final_path, 'JPEG', quality=85, optimize=True)
-            return final_path
+        base_stem = os.path.splitext(os.path.basename(source_path))[0]
+        final_path = os.path.join(dest_dir, f"{base_stem}.jpg")
+        img.save(final_path, 'JPEG', quality=85, optimize=True)
+        return final_path
     except Exception as e:
         logger.error(f"Ошибка ресайза для сохранения: {e}")
         # Если ресайз упал, просто копируем оригинал
@@ -79,6 +85,12 @@ def resize_and_save_final(source_path, dest_dir, max_size=768):
             return final_path
         except Exception as copy_err:
             logger.error(f"Ошибка копирования файла: {copy_err}")
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
     return None
 
 
@@ -177,8 +189,8 @@ async def main():
                     description = await vision.describe_image(final_img_path, caption=text)
 
                     if description:
-                        # Сохранение в постоянную папку
-                        saved_path = resize_and_save_final(final_img_path, UPLOADED_DIR, max_size=768)
+                        # Сохранение в постоянную папку без блокировки event loop
+                        saved_path = await asyncio.to_thread(resize_and_save_final, final_img_path, UPLOADED_DIR, 768)
 
                         if saved_path:
                             # Запись в БД (описание и путь)
@@ -186,7 +198,7 @@ async def main():
                                 UPDATE archive_messages 
                                 SET vision_description = ?, media_remote_url = ?, vision_processed = 1 
                                 WHERE msg_id = ?
-                            ''', (description, saved_path, msg_id))
+                            ''', (str(description), saved_path, msg_id))
                             await db.commit()
                             print(f"   ∟ Готово: {description[:50]}... | Сохранено: {saved_path}")
                         else:

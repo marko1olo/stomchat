@@ -126,8 +126,8 @@ async def test_get_user_quiz_stats_with_streak():
     doctor_id = 998877
 
     # Создаем 3 квиза за разные дни
-    # День 1: 2 дня назад
-    dt_2days_ago = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    # День 1: 2 дня назад (UTC, как и CURRENT_TIMESTAMP в SQLite)
+    dt_2days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
     p1 = 101
     await poll_storage.save_poll(
         poll_id=p1, chat_id=-1001, poll_type="quiz",
@@ -146,8 +146,8 @@ async def test_get_user_quiz_stats_with_streak():
         await conn.execute("UPDATE poll_votes SET voted_at = ? WHERE poll_id = ? AND user_id = ?", (dt_2days_ago, p1, doctor_id))
         await conn.commit()
 
-    # День 2: вчера
-    dt_yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    # День 2: вчера (UTC, как и CURRENT_TIMESTAMP в SQLite)
+    dt_yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
     p2 = 102
     await poll_storage.save_poll(
         poll_id=p2, chat_id=-1001, poll_type="quiz",

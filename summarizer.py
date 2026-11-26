@@ -16,6 +16,7 @@ import random
 import re
 import html
 import runtime_guard
+import tg_safety
 import user_memory
 import clinical_cognitive_core
 from collections import Counter
@@ -250,6 +251,230 @@ def _is_valid_summary_image_url(url: str) -> bool:
     return True
 
 
+_NONCLINICAL_MEDIA_MARKERS = (
+    "немедицинск",
+    "не являются клиническими",
+    "не является клиническим",
+    "не относится к стоматологи",
+    "не содержит стоматологическ",
+    "каких-либо стоматологических объектов",
+    "стоматологических объектов не",
+    "отсутствуют стоматологическ",
+    "нет стоматологических",
+    "бытовое изображение",
+    "бытовая иллюстрация",
+    "бытовое фото",
+    "ироничн",
+    "юмористическ",
+    "скриншот переписки",
+    "мем",
+)
+
+
+def _is_nonclinical_caption(text: str) -> bool:
+    """Возвращает True, если описание/подпись явно помечают снимок как немедицинский/бытовой/мем."""
+    if not text:
+        return False
+    low = str(text).strip().lower()
+    if not low or low == "-" or low.startswith("skip"):
+        return True
+    return any(marker in low for marker in _NONCLINICAL_MEDIA_MARKERS)
+
+
+def _is_clinical_summary_media(m_desc: str = "", m_short: str = "", m_url: str = "") -> bool:
+    """Проверяет, что вложение пригодно для клинического дайджеста (валидный URL + нет маркера бытового мема)."""
+    if not _is_valid_summary_image_url(m_url):
+        return False
+    if _is_nonclinical_caption(m_short) or _is_nonclinical_caption(m_desc):
+        return False
+    return True
+
+
+def _collapse_nested_emphasis(html_text: str) -> str:
+    """Убирает двойные вложенные <b>...<b>...</b></b>, <strong> и пустые <p></p> после clean_markdown_to_html."""
+    if not html_text:
+        return ""
+    res = html_text
+    # Удаляем пустые параграфы и сворачиваем вложенные <b>/<strong> без пересечения соседних тегов
+    res = re.sub(r'<p>\s*</p>', '', res)
+    for tag in ("b", "strong", "i", "em"):
+        pat = re.compile(rf'<{tag}>([^<]*)<{tag}>([^<]*)</{tag}>([^<]*)</{tag}>', re.IGNORECASE)
+        for _ in range(4):
+            nxt = pat.sub(rf'<{tag}>\1\2\3</{tag}>', res)
+            if nxt == res:
+                break
+            res = nxt
+    res = re.sub(r'\n{3,}', '\n\n', res)
+    return res.strip()
+
+
+def _prepare_telegram_direct_html(full_html: str) -> str:
+    """Преобразует Telegraph HTML (<figure>, <p>, <h*>, <hr>, <ul>/<li>) в чистый Telegram-HTML."""
+    if not full_html:
+        return ""
+    from html_safe import balance_html, convert_all_tables_in_html_to_telegraph
+
+    txt = convert_all_tables_in_html_to_telegraph(full_html)
+    txt = _collapse_nested_emphasis(txt)
+
+    def _fig_to_link(m):
+        url = (m.group(1) or "").strip()
+        cap = html.unescape(re.sub(r'<[^>]+>', '', m.group(2) or "")).strip()
+        label = cap or "Клинический снимок"
+        if not url:
+            return f"\n📷 {html.escape(label)}\n"
+        return f'\n📷 <a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>\n'
+
+    txt = re.sub(
+        r'<figure>\s*<img[^>]*src=["\']([^"\']+)["\'][^>]*>\s*(?:<figcaption>([\s\S]*?)</figcaption>)?\s*</figure>',
+        _fig_to_link,
+        txt,
+        flags=re.IGNORECASE,
+    )
+    txt = re.sub(r'<h[1-6][^>]*>([\s\S]*?)</h[1-6]>', lambda m: f"\n\n<b>{m.group(1).strip()}</b>\n", txt, flags=re.IGNORECASE)
+    txt = re.sub(r'<hr\s*/?>', '\n\n━━━━━━━━━━\n\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'<li[^>]*>\s*', '• ', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'\s*</li>', '\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'</?(?:ul|ol)[^>]*>', '\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'</p>\s*<p[^>]*>', '\n\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'<p[^>]*>', '', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'</p>', '\n\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'<br\s*/?>', '\n', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'</?(?:figure|figcaption|img)[^>]*>', '', txt, flags=re.IGNORECASE)
+    txt = re.sub(r'\n{3,}', '\n\n', txt).strip()
+    body, unclosed = balance_html(txt)
+    return body + "".join(f"</{tag}>" for tag in reversed(unclosed))
+
+
+def _is_thumb_image_url(url: str) -> bool:
+    low = (url or "").strip().lower()
+    return "/thumbs/" in low or "/thumb/" in low
+
+
+def _collect_clinical_media_item(
+    m_id,
+    name,
+    m_desc,
+    m_short,
+    m_url,
+    media_map: dict,
+    media_captions: dict,
+    media_authors: dict,
+) -> bool:
+    """Фильтрует немедицинские/битые вложения и отдаёт приоритет full-res перед /thumbs/ при дубле подписи."""
+    if not m_url:
+        return False
+    resolved_cap = ""
+    if m_short and str(m_short).strip():
+        resolved_cap = str(m_short).strip()
+    elif m_desc:
+        from vision import extract_fallback_short_caption
+        resolved_cap = extract_fallback_short_caption(m_desc, max_len=140)
+
+    if not _is_clinical_summary_media(m_desc or "", resolved_cap, m_url):
+        return False
+
+    clean_url = str(m_url).strip()
+    norm_cap = re.sub(r'\s+', ' ', resolved_cap).strip().lower() if resolved_cap else ""
+    if norm_cap:
+        for existing_id, existing_cap in list(media_captions.items()):
+            if re.sub(r'\s+', ' ', existing_cap).strip().lower() == norm_cap:
+                existing_url = media_map.get(existing_id, "")
+                if _is_thumb_image_url(existing_url) and not _is_thumb_image_url(clean_url):
+                    del media_map[existing_id]
+                    del media_captions[existing_id]
+                    media_authors.pop(existing_id, None)
+                    break
+                if not _is_thumb_image_url(existing_url) and _is_thumb_image_url(clean_url):
+                    return False
+
+    media_map[m_id] = clean_url
+    if name and str(name).strip():
+        media_authors[m_id] = str(name).strip()
+    if resolved_cap:
+        media_captions[m_id] = resolved_cap
+    return True
+
+
+async def _deliver_digest_pdf_or_fallback(
+    client,
+    chat_id,
+    topic_id,
+    full_html: str,
+    msg_count: int,
+    date_str: str,
+    page_url,
+    telegraph_error,
+    sent_msg,
+    send_params: dict,
+    *,
+    kind: str,
+    pdf_title: str,
+    pdf_subtitle: str,
+    pdf_caption: str,
+    fallback_emoji: str,
+    fallback_label_prefix: str,
+) -> bool:
+    """Доставляет PDF-версию дайджеста; при отказе и Telegraph, и PDF отправляет Telegram-безопасные части."""
+    pdf_delivered = False
+    if sent_msg:
+        try:
+            from digest_pdf import generate_digest_pdf
+            pdf_path = await generate_digest_pdf(
+                html_content=full_html,
+                title=pdf_title,
+                subtitle=pdf_subtitle,
+                msg_count=msg_count,
+                date_str=date_str,
+            )
+            if pdf_path and os.path.exists(pdf_path) and hasattr(client, "send_file"):
+                pdf_params = {'caption': pdf_caption, 'parse_mode': 'HTML'}
+                if topic_id:
+                    pdf_params['reply_to'] = topic_id
+                outcome = await tg_safety.send_file(
+                    client,
+                    chat_id,
+                    pdf_path,
+                    op=f"{kind}_pdf_send",
+                    logger=logger,
+                    **pdf_params,
+                )
+                if outcome.ok:
+                    pdf_delivered = True
+                    logger.info("PDF %s digest document delivered to chat=%s", kind, chat_id)
+                else:
+                    logger.warning("PDF %s digest send_file failed: %s", kind, outcome.error or outcome.reason)
+        except Exception as pdf_err:
+            logger.warning("PDF %s digest delivery failed: %s", kind, pdf_err)
+
+    if not page_url and not pdf_delivered:
+        logger.warning(
+            "Telegraph %s page unavailable (err=%s) and PDF unavailable; sending direct chat messages fallback",
+            kind,
+            telegraph_error,
+        )
+        from html_safe import split_html
+        direct_html = _prepare_telegram_direct_html(full_html)
+        chunks = split_html(direct_html, limit=1700)
+        fallback_params = dict(send_params)
+        fallback_params['link_preview'] = False
+        fallback_params.pop('buttons', None)
+        for c_idx, chunk in enumerate(chunks):
+            prefix = f"{fallback_emoji} <b>Часть {c_idx + 1}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
+            part_text = prefix + chunk
+            await _send_message_once(
+                client,
+                chat_id,
+                topic_id,
+                part_text,
+                fallback_params,
+                f"{fallback_label_prefix}_{c_idx+1}",
+            )
+            await asyncio.sleep(0.5)
+
+    return pdf_delivered
+
+
 
 
 def prune_empty_summary_sections(html_or_md: str) -> str:
@@ -434,14 +659,21 @@ def embed_media_into_summary_html(
     for m_id, url in filtered_media_map.items():
         if llm_placed_count >= max_images:
             break
+        raw_cap = media_captions.get(m_id, "")
+        if _is_nonclinical_caption(raw_cap):
+            continue
         placeholder = f"[IMG_{m_id}]"
         if placeholder in final_html:
-            caption = media_captions.get(m_id) or f"Клинический снимок #{m_id}"
+            caption = raw_cap or f"Клинический снимок #{m_id}"
             if len(caption) > 140:
                 caption = caption[:137] + "..."
             fig_node = f'\n\n<figure><img src="{url}"><figcaption>{html.escape(caption)}</figcaption></figure>\n\n'
-            pattern = re.compile(rf'[.,;:—\-]?\s*\[IMG_{m_id}\]\s*[.,;:—\-]?', re.IGNORECASE)
-            final_html = pattern.sub(fig_node, final_html, count=1)
+            pattern = re.compile(rf'(?P<pre>[.!?])?[.,;:—\-]?\s*\[IMG_{m_id}\]\s*(?P<post>[.!?])?[.,;:—\-]?', re.IGNORECASE)
+            final_html = pattern.sub(
+                lambda m: f"{m.group('pre') or m.group('post') or ''}{fig_node}",
+                final_html,
+                count=1,
+            )
             placed_ids.add(m_id)
             llm_placed_count += 1
 
@@ -453,7 +685,7 @@ def embed_media_into_summary_html(
         for m_id in remaining_ids:
             cap = media_captions.get(m_id, "")
             # Исключаем явные мемы / немедицинские заглушки
-            if "немедицинск" in cap.lower() or "мем" in cap.lower() or "скриншот переписки" in cap.lower():
+            if _is_nonclinical_caption(cap):
                 continue
             valid_fallback.append(m_id)
 
@@ -554,7 +786,7 @@ def embed_media_into_summary_html(
     # Шаг 3: Дедупликация идентичных подписей <figcaption> подряд (серии фото из одного альбома)
     final_html = _deduplicate_consecutive_figcaptions(final_html)
 
-    final_html = re.sub(r'\[IMG_\d+\]', '', final_html)
+    final_html = re.sub(r'[ \t]*\[IMG_\d+\]', '', final_html)
     logger.info(
         "summary media embedded: total_raw=%d filtered=%d llm_placed=%d fallback=%d final_images=%d max=%d",
         len(media_map or {}), len(filtered_media_map), llm_placed_count, fallback_count, len(placed_ids), max_images
@@ -839,9 +1071,21 @@ def get_russian_date(date_input):
         "января", "февраля", "марта", "апреля", "мая", "июня",
         "июля", "августа", "сентября", "октября", "ноября", "декабря"
     ]
-    if isinstance(date_input, str):
-        # Если пришла строка, парсим её
-        dt = datetime.strptime(date_input[:19], '%Y-%m-%d %H:%M:%S')
+    if date_input is None:
+        dt = datetime.now()
+    elif isinstance(date_input, str):
+        raw = date_input.strip()
+        if not raw:
+            dt = datetime.now()
+        else:
+            norm = raw.replace("T", " ")
+            try:
+                dt = datetime.strptime(norm[:19], '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                try:
+                    dt = datetime.strptime(norm[:10], '%Y-%m-%d')
+                except ValueError:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     else:
         dt = date_input
 
@@ -1107,8 +1351,9 @@ def filter_useful_messages(messages):
         m_url = msg[7] if len(msg) > 7 else None
         text = msg[3] if len(msg) > 3 else None
 
-        # Оставляем, если есть описание медиа (описание мема/снимка) или прямая ссылка
-        if m_desc or m_url:
+        desc_str = str(m_desc).strip() if m_desc else ""
+        has_real_desc = bool(desc_str and desc_str != "-" and not desc_str.lower().startswith("skip"))
+        if has_real_desc or m_url:
             useful.append(msg)
             continue
 
@@ -1211,18 +1456,12 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
 
         full_text_parts.append(f"MSG_{m_id} | {name}: {quote_text}{text or ''}\n")
 
-        if m_desc:
+        if m_desc and not _is_nonclinical_caption(m_desc):
             full_text_parts.append(f"(На фото в MSG_{m_id}: {m_desc})\n")
 
-        if m_url:
-            media_map[m_id] = m_url
-            if name and str(name).strip():
-                media_authors[m_id] = str(name).strip()
-            if m_short and str(m_short).strip():
-                media_captions[m_id] = str(m_short).strip()
-            elif m_desc:
-                from vision import extract_fallback_short_caption
-                media_captions[m_id] = extract_fallback_short_caption(m_desc, max_len=140)
+        _collect_clinical_media_item(
+            m_id, name, m_desc, m_short, m_url, media_map, media_captions, media_authors
+        )
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -1382,10 +1621,12 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
         raw_summary = response.text
         logger.info(f"summary gemini done chat={chat_id} chars={len(raw_summary) if raw_summary else 0}")
         cleaned_html = clean_markdown_to_html(raw_summary)
+        cleaned_html = _collapse_nested_emphasis(cleaned_html)
         cleaned_html = prune_empty_summary_sections(cleaned_html)
 
         # Вставка фото (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 4)
         full_html = embed_media_into_summary_html(cleaned_html, media_map, media_captions, max_images=4, media_authors=media_authors)
+        full_html = _collapse_nested_emphasis(full_html)
 
         cta_telegraph = build_clinical_assistant_cta("telegraph")
         count_footer = f"\n\n<i>Сообщений за период — {msg_count}</i>" if msg_count > 0 and "Сообщений за период" not in full_html else ""
@@ -1409,10 +1650,12 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             send_params['reply_to'] = topic_id
 
         msg_to_send = ""
+        page_url = None
+        telegraph_error = None
+        used_telegraph_branch = False
 
         if len(full_html) < TELEGRAPH_THRESHOLD:
-            from html_safe import convert_all_tables_in_html_to_telegraph
-            msg_to_send = convert_all_tables_in_html_to_telegraph(full_html)
+            msg_to_send = _prepare_telegram_direct_html(full_html)
             direct_send_params = dict(send_params)
             direct_send_params['link_preview'] = False
             logger.info(f"summary telegram send start chat={chat_id} chars={len(msg_to_send)}")
@@ -1433,6 +1676,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 "daily_direct",
             )
         else:
+            used_telegraph_branch = True
             # Создание Telegraph с каскадным даунсайзингом
             logger.info("📜 Создаем Telegraph страницу (Daily)...")
             title = f"Дайджест {'EndoChat' if is_endo else 'Учимся Вместе'} — {date_str}"
@@ -1510,15 +1754,15 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 candidates = []
                 patterns = [
                     # КЛИНИЧЕСКИЙ ФОКУС ДНЯ
-                    r'<b>(?:(?:\d+\.?\s*)?[🎯\s]*КЛИНИЧЕСКИЙ ФОКУС ДНЯ(?:\s*\([^)]*\))?[:\s\-–—]+)([^<]+)</b>',
+                    r'<(?:b|strong|h[2-4])>(?:(?:\d+\.?\s*)?[🎯\s]*КЛИНИЧЕСКИЙ ФОКУС ДНЯ(?:\s*\([^)]*\))?[:\s\-–—]+)([^<]+)</(?:b|strong|h[2-4])>',
                     # ТЕМА ДНЯ
-                    r'<b>(?:(?:\d+\.?\s*)?[🔥\s]*ТЕМА ДНЯ(?:\s*\([^)]*\))?[:\s\-–—]+)([^<]+)</b>',
+                    r'<(?:b|strong|h[2-4])>(?:(?:\d+\.?\s*)?[🔥\s]*ТЕМА ДНЯ(?:\s*\([^)]*\))?[:\s\-–—]+)([^<]+)</(?:b|strong|h[2-4])>',
                     # КЕЙСЫ (сохраняя "Кейс N: Название")
-                    r'<b>(?:###\s*)?((?:Кейс|Клинический случай|Случай)\s*\d+[:\s\-–—.]+[^<]+)</b>',
+                    r'<(?:b|strong|h[2-4])>(?:###\s*)?((?:Кейс|Клинический случай|Случай)\s*\d+[:\s\-–—.]+[^<]+)</(?:b|strong|h[2-4])>',
                     # СПОРЫ / КЛИНИЧЕСКАЯ РАЗВИЛКА
-                    r'<b>(?:(?:\d+\.?\s*)?[⚔️\s]*(?:КЛИНИЧЕСКАЯ РАЗВИЛКА(?:\s*\(АНАЛИЗ СПОРА\))?|АНАЛИЗ ГЛАВНОГО СПОРА|АНАЛИЗ СПОРА)[:\s\-–—]+)([^<]+)</b>',
+                    r'<(?:b|strong|h[2-4])>(?:(?:\d+\.?\s*)?[⚔️\s]*(?:КЛИНИЧЕСКАЯ РАЗВИЛКА(?:\s*\(АНАЛИЗ СПОРА\))?|АНАЛИЗ ГЛАВНОГО СПОРА|АНАЛИЗ СПОРА)[:\s\-–—]+)([^<]+)</(?:b|strong|h[2-4])>',
                     # СПРАВОЧНИК
-                    r'<b>(?:(?:\d+\.?\s*)?[📚\s]*ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК[:\s\-–—]+)([^<]+)</b>',
+                    r'<(?:b|strong|h[2-4])>(?:(?:\d+\.?\s*)?[📚\s]*ТЕОРЕТИЧЕСКИЙ СПРАВОЧНИК[:\s\-–—]+)([^<]+)</(?:b|strong|h[2-4])>',
                 ]
                 stop_words = {
                     "СТРУКТУРА", "ПРАВИЛА", "ВЫВОД", "ЛОГИКА", "ТЕХНИЧЕСКИЕ", "ПОЧЕМУ",
@@ -1548,8 +1792,11 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                         words = cl.split()
                         if len(words) < 2 and len(cl) < 12:
                             continue
-                        if not (8 <= len(cl) <= 75):
+                        if not (8 <= len(cl) <= 220):
                             continue
+                        if len(cl) > 75:
+                            clipped = cl[:72].rsplit(' ', 1)[0].rstrip(' ,;:-–—')
+                            cl = (clipped if len(clipped) >= 20 else cl[:72].rstrip()) + "…"
                         norm = cl[0].upper() + cl[1:]
                         if not _is_dup(norm, candidates) and norm not in candidates:
                             candidates.append(norm)
@@ -1565,7 +1812,7 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
             sel_intro = random.choice(intros)
             dynamic_topics = _extract_topics(full_html)
             if dynamic_topics:
-                sel_bullets = "\n".join(f"🔹 {t}" for t in dynamic_topics)
+                sel_bullets = "\n".join(f"🔹 {html.escape(t)}" for t in dynamic_topics)
             else:
                 sel_bullets = random.choice(bullet_sets)
 
@@ -1604,61 +1851,37 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
                 "daily_teaser",
             )
 
-            # Резервный канал доставки: если Telegraph недоступен, публикуем полную статью в чат частями
-            if not page_url:
-                logger.warning(
-                    "Telegraph daily page unavailable (err=%s); sending full digest as direct chat messages fallback",
-                    telegraph_error,
-                )
-                from html_safe import split_html, convert_all_tables_in_html_to_telegraph
-                direct_html = convert_all_tables_in_html_to_telegraph(full_html)
-                chunks = split_html(direct_html, limit=1700)
-                fallback_params = dict(send_params)
-                fallback_params['link_preview'] = False
-                fallback_params.pop('buttons', None)
-                for c_idx, chunk in enumerate(chunks):
-                    prefix = f"📖 <b>Часть {c_idx + 1}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
-                    part_text = prefix + chunk
-                    await _send_message_once(
-                        client,
-                        chat_id,
-                        topic_id,
-                        part_text,
-                        fallback_params,
-                        f"daily_direct_fallback_{c_idx+1}",
-                    )
-                    await asyncio.sleep(0.5)
-
-        # 9. ЗАКРЕП И ГЕНЕРАЦИЯ PDF
+        # 9. ЗАКРЕП И ГЕНЕРАЦИЯ PDF (+ резервная прямая отправка, только если недоступны и Telegraph, и PDF)
         if sent_msg:
             await _notify_delivery(delivery_hook, sent_msg)
             await _pin_message_safely(client, chat_id, sent_msg.id)
 
-            # Генерация и отправка верстанной журнальной PDF-версии вестника
-            try:
-                from digest_pdf import generate_digest_pdf
-                is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
-                pdf_title = f"Клинический Дайджест {'EndoChat' if is_endo else 'StomChat'} ({date_str})"
-                pdf_subtitle = "Ежедневный клинический вестник эндодонтического сообщества EndoChat" if is_endo else "Ежедневный клинический вестник профессионального сообщества"
-                pdf_path = await generate_digest_pdf(
-                    html_content=full_html,
-                    title=pdf_title,
-                    subtitle=pdf_subtitle,
-                    msg_count=msg_count,
-                    date_str=date_str,
-                )
-                if pdf_path and os.path.exists(pdf_path) and hasattr(client, "send_file"):
-                    pdf_caption = (
-                        f"📄 <b>{pdf_title}</b>\n\n"
-                        f"Полная иллюстрированная версия со всеми снимками, протоколами и кейсами дня."
-                    )
-                    pdf_params = {'caption': pdf_caption, 'parse_mode': 'HTML'}
-                    if topic_id:
-                        pdf_params['reply_to'] = topic_id
-                    await client.send_file(chat_id, pdf_path, **pdf_params)
-                    logger.info("PDF daily digest document delivered to chat=%s", chat_id)
-            except Exception as pdf_err:
-                logger.warning("PDF daily digest delivery failed: %s", pdf_err)
+        is_endo_pdf = "endo" in (getattr(config, "DB_PATH", "") or "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+        pdf_title = f"Клинический Дайджест {'EndoChat' if is_endo_pdf else 'StomChat'} ({date_str})"
+        pdf_subtitle = "Ежедневный клинический вестник эндодонтического сообщества EndoChat" if is_endo_pdf else "Ежедневный клинический вестник профессионального сообщества"
+        pdf_caption = (
+            f"📄 <b>{pdf_title}</b>\n\n"
+            f"Полная иллюстрированная версия со всеми снимками, протоколами и кейсами дня."
+        )
+        if used_telegraph_branch or sent_msg:
+            await _deliver_digest_pdf_or_fallback(
+                client,
+                chat_id,
+                topic_id,
+                full_html,
+                msg_count,
+                date_str,
+                page_url if used_telegraph_branch else "direct_already_sent",
+                telegraph_error,
+                sent_msg,
+                send_params,
+                kind="daily",
+                pdf_title=pdf_title,
+                pdf_subtitle=pdf_subtitle,
+                pdf_caption=pdf_caption,
+                fallback_emoji="📖",
+                fallback_label_prefix="daily_direct_fallback",
+            )
 
         logger.info(f"✅ Саммари отправлено в {chat_id}")
         runtime_guard.clear_summary_status("daily_summary_done")
@@ -1771,18 +1994,12 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
         # Маркеры для нейронки, чтобы она видела структуру диалогов
         full_text_parts.append(f"MSG_{m_id} | {dt_str} | {name}: {quote_text}{text or ''}\n")
 
-        if m_desc:
+        if m_desc and not _is_nonclinical_caption(m_desc):
             full_text_parts.append(f"[ВАЖНО: К этому сообщению прикреплено ФОТО/ВИДЕО: {m_desc}]\n")
 
-        if m_url:
-            media_map[m_id] = m_url
-            if name and str(name).strip():
-                media_authors[m_id] = str(name).strip()
-            if m_short and str(m_short).strip():
-                media_captions[m_id] = str(m_short).strip()
-            elif m_desc:
-                from vision import extract_fallback_short_caption
-                media_captions[m_id] = extract_fallback_short_caption(m_desc, max_len=140)
+        _collect_clinical_media_item(
+            m_id, name, m_desc, m_short, m_url, media_map, media_captions, media_authors
+        )
 
     full_text = "".join(full_text_parts)
     logger.info(
@@ -1981,10 +2198,12 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
 
         logger.info(f"📝 Текст от Gemini получен ({len(raw_text)} симв.). Чистим HTML...")
         full_html = clean_markdown_to_html(raw_text)
+        full_html = _collapse_nested_emphasis(full_html)
         full_html = prune_empty_summary_sections(full_html)
 
         # Вставка изображений (семантический узел Telegraph figure/figcaption + детерминированный fallback, макс 5)
         full_html = embed_media_into_summary_html(full_html, media_map, media_captions, max_images=5, media_authors=media_authors)
+        full_html = _collapse_nested_emphasis(full_html)
 
         # Клинический CTA-подвал для Telegraph с описанием возможностей бота в ЛС
         cta_telegraph = build_clinical_assistant_cta("telegraph")
@@ -2097,69 +2316,36 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
             "weekly_teaser",
         )
 
-        # Резервный канал доставки: если Telegraph недоступен, публикуем полную газету в чат частями
-        if not page_url:
-            logger.warning(
-                "Telegraph weekly page unavailable (err=%s); sending full weekly newspaper as direct chat messages fallback",
-                telegraph_error,
-            )
-            from html_safe import split_html, convert_all_tables_in_html_to_telegraph
-            direct_html = convert_all_tables_in_html_to_telegraph(full_html)
-            chunks = split_html(direct_html, limit=1700)
-            fallback_params = dict(send_params)
-            fallback_params['link_preview'] = False
-            fallback_params.pop('buttons', None)
-            for c_idx, chunk in enumerate(chunks):
-                prefix = f"🗞 <b>Часть {c_idx + 1}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
-                part_text = prefix + chunk
-                await _send_message_once(
-                    client,
-                    chat_id,
-                    topic_id,
-                    part_text,
-                    fallback_params,
-                    f"weekly_direct_fallback_{c_idx+1}",
-                )
-                await asyncio.sleep(0.5)
-
-        # Закреп. Проверка на sent_msg тут была пропущена, хотя в дневной ветке
-        # она есть: обращение к sent_msg.id у None бросало AttributeError уже
-        # ПОСЛЕ доставки тизера, внешний except объявлял выпуск неудачей
-        # (weekly_summary_failed, возврат None), планировщик не помечал цель
-        # доставленной — и на следующем круге через 10 минут публиковал неделю
-        # второй раз. Закреп сам по себе неудачу не создаёт: _pin_message_safely
-        # глотает свои ошибки, падало именно обращение к .id.
+        # Закреп + доставка PDF; резервная прямая отправка — только если недоступны и Telegraph, и PDF.
         if sent_msg:
             await _notify_delivery(delivery_hook, sent_msg)
             await _pin_message_safely(client, chat_id, sent_msg.id)
 
-            # Фоновая генерация и отправка журнальной PDF-версии вестника
-            try:
-                from digest_pdf import generate_digest_pdf
-                is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
-                pdf_title = f"Клинический Вестник {'EndoChat' if is_endo else 'StomChat'} ({date_str})"
-                pdf_subtitle = "Эндодонтический клинический вестник • Недельный обзор" if is_endo else "Большая стоматологическая газета • Недельный обзор"
-                # КРИТИЧНО: В PDF передаем ПОЛНУЮ версию статьи (full_html),
-                # а не усеченную под лимиты сервиса Telegraph!
-                pdf_path = await generate_digest_pdf(
-                    html_content=full_html,
-                    title=pdf_title,
-                    subtitle=pdf_subtitle,
-                    msg_count=msg_count,
-                    date_str=date_str,
-                )
-                if pdf_path and os.path.exists(pdf_path) and hasattr(client, "send_file"):
-                    pdf_caption = (
-                        f"📄 <b>{pdf_title}</b>\n\n"
-                        f"Полная журнальная PDF-версия вестника со всеми клиническими снимками, протоколами и таблицами."
-                    )
-                    pdf_params = {'caption': pdf_caption, 'parse_mode': 'HTML'}
-                    if topic_id:
-                        pdf_params['reply_to'] = topic_id
-                    await client.send_file(chat_id, pdf_path, **pdf_params)
-                    logger.info("PDF weekly digest document delivered to chat=%s", chat_id)
-            except Exception as pdf_err:
-                logger.warning("PDF digest delivery failed (non-critical): %s", pdf_err)
+        is_endo_pdf = "endo" in (getattr(config, "DB_PATH", "") or "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+        pdf_title = f"Клинический Вестник {'EndoChat' if is_endo_pdf else 'StomChat'} ({date_str})"
+        pdf_subtitle = "Эндодонтический клинический вестник • Недельный обзор" if is_endo_pdf else "Большая стоматологическая газета • Недельный обзор"
+        pdf_caption = (
+            f"📄 <b>{pdf_title}</b>\n\n"
+            f"Полная журнальная PDF-версия вестника со всеми клиническими снимками, протоколами и таблицами."
+        )
+        await _deliver_digest_pdf_or_fallback(
+            client,
+            chat_id,
+            topic_id,
+            full_html,
+            msg_count,
+            date_str,
+            page_url,
+            telegraph_error,
+            sent_msg,
+            send_params,
+            kind="weekly",
+            pdf_title=pdf_title,
+            pdf_subtitle=pdf_subtitle,
+            pdf_caption=pdf_caption,
+            fallback_emoji="🗞",
+            fallback_label_prefix="weekly_direct_fallback",
+        )
 
         logger.info(f"✅ MASSIVE Weekly Digest отправлен в {chat_id}")
         runtime_guard.clear_summary_status("weekly_summary_done")

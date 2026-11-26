@@ -15,6 +15,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_saved_modules = {name: sys.modules.get(name) for name in ("vision", "database", "config", "blocking_tools", "runtime_guard")}
 for name in ("vision", "database", "config", "blocking_tools", "runtime_guard"):
     sys.modules.setdefault(name, types.ModuleType(name))
 sys.modules["config"].DENTAL_KEYWORDS = []
@@ -33,6 +34,13 @@ spec = importlib.util.spec_from_file_location(
 )
 A = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(A)
+
+# Restore modules in sys.modules so other tests are not poisoned
+for name, orig in _saved_modules.items():
+    if orig is None:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = orig
 
 CTX = ["Иван: у пациента чувствительность после установки коронки"]
 DRAFT = "Проверь окклюзию, чаще всего дело в супраконтакте."

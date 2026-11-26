@@ -26,11 +26,14 @@ from assistant import clean_html_formatting
 async def setup_db_environment(tmp_path):
     """Изолированная тестовая база данных для предотвращения загрязнения боевой stomat_bot.db."""
     orig_db = getattr(config, "DB_PATH", "stomat_bot.db")
+    orig_state = getattr(assistant, "STATE_PATH", "assistant_state.json")
     test_db = str(tmp_path / "test_bookmarks_search.db")
     config.DB_PATH = test_db
+    assistant.STATE_PATH = str(tmp_path / "assistant_state.json")
     await database.init_db()
     yield
     config.DB_PATH = orig_db
+    assistant.STATE_PATH = orig_state
 
 
 class FakeEvent:

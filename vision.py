@@ -194,6 +194,12 @@ def _enrich_vision_metadata(parsed: dict, raw_text: str) -> dict:
     """Обогащает метаданные снимка и гарантирует корректную клиническую автомаршрутизацию."""
     if not isinstance(parsed, dict):
         parsed = {}
+    if str(parsed.get("modality") or "").upper() == "NON_DENTAL":
+        parsed["has_clinical_doubt"] = False
+        parsed["target_tooth"] = None
+        parsed["doubt_subject"] = None
+        parsed["recommended_quadrant"] = None
+        return parsed
     raw_lower = (raw_text or "").lower()
     subject_lower = str(parsed.get("doubt_subject") or "").lower()
     combined_lower = f"{subject_lower} {raw_lower}"
@@ -434,24 +440,34 @@ def _load_vision_cache() -> dict:
     return {}
 
 
+def _trim_vision_cache(cache_data: dict) -> None:
+    if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
+        sorted_items = sorted(
+            cache_data.items(),
+            key=lambda item: item[1].get("ts", 0) if isinstance(item[1], dict) else 0,
+            reverse=True,
+        )
+        trimmed = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
+        cache_data.clear()
+        cache_data.update(trimmed)
+
+
 def _save_vision_cache(cache_data: dict) -> None:
     tmp_path = None
     try:
-        if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
+        snapshot = dict(cache_data)
+        if len(snapshot) > VISION_CACHE_MAX_ENTRIES:
             sorted_items = sorted(
-                cache_data.items(),
+                snapshot.items(),
                 key=lambda item: item[1].get("ts", 0) if isinstance(item[1], dict) else 0,
                 reverse=True,
             )
-            trimmed = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
-            _VISION_CACHE.clear()
-            _VISION_CACHE.update(trimmed)
-            cache_data = trimmed
+            snapshot = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
 
         # Unique tmp_path prevents collision between concurrent processes / threads
         tmp_path = f"{VISION_CACHE_FILE}.{os.getpid()}_{time.time_ns()}_{random.randint(1000, 9999)}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
             f.flush()
             os.fsync(f.fileno())
 
@@ -513,45 +529,29 @@ def get_recent_image_urls(key=None) -> list[str]:
 
 async def _translate_description_to_russian(text: str, client: AsyncOpenAI = None, provider: str = None) -> str:
     """
-    Быстрый легковесный перевод англоязычного описания на русский язык.
-    Исключает выброс готового описания снимка и повторный запуск тяжелого мультимодального каскада.
+    Быстрый легковесный перевод англоязычного описания на русский язык через активный клиент.
+    Исключает лишний спаун подпроцессов и повторный запуск тяжелого мультимодального каскада.
     """
-    if not text:
+    if not text or not client or not provider:
         return ""
     translate_prompt = (
-        "Переведи следующее клиническое стоматологическое описание на профессиональный русский язык. "
-        "Сохраняй медицинскую терминологию (FDI номера зубов, анатомические структуры, рентгенологические термины). "
-        "Выведи ТОЛЬКО русский перевод без каких-либо комментариев, предисловий и тегов <think>:\n\n"
+        "Переведи клиническое стоматологическое описание на профессиональный русский язык, "
+        "сохраняя FDI и термины. Выведи ТОЛЬКО русский перевод без тегов <think>:\n\n"
         f"{text}"
     )
-    if client and provider:
-        try:
-            trans_model = "gemini-3.5-flash-lite" if provider == "gemini" else "qwen/qwen3.8-27b"
-            resp = await client.chat.completions.create(
-                model=trans_model,
-                messages=[{"role": "user", "content": translate_prompt}],
-                max_tokens=1000,
-            )
-            raw = resp.choices[0].message.content if (resp.choices and len(resp.choices) > 0) else None
-            cleaned = gemini_client.strip_reasoning(raw)
-            if cleaned and _is_mostly_cyrillic(cleaned):
-                return cleaned
-        except Exception as exc:
-            logger.warning("Direct client translation failed: %s; falling back to blocking_tools", exc)
-
     try:
-        import blocking_tools
-        res, err = await blocking_tools.generate_gemini_text_async(
-            translate_prompt,
-            {"kind": "llama_triage", "thinking_level": "LOW"},
-            timeout=15.0,
+        trans_model = "gemini-3.5-flash-lite" if provider == "gemini" else "qwen/qwen3.8-27b"
+        resp = await client.chat.completions.create(
+            model=trans_model,
+            messages=[{"role": "user", "content": translate_prompt}],
+            max_tokens=1000,
         )
-        if res and getattr(res, "text", None):
-            cleaned = gemini_client.strip_reasoning(res.text)
-            if cleaned and _is_mostly_cyrillic(cleaned):
-                return cleaned
+        raw = resp.choices[0].message.content if (resp.choices and len(resp.choices) > 0) else None
+        cleaned = gemini_client.strip_reasoning(raw)
+        if cleaned and _is_mostly_cyrillic(cleaned):
+            return cleaned
     except Exception as exc:
-        logger.warning("blocking_tools translation failed: %s", exc)
+        logger.warning("Direct client translation failed (%s): %s", provider, exc)
 
     return ""
 
@@ -611,78 +611,26 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             # отделять увиденное от истолкованного и признавать пределы снимка.
             album_notice = ""
             if len(image_urls) > 1:
-                album_notice = (
-                    f" ВНИМАНИЕ: Загружена серия из {len(image_urls)} снимков (клинический фотопротокол/серия RG/сканы). "
-                    f"Ограничение длины в 3-6 предложений СНИМАЕТСЯ! "
-                    f"Дай последовательный разбор каждого снимка (Снимок 1, Снимок 2...), затем сформируй структурированный синтез. "
-                    f"Синтез строй по анатомическим доменам, реально представленным в серии: "
-                    f"выдели те аспекты (макроархитектура, окклюзия, боковые опоры, локальные дефекты, эндо/пародонт, лабораторные этапы и т.д.), "
-                    f"которые читаются на снимках. Не перечисляй домены ради перечисления — включай только те, по которым серия даёт достаточно информации."
-                )
-            video_collage_guidance = (
-                " ВИДЕО-РАСКАДРОВКИ И КОЛЛАЖИ: если на изображении представлен коллаж из 2-4 кадров с временными метками "
-                "(например, '#1 T=1.5s', '#2 T=4.0s' и т.д.), это раскадровка стоматологического видео (эндодонтический микроскоп, "
-                "операционный протокол или прокрутка срезов КЛКТ). Проанализируй динамику процесса во времени от ранних этапов к поздним: "
-                "последовательность этапов вмешательства (доступ -> поиск устьев/MB2 -> инструментация -> обтурация) "
-                "либо изменения анатомии по срезам КТ (коронковая часть -> зона фуркации -> средняя треть -> апекс и периапикальная зона)."
-            )
+                album_notice = f" Серия из {len(image_urls)} кадров (клинический фотопротокол/серия RG): разбери каждый последовательно (Снимок 1, Снимок 2...) и опиши общую динамику и синтез без лимита 3-6 предложений."
+            video_collage_guidance = " Коллаж '#1 T=...': раскадровка видео/КЛКТ — опиши динамику этапов/срезов."
 
             system_prompt = (
-                f"Это стоматологическое изображение из врачебного сообщества.{context}{album_notice}{video_collage_guidance} "
-                f"Оценивай любые снимки: внутриротовые фото (фронт, окклюзия, уступы, ретракторы, коронки, раббердам); "
-                f"рентгенографию (прицельные, bitewing, ОПТГ, срезы КЛКТ, 3D); лабораторные сканы, wax-up, CAD/CAM. Не требуй другой снимок. "
-                f"НЕМЕДИЦИНСКИЕ ИЗОБРАЖЕНИЯ: если это мем, котик, еда, скриншот мессенджера/интерфейса, бытовое фото — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать зубы, кариес или рентген! Кратко и точно опиши суть («Скриншот переписки...», «Мем с собакой...»). Если на картинке есть текст или подписи — разбери их смысл. "
-                f"КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ЗЕРКАЛИРОВАНИЯ И ПЕРЕСКАЗА (ZERO MIRRORING & DEEP SYNTHESIS): не пересказывай подпись пользователя под снимком, не зеркаль чужие слова с другого ракурса. Проводи полностью самостоятельный глубокий рентгенологический и морфологический синтез от первопричин. "
-                f"Опиши клинико-рентгенологический статус (Macro + Micro): "
-                f"1. Архитектура и прикус: положение челюстей, окклюзионная плоскость, прикус, межальвеолярная высота. "
-                f"2. Зубные ряды: дефекты (включенные, концевые — жевательная опора), протезы, имплантаты, материалы. "
-                f"3. Локальный статус (FDI): номера зубов (1.1-4.8), кариес, вторичный кариес, краевое прилегание коронок/реставраций, этап лечения. "
-                f"4. Скрытые контрасты: вестибулярный вид (фасад) vs окклюзионный/нёбный/язычный (разрушение, кариес). "
-                f"5. ОБЯЗАТЕЛЬНЫЙ СИСТЕМАТИЧЕСКИЙ 4-ЗОННЫЙ РАДИОЛОГИЧЕСКИЙ АЛГОРИТМ (ДЛЯ RG / КТ / КЛКТ / ОПТГ):\n"
-                f"Категорически запрещена рентгенологическая «слепота к деталям» (пропуск внутренних кальцификатов пульпы, скрытых каналов, ориентиров)! "
-                f"АНТИ-ТУННЕЛЬНОЕ ЗРЕНИЕ: Категорически запрещено зацикливаться на очевидной грубой патологии одного зуба (ретенция/дистопия 4.8) и слепо игнорировать центр коронки и пульпарную камеру соседних зубов (шарик/дентикль 4.7). Каждый зуб в зоне обзора сканируется автономно по всем 4 зонам!\n"
-                f"Методично сканируй снимок по 4 анатомическим зонам:\n"
-                f"- Зона 1 (Коронка и пульпарная камера): прицельный поиск дентиклей/петрификатов пульпы (свободные/пристеночные/интерстициальные кальцификаты, «шаровидные» рентгеноконтрастные включения высокой плотности в полости зуба, «камень в пульпе» — ликвидировать любую слепоту к «шарикам/петрификатам в пульпарной камере», не пропускать дентикли в центре коронки!), глубина кариозного поражения, скрытый апроксимальный кариес (контактные пункты), краевое прилегание пломб/коронок, нависающие края реставраций, вторичный кариес под уступом. ПОСТОПЕРАЦИОННЫЙ АУДИТ КОРОНОК ПОСЛЕ ФИКСАЦИИ: рентгеноконтрастность излишков цемента в десневом кармане/борозде, точность посадки на уступ (отсутствие ступеней и нависания), отсутствие щелей и микрозазоров между коронкой и культей (open margin).\n"
-                f"- Зона 2 (Корневая система и каналы): анатомическая конфигурация по Вертуччи (типы I-VIII), изгибы корней по Шнайдеру (Schneider: радиус и угол искривления), облитерация/склероз каналов, инородные тела (отломки инструментов: локализация, длина, сплав NiTi/сталь), ступеньки, перфорации (стрип, фуркационные, апикальные), качество обтурации и герметизм пломбирования.\n"
-                f"- Зона 3 (Периапикальный периодонт и окружающая кость): непрерывность lamina dura (кортикальная пластинка альвеолы), расширение периодонтальной щели, периапикальные очаги деструкции кости (четкие/размытые контуры, PAI 1-5), резорбция корней (внутренняя vs наружная: цервикальная инвазивная, апикальная).\n"
-                f"- Зона 4 (Смежные анатомические ориентиры): дно гайморовой пазухи (целостность дна, костная перегородка, мукозит), нижнечелюстной канал (топография и расстояние до апексов моляров, риски n. alveolaris inferior), ментальное отверстие (подбородочное), кортикальные пластинки челюсти.\n"
-                f"РАЗДЕЛЕНИЕ ОБЪЕКТИВНОЙ КАРТИНЫ И ИНТЕРПРЕТАЦИИ:\n"
-                f"1) Объективная картина: рентген-плотность (рентгеноконтрастное / радиоопаковое vs радиолюцентное / просветление), точная анатомическая локализация, геометрическая форма, контуры.\n"
-                f"2) Клиническая интерпретация и дифдиагноз: дентикль/петрификат vs проекционная суперпозиция бугров, киста vs гранулема, внутренняя vs наружная резорбция, кариес vs cervical burnout.\n"
-                f"КАТЕГОРИЧЕСКИЙ ВЫКОС ДЕЖУРНЫХ РОБОТИЗИРОВАННЫХ ФРАЗ:\n"
-                f"Запрещены любые шаблонные клише: «На представленном снимке визуализируется...», «Следует отметить, что...», «В данном случае определяется...», «В целом можно сказать...», «Для уточнения диагноза рекомендуется КТ...».\n"
-                f"Разбор снимка должен выдавать четкую, емкую клиническую картину для доктора у экрана: начинай сразу с модальности, точного номера зуба по FDI и плотной протокольной констатации фактов по 4 зонам.\n"
-                f"ПРАВИЛА ДОСТОВЕРНОСТИ: "
-                f"1) Строгая наблюдаемость: описывай структуры только в прямом фокусе; при помехах констатируй недоступность обзора («дефектов не дифференцируется», «граница вне зоны обзора» — полноценный ответ). "
-                f"2) Отделяй наблюдение от истолкования: сначала морфология, затем гипотезы; не утверждай патологию без четких границ; НЕ ставь диагноз по одному снимку. "
-                f"3) Дисциплинарная консистентность: не смешивай терапию, хирургию, ортопедию. "
-                f"4) Без фантомных величин: никаких вымышленных чисел (миллиметры, длина, дефект), если они не читаются на снимке. "
-                f"ДЛИНА И ПОЛНОТА: Для рентгенологических снимков (визиография, прицельный, КТ, КЛКТ, ОПТГ) запрещено искусственно сжимать разбор в ущерб полноте — давай последовательный систематический аудит по всем 4 зонам (Зона 1: коронка и пульпарная камера с обязательным прицельным поиском дентиклей; Зона 2: корневые каналы; Зона 3: периодонт и кость; Зона 4: смежные ориентиры). Категорически запрещена рентгенологическая «слепота к деталям» (пропуск крупного дентикля/петрификата пульпарной камеры при фиксации только на маргинальном кармане или кариесе). Для клинических фото полости рта — 3-6 емких предложений (Macro + Micro). "
+                f"Стоматологическое фото.{context}{album_notice}{video_collage_guidance} "
+                f"Оценивай любые кадры (фото, прицельные, ОПТГ, КЛКТ, сканы), не требуй другой снимок. "
+                f"НЕМЕДИЦИНСКИЕ ИЗОБРАЖЕНИЯ (мем, котик, еда, скриншот): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать зубы — опиши суть и разбери их смысл. "
+                f"КАТЕГОРИЧЕСКИЙ ЗАПРЕТ ЗЕРКАЛИРОВАНИЯ И ПЕРЕСКАЗА (ZERO MIRRORING & DEEP SYNTHESIS): не повторяй подпись. "
+                f"клинико-рентгенологический статус (Macro + Micro): Архитектура и прикус, зубные ряды, материалы, этап лечения, фасад vs орально. "
+                f"ОБЯЗАТЕЛЬНЫЙ СИСТЕМАТИЧЕСКИЙ 4-ЗОННЫЙ РАДИОЛОГИЧЕСКИЙ АЛГОРИТМ (RG/КТ/КЛКТ/ОПТГ; исключена слепота к деталям; АНТИ-ТУННЕЛЬНОЕ ЗРЕНИЕ: ретенция/дистопия 4.8 не отменяет шарик/дентикль 4.7): "
+                f"Зона 1 (Коронка и пульпарная камера): дентиклей/петрификатов пульпы (не пропускать дентикли в центре коронки, ликвидировать любую слепоту к «шарикам/петрификатам в пульпарной камере»), скрытый апроксимальный кариес, нависающие края реставраций; ПОСТОПЕРАЦИОННЫЙ АУДИТ КОРОНОК ПОСЛЕ ФИКСАЦИИ (рентгеноконтрастность излишков цемента, точность посадки на уступ, отсутствие щелей и микрозазоров, open margin). "
+                f"Зона 2 (Корневая система и каналы): Вертуччи, Шнайдер, отломки инструментов, перфорации, обтурация. "
+                f"Зона 3 (Периапикальный периодонт и окружающая кость): lamina dura, периодонтальной щели, периапикальные очаги деструкции (PAI 1-5), резорбция корней. "
+                f"Зона 4 (Смежные анатомические ориентиры): дно гайморовой пазухи, нижнечелюстной канал, ментальное отверстие. "
+                f"РАЗДЕЛЕНИЕ ОБЪЕКТИВНОЙ КАРТИНЫ И ИНТЕРПРЕТАЦИИ: Объективная картина: рентген-плотность, контуры; Клиническая интерпретация и дифдиагноз. "
+                f"КАТЕГОРИЧЕСКИЙ ВЫКОС ДЕЖУРНЫХ РОБОТИЗИРОВАННЫХ ФРАЗ («На представленном снимке визуализируется», «Следует отметить, что», «В целом можно сказать»): дай четкую, емкую клиническую картину для доктора с модальности и FDI. "
+                f"ПРАВИЛА ДОСТОВЕРНОСТИ: Отделяй наблюдение от истолкования; НЕ ставь диагноз по одному снимку; при помехах — недоступность обзора (полноценный ответ); без фантомных чисел (миллиметры, длина, дефект), если не читаются на снимке. Для фото 3-6 фраз. "
                 f"{clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE} "
-                f"ФОРМАТ ОТВЕТА — СТРОГО ТРИ СЕКЦИИ:\n"
-                f"[ПОДРОБНОЕ ОПИСАНИЕ]\n"
-                f"<подробный клинический разбор снимка для LLM-контекста: для рентгена/КТ/КЛКТ — обязательный систематический 4-зонный аудит, исключающий пропуск внутренних структур и дентиклей, с разделением на объективную картину и дифдиагноз; для фото — клинико-морфологический разбор>\n\n"
-                f"[КРАТКАЯ ПОДПИСЬ]\n"
-                f"<1-2 коротких chairside-фразы для подписи к фото в статье, макс 120 символов>\n\n"
-                f"[МЕТАДАННЫЕ]\n"
-                f"{{\n"
-                f'  "modality": "PERIAPICAL_XRAY|CBCT|PANORAMIC_OPG|CLINICAL_PHOTO|NON_DENTAL",\n'
-                f'  "has_clinical_doubt": true/false,\n'
-                f'  "target_tooth": 11-48 или null,\n'
-                f'  "doubt_subject": "кратко суть сомнения врача или обнаруженной ключевой находки (напр. дентикль пульпарной камеры / отломок / периапикальный очаг) или null",\n'
-                f'  "recommended_quadrant": 2/3/4\n'
-                f"}}\n"
-                f"АВТОМАРШРУТИЗАЦИЯ В КВАДРАНТЫ (recommended_quadrant):\n"
-                f"- Квадрант 2 (CLAHE HD): ВСЕГДА выбирать при кальцификатах пульпарной камеры («шарик», «дентикль», «петрификат», «пульполит», «облитерация пульпы»), а также для детализации анатомии каналов.\n"
-                f"- Квадрант 3 (Негатив / Инверсия): при периапикальных очагах деструкции, кистах, гранулемах, резорбции корней, переломах и трещинах.\n"
-                f"- Квадрант 4 (Контурный фильтр / Шарп): при отломках инструментов (NiTi/сталь), ступеньках, перфорациях, нависающих краях реставраций и оценке периодонтальной щели.\n"
-                f"Значения modality:\n"
-                f"- PERIAPICAL_XRAY: ТОЛЬКО прицельный внутриротовой рентген 1-3 зубов (радиовизиограф).\n"
-                f"- CBCT: срез или 3D-реконструкция компьютерной томографии (КТ / КЛКТ).\n"
-                f"- PANORAMIC_OPG: панорамный снимок (ОПТГ) зубных рядов обеих челюстей.\n"
-                f"- CLINICAL_PHOTO: цветная клиническая фотография в полости рта (зубы, десны, коронки, слепки, раббердам).\n"
-                f"- NON_DENTAL: мем, скриншот чата, документ, бытовое немедицинское фото.\n\n"
-                f"ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ без английских фраз, черновиков и тегов <think>."
+                f"СТРОГО НА РУССКОМ:\n[ПОДРОБНОЕ ОПИСАНИЕ]\n<разбор>\n[КРАТКАЯ ПОДПИСЬ]\n<до 120 симв>\n[МЕТАДАННЫЕ]\n"
+                f'{{"modality":"PERIAPICAL_XRAY|CBCT|PANORAMIC_OPG|CLINICAL_PHOTO|NON_DENTAL","has_clinical_doubt":bool,"target_tooth":11-48|null,"doubt_subject":str|null,"recommended_quadrant":2|3|4|null}}'
             )
 
 
@@ -691,7 +639,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             models_pool = [
                 ("gemini-3.5-flash-lite", "gemini"),
                 ("gemini-3.1-flash-lite", "gemini"),
-                ("gemini-3.6-flash", "gemini"),
+                ("qwen/qwen3.8-27b", "groq"),
             ]
             # Исключаем временно забаненные модели (по 503/404)
             banned_map = gemini_client.get_banned_models()
@@ -717,15 +665,12 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 pool=5.0,
             )
 
-            # Кулдауны ключей общие с текстовым каскадом (gemini_client): пул
-            # ключей один и тот же, и ключ, выбитый в 429 генерацией текста, не
-            # должен тут же получать запрос от зрения. Раньше vision про
-            # кулдауны не знал вовсе и продолжал бить в исчерпанные ключи,
-            # отсчитывая по 2.5 секунды на каждый отказ.
-            cooldowns = gemini_client.get_key_cooldowns()
-
             async with httpx.AsyncClient(verify=VISION_TLS_VERIFY, trust_env=False, timeout=timeout) as http_client:
-                for model_name, provider in models_cascade:
+                idx_model = 0
+                while idx_model < len(models_cascade):
+                    model_name, provider = models_cascade[idx_model]
+                    idx_model += 1
+
                     if provider == "gemini":
                         raw_keys = os.getenv("GOOGLE_API_KEYS", "") or os.getenv("GOOGLE_KEYS", "") or getattr(config, "GOOGLE_KEYS", [])
                         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -743,34 +688,26 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
 
                     random.shuffle(keys)
 
-                    now_ts = time.time()
-                    available = [
-                        k for k in keys
-                        if cooldowns.get(gemini_client._key_fingerprint(provider, k), 0) <= now_ts
-                    ]
+                    # Свежий отбор живых ключей (учитывает и общий, и по-модельный кулдаун).
+                    available, _, wait_s = gemini_client.available_keys(provider, keys, model_name=model_name)
                     if not available:
                         logger.info(
-                            "Vision: all %s keys are on cooldown; skipping %s.", provider, model_name
+                            "Vision: all %s keys are on cooldown (next in %ss); skipping %s.",
+                            provider, wait_s, model_name,
                         )
                         continue
 
-                    # Ключей на модель берём ОГРАНИЧЕННОЕ число, а не все.
-                    #
-                    # Перебор всех ключей давал 2 x 10 + 1 x 7 = 27 попыток по 33 с
-                    # (запрос 30 плюс пауза троттлинга 3) — до 891 с на один
-                    # снимок. Внешний потолок разбора стоял 180 с, то есть
-                    # резервные модели каскада не пробовались никогда, а снимок
-                    # после срабатывания внешнего таймаута получал в базе отметку
-                    # «разобрано» и терялся навсегда.
-                    #
-                    # Поднимать внешний потолок до 951 с было бы хуже: воркер
-                    # один, очередь на 128 снимков, и одно зависшее фото
-                    # остановило бы разбор на четверть часа. Отказ конкретного
-                    # ключа почти всегда означает квоту или 429 — а от этого
-                    # спасает СЛЕДУЮЩАЯ МОДЕЛЬ, не двадцатый ключ той же.
-                    # Ключи перемешаны выше, поэтому квота размазывается по пулу
-                    # между вызовами.
                     for api_key in available[:VISION_KEYS_PER_MODEL]:
+                        live_fresh, _, _ = gemini_client.available_keys(provider, [api_key], model_name=model_name)
+                        if not live_fresh:
+                            any_left, _, _ = gemini_client.available_keys(provider, available, model_name=model_name)
+                            if not any_left:
+                                logger.info(
+                                    "Vision: all %s keys entered cooldown mid-cascade; switching from %s.",
+                                    provider, model_name,
+                                )
+                                break
+                            continue
                         try:
                             await _pace_vision_calls()
 
@@ -800,13 +737,8 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             finish_reason = getattr(choice, "finish_reason", None) if choice else None
                             content = choice.message.content if choice else None
                             if content:
-                                # Общий помощник вместо местной копии срезки. В
-                                # прежней ветке незакрытого тега при пустом начале
-                                # выбиралось parts2[1] — то есть САМИ размышления
-                                # модели уходили как клиническое описание снимка.
                                 text = gemini_client.strip_reasoning(content)
                                 if text:
-                                    # Проверка на обрыв генерации (по токенам или обрыв слова)
                                     is_truncated = False
                                     if finish_reason == "length":
                                         is_truncated = True
@@ -826,12 +758,6 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                         if english_fallback is None:
                                             english_fallback = text
                                         continue
-                                    # Инструкции «отвечай строго по-русски» мало:
-                                    # замер по живой базе показал 1285 английских
-                                    # описаний из 3375 — 38%. Они уходят в промпт
-                                    # русского чата, и отвечающая модель вынуждена
-                                    # переводить чужой текст. Проверяем результат,
-                                    # а не надеемся на послушание модели.
                                     russian_text = text
                                     if not _is_mostly_cyrillic(text):
                                         logger.info(
@@ -845,7 +771,6 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     if _is_mostly_cyrillic(russian_text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
-                                        # Разбор двойного формата [ПОДРОБНОЕ ОПИСАНИЕ] / [КРАТКАЯ ПОДПИСЬ]
                                         metadata = extract_vision_metadata(russian_text)
                                         detailed_ctx, short_cap = parse_dual_vision_description(russian_text)
                                         if not detailed_ctx:
@@ -860,10 +785,9 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
                                         if not skip_cache and cache_key:
                                             _VISION_CACHE[cache_key] = {"text": detailed_ctx, "short_caption": short_cap, "metadata": metadata, "ts": time.time()}
-                                            _save_vision_cache(_VISION_CACHE)
-                                        gemini_client.note_success(provider, api_key, model_name=model_name)
+                                            _trim_vision_cache(_VISION_CACHE)
+                                            await asyncio.to_thread(_save_vision_cache, dict(_VISION_CACHE))
                                         return VisionDescription(detailed_ctx, image_urls=image_urls, short_caption=short_cap, metadata=metadata)
-
 
                                     if english_fallback is None:
                                         english_fallback = text
@@ -884,19 +808,20 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
                                     if not skip_cache and cache_key:
                                         _VISION_CACHE[cache_key] = {"text": english_fallback, "ts": time.time()}
-                                        _save_vision_cache(_VISION_CACHE)
+                                        _trim_vision_cache(_VISION_CACHE)
+                                        await asyncio.to_thread(_save_vision_cache, dict(_VISION_CACHE))
                                     return VisionDescription(english_fallback, image_urls=image_urls)
                                 return None
                             if any(s in err_str for s in ("not support image", "image input", "unsupported content")):
                                 logger.warning(f"Vision provider {provider} model {model_name} does not support image input: {e}")
+                                if provider == "groq" and model_name != "meta-llama/llama-4-scout-17b-16e-instruct" and ("meta-llama/llama-4-scout-17b-16e-instruct", "groq") not in models_cascade:
+                                    models_cascade.append(("meta-llama/llama-4-scout-17b-16e-instruct", "groq"))
                                 break
                             if any(s in err_str for s in ("404", "not_found", "does not exist", "not found")):
                                 logger.warning(f"Vision {provider} model {model_name} not found or unsupported for vision (404). Skipping provider.")
+                                if provider == "groq" and model_name != "meta-llama/llama-4-scout-17b-16e-instruct" and ("meta-llama/llama-4-scout-17b-16e-instruct", "groq") not in models_cascade:
+                                    models_cascade.append(("meta-llama/llama-4-scout-17b-16e-instruct", "groq"))
                                 break
-                            # Коды статусов — по границе слова. Подстрочный поиск
-                            # "500" находил его в "1500 tokens" и "500000 tokens",
-                            # то есть обычная ошибка запроса выбрасывала модель
-                            # из каскада как перегруженную.
                             if gemini_client._SERVER_ERROR_RE.search(err_str) or any(s in err_str for s in ("unavailable", "503", "504", "overload")):
                                 if hasattr(gemini_client, "_record_model_server_failure"):
                                     ban_duration = gemini_client._record_model_server_failure(model_name)
@@ -909,26 +834,29 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 )
                                 break
                             if gemini_client._RATE_LIMIT_RE.search(err_str):
-                                # Кулдаун записываем в общий с текстовым каскадом
-                                # файл: иначе следующий же снимок снова уходит в
-                                # тот же исчерпанный ключ.
                                 gemini_client.note_key_failure(provider, api_key, str(e), model_name=model_name)
                                 logger.info(
-                                    "Vision key rate limited (429); key placed on %ss cooldown.",
-                                    gemini_client.KEY_COOLDOWN_SECONDS,
+                                    "Vision %s key rate limited (429) on %s.", provider, model_name,
                                 )
+                                remaining_keys, _, _ = gemini_client.available_keys(provider, available, model_name=model_name)
+                                if not remaining_keys:
+                                    logger.info(
+                                        "Vision: no live %s keys left after 429; moving to next model.", provider,
+                                    )
+                                    break
                                 continue
+                            if any(s in err_str for s in ("timed out", "timeout")):
+                                logger.warning(f"Vision {provider} ({model_name}) request timed out; switching to next model.")
+                                break
                             logger.warning(f"Vision {provider} key failed ({model_name}): {e}")
 
             if english_fallback:
-                # Ни одна модель каскада не ответила по-русски. Английское
-                # описание всё же лучше, чем ничего: без него врач получит
-                # ответ, в котором снимок вообще не упомянут.
                 logger.warning("Vision: no Russian answer from cascade, using non-Russian description")
                 _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
                 if not skip_cache and cache_key:
                     _VISION_CACHE[cache_key] = {"text": english_fallback, "ts": time.time()}
-                    _save_vision_cache(_VISION_CACHE)
+                    _trim_vision_cache(_VISION_CACHE)
+                    await asyncio.to_thread(_save_vision_cache, dict(_VISION_CACHE))
                 return VisionDescription(english_fallback, image_urls=image_urls)
             return None
 

@@ -164,6 +164,7 @@ def get_openai_client(api_key, base_url, timeout=650.0, **kwargs):
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BANNED_MODELS_FILE = os.path.join(_BASE_DIR, "banned_models.json")
 KEY_COOLDOWN_FILE = os.path.join(_BASE_DIR, "key_cooldowns.json")
+MODEL_KEY_COOLDOWN_FILE = os.path.join(_BASE_DIR, "model_key_cooldowns.json")
 KEY_COOLDOWN_SECONDS = 300
 
 
@@ -251,6 +252,69 @@ def set_key_cooldown(provider, api_key, seconds=KEY_COOLDOWN_SECONDS):
     cooldowns = get_key_cooldowns()
     cooldowns[_key_fingerprint(provider, api_key)] = time.time() + seconds
     _save_expiry_map(KEY_COOLDOWN_FILE, cooldowns)
+
+
+def _model_key_fingerprint(provider, model_name, api_key):
+    """Устойчивый отпечаток пары (провайдер, модель, ключ) для по-модельных квот 429."""
+    return hashlib.sha256(f"{provider}:{model_name}:{api_key}".encode("utf-8")).hexdigest()[:16]
+
+
+def get_model_key_cooldowns():
+    """По-модельные кулдауны ключей (RPD/TPD одной модели не блокируют другие модели ключа)."""
+    return _load_expiry_map(MODEL_KEY_COOLDOWN_FILE)
+
+
+def set_model_key_cooldown(provider, model_name, api_key, seconds=KEY_COOLDOWN_SECONDS):
+    if not model_name:
+        set_key_cooldown(provider, api_key, seconds=seconds)
+        return
+    cooldowns = get_model_key_cooldowns()
+    cooldowns[_model_key_fingerprint(provider, model_name, api_key)] = time.time() + seconds
+    _save_expiry_map(MODEL_KEY_COOLDOWN_FILE, cooldowns)
+
+
+def _parse_retry_delay_seconds(error_text: str, default: int = KEY_COOLDOWN_SECONDS, cap: int = 3600) -> int:
+    """Извлекает retryDelay / 'try again in XhYmZs' из 429-ответа провайдера."""
+    txt = str(error_text or "")
+    # 1. Google RetryInfo: 'retryDelay': '4940s'
+    m_sec = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+)s", txt, re.IGNORECASE)
+    if m_sec:
+        val = int(m_sec.group(1))
+        return max(30, min(cap, val))
+    # 2. Human duration: '1h22m20.2s', '45m26.352s', '38.5s'
+    m_dur = re.search(r"(?:retry|try again)\s+in\s+(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s", txt, re.IGNORECASE)
+    if m_dur:
+        hours = int(m_dur.group(1) or 0)
+        mins = int(m_dur.group(2) or 0)
+        secs = float(m_dur.group(3) or 0)
+        total = int(hours * 3600 + mins * 60 + secs)
+        if total > 0:
+            return max(30, min(cap, total))
+    return default
+
+
+def _is_model_scoped_quota_error(provider: str, error_text: str, model_name: str | None = None) -> bool:
+    """
+    Определяет, относится ли 429 к лимиту конкретной модели (RPD/TPD одной модели),
+    а не ко всему ключу/проекту целиком.
+    """
+    err_lower = str(error_text or "").lower()
+    if provider == "gemini":
+        # Google FreeTier RPD: GenerateRequestsPerDayPerProjectPerModel-FreeTier
+        if (
+            "generaterequestsperdayperprojectpermodel" in err_lower
+            or "generate_content_free_tier_requests" in err_lower
+            or ("perprojectpermodel" in err_lower)
+            or ("per day" in err_lower and "per model" in err_lower)
+        ):
+            return bool(model_name or re.search(r"\bmodel\s*:\s*[a-z0-9._-]+", err_lower))
+    elif provider == "groq":
+        # Groq TPD: Rate limit reached for model `qwen/qwen3.8-27b` ... on tokens per day (TPD)
+        if "rate limit reached for model" in err_lower and (
+            "tokens per day" in err_lower or "(tpd)" in err_lower or "requests per day" in err_lower or "(rpd)" in err_lower
+        ):
+            return bool(model_name or "for model" in err_lower)
+    return False
 
 
 # Перегруженную модель убираем из каскада на это время. Значение было вписано
@@ -358,13 +422,28 @@ GCP_PROJECT_COOLDOWN_SECONDS = 60
 
 
 def is_gcp_project_quota_error(error_text: str) -> bool:
-    """Определяет, относится ли ошибка 429 к квоте всего проекта GCP (все 10 ключей одного проекта)."""
+    """
+    Определяет, относится ли ошибка 429 к общепроектной квоте всего GCP-проекта
+    по ВСЕМ моделям сразу (а не к по-модельному дневному лимиту одной модели).
+
+    Ранее проверка срабатывала на подстроки `project_number:` и `perproject` внутри
+    `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, из-за чего 20 RPD у одной
+    `gemini-3.6-flash` мгновенно клали в кулдаун все 8 Google-ключей для всех
+    здоровых моделей (`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` и т.д.).
+    """
     err_lower = str(error_text or "").lower()
+    # По-модельные дневные лимиты одной модели НЕ являются общепроектной аварией всех моделей
+    if (
+        "generaterequestsperdayperprojectpermodel" in err_lower
+        or "generate_content_free_tier_requests" in err_lower
+        or "perprojectpermodel" in err_lower
+        or ("per day" in err_lower and "per model" in err_lower)
+    ):
+        return False
     return (
-        "project_number:" in err_lower
-        or "generatecontentrequestsperminuteperprojectperregion" in err_lower
-        or "886969145965" in err_lower
-        or ("resource_exhausted" in err_lower and ("project" in err_lower or "perproject" in err_lower))
+        "generatecontentrequestsperminuteperprojectperregion" in err_lower
+        or ("requestsperminuteperproject" in err_lower and "permodel" not in err_lower)
+        or ("resource_exhausted" in err_lower and "perproject" in err_lower and "permodel" not in err_lower)
     )
 
 
@@ -392,7 +471,7 @@ def get_provider_client(provider, api_key, timeout=650.0):
     return get_openai_client(api_key, base_url, timeout=timeout)
 
 
-def available_keys(provider, keys):
+def available_keys(provider, keys, model_name=None):
     """
     Делит ключи провайдера на живые и остывающие. Отбор для ВСЕХ путей — здесь.
 
@@ -400,22 +479,26 @@ def available_keys(provider, keys):
     внутри списков сохраняется — вызывающий уже перемешал пул, и перемешивать
     заново нельзя: это ломает размазывание квоты.
 
-    Отдаём обе половины, а не только живую, потому что правильное поведение при
-    «все остывают» у путей разное: текстовый каскад уходит к следующему
-    провайдеру, а у расшифровки голосового следующего провайдера нет вовсе, и
-    для неё остывающий ключ в конце очереди лучше, чем тишина врачу.
+    Если передан `model_name`, дополнительно учитывает по-модельный кулдаун
+    ключа (`MODEL_KEY_COOLDOWN_FILE`), не отключая ключ для других моделей.
     """
     cooldowns = get_key_cooldowns()
+    model_cooldowns = get_model_key_cooldowns() if model_name else {}
     now_ts = time.time()
     fresh, cooling = [], []
+    soonest = None
     for key in keys:
-        if cooldowns.get(_key_fingerprint(provider, key), 0) <= now_ts:
+        key_cd = cooldowns.get(_key_fingerprint(provider, key), 0)
+        mod_cd = model_cooldowns.get(_model_key_fingerprint(provider, model_name, key), 0) if model_name else 0
+        until = max(key_cd, mod_cd)
+        if until <= now_ts:
             fresh.append(key)
         else:
             cooling.append(key)
+            if soonest is None or until < soonest:
+                soonest = until
     wait_seconds = 0
-    if cooling and not fresh:
-        soonest = min(cooldowns.get(_key_fingerprint(provider, k), 0) for k in cooling)
+    if cooling and not fresh and soonest is not None:
         wait_seconds = max(0, int(soonest - now_ts))
     return fresh, cooling, wait_seconds
 
@@ -482,7 +565,11 @@ def note_success(provider, api_key, model_name=None):
         отсеет весь каскад и снова упрётся в ту же принудительную ветку.
     """
     cleared_key = _clear_expiry_entry(KEY_COOLDOWN_FILE, _key_fingerprint(provider, api_key))
-    if cleared_key:
+    cleared_model_key = (
+        _clear_expiry_entry(MODEL_KEY_COOLDOWN_FILE, _model_key_fingerprint(provider, model_name, api_key))
+        if model_name else False
+    )
+    if cleared_key or cleared_model_key:
         logger.info("%s key answered while on cooldown; cooldown lifted.", provider.capitalize())
     if model_name:
         if _clear_expiry_entry(BANNED_MODELS_FILE, model_name):
@@ -529,33 +616,55 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         return "content_blocked"
 
     if _RATE_LIMIT_RE.search(err_msg):
+        pool = provider_pool(provider)
         if provider == "gemini" and is_gcp_project_quota_error(err_msg):
-            set_provider_pool_cooldown("gemini", seconds=GCP_PROJECT_COOLDOWN_SECONDS)
+            applied_cd = GCP_PROJECT_COOLDOWN_SECONDS
+            set_provider_pool_cooldown("gemini", seconds=applied_cd)
             logger.warning(
                 "Gemini GCP Project quota exhausted (%s). "
                 "Placed all %d Google keys on %ds cooldown to prevent burning keys.",
-                err_msg[:120], len(provider_pool("gemini")), GCP_PROJECT_COOLDOWN_SECONDS,
+                err_msg[:120], len(pool), applied_cd,
             )
+            alive = len(available_keys(provider, pool)[0]) if pool else 0
+        elif _is_model_scoped_quota_error(provider, err_msg, model_name=model_name):
+            eff_model = model_name
+            if not eff_model:
+                m_mod = re.search(r"\bmodel\s*:\s*([a-z0-9._/-]+)", err_msg)
+                if m_mod:
+                    eff_model = m_mod.group(1)
+            applied_cd = _parse_retry_delay_seconds(err_msg, default=600, cap=3600)
+            set_model_key_cooldown(provider, eff_model, api_key, seconds=applied_cd)
+            alive = len(available_keys(provider, pool, model_name=eff_model)[0]) if pool else 0
+            # Если Google вернул PerProjectPerModel и почти не осталось живых ключей для этой модели,
+            # кратковременно баним только эту модель, не трогая остальные модели пула.
+            if provider == "gemini" and eff_model and alive <= max(0, len(pool) - 2):
+                ban_model(eff_model, min(applied_cd, 300))
+            log_fn = logger.info if alive else logger.warning
+            log_fn(
+                "%s model %s rate limited (429/quota). Placing key on %ss cooldown for this model only. "
+                "Последствие: живых ключей для %s осталось %s из %s (другие модели не затронуты).",
+                provider.capitalize(), eff_model or "unknown", applied_cd,
+                eff_model or "model", alive, len(pool),
+            )
+            _record_failure("key_rate_limited", error_text, api_key)
+            return "key_rate_limited"
         else:
-            set_key_cooldown(provider, api_key)
-        # В журнале называем ПОСЛЕДСТВИЕ, а не только механику: строка
-        # «placing key on 300s cooldown» не отвечала на единственный вопрос,
-        # который стоит задавать по такой записи, — осталось ли чем отвечать
-        # врачу. Остаток считаем после записи кулдауна, то есть уже с ним.
-        pool = provider_pool(provider)
-        alive = len(available_keys(provider, pool)[0]) if pool else 0
+            applied_cd = KEY_COOLDOWN_SECONDS
+            set_key_cooldown(provider, api_key, seconds=applied_cd)
+            alive = len(available_keys(provider, pool)[0]) if pool else 0
+
         if alive:
             logger.info(
                 "%s rate limited (429/quota). Placing key on %ss cooldown. "
                 "Последствие: живых ключей осталось %s из %s, ответ врачу идёт через них.",
-                provider.capitalize(), KEY_COOLDOWN_SECONDS, alive, len(pool),
+                provider.capitalize(), applied_cd, alive, len(pool),
             )
         else:
             logger.warning(
                 "%s rate limited (429/quota). Placing key on %ss cooldown. "
                 "Последствие: живых ключей %s НЕ ОСТАЛОСЬ (всего %s) — до истечения "
                 "кулдауна врач получит «не смог ответить» вместо ответа.",
-                provider.capitalize(), KEY_COOLDOWN_SECONDS, provider, len(pool),
+                provider.capitalize(), applied_cd, provider, len(pool),
             )
         _record_failure("key_rate_limited", error_text, api_key)
         return "key_rate_limited"
@@ -1325,7 +1434,10 @@ def generate_text(prompt, status_context=None, timeout=None):
         min_req_step = 2.0 if is_triage else 7.0
         # Запас на безопасный выход подпроцесса до убийства родителем через asyncio.wait_for:
         guard_margin = min(3.0, max(0.5, budget * 0.05))
-        usable = max(min(budget, MIN_REQUEST_SECONDS), budget - guard_margin)
+        if budget >= 180.0:
+            usable = max(min(budget, MIN_REQUEST_SECONDS), min(budget - guard_margin, budget * BUDGET_RESERVE_SHARE))
+        else:
+            usable = max(min(budget, MIN_REQUEST_SECONDS), budget - guard_margin)
         models_fit = max(1, min(len(active_cascade), int(usable // min_req_step)))
         share_divisor = max(1, min(models_fit, len(active_cascade)))
         model_share = usable / share_divisor
@@ -1338,8 +1450,8 @@ def generate_text(prompt, status_context=None, timeout=None):
             # Не душить интерактивные рассуждающие модели (gpt-6.1-sol / AgentRouter) потолком 120с!
             # Для AgentRouter и HIGH thinking потолок до 480.0с.
             is_reasoning_cascade = (thinking_level == "HIGH") or any(p == "agentrouter" for _, p in active_cascade)
-            chat_max = 480.0 if is_reasoning_cascade else 120.0
-            chat_ceiling = 480.0 if is_reasoning_cascade else 120.0
+            chat_max = 120.0 if thinking_level == "HIGH" else 45.0
+            chat_ceiling = 120.0 if thinking_level == "HIGH" else 45.0
             req_timeout = max(15.0, min(req_timeout, chat_max, chat_ceiling))
         deadline = time.monotonic() + usable
         logger.debug(
@@ -1382,8 +1494,10 @@ def generate_text(prompt, status_context=None, timeout=None):
             # «All AI attempts exhausted» и молча не отвечал врачу, имея на руках
             # больше десятка рабочих ключей.
             # Отбор — через общий учёт (available_keys), а не своей копией фильтра.
-            available, _cooling, cooldown_wait = available_keys(provider, keys)
+            available, _cooling, cooldown_wait = available_keys(provider, keys, model_name=model_name)
             if not available:
+                if cooldown_wait and cooldown_wait > 0:
+                    min_cooldown_seen = min(min_cooldown_seen, cooldown_wait)
                 logger.info(
                     "All %s keys are on cooldown (%ss left); skipping %s in cascade.",
                     provider, cooldown_wait, model_name
@@ -1412,10 +1526,17 @@ def generate_text(prompt, status_context=None, timeout=None):
                 if deadline is not None and requests_made:
                     remaining = deadline - time.monotonic()
                     min_needed = model_min_budget_seconds(model_name, provider, is_triage=is_triage)
+                    if deadline is not None and timeout and float(timeout) >= 180.0 and not is_triage:
+                        min_needed = max(min_needed, 10.0)
                     if (remaining + 0.05) < min_needed:
-                        # Проверяем наличие быстрых моделей (Groq) в хвосте каскада
+                        # Проверяем наличие быстрых моделей в хвосте каскада (для длинных сводок минимальный порог единый)
+                        def _tail_min(sub_m, sub_p):
+                            base_m = model_min_budget_seconds(sub_m, sub_p, is_triage=is_triage)
+                            if timeout and float(timeout) >= 180.0 and not is_triage:
+                                return max(base_m, 10.0)
+                            return base_m
                         faster_fallback_available = any(
-                            remaining >= model_min_budget_seconds(sub_m, sub_p, is_triage=is_triage)
+                            remaining >= _tail_min(sub_m, sub_p)
                             for sub_m, sub_p in active_cascade[model_index + 1:]
                         )
                         if faster_fallback_available:
@@ -1475,6 +1596,7 @@ def generate_text(prompt, status_context=None, timeout=None):
                     attempts_planned=attempts_planned,
                 )
 
+                client = None
                 try:
                     client = get_provider_client(provider, api_key, timeout=call_timeout)
                     _write_generation_status(
@@ -1553,6 +1675,11 @@ def generate_text(prompt, status_context=None, timeout=None):
                             create_kwargs["max_tokens"] = max(gemini_default_max, int(ctx_max_tokens or gemini_default_max))
                         if is_triage or thinking_level in ("NONE", "none"):
                             pass
+                        elif "lite" in model_name.lower() and call_timeout < 45.0:
+                            # Lite-модели на коротком бюджете зависают в HIGH-размышлениях (Request timed out)
+                            create_kwargs["reasoning_effort"] = "low" if call_timeout < 20.0 else "medium"
+                        elif call_timeout < 25.0 and thinking_level == "HIGH":
+                            create_kwargs["reasoning_effort"] = "medium"
                         elif thinking_level == "LOW":
                             create_kwargs["reasoning_effort"] = "low"
                         elif thinking_level == "HIGH":
@@ -1608,68 +1735,75 @@ def generate_text(prompt, status_context=None, timeout=None):
                                     "reasoning": {"effort": ar_effort}
                                 }
                                 ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, stream=True, timeout=call_timeout)
-                                if ar_resp.status_code == 200:
-                                    stream_chunks = []
-                                    if hasattr(ar_resp, "iter_lines"):
-                                        try:
-                                            for raw_line in ar_resp.iter_lines():
-                                                if not raw_line:
-                                                    continue
-                                                line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
-                                                line = line.strip()
-                                                if line.startswith("data:"):
-                                                    data_str = line[5:].strip()
-                                                    if data_str == "[DONE]":
-                                                        break
-                                                    try:
-                                                        chunk = json.loads(data_str)
-                                                    except Exception:
+                                try:
+                                    if ar_resp.status_code == 200:
+                                        stream_chunks = []
+                                        if hasattr(ar_resp, "iter_lines"):
+                                            try:
+                                                for raw_line in ar_resp.iter_lines():
+                                                    if not raw_line:
                                                         continue
-                                                    ev_type = chunk.get("type", "")
-                                                    if "delta" in chunk:
-                                                        d = chunk["delta"]
-                                                        if isinstance(d, str):
-                                                            stream_chunks.append(d)
-                                                        elif isinstance(d, dict) and "text" in d:
-                                                            stream_chunks.append(d["text"])
-                                                    elif ev_type in ("response.output_text.delta", "response.text.delta"):
-                                                        txt = chunk.get("text") or chunk.get("delta") or ""
-                                                        if isinstance(txt, str):
-                                                            stream_chunks.append(txt)
-                                        except Exception as stream_err:
-                                            logger.warning("AgentRouter SSE stream read error: %s", stream_err)
+                                                    line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+                                                    line = line.strip()
+                                                    if line.startswith("data:"):
+                                                        data_str = line[5:].strip()
+                                                        if data_str == "[DONE]":
+                                                            break
+                                                        try:
+                                                            chunk = json.loads(data_str)
+                                                        except Exception:
+                                                            continue
+                                                        ev_type = chunk.get("type", "")
+                                                        if "delta" in chunk:
+                                                            d = chunk["delta"]
+                                                            if isinstance(d, str):
+                                                                stream_chunks.append(d)
+                                                            elif isinstance(d, dict) and "text" in d:
+                                                                stream_chunks.append(d["text"])
+                                                        elif ev_type in ("response.output_text.delta", "response.text.delta"):
+                                                            txt = chunk.get("text") or chunk.get("delta") or ""
+                                                            if isinstance(txt, str):
+                                                                stream_chunks.append(txt)
+                                            except Exception as stream_err:
+                                                logger.warning("AgentRouter SSE stream read error: %s", stream_err)
 
-                                    extracted_txt = "".join(stream_chunks).strip() if stream_chunks else None
-                                    if not extracted_txt and hasattr(ar_resp, "json"):
+                                        extracted_txt = "".join(stream_chunks).strip() if stream_chunks else None
+                                        if not extracted_txt and hasattr(ar_resp, "json"):
+                                            try:
+                                                ar_data = ar_resp.json()
+                                                for out_item in ar_data.get("output", []):
+                                                    if out_item.get("type") == "message":
+                                                        msg_content = out_item.get("content", [])
+                                                        if isinstance(msg_content, list) and msg_content:
+                                                            extracted_txt = msg_content[0].get("text")
+                                                        elif isinstance(msg_content, str):
+                                                            extracted_txt = msg_content
+                                            except Exception:
+                                                pass
+                                        if not extracted_txt:
+                                            raise RuntimeError("AgentRouter SSE stream yielded empty output")
+                                        response = type("DummyResp", (), {
+                                            "choices": [type("Choice", (), {
+                                                "message": type("Msg", (), {"content": extracted_txt})(),
+                                                "finish_reason": "stop"
+                                            })()]
+                                        })()
+                                        break
+                                    elif ar_resp.status_code in (400, 404):
+                                        if "content-blocked" in ar_resp.text.lower():
+                                            raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:300]}")
+                                        if "not support" not in ar_resp.text.lower():
+                                            response = client.chat.completions.create(**create_kwargs)
+                                            break
+                                        raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
+                                    else:
+                                        raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
+                                finally:
+                                    if hasattr(ar_resp, "close"):
                                         try:
-                                            ar_data = ar_resp.json()
-                                            for out_item in ar_data.get("output", []):
-                                                if out_item.get("type") == "message":
-                                                    msg_content = out_item.get("content", [])
-                                                    if isinstance(msg_content, list) and msg_content:
-                                                        extracted_txt = msg_content[0].get("text")
-                                                    elif isinstance(msg_content, str):
-                                                        extracted_txt = msg_content
+                                            ar_resp.close()
                                         except Exception:
                                             pass
-                                    if not extracted_txt:
-                                        raise RuntimeError("AgentRouter SSE stream yielded empty output")
-                                    response = type("DummyResp", (), {
-                                        "choices": [type("Choice", (), {
-                                            "message": type("Msg", (), {"content": extracted_txt})(),
-                                            "finish_reason": "stop"
-                                        })()]
-                                    })()
-                                    break
-                                elif ar_resp.status_code in (400, 404):
-                                    if "content-blocked" in ar_resp.text.lower():
-                                        raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:300]}")
-                                    if "not support" not in ar_resp.text.lower():
-                                        response = client.chat.completions.create(**create_kwargs)
-                                        break
-                                    raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
-                                else:
-                                    raise RuntimeError(f"AgentRouter error {ar_resp.status_code}: {ar_resp.text[:300]}")
                             response = client.chat.completions.create(**create_kwargs)
                             break
                         except TypeError as err:
@@ -1847,6 +1981,12 @@ def generate_text(prompt, status_context=None, timeout=None):
                         _sleep_with_status(sleep_time, status_context, attempt + 1, max_attempts, key_id)
                         did_sleep_on_error = True
                     continue
+                finally:
+                    if client is not None and hasattr(client, "close"):
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
 
         if out_of_budget:
             break
@@ -2222,15 +2362,29 @@ async def transcribe_audio_gemini_multimodal(
     }
 
     last_error = "all attempts failed"
-    for gkey in keys:
-        for model_name in models_to_try:
+    import asyncio as _asyncio
+    shuffled_keys = list(keys)
+    random.shuffle(shuffled_keys)
+    available, _cooling, cooldown_wait = available_keys("gemini", shuffled_keys)
+    if not available:
+        logger.info("Gemini multimodal STT: all %d keys are on cooldown (%ss left); skipping to Whisper.", len(keys), cooldown_wait)
+        return None, f"all gemini keys on cooldown ({cooldown_wait}s)"
+
+    active_stt_models = [m for m, _p in active_models([(m, "gemini") for m in models_to_try])]
+    tls_verify = os.getenv("STOMCHAT_VISION_TLS_VERIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    for gkey in available[:3]:
+        for model_name in active_stt_models:
+            # Перепроверяем здоровье ключа для конкретной модели на случай по-модельного 429
+            if not available_keys("gemini", [gkey], model_name=model_name)[0]:
+                continue
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model_name}:generateContent?key={gkey}"
             )
             for proxy in proxies_to_try:
                 try:
-                    async with _httpx.AsyncClient(proxy=proxy, verify=False, timeout=gemini_timeout) as hc:
+                    async with _httpx.AsyncClient(proxy=proxy, verify=tls_verify, timeout=gemini_timeout) as hc:
                         resp = await hc.post(url, json=payload)
                         if resp.status_code == 200:
                             gdata = resp.json()
@@ -2241,6 +2395,7 @@ async def transcribe_audio_gemini_multimodal(
                             )
                             if parts and "text" in parts[0]:
                                 raw = parts[0]["text"].strip()
+                                note_success("gemini", gkey, model_name=model_name)
                                 if not raw or re.match(
                                     r"^\[?(тишина|silence|тишина\.+)\]?\.?$",
                                     raw.strip().lower(),
@@ -2255,23 +2410,31 @@ async def transcribe_audio_gemini_multimodal(
                                 )
                                 return raw, None
                             last_error = f"{model_name}: empty response"
+                            break
                         elif resp.status_code == 429:
-                            logger.info(
-                                "Gemini multimodal STT: 429 key=...%s model=%s. Placing key on %ds cooldown.",
-                                gkey[-4:], model_name, KEY_COOLDOWN_SECONDS,
-                            )
-                            set_key_cooldown("gemini", gkey, KEY_COOLDOWN_SECONDS)
+                            err_body = getattr(resp, "text", "") or ""
+                            if _is_model_scoped_quota_error("gemini", err_body, model_name=model_name):
+                                note_key_failure("gemini", gkey, f"429 {err_body[:300]}", model_name=model_name)
+                            else:
+                                logger.info(
+                                    "Gemini multimodal STT: 429 key=...%s model=%s. Placing key on %ds cooldown.",
+                                    gkey[-4:], model_name, KEY_COOLDOWN_SECONDS,
+                                )
+                                set_key_cooldown("gemini", gkey, KEY_COOLDOWN_SECONDS)
                             last_error = f"429 on {model_name}"
                             # Обязательная пауза >= 2.5с перед следующим ключом (Iron Rule)
-                            import asyncio as _asyncio
                             await _asyncio.sleep(2.5)
-                            break  # следующий ключ
+                            break  # следующий ключ / модель
                         else:
+                            err_body = getattr(resp, "text", "") or ""
                             last_error = f"{model_name}: HTTP {resp.status_code}"
+                            note_key_failure("gemini", gkey, f"HTTP {resp.status_code}: {err_body[:250]}", model_name=model_name)
                             logger.debug(
                                 "Gemini multimodal STT HTTP %s model=%s",
                                 resp.status_code, model_name,
                             )
+                            if resp.status_code not in (403,):
+                                break
                 except Exception as exc:
                     last_error = f"{model_name}: {exc}"
                     logger.debug(
@@ -2414,10 +2577,10 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
             # и бан модели на 20 минут оставил бы врача вообще без расшифровок.
             failure_reason = note_key_failure("groq", api_key, str(e))
             if failure_reason == "key_rate_limited":
-                # Пауза строго 2.5 сек по Iron Law, но ограничена остатком бюджета
                 rate_delay = 2.5
+                # Пауза строго 2.5 сек по Iron Law, но ограничена остатком бюджета
                 left = (usable - (time.monotonic() - started)) if usable else rate_delay
-                time.sleep(max(0.0, min(rate_delay, left)))
+                time.sleep(max(0.0, min(2.5, left)))
             continue
 
     if actual_file_path != file_path and os.path.exists(actual_file_path):
@@ -2490,6 +2653,7 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
         ("gemini-3.5-flash-lite", "gemini"),
     ])
 
+    cascade = active_models(cascade)
     deadline = time.monotonic() + float(timeout or 160.0)
     prev_supp_provider = None
     for model_index, (model_name, provider) in enumerate(cascade):
@@ -2518,14 +2682,19 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
             call_timeout = min(20.0, rem)
         call_timeout = round(max(3.0, call_timeout), 2)
 
-        keys = config.GROQ_KEYS if provider == "groq" else (config.AGENTROUTER_KEYS if provider == "agentrouter" else config.GOOGLE_KEYS)
-        live_keys, cooldown_keys, _ = available_keys(provider, keys)
-        candidates = live_keys or cooldown_keys
-        if not candidates:
+        keys = list(provider_pool(provider))
+        if not keys:
             continue
+        random.shuffle(keys)
+        live_keys, _cooldown_keys, cd_wait = available_keys(provider, keys, model_name=model_name)
+        if not live_keys:
+            logger.info("PM supplement: all %s keys on cooldown (%ss left) for %s; skipping.", provider, cd_wait, model_name)
+            continue
+        candidates = live_keys
 
         for api_key in candidates[:2]:
             key_id = f"{provider}...{api_key[-5:]}" if api_key else f"{provider}_none"
+            client = None
             try:
                 client = get_provider_client(provider, api_key, timeout=call_timeout)
                 is_gpt_sol = (provider == "agentrouter") or ("gpt-6.1" in str(model_name).lower()) or ("sol" in str(model_name).lower())
@@ -2573,35 +2742,35 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
                             "input": ar_input
                         }
                         ar_call_timeout = call_timeout
-                        ar_resp = _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=ar_call_timeout)
-                        if ar_resp.status_code == 200:
-                            ar_data = ar_resp.json()
-                            extracted_txt = None
-                            for out_item in ar_data.get("output", []):
-                                if out_item.get("type") == "message":
-                                    msg_content = out_item.get("content", [])
-                                    if isinstance(msg_content, list) and msg_content:
-                                        extracted_txt = msg_content[0].get("text")
-                                    elif isinstance(msg_content, str):
-                                        extracted_txt = msg_content
-                            if extracted_txt:
-                                response = type("DummyResp", (), {
-                                    "choices": [type("Choice", (), {
-                                        "message": type("Msg", (), {"content": extracted_txt})(),
-                                        "finish_reason": "stop"
-                                    })()]
-                                })()
-                            else:
-                                raise RuntimeError(f"AgentRouter empty supplement output: {ar_data}")
-                        elif ar_resp.status_code in (400, 404):
-                            if "content-blocked" in ar_resp.text.lower():
-                                raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:200]}")
-                            if "not support" not in ar_resp.text.lower():
-                                response = client.chat.completions.create(**supp_kwargs)
+                        with _req.post(f"{ar_base}/responses", headers=ar_headers, json=ar_payload, timeout=ar_call_timeout) as ar_resp:
+                            if ar_resp.status_code == 200:
+                                ar_data = ar_resp.json()
+                                extracted_txt = None
+                                for out_item in ar_data.get("output", []):
+                                    if out_item.get("type") == "message":
+                                        msg_content = out_item.get("content", [])
+                                        if isinstance(msg_content, list) and msg_content:
+                                            extracted_txt = msg_content[0].get("text")
+                                        elif isinstance(msg_content, str):
+                                            extracted_txt = msg_content
+                                if extracted_txt:
+                                    response = type("DummyResp", (), {
+                                        "choices": [type("Choice", (), {
+                                            "message": type("Msg", (), {"content": extracted_txt})(),
+                                            "finish_reason": "stop"
+                                        })()]
+                                    })()
+                                else:
+                                    raise RuntimeError(f"AgentRouter empty supplement output: {ar_data}")
+                            elif ar_resp.status_code in (400, 404):
+                                if "content-blocked" in ar_resp.text.lower():
+                                    raise RuntimeError(f"AgentRouter content-blocked: {ar_resp.text[:200]}")
+                                if "not support" not in ar_resp.text.lower():
+                                    response = client.chat.completions.create(**supp_kwargs)
+                                else:
+                                    raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
                             else:
                                 raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
-                        else:
-                            raise RuntimeError(f"AgentRouter supplement error {ar_resp.status_code}: {ar_resp.text[:200]}")
                     else:
                         response = client.chat.completions.create(**supp_kwargs)
                 except (TypeError, Exception) as err:
@@ -2624,8 +2793,16 @@ def generate_pm_supplement(user_question, initial_answer, timeout=160.0):
                 if supp_fail in ("model_overloaded", "model_not_found", "content_blocked"):
                     break
                 if supp_fail == "key_rate_limited":
-                    time.sleep(2.5)
+                    left = deadline - time.monotonic()
+                    if left > 4.0:
+                        time.sleep(min(2.5, left - 2.0))
                 continue
+            finally:
+                if client is not None and hasattr(client, "close"):
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
 
     return None
 
@@ -2646,10 +2823,11 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
     if not keys:
         return None, "no_google_keys"
 
+    random.shuffle(keys)
     available, _cooling, cooldown_wait = available_keys("gemini", keys)
-    candidates = available or keys
-    if not candidates:
+    if not available:
         return None, f"all_keys_cooling:{cooldown_wait}"
+    candidates = available
 
     try:
         from google import genai
@@ -2679,12 +2857,19 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
     raw_models = [m for m in [cfg_model, "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"] if m]
     seen_models = set()
     models_to_try = [m for m in raw_models if not (m in seen_models or seen_models.add(m))]
+    models_to_try = [m for m, _p in active_models([(m, "gemini") for m in models_to_try])]
     last_err = None
+    deadline = time.monotonic() + float(timeout or 160.0)
 
     for model_name in models_to_try:
-        if model_name in get_banned_models():
+        if time.monotonic() >= deadline:
+            break
+        model_keys, _, _ = available_keys("gemini", candidates, model_name=model_name)
+        if not model_keys:
             continue
-        for api_key in candidates[:3]:
+        for api_key in model_keys[:3]:
+            if time.monotonic() >= deadline:
+                break
             key_id = f"gemini...{api_key[-5:]}" if api_key else "none"
             try:
                 client = genai.Client(api_key=api_key)
@@ -2748,8 +2933,12 @@ def generate_google_grounding(prompt_or_query, timeout=160.0):
                     model_name, key_id, last_err,
                 )
                 g_fail = note_key_failure("gemini", api_key, str(exc), model_name=model_name)
+                if g_fail in ("model_overloaded", "model_not_found", "content_blocked"):
+                    break
                 if g_fail == "key_rate_limited":
-                    time.sleep(2.5)
+                    rem = deadline - time.monotonic()
+                    if rem > 3.0:
+                        time.sleep(min(2.5, rem - 1.0))
 
     return None, last_err or "all_grounding_attempts_failed"
 

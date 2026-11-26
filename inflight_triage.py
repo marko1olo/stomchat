@@ -173,7 +173,12 @@ class InFlightManager:
             # Переносим неразобранные фоллоу-апы из прерванной/замещенной сессии, чтобы не терять реплики автора
             for f in preserved_unprocessed:
                 if f.get("msg_id") != trigger_msg_id:
-                    session.add_followup(f["text"], f.get("msg_id"), f.get("has_media", False), f.get("media_type"))
+                    session.record_followup(
+                        f.get("msg_id") or 0,
+                        f.get("text", ""),
+                        has_media=f.get("has_media", False),
+                        date=f.get("date"),
+                    )
             for mid in preserved_triggers:
                 session.add_trigger_msg_id(mid)
 
@@ -441,7 +446,13 @@ async def run_inflight_followup_triage(
         "зуб", "канал", "снимок", "пломб", "смол", "адгезив", "силер", "корон", "штифт", "боль", "кт",
         "пациент", "десна", "полость", "эмаль", "дентин", "пульп", "апекс", "мта", "гуттаперч"
     )
-    if any(re.search(pat, combined_low) for pat in impatience_patterns) and not any(k in combined_low for k in clinical_markers):
+    has_dental = False
+    try:
+        from dental_vocab import has_dental_term
+        has_dental = has_dental_term(combined_followup)
+    except Exception:
+        has_dental = False
+    if any(re.search(pat, combined_low) for pat in impatience_patterns) and not has_dental and not any(k in combined_low for k in clinical_markers):
         return {
             "action": "WAIT_FOR_ANSWER",
             "merged_query": orig_clean,

@@ -703,6 +703,30 @@ async def run_callback_tests():
     ok_other = await ct.handle_if_chairside_command(bot, mock_cmd_ev, "/help")
     check("/help не перехватывается chairside-фасадом", not ok_other)
 
+    # New regression callbacks: preserve:ferrule, sos:last, sos:resuscitation_menu, noop, is_chairside_callback
+    ev_pf = MockCallbackEvent("preserve:ferrule")
+    ok_pf = await ct.dispatch_chairside_callback(bot, ev_pf, "preserve:ferrule")
+    check("preserve:ferrule диспетчеризируется", ok_pf and ev_pf.edit.called)
+
+    ev_sl = MockCallbackEvent("sos:last")
+    ok_sl = await ct.dispatch_chairside_callback(bot, ev_sl, "sos:last")
+    check("sos:last диспетчеризируется", ok_sl and ev_sl.edit.called)
+
+    ev_rm = MockCallbackEvent("sos:resuscitation_menu")
+    ok_rm = await ct.dispatch_chairside_callback(bot, ev_rm, "sos:resuscitation_menu")
+    check("sos:resuscitation_menu диспетчеризируется", ok_rm and ev_rm.edit.called)
+
+    ev_np = MockCallbackEvent("noop")
+    ok_np = await ct.dispatch_chairside_callback(bot, ev_np, "noop")
+    check("noop диспетчеризируется", ok_np and ev_np.answer.called)
+
+    check("is_chairside_callback распознает cement:menu и не крадет sos:endo_pain",
+          ct.is_chairside_callback("cement:menu") and ct.is_chairside_callback("sos:anaphylaxis") and not ct.is_chairside_callback("sos:endo_pain"))
+
+    import html_safe
+    chunks = html_safe.split_html('<a href="https://t.me/test">' + ("A" * 50) + "</a>", limit=35)
+    check("split_html не создает голый <a> без href во втором чанке", all("<a>" not in c for c in chunks))
+
 
 def test_all_chairside_tools():
     asyncio.run(run_callback_tests())

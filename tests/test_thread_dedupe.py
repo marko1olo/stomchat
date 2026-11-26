@@ -193,7 +193,7 @@ async def _fake_triage(context_msgs):
     return True
 
 
-async def _fake_dialogue_triage(chain, recent_chat=None):
+async def _fake_dialogue_triage(chain, recent_chat=None, **kw):
     await asyncio.sleep(0.005)
     return True
 
@@ -234,6 +234,8 @@ A.resolve_bot_identity = _fake_resolve
 database.get_last_n_messages = _fake_last_n
 database.get_user_profile = _fake_profile
 A.SHADOW_TESTING = False
+_ORIG_PASSIVE_PROB = getattr(A.config, "PASSIVE_TEXT_PROBABILITY", 0.66)
+A.config.PASSIVE_TEXT_PROBABILITY = 1.0
 
 
 def reset_world(state=None):
@@ -246,6 +248,8 @@ def reset_world(state=None):
     A._PASSIVE_CLAIMS.clear()
     A.REPLIED_MSG_IDS.clear()
     A.USER_COOLDOWNS.clear()
+    A.AUTHOR_GROUP_REPLY_COOLDOWNS.clear()
+    A._ACTIVE_DIALOGUE_THREADS.clear()
     A.BOT_ID = None
     LOGGED.clear()
 
@@ -651,6 +655,7 @@ check("вызов чистки без добавления ветку по во�
 check("ловушка на возврат обрезки до 100 сработала бы",
       "del threads[:-100]" in "            if len(threads) > 100:\n                del threads[:-100]")
 
+A.config.PASSIVE_TEXT_PROBABILITY = _ORIG_PASSIVE_PROB
 _alog.handlers = [h for h in _alog.handlers if not isinstance(h, _LogCatcher)]
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 

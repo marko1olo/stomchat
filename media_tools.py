@@ -93,11 +93,66 @@ def _json_exit(payload, code=0):
     raise SystemExit(code)
 
 
+def _register_heif_if_available():
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+
+
+def _pil_to_rgb_normalized(source):
+    """Нормализует EXIF-ориентацию, 16-bit рентген (I;16/I/F) и альфа-канал (белый фон) в RGB."""
+    from PIL import Image, ImageOps
+    import numpy as np
+
+    transposed = None
+    try:
+        transposed = ImageOps.exif_transpose(source)
+    except Exception:
+        transposed = source
+
+    cur = transposed if transposed is not None else source
+    try:
+        if cur.mode.startswith("I") or cur.mode == "F":
+            arr = np.asarray(cur, dtype=np.float32)
+            min_v, max_v = float(np.min(arr)), float(np.max(arr))
+            if max_v > min_v:
+                norm = ((arr - min_v) * (255.0 / (max_v - min_v))).clip(0, 255).astype(np.uint8)
+            else:
+                norm = np.zeros(arr.shape, dtype=np.uint8)
+            gray = Image.fromarray(norm, mode="L")
+            try:
+                return gray.convert("RGB")
+            finally:
+                gray.close()
+
+        if cur.mode in ("RGBA", "LA", "PA") or (cur.mode == "P" and "transparency" in cur.info):
+            rgba = cur.convert("RGBA")
+            try:
+                bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                bg.paste(rgba, mask=rgba.split()[3])
+                return bg
+            finally:
+                rgba.close()
+
+        if cur.mode != "RGB":
+            return cur.convert("RGB")
+        return cur.copy()
+    finally:
+        if transposed is not None and transposed is not source:
+            try:
+                transposed.close()
+            except Exception:
+                pass
+
+
 def _prepare_image_sync(file_path):
     from PIL import Image
 
     img = None
     try:
+        _register_heif_if_available()
         Image.MAX_IMAGE_PIXELS = 49_000_000
         if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) <= 0:
             return None, "Пустой файл"
@@ -105,10 +160,7 @@ def _prepare_image_sync(file_path):
         try:
             with Image.open(file_path) as source:
                 source.load()
-                if source.mode != "RGB":
-                    img = source.convert("RGB")
-                else:
-                    img = source.copy()
+                img = _pil_to_rgb_normalized(source)
         except Exception as exc:
             return None, f"Невалидный файл изображения: {exc}"
 
@@ -215,8 +267,11 @@ def _extract_frame_sync(video_path: str):
             if max(h, w) > 1200:
                 scale = 1200.0 / max(h, w)
                 frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            if not cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+            ok_enc, enc_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok_enc:
                 return None, "Не удалось сохранить кадр"
+            with open(frame_path, "wb") as out_f:
+                out_f.write(enc_buf.tobytes())
             return frame_path, None
 
         # Нормализация ячеек коллажа (целевая ширина ячейки 540px)
@@ -229,7 +284,8 @@ def _extract_frame_sync(video_path: str):
         for f, label in zip(extracted_frames, frame_labels):
             cell = cv2.resize(f, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
             overlay = cell.copy()
-            badge_w = 175
+            (tw, _th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
+            badge_w = min(cell_w - 8, max(175, tw + 20))
             cv2.rectangle(overlay, (4, 4), (badge_w, 30), (20, 20, 20), -1)
             cv2.addWeighted(overlay, 0.7, cell, 0.3, 0, cell)
             cv2.putText(cell, label, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
@@ -250,8 +306,11 @@ def _extract_frame_sync(video_path: str):
         else:
             collage = np.hstack(processed_cells)
 
-        if not cv2.imwrite(frame_path, collage, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+        ok_enc, enc_buf = cv2.imencode(".jpg", collage, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok_enc:
             return None, "Не удалось сохранить коллаж кадров"
+        with open(frame_path, "wb") as out_f:
+            out_f.write(enc_buf.tobytes())
         return frame_path, None
 
     except Exception as exc:
@@ -586,11 +645,13 @@ def prepare_image_bytes_sync(raw_bytes: bytes, max_dim: int = 1200, quality: int
     if not raw_bytes:
         return None
     from PIL import Image
+    img = None
     try:
+        _register_heif_if_available()
         Image.MAX_IMAGE_PIXELS = 49_000_000
         with Image.open(io.BytesIO(raw_bytes)) as source:
             source.load()
-            img = source.convert("RGB") if source.mode != "RGB" else source.copy()
+            img = _pil_to_rgb_normalized(source)
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
         with io.BytesIO() as buffer:
@@ -600,6 +661,12 @@ def prepare_image_bytes_sync(raw_bytes: bytes, max_dim: int = 1200, quality: int
     except Exception as exc:
         logger.warning("prepare_image_bytes_sync error: %s", exc)
         return None
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
 
 
 async def extract_multimodal_images_async(client, chat_id, message_ids: list[int], max_images: int = 16) -> list[str]:
@@ -725,8 +792,14 @@ def _validate_image_url(url, timeout=5):
         import requests
         resp = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
         if resp.status_code in (405, 501):
-            resp = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True)
-            resp.close()
+            with requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True) as get_resp:
+                if get_resp.status_code == 200:
+                    final_url = getattr(get_resp, "url", url) or url
+                    if "removed.png" in final_url.lower():
+                        return False
+                    content_type = (get_resp.headers.get("Content-Type") or "").lower()
+                    return content_type.startswith("image/")
+                return False
         if resp.status_code == 200:
             final_url = getattr(resp, "url", url) or url
             if "removed.png" in final_url.lower():
@@ -757,6 +830,8 @@ def upload_clinical_image_sync(file_path):
         fname = os.path.basename(file_path) or "clinical_case.jpg"
         if not (fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
             fname = f"{fname}.jpg"
+        ext = os.path.splitext(fname)[1].lower()
+        mime_type = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -766,7 +841,7 @@ def upload_clinical_image_sync(file_path):
         # 1. Основной провайдер: Pixhost.to
         pixhost_url = "https://api.pixhost.to/images"
         pixhost_data = {"content_type": 0, "max_th_size": 420}
-        pixhost_files = {"img": (fname, img_bytes, "image/jpeg")}
+        pixhost_files = {"img": (fname, img_bytes, mime_type)}
 
         try:
             r = requests.post(

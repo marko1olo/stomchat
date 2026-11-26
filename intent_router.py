@@ -139,12 +139,12 @@ _CONFLICT_PHRASES = [
 ]
 _SINGLE_CONFLICT_KWS = [
     "бред", "чушь", "дичь", "херня", "говно", "безрукий", "какой дурак",
-    "херню", "глупость", "рукожоп", "рукожопие", "помойку", "мусорку",
-    "выброси", "косяк", "ужасно", "кривые руки", "уродство", "отстой",
-    "хлам", "ахинея", "ппц", "пиздец", "бредятина", "какой дебил", "убейся",
+    "херню", "рукожоп", "рукожопие", "помойку", "мусорку",
+    "кривые руки", "уродство",
+    "ахинея", "ппц", "пиздец", "бредятина", "какой дебил", "убейся",
     "дебилизм", "идиот", "идиотизм", "тупой", "тупость", "придурок", "даун",
     "рукожопый", "криворукий", "жопорукий", "косорукий", "ересь", "чепуха",
-    "психушка", "дурка", "лечись", "высер", "выкинь", "дерьмо", "говнище",
+    "психушка", "дурка", "высер", "дерьмо", "говнище",
     "днище", "лажовый", "шиза", "дебил", "кретин", "олень", "баран", "тормоз",
     "позорище", "позор", "стыдоба", "срач", "клоун", "цирк", "клоунада",
     "хрень", "галиматья", "шарага", "колхозный", "безрукие", "убожество",
@@ -175,7 +175,9 @@ _BOT_COMPLAINT_RE = re.compile(
     r"\b(?:бот|нейросет\w*|ассистент|гпт|gpt)\b.*\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)|"
     r"\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)\b.*\b(?:бот|нейросет\w*|ассистент|гпт|gpt)|"
     r"\b(?:он|ты)\s+(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошибся|гонишь|надоел\w*)|"
-    r"\b(?:хватит|перестань|отстань|не\s+пиши|без\s+спама|стоп)\b",
+    r"(?:^\s*(?:хватит|перестань|отстань|не\s+пиши|без\s+спама|стоп)(?:[!.\s]*$|[,!]\s+(?:бот|спам\w*|уже|писать|отвечать|флуд\w*)))|"
+    r"\b(?:хватит|перестань)\s+(?:писать|спамить|отвечать|флудить|лезть|бредить)\b|"
+    r"\b(?:отстань|не\s+пиши|без\s+спама)\b",
     re.IGNORECASE
 )
 
@@ -455,12 +457,12 @@ def should_passively_engage(
     mentions = re.findall(r"@\w{4,}", clean)
     if mentions:
         try:
-            bot_username = getattr(config, "BOT_USERNAME", "") or ""
-            other_mentions = [m for m in mentions if m.lower() != f"@{bot_username.lower()}"]
-            if other_mentions:
-                return False, "addressed_to_other_user"
+            bot_username = (getattr(config, "BOT_USERNAME", "") or "").lstrip("@").strip().lower()
         except Exception:
-            pass
+            bot_username = ""
+        other_mentions = [m for m in mentions if not bot_username or m.lower() != f"@{bot_username}"]
+        if other_mentions:
+            return False, "addressed_to_other_user"
 
     return True, "clinical_engagement_allowed"
 
@@ -571,7 +573,6 @@ class GroupTriageLockManager:
         self._chat_locks: Dict[int, asyncio.Lock] = {}
         self._in_flight_chats: Set[int] = set()
         self._last_chat_response_time: Dict[int, float] = {}
-        self._user_timestamps: Dict[Tuple[int, int], List[float]] = {}
 
     def get_chat_lock(self, chat_id: int) -> asyncio.Lock:
         if chat_id not in self._chat_locks:

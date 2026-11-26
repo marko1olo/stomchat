@@ -363,48 +363,73 @@ def verify_and_guard_anatomy(
         elif mentions_upper_jaw and not mentions_lower_jaw:
             target_teeth.append(16)  # Репрезентативный моляр верхней челюсти
 
-    # 3. Валидация по целевым зубам
-    for fdi in target_teeth:
-        inv = FDI_ANATOMY_INVARIANTS.get(fdi)
-        if not inv:
-            continue
-            
-        if inv.jaw == "mandible":
-            # На нижней челюсти КАТЕГОРИЧЕСКИ запрещен небный корень / палатинальный корень/канал
-            for m in _MANDIBLE_FORBIDDEN_ROOT_RE.finditer(text):
-                if not _is_negated_match(text, m.start(), m.end()):
-                    matched_term = m.group(0).strip()
-                    violations.append(
-                        f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
-                        f"У зубов нижней челюсти (31-48) НЕ БЫВАЕТ небных корней/каналов! "
-                        f"Корни нижних моляров: медиальный (MB, ML), дистальный (D, DB, DL), либо Radix Entomolaris/Paramolaris."
-                    )
-            # На нижней челюсти КАТЕГОРИЧЕСКИ запрещена небная поверхность / стенка
-            for m in _MANDIBLE_FORBIDDEN_SURFACE_RE.finditer(text):
-                if not _is_negated_match(text, m.start(), m.end()):
-                    matched_term = m.group(0).strip()
-                    violations.append(
-                        f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
-                        f"У зубов нижней челюсти поверхность ЯЗЫЧНАЯ (lingual), а не нёбная (palatal)."
-                    )
-                    
-        elif inv.jaw == "maxilla":
-            # На верхней челюсти КАТЕГОРИЧЕСКИ запрещен язычный корень/канал
-            for m in _MAXILLA_FORBIDDEN_ROOT_RE.finditer(text):
-                if not _is_negated_match(text, m.start(), m.end()):
-                    matched_term = m.group(0).strip()
-                    violations.append(
-                        f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
-                        f"У зубов верхней челюсти (11-28) корень/канал НЕБНЫЙ (palatal), язычного корня/канала не существует."
-                    )
-            # На верхней челюсти КАТЕГОРИЧЕСКИ запрещена язычная поверхность / стенка
-            for m in _MAXILLA_FORBIDDEN_SURFACE_RE.finditer(text):
-                if not _is_negated_match(text, m.start(), m.end()):
-                    matched_term = m.group(0).strip()
-                    violations.append(
-                        f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
-                        f"У зубов верхней челюсти поверхность НЕБНАЯ (palatal), а не язычная (lingual)."
-                    )
+    # 3. Валидация по целевым зубам (с контекстной изоляцией предложений, если в тексте обе челюсти)
+    def _check_segment(seg_text: str, seg_teeth: List[int]) -> None:
+        for fdi in seg_teeth:
+            inv = FDI_ANATOMY_INVARIANTS.get(fdi)
+            if not inv:
+                continue
+
+            if inv.jaw == "mandible":
+                for m in _MANDIBLE_FORBIDDEN_ROOT_RE.finditer(seg_text):
+                    if not _is_negated_match(seg_text, m.start(), m.end()):
+                        matched_term = m.group(0).strip()
+                        violations.append(
+                            f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
+                            f"У зубов нижней челюсти (31-48) НЕ БЫВАЕТ небных корней/каналов! "
+                            f"Корни нижних моляров: медиальный (MB, ML), дистальный (D, DB, DL), либо Radix Entomolaris/Paramolaris."
+                        )
+                for m in _MANDIBLE_FORBIDDEN_SURFACE_RE.finditer(seg_text):
+                    if not _is_negated_match(seg_text, m.start(), m.end()):
+                        matched_term = m.group(0).strip()
+                        violations.append(
+                            f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
+                            f"У зубов нижней челюсти поверхность ЯЗЫЧНАЯ (lingual), а не нёбная (palatal)."
+                        )
+
+            elif inv.jaw == "maxilla":
+                for m in _MAXILLA_FORBIDDEN_ROOT_RE.finditer(seg_text):
+                    if not _is_negated_match(seg_text, m.start(), m.end()):
+                        matched_term = m.group(0).strip()
+                        violations.append(
+                            f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
+                            f"У зубов верхней челюсти (11-28) корень/канал НЕБНЫЙ (palatal), язычного корня/канала не существует."
+                        )
+                for m in _MAXILLA_FORBIDDEN_SURFACE_RE.finditer(seg_text):
+                    if not _is_negated_match(seg_text, m.start(), m.end()):
+                        matched_term = m.group(0).strip()
+                        violations.append(
+                            f"Зуб {fdi} ({inv.name_ru}): анатомическая галлюцинация '{matched_term}'. "
+                            f"У зубов верхней челюсти поверхность НЕБНАЯ (palatal), а не язычная (lingual)."
+                        )
+
+    text_teeth_all = extract_fdi_teeth_from_text(text)
+    jaws_in_text = {
+        FDI_ANATOMY_INVARIANTS[t].jaw
+        for t in text_teeth_all
+        if t in FDI_ANATOMY_INVARIANTS
+    }
+    if len(jaws_in_text) > 1 or (mentions_lower_jaw and mentions_upper_jaw):
+        clauses = [c.strip() for c in re.split(r"(?<=[.!?;])\s+|\n+", text) if c.strip()]
+        for clause in clauses:
+            c_teeth = extract_fdi_teeth_from_text(clause)
+            if not c_teeth:
+                c_low = bool(re.search(r'\b(?:нижн(?:ей|юю|яя|их)?\s+челюст\w*|нижн(?:их|ие|его|ем)?\s+моляр\w*|mandib\w*)\b', clause, re.I))
+                c_up = bool(re.search(r'\b(?:верхн(?:ей|юю|яя|их)?\s+челюст\w*|верхн(?:их|ие|его|ем)?\s+моляр\w*|maxill\w*)\b', clause, re.I))
+                if c_low and not c_up:
+                    c_teeth = [36]
+                elif c_up and not c_low:
+                    c_teeth = [16]
+                elif resolved_fdi:
+                    c_teeth = [resolved_fdi]
+                else:
+                    target_jaws = {FDI_ANATOMY_INVARIANTS[t].jaw for t in target_teeth if t in FDI_ANATOMY_INVARIANTS}
+                    if len(target_jaws) == 1:
+                        c_teeth = target_teeth
+            if c_teeth:
+                _check_segment(clause, c_teeth)
+    else:
+        _check_segment(text, target_teeth)
 
     unique_violations = list(dict.fromkeys(violations))
     return (len(unique_violations) == 0, unique_violations)

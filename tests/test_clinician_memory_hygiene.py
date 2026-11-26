@@ -312,7 +312,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
                 p = _REPO_ROOT / candidate
                 if p.exists():
                     try:
-                        c = sqlite3.connect(str(p))
+                        c = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
                         tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
                         c.close()
                         if "user_memories" in tables:
@@ -326,7 +326,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("SELECT user_id, profile_portrait FROM user_profiles WHERE profile_portrait IS NOT NULL AND profile_portrait != ''")
         rows = cur.fetchall()
@@ -348,7 +348,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("SELECT user_id, specialty FROM user_memories WHERE specialty IS NOT NULL AND specialty != ''")
         rows = cur.fetchall()
@@ -367,7 +367,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("SELECT user_id, facts_json FROM user_memories WHERE facts_json IS NOT NULL AND facts_json != ''")
         rows = cur.fetchall()
@@ -394,7 +394,7 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("SELECT user_id, username, first_name FROM user_memories")
         rows = cur.fetchall()
@@ -411,12 +411,81 @@ class TestLiveDatabaseHygiene(unittest.TestCase):
         if not self.db_path:
             self.skipTest("Live database not found in repo root")
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("PRAGMA integrity_check")
         res = cur.fetchone()[0]
         conn.close()
         self.assertEqual(res, "ok", f"PRAGMA integrity_check failed on {self.db_path.name}: {res}")
+
+    def test_has_clinical_profile_signal_filters_banter_and_social_channels(self):
+        """Бытовой треп и упоминания телеграм-каналов не должны проходить гейт клинической памяти."""
+        self.assertFalse(user_memory.has_clinical_profile_signal("в титан 30 минут за 150 для юбиляров)))"))
+        self.assertFalse(user_memory.has_clinical_profile_signal("зайти ко мне на телеграм канал"))
+        self.assertFalse(user_memory.has_clinical_profile_signal("посоветуйте vpn uboost для ютуба"))
+        self.assertTrue(user_memory.has_clinical_profile_signal("Обходим отлом инструмента в зубе 36 с CeraSeal"))
+        self.assertTrue(user_memory.has_clinical_profile_signal("Работаю под микроскопом Leica M320"))
+
+    def test_deduplicate_clinical_summary_filters_offtopic_and_meta(self):
+        """Оффтоп-предложения про VPN и чат-ботов вырезаются из group_summary детерминированно."""
+        raw = (
+            "Участник активно обсуждает обход блокировок и использование VPN uBoost в чате. "
+            "Сомнения в природе чат-бота. "
+            "Применяет биокерамический силер CeraSeal при обтурации 36 зуба."
+        )
+        cleaned = user_memory.deduplicate_clinical_summary(raw)
+        self.assertNotIn("VPN", cleaned)
+        self.assertNotIn("uBoost", cleaned)
+        self.assertNotIn("чат-бота", cleaned)
+        self.assertIn("CeraSeal", cleaned)
+
+    def test_daemon_skips_llm_on_pure_banter_and_advances_cursor(self):
+        """Демон групповой памяти не тратит LLM на флуд, двигает курсор и сохраняет старое резюме."""
+        import asyncio
+        import tempfile
+        from unittest.mock import AsyncMock, patch
+        import config
+        import database
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                old_db = config.DB_PATH
+                try:
+                    config.DB_PATH = str(Path(tmpdir) / "test_daemon_gate.db")
+                    await database.init_db()
+                    await database.save_user_memory(
+                        user_id=99001,
+                        username="banter_doc",
+                        first_name="Dr Banter",
+                        group_summary="Специалист по эндодонтии, работает с CeraSeal.",
+                        group_message_count=5,
+                        last_group_analyzed_id=100,
+                    )
+                    for mid, txt in [
+                        (101, "в титан 30 минут за 150 для юбиляров)))"),
+                        (102, "зайти ко мне на телеграм канал посмотрите видео"),
+                        (103, "слушай там скоро бизнес молодость 3.0 расцветет"),
+                    ]:
+                        await database.save_message(
+                            msg_id=mid,
+                            sender_id=99001,
+                            sender_name="Dr Banter",
+                            sender_username="banter_doc",
+                            text=txt,
+                            date="2026-11-24 12:00:00",
+                        )
+
+                    llm_mock = AsyncMock(side_effect=AssertionError("LLM must not be called on non-clinical banter!"))
+                    with patch.object(user_memory, "generate_gemini_text_async", llm_mock):
+                        await user_memory.process_group_memory_daemon_batch(min_new_messages=3, limit=5)
+                    self.assertEqual(llm_mock.await_count, 0)
+                    mem = await database.get_user_memory(99001)
+                    self.assertEqual(mem["last_group_analyzed_id"], 103)
+                    self.assertIn("CeraSeal", mem["group_summary"])
+                finally:
+                    config.DB_PATH = old_db
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

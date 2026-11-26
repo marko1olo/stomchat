@@ -17,6 +17,8 @@ Verifies:
 
 import sys
 import os
+import shutil
+import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +28,23 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import assistant
+
+_ORIG_STATE_PATH = None
+_TMP_STATE_DIR = None
+
+
+def setUpModule():
+    global _ORIG_STATE_PATH, _TMP_STATE_DIR
+    _ORIG_STATE_PATH = assistant.STATE_PATH
+    _TMP_STATE_DIR = tempfile.mkdtemp(prefix="pm_mentor_state_")
+    assistant.STATE_PATH = os.path.join(_TMP_STATE_DIR, "assistant_state.json")
+
+
+def tearDownModule():
+    if _ORIG_STATE_PATH is not None:
+        assistant.STATE_PATH = _ORIG_STATE_PATH
+    if _TMP_STATE_DIR:
+        shutil.rmtree(_TMP_STATE_DIR, ignore_errors=True)
 
 
 def _create_mock_client():

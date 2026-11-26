@@ -253,7 +253,7 @@ def _create_telegraph_page_sync(title, html_content):
     from html_telegraph_poster.converter import convert_html_to_telegraph_format, OutputFormat
 
     # Динамический автор и шортнейм: EndoChat AI для EndoChat, StomChat AI для StomChat
-    is_endo = "endo" in getattr(config, "DB_PATH", "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
+    is_endo = "endo" in (getattr(config, "DB_PATH", "") or "").lower() or "endo" in os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower()
     bot_author = "EndoChat AI" if is_endo else "StomChat AI"
     short_name = "EndoChat_Reporter" if is_endo else "StomatBot_Reporter"
 
@@ -278,6 +278,29 @@ def _create_telegraph_page_sync(title, html_content):
     # Зачищаем любые битые ссылки на iili.io / freeimage перед конвертацией и отправкой
     formatted_body = _clean_telegraph_html(formatted_body)
 
+    def _post_telegraph_create(content_json_str: str) -> dict:
+        try:
+            http_resp = requests.post(
+                "https://api.telegra.ph/createPage",
+                data={
+                    "access_token": token,
+                    "title": title[:256],
+                    "author_name": bot_author,
+                    "content": content_json_str,
+                    "return_content": False,
+                },
+                timeout=25,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+            raise RuntimeError(f"Telegraph network unreachable or timed out: {net_err}")
+        try:
+            return http_resp.json()
+        except ValueError as json_err:
+            snippet = (getattr(http_resp, "text", "") or "")[:160].replace("\n", " ")
+            raise RuntimeError(
+                f"Telegraph returned non-JSON HTTP {getattr(http_resp, 'status_code', '?')}: {snippet}"
+            ) from json_err
+
     # Прямой UTF-8 транспорт через application/x-www-form-urlencoded:
     # Сервер Telegraph API валидирует сырую UTF-8 строку (2 байта на русский символ)
     # вместо экранированного JSON \uXXXX (6 байт на символ), поднимая лимит страницы
@@ -286,20 +309,7 @@ def _create_telegraph_page_sync(title, html_content):
         nodes = convert_html_to_telegraph_format(formatted_body, clean_html=True, output_format=OutputFormat.PYTHON_LIST)
         nodes = _sanitize_telegraph_nodes(nodes)
         content_str = json.dumps(nodes, ensure_ascii=False)
-        try:
-            resp = requests.post(
-                "https://api.telegra.ph/createPage",
-                data={
-                    "access_token": token,
-                    "title": title[:256],
-                    "author_name": bot_author,
-                    "content": content_str,
-                    "return_content": False,
-                },
-                timeout=25,
-            ).json()
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
-            raise RuntimeError(f"Telegraph network unreachable or timed out: {net_err}")
+        resp = _post_telegraph_create(content_str)
 
         if resp.get("ok"):
             return resp["result"]["url"]
@@ -315,20 +325,7 @@ def _create_telegraph_page_sync(title, html_content):
             if wait_s <= 10:
                 logger.warning("Telegraph %s: спим %d сек перед повторной попыткой", api_err, wait_s + 1)
                 time.sleep(wait_s + 1)
-                try:
-                    resp = requests.post(
-                        "https://api.telegra.ph/createPage",
-                        data={
-                            "access_token": token,
-                            "title": title[:256],
-                            "author_name": bot_author,
-                            "content": content_str,
-                            "return_content": False,
-                        },
-                        timeout=25,
-                    ).json()
-                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
-                    raise RuntimeError(f"Telegraph network unreachable or timed out: {net_err}")
+                resp = _post_telegraph_create(content_str)
                 if resp.get("ok"):
                     return resp["result"]["url"]
                 api_err = str(resp.get("error", "Unknown"))
@@ -338,17 +335,23 @@ def _create_telegraph_page_sync(title, html_content):
                 raise RuntimeError(f"Telegraph flood wait too long: {api_err}")
 
         # При других ошибках API (например, сериализации узлов) делаем 1 попытку через библиотечный poster
-        orig_post = requests.post
-        def timed_post(*a, **kw):
-            kw.setdefault("timeout", 25)
-            return orig_post(*a, **kw)
-        try:
-            requests.post = timed_post
-            poster = TelegraphPoster(use_api=True, access_token=token)
-            page = poster.post(title=title, author=bot_author, text=formatted_body)
-            return page["url"]
-        finally:
-            requests.post = orig_post
+        import threading
+        _patch_lock = getattr(_create_telegraph_page_sync, "_post_patch_lock", None)
+        if _patch_lock is None:
+            _patch_lock = threading.Lock()
+            _create_telegraph_page_sync._post_patch_lock = _patch_lock
+        with _patch_lock:
+            orig_post = requests.post
+            def timed_post(*a, **kw):
+                kw.setdefault("timeout", 25)
+                return orig_post(*a, **kw)
+            try:
+                requests.post = timed_post
+                poster = TelegraphPoster(use_api=True, access_token=token)
+                page = poster.post(title=title, author=bot_author, text=formatted_body)
+                return page["url"]
+            finally:
+                requests.post = orig_post
     except Exception as e:
         if "CONTENT_TOO_BIG" in str(e) or "FLOOD_WAIT" in str(e):
             raise
@@ -845,7 +848,23 @@ _GEMINI_DEFAULT_TIMEOUT_SECONDS = 480.0
 _LAST_GEMINI_CALL_START = 0.0
 # Блокировка удерживается только на время расчёта паузы и самого сна, а не на
 # время запроса — иначе все LLM-вызовы выстроились бы в один поток.
-_GEMINI_PACE_LOCK = asyncio.Lock()
+_GEMINI_PACE_LOCK = None
+_GEMINI_PACE_LOCK_OWNED = None
+_GEMINI_PACE_LOCK_LOOP = None
+
+
+def _get_gemini_pace_lock():
+    """Возвращает Lock для текущей петли событий, сохраняя совместимость с ручной подменой _GEMINI_PACE_LOCK в тестах."""
+    global _GEMINI_PACE_LOCK, _GEMINI_PACE_LOCK_OWNED, _GEMINI_PACE_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _GEMINI_PACE_LOCK is None or (
+        _GEMINI_PACE_LOCK is _GEMINI_PACE_LOCK_OWNED and _GEMINI_PACE_LOCK_LOOP is not loop
+    ):
+        lock = asyncio.Lock()
+        _GEMINI_PACE_LOCK = lock
+        _GEMINI_PACE_LOCK_OWNED = lock
+        _GEMINI_PACE_LOCK_LOOP = loop
+    return _GEMINI_PACE_LOCK
 
 
 async def _pace_gemini_calls():
@@ -860,7 +879,7 @@ async def _pace_gemini_calls():
     считает паузу уже от обновлённого времени.
     """
     global _LAST_GEMINI_CALL_START
-    async with _GEMINI_PACE_LOCK:
+    async with _get_gemini_pace_lock():
         # monotonic, а не time(): интервал не должен ломаться от перевода часов.
         wait = _GEMINI_MIN_INTERVAL_SECONDS - (time.monotonic() - _LAST_GEMINI_CALL_START)
         if wait > 0:

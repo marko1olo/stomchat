@@ -47,6 +47,22 @@ import clinical_rescue as cr
 
 
 def run_tests():
+    import config as _cfg
+    _had_min_age = hasattr(_cfg, "CLINICAL_RESCUE_MIN_AGE_MINUTES")
+    _orig_min_age = getattr(_cfg, "CLINICAL_RESCUE_MIN_AGE_MINUTES", None)
+    _cfg.CLINICAL_RESCUE_MIN_AGE_MINUTES = 15
+    try:
+        return _run_tests_impl()
+    finally:
+        if _had_min_age:
+            _cfg.CLINICAL_RESCUE_MIN_AGE_MINUTES = _orig_min_age
+        elif hasattr(_cfg, "CLINICAL_RESCUE_MIN_AGE_MINUTES"):
+            delattr(_cfg, "CLINICAL_RESCUE_MIN_AGE_MINUTES")
+
+
+def _run_tests_impl():
+    PASS.clear()
+    FAIL.clear()
     print("\n[1] Эвристический фильтр кандидатов на спасение (is_clinical_rescue_candidate)")
     check("клинический вопрос распознан",
           cr.is_clinical_rescue_candidate("Коллеги, подскажите протокол при обломке в средней трети?", False))
@@ -70,6 +86,16 @@ def run_tests():
           not cr.is_clinical_rescue_candidate("В данном случае всё, что вышло за апекс извлекается с помощью апикальной хирургии", False))
     check("клинический опыт без вопроса отклонен",
           not cr.is_clinical_rescue_candidate("Я всегда закрываю перфорацию прорутом и ставлю временную пломбу", False))
+    check("ложное срабатывание 'кто'+'телеграм канал' отклонено",
+          not cr.is_clinical_rescue_candidate("Кто подскажет про мой телеграм канал, заходите?", False))
+    check("ложное срабатывание 'боль' внутри 'больше' отклонено",
+          not cr.is_clinical_rescue_candidate("Подскажите, где больше пациентов в клинике?", False))
+
+    import question_lifeline as ql
+    check("lifeline: мем и портрет распознаны как не-клиника",
+          ql.is_explicitly_non_dental_media("мем про стоматолога") and ql.is_explicitly_non_dental_media("портрет врача"))
+    check("lifeline: 'Кто подскажет про телеграм канал?' отклонено",
+          not ql.is_clinical_question_candidate("Кто подскажет про телеграм канал?", False))
 
     print("\n[2] Запросы к SQLite: поиск повисших кейсов без ответов")
     tmp_dir = tempfile.mkdtemp()
@@ -338,7 +364,7 @@ def run_tests():
     }
 
     async def test_escape_hatch():
-        with patch("blocking_tools.generate_gemini_text_async") as mock_gemini:
+        with patch("blocking_tools.generate_gemini_text_async", new_callable=AsyncMock) as mock_gemini:
             mock_resp = MagicMock()
             mock_resp.text = "NOT_CLINICAL_CASE"
             mock_gemini.return_value = (mock_resp, None)
@@ -365,7 +391,7 @@ def run_tests():
     }
 
     async def test_desc_suppress():
-        with patch("blocking_tools.generate_gemini_text_async") as mock_gemini:
+        with patch("blocking_tools.generate_gemini_text_async", new_callable=AsyncMock) as mock_gemini:
             res = await cr.generate_clinical_rescue_text(fake_desc_cand, album_db_path)
             # mock_gemini не должен быть вызван
             return res, mock_gemini.call_count
@@ -503,9 +529,13 @@ def run_tests():
 
     print("\n" + "=" * 60)
     print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-    if FAIL:
-        sys.exit(1)
+    return len(FAIL) == 0
+
+
+def test_clinical_rescue_suite():
+    assert run_tests(), f"Failed checks in test_clinical_rescue: {FAIL}"
 
 
 if __name__ == "__main__":
-    run_tests()
+    ok = run_tests()
+    sys.exit(0 if ok else 1)

@@ -123,7 +123,7 @@ DENTAL_KEYWORDS = {
     "эпулис", "оперкулэктом", "прорезыван", "ретенци", "ретинирован", "ретинир", "дистопи", "восьмерк", "семерк", "шестерк",
     "дигидрофосфат", "гута", "активатор", "скейлинг", "scaling", "скейлер", "тризм",
     "exocad", "экзокад", "tibase", "тибаз", "тибаза", "scanbody", "сканбоди", "3shape", "тришейп",
-    "миорелаксант",
+    "миорелаксант", "ceraseal", "церасил", "bioroot", "биорут", "кавитрон", "soco",
     # Клинические материалы и детская стоматология (Red-Team Cyrillic & Materials Audit)
     "птфэ", "птфе", "бисакрил", "бис-акрил", "стеклоиономер", "сиц", "прорут", "proroot", "приемдетей",
     # Клинические ятрогении, неотложные состояния и острая хирургия/эндодонтия
@@ -461,6 +461,11 @@ def stem_word(word):
 
 
 _WORD_RE = re.compile(r"[\w-]+", re.UNICODE)
+_SOCIAL_CHANNEL_RE = re.compile(
+    r"\b(?:телеграм|telegram|тг|tg|youtube|ютуб|дзен|rutube|рутуб|мой|свой|твой|наш|его|ее|её)\s*[-]?\s*канал[а-яё]*\b"
+    r"|\b(?:подписат\w*|подписк\w*|зайти|зашел|зайди|ссылк\w*)\s+(?:ко\s+мне\s+)?(?:на|в)\s+канал[а-яё]*\b",
+    re.IGNORECASE,
+)
 
 
 _FDI_TOOTH_RE = re.compile(
@@ -504,7 +509,8 @@ def has_dental_term(text):
     raw_text = text or ""
     if _FDI_TOOTH_RE.search(raw_text):
         return True
-    norm_text = normalize_dental_compounds(raw_text.lower().replace('ё', 'е'))
+    cleaned_raw = _SOCIAL_CHANNEL_RE.sub(" ", raw_text)
+    norm_text = normalize_dental_compounds(cleaned_raw.lower().replace('ё', 'е'))
     for token in _WORD_RE.findall(norm_text):
         # Дефисные термины словаря ("e-max", "air-flow", "bio-oss") проверяем и
         # целиком, и по частям: в тексте встречается и то и другое написание.

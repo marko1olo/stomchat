@@ -16,6 +16,7 @@ import asyncio
 import logging
 import random
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -44,6 +45,7 @@ DB_LOCK_RETRY_MAX_DELAY = 1.5   # секунды
 
 # Пути баз данных, для которых режим журнала WAL уже активирован в текущем процессе
 _WAL_READY_PATHS: Set[str] = set()
+_WAL_READY_LOCK = threading.Lock()
 
 # Единый однопоточный исполнитель для строгой сериализации транзакций SQLite
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-worker")
@@ -87,9 +89,10 @@ def connect_db(db_path: Optional[str] = None, timeout: float = 30.0) -> sqlite3.
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA cache_size = -4000")
-    if path not in _WAL_READY_PATHS:
-        conn.execute("PRAGMA journal_mode = WAL")
-        _WAL_READY_PATHS.add(path)
+    with _WAL_READY_LOCK:
+        if path not in _WAL_READY_PATHS:
+            conn.execute("PRAGMA journal_mode = WAL")
+            _WAL_READY_PATHS.add(path)
     return conn
 
 

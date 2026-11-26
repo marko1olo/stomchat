@@ -2601,13 +2601,14 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
             await _safe_edit_chairside(event, text, buttons=buttons)
             return True
 
-    # 3. ЭКСПРЕСС-КОНСИЛИУМ: «СПАСАТЬ ИЛИ УДАЛЯТЬ?» (pres_st:* / pres_eval:*)
-    if data_str.startswith("pres_st:") or data_str.startswith("pres_eval:") or data_str.startswith("preserve:tooth:"):
-        if data_str.startswith("preserve:tooth:"):
+    # 3. ЭКСПРЕСС-КОНСИЛИУМ: «СПАСАТЬ ИЛИ УДАЛЯТЬ?» (pres_st:* / pres_eval:* / preserve:*)
+    if data_str.startswith(("pres_st:", "pres_eval:", "preserve:")):
+        if data_str.startswith("preserve:"):
             parts = data_str.split(":")
-            t_num = parts[2] if len(parts) > 2 else "зуб"
+            t_num = parts[2] if len(parts) > 2 and parts[2] else ""
+            title_suffix = f" зуба {t_num}" if t_num else ""
             text = (
-                f"⚖️ <b>Экспресс-консилиум: Спасать или удалять зуб {t_num}?</b>\n"
+                f"⚖️ <b>Экспресс-консилиум: Спасать или удалять{title_suffix}?</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
                 "Нажимайте на кнопки ниже, чтобы задать клинические параметры у кресла:\n"
                 "• <b>Феррул:</b> высота здорового дентина над десной\n"

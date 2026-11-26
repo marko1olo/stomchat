@@ -15,6 +15,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_saved_modules = {name: sys.modules.get(name) for name in ("vision", "database", "config", "blocking_tools", "runtime_guard")}
 for name in ("vision", "database", "config", "blocking_tools", "runtime_guard"):
     sys.modules.setdefault(name, types.ModuleType(name))
 sys.modules["config"].DENTAL_KEYWORDS = []
@@ -25,6 +26,13 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import assistant as A
+
+# Restore modules in sys.modules so other tests are not poisoned
+for name, orig in _saved_modules.items():
+    if orig is None:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = orig
 
 PASS, FAIL = [], []
 

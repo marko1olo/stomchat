@@ -71,7 +71,8 @@ COMPLICATION_PATTERNS = [
     r"\bвывих\w*",
     r"\bэмфизем\w*",
     r"\bперф[аеуыои]\b",
-    r"\bступен\w*",
+    r"\bступеньк\w*",
+    r"\bступен(?:ь|ью|и|ей)\b",
     r"\bзаклини\w*",
     r"\bпротолкн\w*",
     r"\bпропихн\w*",
@@ -126,16 +127,23 @@ def is_clinical_complication(text: str) -> bool:
 # ── Детерминированный фильтр вопросов, жалоб на бота и шума ───────────────────
 QUESTION_PATTERNS = [
     r"\?+$",
-    r"^(?:как|почему|чем|какой|какая|какое|какие|куда|сколько|зачем|где|кто)\b",
+    r"^(?:почему|зачем|сколько|как\s+(?:лечить|пройти|обойти|убрать|удалить|снять|сделать|быть|поступить|правильно|лучше)|чем\s+(?:обработать|мыть|закрыть|пломбировать|фиксировать|снять|заменить)|какой\s+(?:силер|протокол|метод|файл|адгезив|цемент|антибиотик)|какая\s+(?:тактика|толщина|концентрация)|какие\s+(?:файлы|риски|осложнения|антибиотики)|куда\s+(?:двигаться|идти)|где\s+(?:искать|взять|найти|купить)|кто\s+(?:сталкивался|знает|делает|подскажет))\b",
     r"\b(?:подскажите|посоветуйте|поделитесь|что\s+думаете|ваше\s+мнение|кто\s+сталкивался|было\s+у\s+кого)\b",
 ]
 QUESTION_RE = re.compile("|".join(QUESTION_PATTERNS), re.IGNORECASE)
+_URL_STRIP_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_NON_QUESTION_EXCLAMATION_RE = re.compile(
+    r"^(?:как\s+(?:же|вариант|минимум|максимум|правило)\b|какой\s+(?:красив\w*|классн\w*|крут\w*|отличн\w*|ужас)\b|чем\s+[^?\n]{1,60},\s*тем\b|(?:кто|где|куда)-то\b)",
+    re.IGNORECASE,
+)
 
 META_COMPLAINT_PATTERNS = [
     r"\b(?:бот|нейросет\w*|ассистент|гпт|gpt)\b.*\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)",
     r"\b(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошиб\w*|надоел\w*|спамит\w*)\b.*\b(?:бот|нейросет\w*|ассистент|гпт|gpt)",
     r"\b(?:он|ты)\s+(?:сломал\w*|завис\w*|глючит\w*|бредит\w*|тупит\w*|ошибся|гонишь|надоел\w*)",
-    r"\b(?:хватит|перестань|отстань|не\s+пиши|без\s+спама|стоп)\b",
+    r"(?:^\s*(?:хватит|перестань|отстань|не\s+пиши|без\s+спама|стоп)(?:[!.\s]*$|[,!]\s+(?:бот|спам\w*|уже|писать|отвечать|флуд\w*)))",
+    r"\b(?:хватит|перестань)\s+(?:писать|спамить|отвечать|флудить|лезть|бредить)\b",
+    r"\b(?:отстань|не\s+пиши|без\s+спама)\b",
 ]
 META_COMPLAINT_RE = re.compile("|".join(META_COMPLAINT_PATTERNS), re.IGNORECASE)
 
@@ -152,9 +160,13 @@ def is_question_or_doubt(text: str) -> bool:
     """Определяет, содержит ли сообщение прямой вопрос, сомнение или запрос консультации."""
     if not text:
         return False
-    stripped = text.strip()
-    if stripped.endswith("?"):
+    stripped = _URL_STRIP_RE.sub(" ", text).strip()
+    if not stripped:
+        return False
+    if "?" in stripped:
         return True
+    if _NON_QUESTION_EXCLAMATION_RE.match(stripped):
+        return False
     return bool(QUESTION_RE.search(stripped))
 
 
@@ -280,13 +292,12 @@ def parse_batch_reactions_json(raw_text: str) -> List[Dict[str, Any]]:
             cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
             cleaned = re.sub(r"\n?```$", "", cleaned).strip()
 
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        cleaned = cleaned[start : end + 1]
-
     try:
-        data = json.loads(cleaned)
+        start = cleaned.find("[")
+        if start != -1:
+            data, _ = json.JSONDecoder().raw_decode(cleaned, start)
+        else:
+            data = json.loads(cleaned)
         if isinstance(data, list):
             results = []
             for item in data:

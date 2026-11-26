@@ -137,6 +137,8 @@ def fake_sleep(seconds, ctx, attempt, max_attempts, key_id):
     CLOCK.t += float(seconds)
 
 
+_ORIG_GET_OPENAI_CLIENT = gc.get_openai_client
+_ORIG_SLEEP_WITH_STATUS = gc._sleep_with_status
 gc.get_openai_client = fake_client_maker
 gc._sleep_with_status = fake_sleep
 
@@ -509,6 +511,8 @@ config.AGENTROUTER_KEYS = []
 
 gc.BANNED_MODELS_FILE = _ORIG_BANNED
 gc.KEY_COOLDOWN_FILE = _ORIG_COOLDOWNS
+gc.get_openai_client = _ORIG_GET_OPENAI_CLIENT
+gc._sleep_with_status = _ORIG_SLEEP_WITH_STATUS
 runtime_guard.SUMMARY_STATUS_PATH = _ORIG_STATUS
 shutil.rmtree(_TMPDIR, ignore_errors=True)
 print(f"\n{'=' * 62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")

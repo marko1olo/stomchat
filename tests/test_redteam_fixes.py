@@ -45,7 +45,19 @@ _REPO_ROOT = os.path.dirname(_HERE)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import tempfile
 import assistant
+
+_ORIG_REDTEAM_STATE_PATH = getattr(assistant, "STATE_PATH", "assistant_state.json")
+
+
+def setUpModule():
+    tmp_dir = tempfile.mkdtemp(prefix="stomchat_redteam_fixes_")
+    assistant.STATE_PATH = os.path.join(tmp_dir, "assistant_state.json")
+
+
+def tearDownModule():
+    assistant.STATE_PATH = _ORIG_REDTEAM_STATE_PATH
 import clinical_cognitive_core
 import digest_pdf
 import html_safe

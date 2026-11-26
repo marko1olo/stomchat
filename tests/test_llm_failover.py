@@ -18,6 +18,10 @@ import shutil
 import sys
 import tempfile
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -32,6 +36,7 @@ import gemini_client as gc
 
 gc.BANNED_MODELS_FILE = os.path.join(_TMPDIR, "banned_models.json")
 gc.KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "key_cooldowns.json")
+gc.MODEL_KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "model_key_cooldowns.json")
 
 GOOGLE_KEYS = [f"gk-{i:02d}-secretpart" for i in range(10)]
 GROQ_KEYS = [f"qk-{i:02d}-secretpart" for i in range(7)]
@@ -86,7 +91,7 @@ def reset(behaviour=None):
     REQUESTS.clear()
     _behaviour.clear()
     _behaviour.update(behaviour or {})
-    for path in (gc.BANNED_MODELS_FILE, gc.KEY_COOLDOWN_FILE):
+    for path in (gc.BANNED_MODELS_FILE, gc.KEY_COOLDOWN_FILE, gc.MODEL_KEY_COOLDOWN_FILE):
         if os.path.exists(path):
             os.remove(path)
 
@@ -123,37 +128,45 @@ check("протухшая запись отброшена при чтении",
 print("\n[4] Попытки не сгорают на ключах, стоящих на кулдауне")
 # Восемь из десяти ключей Google остывают. При бюджете 3 попытки живых ключей
 # хватает — модель обязана быть опрошена, а не пропущена.
-reset({"gemini-3.5-flash": None, "gemini-3.5-flash-lite": None})
+gemini_only_beh = {
+    m: "готовый ответ"
+    for m, p in gc.cascade_for_context({"kind": "poll_content_gen"})
+    if p == "gemini"
+}
+reset(gemini_only_beh)
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
-_behaviour["gemini-3.5-flash"] = "готовый ответ"
-_behaviour["gemini-3.5-flash-lite"] = "готовый ответ"
 
-res = gc.generate_text("вопрос", {"kind": "pm_chat"})
+res = gc.generate_text("вопрос", {"kind": "poll_content_gen"})
 check("ответ получен, несмотря на 8 остывающих ключей", res is not None and res.text == "готовый ответ",
-      f"got {res}")
+      f"got {res} ({getattr(res, 'text', None)!r})")
 cold = set(GOOGLE_KEYS[:8])
 check("ни один запрос не ушёл на остывающий ключ",
       not (set(keys_used()) & cold), f"got {keys_used()}")
 check("сделан ровно один запрос", len(REQUESTS) == 1, f"got {REQUESTS}")
 
 print("\n[5] Все ключи провайдера на кулдауне — каскад идёт дальше, а не молчит")
-reset({"gemini-3.5-flash": None, "gemini-3.7-flash": None, "gemini-3.6-flash": None,
-       "gemini-3.8-flash": None, "gemini-3.5-flash-lite": None, "gemini-3.1-flash-lite": None,
-       "llama-3.3-70b-versatile": "ответ от groq", "qwen/qwen3.8-27b": "ответ от groq"})
+all_down_beh = {
+    m: ("ответ от groq" if p == "groq" else None)
+    for m, p in gc.cascade_for_context({"kind": "pm_chat"})
+}
+reset(all_down_beh)
 for key in GOOGLE_KEYS:
     gc.set_key_cooldown("gemini", key, seconds=300)
 
 res = gc.generate_text("вопрос", {"kind": "pm_chat"})
 check("ответ пришёл от следующего провайдера", res is not None and res.text == "ответ от groq",
-      f"got {res}")
+      f"got {res} ({getattr(res, 'text', None)!r})")
 check("к Google не обращались вовсе", not (set(keys_used()) & set(GOOGLE_KEYS)),
       f"got {keys_used()}")
 
 print("\n[6] 429 ставит ключ на кулдаун и переходит к следующему")
-reset({"gemini-3.5-flash": Exception("429 Too Many Requests: rate limit exceeded"),
-       "gemini-3.5-flash-lite": Exception("429 Too Many Requests: rate limit exceeded")})
-res = gc.generate_text("вопрос", {"kind": "pm_chat"})
+rate_429_beh = {
+    m: Exception("429 Too Many Requests: rate limit exceeded")
+    for m, _ in gc.cascade_for_context({"kind": "poll_content_gen"})
+}
+reset(rate_429_beh)
+res = gc.generate_text("вопрос", {"kind": "poll_content_gen"})
 tried = keys_used()
 check("испробовано несколько разных ключей", len(set(tried)) > 1, f"got {tried}")
 cooled = gc.get_key_cooldowns()
@@ -179,13 +192,18 @@ check("каскад ушёл к следующей модели",
       "gemini-3.5-flash" in models_used() or len(set(models_used())) > 1, f"got {models_used()}")
 
 print("\n[9] Забаненная модель пропускается на следующем вызове")
-reset({"gemini-3.6-flash": "не должно вызваться", "gemini-3.7-flash": "ответ резервной",
-       "gemini-3.5-flash": "ответ резервной"})
+backup_beh = {
+    m: "ответ резервной"
+    for m, _ in gc.cascade_for_context({"kind": "summary"})
+}
+backup_beh["gemini-3.6-flash"] = "не должно вызваться"
+reset(backup_beh)
 gc.ban_model("gemini-3.6-flash", 1200)
 res = gc.generate_text("сводка", {"kind": "summary"})
 check("основная модель не опрашивалась", "gemini-3.6-flash" not in models_used(),
       f"got {models_used()}")
-check("ответ дала резервная", res is not None and res.text == "ответ резервной", f"got {res}")
+check("ответ дала резервная", res is not None and res.text == "ответ резервной",
+      f"got {res} ({getattr(res, 'text', None)!r})")
 
 print("\n[10] Битый файл банов не блокирует работу")
 reset({"gemini-3.6-flash": "ответ"})

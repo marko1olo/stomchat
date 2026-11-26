@@ -80,6 +80,7 @@ import gemini_client as gc
 
 gc.BANNED_MODELS_FILE = os.path.join(_TMPDIR, "banned_models.json")
 gc.KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "key_cooldowns.json")
+gc.MODEL_KEY_COOLDOWN_FILE = os.path.join(_TMPDIR, "model_key_cooldowns.json")
 gc.MODEL_FAILURES_FILE = os.path.join(_TMPDIR, "model_failures.json")
 _ROOT_COOLDOWN_BEFORE = os.path.exists("key_cooldowns.json")
 
@@ -256,10 +257,14 @@ check("неизвестный провайдер — отказ, а не мол�
 
 
 print("\n[2] Текстовый каскад: ключ на кулдауне НЕ пробуется раньше срока")
-reset({"gemini-3.5-flash": "готовый ответ", "gemini-3.5-flash-lite": "готовый ответ"})
+reset({
+    "gemini-3.1-flash-lite": "готовый ответ",
+    "gemini-3.5-flash": "готовый ответ",
+    "gemini-3.5-flash-lite": "готовый ответ",
+})
 for key in GOOGLE_KEYS[:8]:
     gc.set_key_cooldown("gemini", key, seconds=300)
-res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
+res = gc.generate_text("вопрос врача", {"kind": "pm_chat", "thinking_level": "LOW"})
 check("ответ получен при 8 остывающих из 10", res is not None and res.text == "готовый ответ", f"got {res}")
 used = [k for _, k in TEXT_REQUESTS]
 check("ни один запрос не ушёл на остывающий ключ", not (set(used) & set(GOOGLE_KEYS[:8])), f"got {used}")
@@ -331,7 +336,7 @@ check("сырой ключ в разбор провала не утёк",
       all(k not in str(gc.get_last_failure()) for k in GROQ_KEYS), f"got {gc.get_last_failure()}")
 
 # Обратная сторона: пометка от расшифровки уводит текстовый каскад к Gemini.
-reset({"llama-3.3-70b-versatile": "ответ groq", "gemini-3.5-flash-lite": "ответ gemini"},
+reset({"llama-3.3-70b-versatile": "ответ groq", "gemini-3.1-flash-lite": "ответ gemini", "gemini-3.5-flash-lite": "ответ gemini"},
       audio_behaviour={"*": Exception("429 quota exceeded")})
 gc.transcribe_audio_bytes_or_file(_AUDIO_PATH, timeout=60)
 res = gc.generate_text("короткий вопрос", {"kind": "llama_triage"})
@@ -355,20 +360,20 @@ check("снятие названо в журнале",
       any("cooldown lifted" in line for line in LOG.lines),
       f"журнал: {LOG.lines[-4:]}")
 
-reset({"gemini-3.5-flash": "ответ модели"})
+reset({"gemini-3.1-flash-lite": "ответ модели", "gemini-3.5-flash": "ответ модели"})
 gc.set_key_cooldown("gemini", GOOGLE_KEYS[0], seconds=300)
-gc.generate_text("вопрос", {"kind": "pm_chat"})
+gc.generate_text("вопрос", {"kind": "pm_chat", "thinking_level": "LOW"})
 check("удача по живому ключу чужих пометок не снимает",
       GOOGLE_KEYS[0] in cooled("gemini", GOOGLE_KEYS), f"got {cooled('gemini', GOOGLE_KEYS)}")
 
 # Бан модели снимается тем же правилом: active_models принудительно берёт
 # последнюю забаненную, она отвечает — значит забанена она напрасно.
-_assistant_models = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+_assistant_models = ("gpt-6.1-sol", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                      "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
                      "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
                      "llama-3.3-70b-versatile")
-_last_model = "openai/gpt-oss-120b"
-reset({_last_model: "ответ резервной", "llama-3.3-70b-versatile": "ответ резервной"})
+_last_model = "llama-3.3-70b-versatile"
+reset({_last_model: "ответ резервной", "openai/gpt-oss-120b": "ответ резервной"})
 for model in _assistant_models:
     gc.ban_model(model, 1200)
 res = gc.generate_text("вопрос", {"kind": "assistant"})
@@ -383,10 +388,12 @@ check("снятие бана названо в журнале", any("ban lifted"
 
 
 print("\n[6] Отказ по квоте называет в журнале ПОСЛЕДСТВИЕ, а не механику")
-reset({"gemini-3.5-flash": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
+reset({"gemini-3.1-flash-lite": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
+       "gemini-3.5-flash": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
        "gemini-3.5-flash-lite": Exception("429 RESOURCE_EXHAUSTED: quota_limit_value: 500 per day"),
+       "gemini-3.8-flash": "ответ резервной",
        "gemini-3.7-flash": "ответ резервной"})
-gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
+gc.generate_text("вопрос", {"kind": "pm_chat", "thinking_level": "LOW"}, timeout=90)
 quota_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
 check("запись об отказе по квоте есть", quota_lines, f"журнал: {LOG.lines[:6]}")
 check("в записи назван остаток живых ключей",
@@ -394,11 +401,12 @@ check("в записи назван остаток живых ключей",
 check("остаток назван числом из живого пула",
       any(" из 10" in l for l in quota_lines), f"got {quota_lines}")
 
-reset({"gemini-3.5-flash": Exception("429 quota exceeded"),
+reset({"gemini-3.1-flash-lite": Exception("429 quota exceeded"),
+       "gemini-3.5-flash": Exception("429 quota exceeded"),
        "gemini-3.5-flash-lite": Exception("429 quota exceeded")})
 for key in GOOGLE_KEYS[1:]:
     gc.set_key_cooldown("gemini", key, seconds=300)
-gc.generate_text("вопрос", {"kind": "pm_chat"}, timeout=90)
+gc.generate_text("вопрос", {"kind": "pm_chat", "thinking_level": "LOW"}, timeout=90)
 last_lines = [l for l in LOG.lines if "429" in l and "cooldown" in l]
 check("исчерпание последнего ключа названо отказом врачу",
       any("НЕ ОСТАЛОСЬ" in l and "не смог ответить" in l for l in last_lines), f"got {last_lines}")
@@ -529,13 +537,14 @@ print("\n[13] Попытки одной модели идут по РАЗНЫМ 
 # Число попыток задаём явно: значение по умолчанию берётся из окружения, а его
 # состояние на боевой машине я не контролирую.
 os.environ["STOMCHAT_GEMINI_MAX_ATTEMPTS"] = "3"
-reset({"gemini-3.5-flash": Exception("invalid argument: unsupported field in request"),
+reset({"gemini-3.1-flash-lite": Exception("invalid argument: unsupported field in request"),
+       "gemini-3.5-flash": Exception("invalid argument: unsupported field in request"),
        "gemini-3.5-flash-lite": Exception("invalid argument: unsupported field in request")})
-res = gc.generate_text("вопрос врача", {"kind": "pm_chat"})
+res = gc.generate_text("вопрос врача", {"kind": "pm_chat", "thinking_level": "LOW"})
 _per_model = {}
 for _model, _key in TEXT_REQUESTS:
     _per_model.setdefault(_model, []).append(_key)
-_failing = _per_model.get("gemini-3.5-flash-lite", _per_model.get("gemini-3.5-flash", []))
+_failing = _per_model.get("gemini-3.1-flash-lite", _per_model.get("gemini-3.5-flash-lite", []))
 check("отказавшая модель получила больше одной попытки", len(_failing) >= 2,
       f"got {len(_failing)} — ротацию ключей проверять не на чем")
 check("каждая попытка модели ушла на СВОЙ ключ (квота размазана)",

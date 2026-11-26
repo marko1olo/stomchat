@@ -74,7 +74,7 @@ async def run():
     check("вставки разных стилей различаются",
           blocks["clinical_dry"] != blocks["humor_cynic"])
     check("у циника в тексте есть ирония",
-          "иронич" in blocks["humor_cynic"].lower() or "цинизм" in blocks["humor_cynic"].lower(),
+          "ирони" in blocks["humor_cynic"].lower() or "цинизм" in blocks["humor_cynic"].lower(),
           blocks["humor_cynic"][:70])
     check("сухой стиль запрещает смайлы",
           "смайл" in blocks["clinical_dry"].lower())

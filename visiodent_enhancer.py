@@ -100,6 +100,19 @@ def draw_hud_pill_badge(
     pad_y = max(5, int(10 * (effective_font_size / 22)))
     x, y = xy
     w = tw + pad_x * 2 + 18
+    if max_badge_w and max_badge_w > 0 and w > max_badge_w and RESOLVED_FONT_PATH:
+        while w > max_badge_w and effective_font_size > 9:
+            effective_font_size -= 1
+            try:
+                font = ImageFont.truetype(RESOLVED_FONT_PATH, effective_font_size)
+            except Exception:
+                break
+            bbox = font.getbbox(text)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            pad_x = max(6, int(16 * (effective_font_size / 22)))
+            pad_y = max(4, int(10 * (effective_font_size / 22)))
+            w = tw + pad_x * 2 + 18
     h = th + pad_y * 2
 
     # Полупрозрачная подложка цвета темного сланца
@@ -145,6 +158,7 @@ def generate_visiodent_collage(
 
     Возвращает (output_path, (width, height)).
     """
+    pil_img = None
     try:
         if isinstance(input_source, bytes):
             if len(input_source) == 0:
@@ -152,7 +166,12 @@ def generate_visiodent_collage(
             nparr = np.frombuffer(input_source, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         elif isinstance(input_source, str) and os.path.exists(input_source):
-            img = cv2.imread(input_source, cv2.IMREAD_COLOR)
+            with open(input_source, "rb") as f:
+                raw_bytes = f.read()
+            if not raw_bytes:
+                return None, None
+            nparr = np.frombuffer(raw_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         else:
             logger.error("generate_visiodent_collage: невалидный источник изображения: %s", type(input_source))
             return None, None
@@ -258,7 +277,9 @@ def generate_visiodent_collage(
             os.makedirs(MEDIA_TEMP_DIR, exist_ok=True)
             output_path = os.path.join(MEDIA_TEMP_DIR, f"visio_collage_{os.getpid()}_{np.random.randint(1000, 9999)}.jpg")
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         # Гарантированное сохранение стандартного baseline JPEG с принудительным сбросом буферов на диск (fsync)
         with open(output_path, "wb") as f:
             pil_img.save(f, format="JPEG", quality=95, progressive=False, optimize=False)
@@ -273,6 +294,12 @@ def generate_visiodent_collage(
     except Exception as exc:
         logger.exception("Ошибка при генерации визиографического коллажа: %s", exc)
         return None, None
+    finally:
+        if pil_img is not None:
+            try:
+                pil_img.close()
+            except Exception:
+                pass
 
 
 def is_periapical_xray_confirmed(vision_description: Any, user_text: str = "") -> bool:
@@ -330,7 +357,12 @@ def validate_visiodent_candidate(img_source: Union[str, bytes], user_text: str =
             nparr = np.frombuffer(img_source, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         elif isinstance(img_source, str) and os.path.exists(img_source):
-            img = cv2.imread(img_source, cv2.IMREAD_COLOR)
+            with open(img_source, "rb") as f:
+                raw_bytes = f.read()
+            if not raw_bytes:
+                return False, "Поврежденный графический файл"
+            nparr = np.frombuffer(raw_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         else:
             return False, "Не удалось открыть изображение"
 
@@ -355,7 +387,7 @@ def validate_visiodent_candidate(img_source: Union[str, bytes], user_text: str =
         return True, "OK"
     except Exception as exc:
         logger.warning("validate_visiodent_candidate error: %s", exc)
-        return True, "OK"
+        return False, f"Ошибка валидации изображения: {exc}"
 
 
 def get_recommendation_text_for_quadrant(quad: int, focus: str = "") -> str:

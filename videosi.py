@@ -130,16 +130,19 @@ async def classify_video(body):
     for api_key in config.GOOGLE_KEYS:
         try:
             client = genai.Client(api_key=api_key)
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL_ID,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0, safety_settings=[
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-        ])
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.generate_content,
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.0, safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+            ])
+                ),
+                timeout=60.0,
             )
             if response and response.text:
                 return clean_codes(extract_codes(response.text))

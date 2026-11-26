@@ -174,9 +174,7 @@ def backup_database(
         raise RuntimeError(f"Созданный бекап БД поврежден: {msg}")
 
     # Шаг 4: атомарная замена
-    if dest_path.exists():
-        dest_path.unlink()
-    tmp_dest.rename(dest_path)
+    os.replace(tmp_dest, dest_path)
 
     sha256 = calc_sha256(dest_path)
     size = dest_path.stat().st_size

@@ -128,9 +128,9 @@ check("ветка ответа в тред тянет контекст сраз�
       "ORDER BY date ASC" in CODE, "иначе тред читается задом наперёд")
 
 # Рецензент обязан смотреть в КОНЕЦ списка — там свежее.
-validator = CODE.split("async def check_response_quality", 1)[1].split("\n\n\n", 1)[0]
+validator = CODE.split("async def check_response_quality", 1)[1].split("async def ", 1)[0]
 check("рецензент берёт последние сообщения, а не первые",
-      "context_msgs[-10:]" in validator,
+      "c_list[-12:]" in validator and "c_list[-11:]" in validator,
       "срез не с конца — рецензент увидит старое")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")

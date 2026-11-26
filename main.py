@@ -1306,7 +1306,13 @@ async def outbox_worker_task(bot_client):
                 pm = item.get("parse_mode") or "html"
                 current_retries = item.get("retry_count", 0)
                 try:
-                    chunks = list(html_safe.split_html(text, limit=4000)) if pm == "html" else [text[i:i+4000] for i in range(0, len(text), 4000)]
+                    send_text = text
+                    if pm == "html" and isinstance(send_text, str):
+                        send_text = re.sub(r"(?is)</p>\s*<p[^>]*>", "\n\n", send_text)
+                        send_text = re.sub(r"(?is)</?p[^>]*>", "", send_text).strip()
+                        if hasattr(html_safe, "sanitize_telegram_html"):
+                            send_text = html_safe.sanitize_telegram_html(send_text)
+                    chunks = list(html_safe.split_html(send_text, limit=4000)) if pm == "html" else [send_text[i:i+4000] for i in range(0, len(send_text), 4000)]
                     delivery_ok = True
                     for c_idx, chunk in enumerate(chunks):
                         outcome = await tg_safety.send_message(
@@ -1319,7 +1325,8 @@ async def outbox_worker_task(bot_client):
                         )
                         if not outcome.ok:
                             delivery_ok = False
-                            err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
+                            err_prefix = f"{outcome.kind}" if outcome.kind == outcome.reason else f"{outcome.kind}:{outcome.reason}"
+                            err_str = f"{err_prefix}: {outcome.error}"
                             if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
                                 next_retry = current_retries + 1
                                 if next_retry >= OUTBOX_MAX_RETRIES:
@@ -1365,7 +1372,7 @@ async def outbox_worker_task(bot_client):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.debug("Outbox worker loop error: %s", e)
+            runtime_guard.throttled_log(logging.WARNING, "outbox_worker_loop_err", "Outbox worker loop error: %s", e, logger=logger)
         await asyncio.sleep(5.0)
 
 
@@ -1726,8 +1733,8 @@ async def recover_pending_media_analysis():
             msg_id,
             id_to_text.get(msg_id) or message.message or "",
             media_type_hint=media_type_hint,
-            bulk=not is_fresh,
-            trigger_assistant=is_fresh if is_fresh else None,
+            bulk=True,
+            trigger_assistant=is_fresh,
         ):
             queued += 1
 
@@ -1855,12 +1862,11 @@ VOICE_TRANSCRIBE_TIMEOUT_SECONDS = 60
 
 # Накладные ОДНОГО голосового поверх скачивания и самой расшифровки: запас на
 # подъём подпроцесса расшифровки (blocking_tools._SUBPROCESS_STARTUP_SLACK_SECONDS
-# = 10 с, родитель ждёт на столько дольше, чем выдал ребёнку) плюс правка
-# терминов (blocking_tools.correct_dental_transcription_async, свой timeout=20 по
-# умолчанию) плюс запас на файловые операции. Числа не выдуманы здесь, а взяты из
-# чужих бюджетов; вложенность проверяет test_voice_offline.py — расхождение двух
-# независимых чисел в этом проекте всплывало четыре раза (test_budget_nesting.py).
-VOICE_ITEM_OVERHEAD_SECONDS = 45
+# = 30 с, родитель ждёт на столько дольше, чем выдал ребёнку) плюс правка
+# терминов (blocking_tools.correct_dental_transcription_async, timeout=80 по
+# умолчанию) плюс запас на файловые операции (10 с). Числа взяты из бюджетов
+# нижестоящих этапов; вложенность проверяет test_voice_offline.py.
+VOICE_ITEM_OVERHEAD_SECONDS = 120
 # Худший случай одного голосового целиком. Из слагаемых, а не отдельным числом.
 VOICE_ITEM_BUDGET_SECONDS = (
     VOICE_DOWNLOAD_TIMEOUT_SECONDS + VOICE_TRANSCRIBE_TIMEOUT_SECONDS + VOICE_ITEM_OVERHEAD_SECONDS
@@ -2055,13 +2061,16 @@ async def _publish_voice_transcription(chat_id, msg_id, text):
         # Регистрировать сообщение в bot_sent_messages здесь не нужно:
         # bot_client.send_message обёрнут patched_send_message, который делает
         # это для КАЖДОЙ отправки бота.
-        await bot_client.send_message(
-            entity=chat_id,
-            message=f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
+        outcome = await tg_safety.send_message(
+            bot_client,
+            chat_id,
+            f"🎤 <b>[Транскрипция голосового]:</b> «{text}»",
             reply_to=msg_id,
             parse_mode='html',
+            timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+            op="send_message:voice_transcription",
         )
-        return True
+        return bool(outcome.ok)
     except Exception as send_err:
         logger.error("failed to post voice transcription msg_id=%s: %s", msg_id, send_err)
         return False
@@ -2140,16 +2149,17 @@ async def _notify_voice_failure(chat_id, msg_id, reason, sender_id=None):
         tail = (f" Пока молчал, не распознал ещё {suppressed} — "
                 "видимо, распознавание лежит.")
     try:
-        await bot_client.send_message(
-            entity=chat_id,
-            # Формулировка та же, что в ЛС (assistant.py), и «аудио», а не
-            # «голосовое»: этим же путём идут присланные аудиофайлы.
-            message="❌ <i>Не удалось распознать аудио. "
-                    "Повторите или напишите текстом." + tail + "</i>",
+        outcome = await tg_safety.send_message(
+            bot_client,
+            chat_id,
+            "❌ <i>Не удалось распознать аудио. "
+            "Повторите или напишите текстом." + tail + "</i>",
             reply_to=msg_id,
             parse_mode='html',
+            timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+            op="send_message:voice_failure_notice",
         )
-        return True
+        return bool(outcome.ok)
     except Exception as send_err:
         logger.error("failed to notify voice failure msg_id=%s: %s", msg_id, send_err)
         return False
@@ -3508,6 +3518,8 @@ async def handle_private_message(event):
     # Обычные реплики, снимки и голосовые собираем в очередь для склейки быстрых сообщений
     queue = _PM_PENDING_QUEUES.setdefault(chat_id, [])
     if len(queue) > 10:
+        dropped = len(queue) - 5
+        logger.warning("PM pending queue overflow for chat_id=%s: dropping %d oldest messages", chat_id, dropped)
         _PM_PENDING_QUEUES[chat_id] = queue[-5:]
         queue = _PM_PENDING_QUEUES[chat_id]
     queue.append(event)
@@ -3588,10 +3600,13 @@ async def handle_private_message(event):
                     except asyncio.TimeoutError:
                         logger.error(f"PM burst item processing timed out (> {pm_timeout}s) for chat_id={chat_id}")
                         try:
-                            await bot_client.send_message(
-                                entity=chat_id,
-                                message="⏱ <i>Клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
+                            await tg_safety.send_message(
+                                bot_client,
+                                chat_id,
+                                "⏱ <i>Клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
                                 parse_mode="html",
+                                timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+                                op="send_message:pm_timeout_notice",
                             )
                         except Exception as notify_err:
                             logger.warning(f"Failed to notify user about timeout in chat_id={chat_id}: {notify_err}")
@@ -4642,6 +4657,15 @@ async def start_bot():
         reaction_engine.stop_engine_worker()
         runtime_guard.stop_watchdog()
         await runtime_guard.cancel_all_tasks(timeout=3.0)
+        for _cli_name, _cli in (("bot_client", bot_client), ("client", client)):
+            try:
+                if getattr(_cli, "is_connected", lambda: False)():
+                    await asyncio.wait_for(_cli.disconnect(), timeout=5.0)
+            except Exception as _disc_err:
+                logger.debug("Graceful disconnect skipped for %s: %s", _cli_name, _disc_err)
+
+
+EXIT_CODE_ALREADY_RUNNING = 75
 
 
 def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
@@ -4668,8 +4692,10 @@ def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
                         ident, attempt + 1, max_retries, retry_interval,
                     )
                     time.sleep(retry_interval)
-            logger.warning(f"Another instance of {bot_display_name} bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
-            sys.exit(0)
+            logger.warning(f"Another instance of {bot_display_name} bot is already running (Windows Named Mutex exists). Exiting with code {EXIT_CODE_ALREADY_RUNNING}.")
+            sys.exit(EXIT_CODE_ALREADY_RUNNING)
+        except SystemExit:
+            raise
         except Exception as e:
             logger.warning(f"Failed to create Windows named mutex: {e}. Falling back to lockfile.")
 
@@ -4679,36 +4705,42 @@ def acquire_single_instance_lock(max_retries=5, retry_interval=2.0):
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_file
     except (BlockingIOError, IOError, OSError) as e:
-        logger.warning(f"Another instance of {bot_display_name} bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
-        sys.exit(0)
+        logger.warning(f"Another instance of {bot_display_name} bot is already running (Linux flock: {e}). Exiting with code {EXIT_CODE_ALREADY_RUNNING}.")
+        sys.exit(EXIT_CODE_ALREADY_RUNNING)
+    except SystemExit:
+        raise
     except Exception:
         pass
     return None
 
 
 if __name__ == '__main__':
+    import signal
     _instance_lock = acquire_single_instance_lock()
 
-    if sys.platform != "win32":
-        import signal
+    def _handle_stop_signal(signum, frame):
+        logger.info("Received stop signal (%s). Initiating graceful shutdown and WAL checkpoint...", signum)
+        raise KeyboardInterrupt
 
-        def _handle_sigterm(signum, frame):
-            logger.info("Received SIGTERM from systemd. Initiating graceful shutdown and WAL checkpoint...")
+    for _sig_name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        _sig = getattr(signal, _sig_name, None)
+        if _sig is not None:
             try:
-                if hasattr(database, "_DB_EXECUTOR"):
-                    database._DB_EXECUTOR.shutdown(wait=True)
-                database.checkpoint_wal()
-            except Exception as e:
-                logger.warning(f"Error during WAL checkpoint on shutdown: {e}")
-            sys.exit(0)
-
-        signal.signal(signal.SIGTERM, _handle_sigterm)
+                signal.signal(_sig, _handle_stop_signal)
+            except Exception:
+                pass
 
     try:
         client.loop.run_until_complete(start_bot())
     except KeyboardInterrupt:
-        logger.info("bot stopped by user")
+        logger.info("bot stopped cleanly by signal/user")
     except Exception:
         logger.exception("fatal bot crash")
         runtime_guard.dump_runtime_state("fatal_bot_crash")
         raise
+    finally:
+        try:
+            database.close_db(checkpoint=True)
+            logger.info("Graceful shutdown WAL checkpoint completed")
+        except Exception as _ckpt_err:
+            logger.warning("Error during shutdown WAL checkpoint: %s", _ckpt_err)

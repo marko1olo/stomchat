@@ -56,7 +56,7 @@ _DENTAL_PROCEDURAL_TERMS = {
 
     "коронка", "винир", "сплинт", "гипохлорит", "гуттаперч", "апекс",
 
-    "коффердам", "рабердам", "бондинг", "протравк", "распломбировк"
+    "коффердам", "рабердам", "раббердам", "бондинг", "протравк", "распломбировк"
 
 }
 
@@ -163,10 +163,12 @@ def _clean_json_str(text: str) -> Optional[dict]:
             logger.debug("Fenced JSON parse failed: %s", e)
 
     # 3. Сканер сбалансированных объектов без ReDoS (уважает строки и экранирование)
-    # Гарантирует извлечение даже при мусоре/комментариях модели после JSON
+    # Отдаём приоритет внешним (top-level) объектам + восстановление trailing commas
     stack = []
     in_str = False
     esc = False
+    outer_candidates = []
+    inner_candidates = []
     for i, ch in enumerate(raw):
         if in_str:
             if esc:
@@ -183,8 +185,15 @@ def _clean_json_str(text: str) -> Optional[dict]:
         elif ch == "}" and stack:
             start_idx = stack.pop()
             candidate = raw[start_idx : i + 1]
+            if not stack:
+                outer_candidates.append(candidate)
+            else:
+                inner_candidates.append(candidate)
+
+    for candidate in outer_candidates + inner_candidates:
+        for attempt in (candidate, re.sub(r',\s*([}\]])', r'\1', candidate)):
             try:
-                obj = json.loads(candidate)
+                obj = json.loads(attempt)
                 if isinstance(obj, dict) and ("is_protocol" in obj or "steps" in obj or "title" in obj):
                     return obj
             except Exception as e:
@@ -314,7 +323,8 @@ async def extract_protocol_from_text_async(
 
 
 
-        if not parsed.get("title") or not parsed.get("steps") or len(parsed.get("steps", [])) < 2:
+        steps_val = parsed.get("steps")
+        if not parsed.get("title") or not isinstance(steps_val, list) or len(steps_val) < 2:
 
             logger.debug(f"Protocol parsing returned incomplete JSON: {response.text[:100]}")
 
@@ -650,7 +660,7 @@ _DEFAULT_COMMUNITY_PROTOCOLS = [
         "indication": "Системная токсичность амидных анестетиков (артикаин, лидокаин, мепивакаин, бупивакаин) при случайном попадании в сосуд или превышении токсической дозы: металлический привкус, тремор, генерализованные судороги, блокада сердца, остановка кровообращения.",
         "contraindications": "Лидокаин и другие антиаритмики класса IB КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ. Бета-блокаторы и блокаторы кальциевых каналов ЗАПРЕЩЕНЫ (вызывают необратимый коллапс).",
         "steps": [
-            {"step": 1, "name": "СТОП инъекция и защита дыхательных путей", "description": "Немедленно прекратить инъекцию при первых признаках продромы (звон в ушах, онимение языка). Вызвать реанимацию СМП (112). 100% кислород через мешок Амбу/маску (гипервентиляция устраняет ацидоз, снижая токсичность)."},
+            {"step": 1, "name": "СТОП инъекция и защита дыхательных путей", "description": "Немедленно прекратить инъекцию при первых признаках продромы (звон в ушах, онемение языка). Вызвать реанимацию СМП (112). 100% кислород через мешок Амбу/маску (гипервентиляция устраняет ацидоз, снижая токсичность)."},
             {"step": 2, "name": "Купирование судорог", "description": "При судорожном синдроме: Диазепам 5–10 мг в/в медленно или Мидазолам 2.5–5 мг в/м. Пропофол запрещен при нестабильной гемодинамике."},
             {"step": 3, "name": "Липидный болюс (Intralipid / Lipofundin 20%)", "description": "Специфический антидот: внутривенно болюсно 20% липидная эмульсия в дозе 1.5 мл/кг массы тела струйно за 2–3 минуты (~100 мл на пациента 70 кг)."},
             {"step": 4, "name": "Продолженная липидная инфузия", "description": "Сразу после болюса начать инфузию со скоростью 0.25 мл/кг/мин (~1000 мл/час) до восстановления стабильного сердечного ритма. При рецидиве коллапса — повторить болюс через 3–5 минут (макс доза 10–12 мл/кг)."},
@@ -824,6 +834,14 @@ def _safe_html_text(val) -> str:
     # 3. Одинарные звездочки: курсив строго по границам слова без пробелов по краям
     # Исключает маркеры списков (* пункт) и знак умножения в дозировках (2 * 2 мл)
     s = re.sub(r'(?<!\w)\*([^\s*\n](?:[^*\n]{0,300}?[^\s*\n])?)\*(?!\w)', r'<i>\1</i>', s)
+    if "<" in s:
+        try:
+            from html_safe import balance_html
+            s, unclosed = balance_html(s)
+            if unclosed:
+                s = s + "".join(f"</{tag}>" for tag in reversed(unclosed))
+        except Exception:
+            pass
     return s
 
 
@@ -1006,7 +1024,7 @@ def format_protocol_catalog(
 
 
 
-    header_title = f"категории «{category_filter}»" if category_filter else "Базы Знаний"
+    header_title = f"категории «{html.escape(str(category_filter))}»" if category_filter else "Базы Знаний"
 
     total_cnt = len(protocols)
 
@@ -1066,11 +1084,15 @@ def format_protocol_catalog(
 
         author = p.get("author_doctor", "")
 
-        author_hint = f" • <i>{author.split('/')[0].strip()[:18]}</i>" if author else ""
+        clean_author = html.escape(str(author).split('/')[0].strip()[:18]) if author else ""
+
+        author_hint = f" • <i>{clean_author}</i>" if clean_author else ""
 
         out.append(f"<b>{idx}.</b> {_safe_html_text(p_title)} <i>({_safe_html_text(p_cat)})</i>{author_hint}")
 
-        btn = Button.inline(f"📖 #{idx} {p_title[:17]}...", data=f"proto:view:{p_id}")
+        btn_title = f"{p_title[:17]}..." if len(p_title) > 17 else p_title
+
+        btn = Button.inline(f"📖 #{idx} {btn_title}", data=f"proto:view:{p_id}")
 
         row.append(btn)
 

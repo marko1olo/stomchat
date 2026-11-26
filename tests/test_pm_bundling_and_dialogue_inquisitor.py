@@ -29,8 +29,20 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+import tempfile
 import assistant
 import main
+
+_ORIG_BUNDLING_STATE_PATH = getattr(assistant, "STATE_PATH", "assistant_state.json")
+
+
+def setUpModule():
+    tmp_dir = tempfile.mkdtemp(prefix="stomchat_pm_bundling_")
+    assistant.STATE_PATH = os.path.join(tmp_dir, "assistant_state.json")
+
+
+def tearDownModule():
+    assistant.STATE_PATH = _ORIG_BUNDLING_STATE_PATH
 
 
 class TestPMBundlingDebounceInquisitor(unittest.IsolatedAsyncioTestCase):

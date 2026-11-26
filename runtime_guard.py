@@ -1,11 +1,13 @@
 import faulthandler
 import asyncio
+import io
 import json
 import logging
 import os
 import re
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
@@ -182,15 +184,26 @@ MEMORY_MAX_MB = 850.0
 # Семафор на параллельные дочерние подпроцессы (инвариант 12.4: MAX_CONCURRENT_SUBPROCESSES <= 2)
 _MAX_CONCURRENT_SUBPROCESSES = max(1, int(os.getenv("MAX_CONCURRENT_SUBPROCESSES", "2")))
 _SUBPROCESS_SEMAPHORE = None
+_SUBPROCESS_SEMAPHORES_BY_LOOP = weakref.WeakKeyDictionary()
 
 
 def get_subprocess_semaphore():
     """
     Глобальный семафор на параллельные дочерние подпроцессы (инвариант 12.4: MAX_CONCURRENT_SUBPROCESSES <= 2).
-    Гарантирует, что тяжелые задачи (LLM, Whisper, Telegraph, Vision prep, Frame extract)
-    не поднимают более 2 дочерних процессов Python одновременно, защищая 1GB VPS от OOM.
+    Привязывается к текущему running loop (чтобы смена цикла событий или тесты
+    не зависали на старом семафоре от закрытого цикла).
     """
     global _SUBPROCESS_SEMAPHORE
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        sem = _SUBPROCESS_SEMAPHORES_BY_LOOP.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
+            _SUBPROCESS_SEMAPHORES_BY_LOOP[loop] = sem
+        return sem
     if _SUBPROCESS_SEMAPHORE is None:
         _SUBPROCESS_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_SUBPROCESSES)
     return _SUBPROCESS_SEMAPHORE
@@ -301,12 +314,33 @@ def check_and_enforce_memory_limits():
     return {"status": "ok", "rss": rss_mb, "action": "none"}
 
 
-try:
+def _force_utf8_stdio():
+    """Гарантирует UTF-8 для stdout/stderr (убирает mojibake 'D? DD' на Windows-консоли)."""
     import sys
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+                continue
+        except Exception:
+            pass
+        try:
+            enc = (getattr(stream, "encoding", "") or "").lower()
+            if "utf" not in enc and hasattr(stream, "buffer"):
+                setattr(
+                    sys,
+                    stream_name,
+                    io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace", line_buffering=True),
+                )
+        except Exception:
+            pass
+
+
+try:
+    _force_utf8_stdio()
 except Exception:
     pass
 
@@ -330,14 +364,8 @@ class RedactingFormatter(logging.Formatter):
 
 
 def configure_logging():
-    try:
-        import sys
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    _force_utf8_stdio()
+    import sys
     root = logging.getLogger()
     for handler in list(root.handlers):
         root.removeHandler(handler)
@@ -358,7 +386,7 @@ def configure_logging():
     root.setLevel(logging.INFO)
 
     if os.getenv("STOMCHAT_CONSOLE_LOG") == "1":
-        console_handler = logging.StreamHandler()
+        console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setFormatter(formatter)
         root.addHandler(console_handler)
 

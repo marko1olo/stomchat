@@ -184,6 +184,7 @@ class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
              patch.object(assistant, "is_explicitly_non_dental_media", return_value=False), \
              patch.object(assistant, "search_knowledge_corpus", AsyncMock(return_value=("", ""))), \
              patch.object(assistant, "check_response_quality", AsyncMock(return_value=(True, "ok"))), \
+             patch.object(assistant.config, "PASSIVE_MEDIA_PROBABILITY", 1.0), \
              patch.object(assistant, "clean_html_formatting", lambda x: x):
 
             await assistant.check_and_trigger_assistant_media(

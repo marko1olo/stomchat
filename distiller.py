@@ -678,7 +678,18 @@ def _extract_facts_by_regex(text: str) -> list[dict]:
             c_code = m.group(5).strip()
             s_raw = m.group(6)
 
-        f_text = f_raw.encode().decode('unicode_escape', errors='replace') if '\\' in f_raw else f_raw
+        if '\\' in f_raw:
+            try:
+                f_text = json.loads(f'"{f_raw}"')
+            except Exception:
+                _esc_map = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "/": "/"}
+                f_text = re.sub(
+                    r'\\(?:u([0-9a-fA-F]{4})|([nrt"\\/]))',
+                    lambda em: chr(int(em.group(1), 16)) if em.group(1) else _esc_map[em.group(2)],
+                    f_raw,
+                )
+        else:
+            f_text = f_raw
         s_ids = [int(x.strip()) for x in re.findall(r'\d+', s_raw)]
         case_val = m.group(7)
         is_case = case_val.lower() == 'true' if case_val else False

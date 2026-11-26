@@ -150,6 +150,7 @@ DEAD = {
 STANDALONE = {
     "run_all_tests": "запускает весь набор, вызывается человеком",
     "run_all_suites": "запуск всех наборов тестов проекта, вызывается разработчиком",
+    "conftest": "общие фикстуры и конфигурация pytest для тестового каталога",
     "config.example": "версионный шаблон config.py, полноту сторожит test_config_contract.py",
     "benchmark": "обезврежен ImportError, замер моделей Groq, запуск руками",
     "delist": "обезврежен ImportError, перечень моделей Google, запуск руками",

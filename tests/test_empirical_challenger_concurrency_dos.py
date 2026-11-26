@@ -502,6 +502,7 @@ class TestClass1EndToEndConcurrentPipelineSimulation(unittest.IsolatedAsyncioTes
             for i in range(5):
                 msg_id = 177400 + i
                 evt = make_event(msg_id=msg_id, sender_id=448838231)
+                evt.chat_id = 448838231
                 tasks.append(
                     assistant.check_and_trigger_assistant(
                         bot_client=mock_bot_client,

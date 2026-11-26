@@ -387,7 +387,8 @@ def diagnose_speaking_space_issue(
     actions = []
     if has_clattering or observed_s_gap_mm < CLOSEST_SPEAKING_SPACE_MIN_MM:
         issues.append("Соударение / стук зубов (Clattering): ВНОЛ ЗАВЫШЕНА (межальвеолярная высота чрезмерна).")
-        actions.append(f"Уменьшить высоту окклюзионных валиков/зубов на {CLOSEST_SPEAKING_SPACE_MIN_MM - observed_s_gap_mm + 0.5:.1f}–1.0 мм.")
+        delta = max(0.5, CLOSEST_SPEAKING_SPACE_MIN_MM - observed_s_gap_mm + 0.5)
+        actions.append(f"Уменьшить высоту окклюзионных валиков/зубов на {delta:.1f}–1.0 мм.")
     if has_lisping or observed_s_gap_mm > 2.5:
         issues.append("Шепелявость / свист (Lisping): ВНОЛ занижена, избыточный сагиттальный зазор или переутолщение базиса на небе.")
         actions.append("Проверить толщину небного свода протеза (истончить до 1.5–2.0 мм в зоне складок), уменьшить оверджет.")

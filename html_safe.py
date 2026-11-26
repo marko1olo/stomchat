@@ -297,7 +297,9 @@ def split_html(text, limit=4000):
     carry = []
     position = 0
     while position < len(text):
-        prefix = "".join(f"<{tag}>" for tag in carry)
+        # Не переоткрываем <a> без href на следующем чанке — Telegram отклоняет <a> без атрибута href;
+        # закрывающий </a> в следующем чанке будет безопасно снят balance_html как непарный.
+        prefix = "".join(f"<{tag}>" for tag in carry if tag != "a")
         budget = limit - len(prefix) - _CLOSER_RESERVE
         if budget <= 0:
             budget = max(1, limit - len(prefix))
@@ -566,8 +568,9 @@ def clean_markdown_to_html(text):
         m_head = heading_re.match(raw_line)
         if m_head:
             content = m_head.group(1).strip()
-            if not (content.startswith("<b>") and content.endswith("</b>")):
-                content = f"<b>{content}</b>"
+            if "<b>" in content or "</b>" in content:
+                content = re.sub(r'</?b>', '', content).strip()
+            content = f"<b>{content}</b>"
             lines.append(content)
             list_flags.append(False)
             heading_flags.append(True)

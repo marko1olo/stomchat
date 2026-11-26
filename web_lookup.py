@@ -910,11 +910,29 @@ CLINICAL_EN_TRANSLATIONS = {
     "имплантат": "dental implant",
     "имплант": "dental implant",
     "депульпирование": "pulpectomy root canal treatment",
+    "перелечивание": "endodontic retreatment",
+    "распломбировка": "root canal retreatment",
+    "отлом": "separated instrument fracture",
+    "инструмент": "endodontic instrument",
+    "канал": "root canal",
+    "корень": "tooth root",
     "резекция верхушки": "apicoectomy root-end surgery",
     "апексификация": "apexification",
     "апекслокатор": "apex locator",
     "обтурация": "root canal obturation",
+    "ирригация": "root canal irrigation",
     "коронка": "dental crown",
+    "винир": "porcelain veneer",
+    "виниры": "porcelain veneers",
+    "вкладка": "inlay onlay restoration",
+    "штифт": "endodontic post",
+    "феррул": "ferrule effect",
+    "оверлей": "dental overlay",
+    "рецессия": "gingival recession",
+    "гранулема": "periapical granuloma",
+    "киста": "radicular cyst",
+    "экстракция": "tooth extraction",
+    "аутотрансплантация": "tooth autotransplantation",
     "элайнеры": "clear aligners",
     "дентин": "dentin",
     "эмаль": "enamel",
@@ -923,6 +941,8 @@ CLINICAL_EN_TRANSLATIONS = {
     "мембрана": "barrier membrane",
     "верхняя челюсть": "maxilla",
     "нижняя челюсть": "mandible",
+    "эндодонтия": "endodontics",
+    "осложнение": "complication",
 
     # Возрастные группы и особые группы
     "детям": "pediatric children",
@@ -941,6 +961,79 @@ CLINICAL_EN_TRANSLATIONS = {
     "тиреоидит": "thyroiditis",
     "кортизол": "cortisol",
 }
+
+# Морфологические стемы (префиксы длиной >= 4 символов) для перевода русских словоформ
+_CLINICAL_STEM_EN = (
+    ("перелеч", "endodontic retreatment"),
+    ("распломб", "root canal retreatment"),
+    ("периапик", "periapical"),
+    ("перфорац", "root canal perforation"),
+    ("периимплант", "peri-implantitis"),
+    ("пародонт", "periodontal"),
+    ("периодонт", "periodontitis"),
+    ("пульпит", "pulpitis"),
+    ("пульп", "dental pulp"),
+    ("отлом", "separated instrument"),
+    ("инструмент", "endodontic instrument"),
+    ("канал", "root canal"),
+    ("корн", "tooth root"),
+    ("корен", "tooth root"),
+    ("ирригац", "root canal irrigation"),
+    ("обтурац", "root canal obturation"),
+    ("резорбц", "root resorption"),
+    ("апексифик", "apexification"),
+    ("апекслок", "apex locator"),
+    ("гипохлор", "sodium hypochlorite"),
+    ("хлоргекс", "chlorhexidine"),
+    ("артикаин", "articaine"),
+    ("мепивакаин", "mepivacaine"),
+    ("лидокаин", "lidocaine"),
+    ("биодентин", "Biodentine"),
+    ("циркон", "zirconia"),
+    ("композит", "composite resin"),
+    ("адгезив", "dental adhesive"),
+    ("коронк", "dental crown"),
+    ("винир", "porcelain veneer"),
+    ("вкладк", "dental inlay onlay"),
+    ("штифт", "endodontic post"),
+    ("феррул", "ferrule effect"),
+    ("оверле", "dental overlay"),
+    ("имплант", "dental implant"),
+    ("остеоинтегр", "osseointegration"),
+    ("рецесс", "gingival recession"),
+    ("гранулем", "periapical granuloma"),
+    ("кист", "radicular cyst"),
+    ("альвеол", "alveolar osteitis"),
+    ("экстракц", "tooth extraction"),
+    ("аутотрансплант", "tooth autotransplantation"),
+    ("кариес", "dental caries"),
+    ("бруксизм", "bruxism"),
+    ("элайнер", "clear aligners"),
+    ("гингив", "gingivitis"),
+    ("эндодонт", "endodontics"),
+    ("дентин", "dentin"),
+    ("эмал", "enamel"),
+    ("мембран", "barrier membrane"),
+    ("осложн", "complication"),
+    ("детск", "pediatric children"),
+    ("беремен", "pregnancy"),
+    ("лактац", "lactation"),
+    ("диабет", "diabetes mellitus"),
+    ("тирео", "thyroid"),
+    ("инсулин", "insulin"),
+)
+_CLINICAL_STEM_EN_SORTED = tuple(sorted(_CLINICAL_STEM_EN, key=lambda x: len(x[0]), reverse=True))
+_FDI_DOT_RE = re.compile(r"^([1-8])\.([1-8])$")
+
+
+def _translate_ru_token(token: str) -> str:
+    """Переводит русский клинический токен с учётом падежных окончаний и словоформ."""
+    if token in CLINICAL_EN_TRANSLATIONS:
+        return CLINICAL_EN_TRANSLATIONS[token]
+    for stem, en in _CLINICAL_STEM_EN_SORTED:
+        if token.startswith(stem):
+            return en
+    return ""
 
 # Расшифровка номеров зубов по международной двухцифровой системе FDI (ISO 3950)
 _FDI_TOOTH_MAP = {
@@ -983,17 +1076,25 @@ def build_scientific_query(query: str) -> str:
                 i += 2
                 continue
         w = tokens[i]
-        if w in _FDI_TOOTH_MAP:
-            translated_tokens.append(_FDI_TOOTH_MAP[w])
-        elif w in CLINICAL_EN_TRANSLATIONS:
-            translated_tokens.append(CLINICAL_EN_TRANSLATIONS[w])
+        m_dot = _FDI_DOT_RE.match(w)
+        fdi_key = f"{m_dot.group(1)}{m_dot.group(2)}" if m_dot else w
+        if fdi_key in _FDI_TOOTH_MAP:
+            translated_tokens.append(_FDI_TOOTH_MAP[fdi_key])
         else:
-            if re.search(r"[a-zA-Z0-9]", w):
+            en_term = _translate_ru_token(w)
+            if en_term:
+                translated_tokens.append(en_term)
+            elif re.search(r"[a-zA-Z0-9]", w):
                 translated_tokens.append(w)
         i += 1
 
     if translated_tokens:
-        result = " ".join(translated_tokens)
+        # Сохраняем порядок без точных дублей подряд
+        deduped = []
+        for t in translated_tokens:
+            if not deduped or deduped[-1] != t:
+                deduped.append(t)
+        result = " ".join(deduped)
         return re.sub(r"\s+", " ", result).strip()
     return cleaned
 

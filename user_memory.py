@@ -232,7 +232,13 @@ _OFFTOPIC_FACT_RE = re.compile(
     r'скорость\s+ответа|медлительност[а-яё]*|отвечает\s+медленно|'
     r'ваканси[а-яё]*|резюме|оклад[а-яё]*|вахтов[а-яё]*\s+режим|в\s+стоматологию\s+[A-ZА-Яa-zа-яё]+|'
     r'контакт\s+для\s+связи|поиск\s+помощи|'
-    r'мошенничеств[а-яё]*|госуслуг[а-яё]*|смс-парол[а-яё]*|кредит[а-яё]*'
+    r'мошенничеств[а-яё]*|госуслуг[а-яё]*|смс-парол[а-яё]*|кредит[а-яё]*|'
+    r'vpn[-\s]*сервис[а-яё]*|\bvpn\b|uboost|обход[а-яё]*\s+блокиров[а-яё]*|'
+    r'развлекательн[а-яё]*\s+(?:и\s+социальн[а-яё]*\s+)?тем[а-яё]*|'
+    r'преобладают\s+(?:развлекательн|социальн|неформальн)[а-яё]*|'
+    r'неформальн[а-яё]*\s+общени[а-яё]*|'
+    r'извинени[а-яё]*\s+за\s+(?:неудачн[а-яё]*\s+)?шутк[а-яё]*|'
+    r'реплик[а-яё]*\s+социальн[а-яё]*\s+характер[а-яё]*'
     r')\b'
 )
 
@@ -675,7 +681,9 @@ def deduplicate_clinical_summary(summary: str) -> str:
                 sentences = _split_into_sentences(inline_content)
                 kept = []
                 for s in sentences:
-                    if is_negative_meta_sentence(s) or is_quackery_or_pseudoscience_sentence(s) or is_injection_or_toxic_sentence(s):
+                    if (is_negative_meta_sentence(s) or is_quackery_or_pseudoscience_sentence(s)
+                            or is_injection_or_toxic_sentence(s) or _OFFTOPIC_FACT_RE.search(s.lower())
+                            or _PURE_META_FACT_RE.search(s)):
                         continue
                     cleaned_s = clean_sentence_meta(s)
                     if not cleaned_s:
@@ -695,7 +703,9 @@ def deduplicate_clinical_summary(summary: str) -> str:
         sentences = _split_into_sentences(content)
         kept_sentences = []
         for s in sentences:
-            if is_negative_meta_sentence(s) or is_quackery_or_pseudoscience_sentence(s) or is_injection_or_toxic_sentence(s):
+            if (is_negative_meta_sentence(s) or is_quackery_or_pseudoscience_sentence(s)
+                    or is_injection_or_toxic_sentence(s) or _OFFTOPIC_FACT_RE.search(s.lower())
+                    or _PURE_META_FACT_RE.search(s)):
                 continue
             cleaned_s = clean_sentence_meta(s)
             if not cleaned_s:
@@ -866,6 +876,35 @@ _TRIVIAL_USER_PATTERNS = {
 }
 
 
+_CLINICAL_PRACTICE_BRAND_RE = re.compile(
+    r'(?i)(?:\b(?:straumann|osstem|dentium|nobel|megagen|neodent|anyridge|ankylos|astra\s*tech|'
+    r'medit|primescan|trios|optibond|clearfil|variolink|panavia|relyx|fuji|totalfill|'
+    r'estelite|filtek|gradia|harmonize|leica|zeiss|zumax|alltion|examvision|univet|'
+    r'vdw|x-?smart|waveone|reciproc|protaper|woodpecker|nsk|komet|dentsply|sirona|'
+    r'kerr|tokuyama|ivoclar|coltene|ultradent|shofu|kuraray|geistlich|radiant|dicom|'
+    r'ординатур[а-яё]*|резидентур[а-яё]*)\b|\bстаж(?:ем|а|у)?\s+\d+)'
+)
+
+
+def has_clinical_profile_signal(text: str) -> bool:
+    """
+    Проверяет, несет ли сообщение из чата клиническую или врачебно-практическую
+    ценность (стоматологические термины, FDI зубы, бренды оборудования/материалов, стаж).
+    Используется групповым демоном памяти, чтобы не жечь LLM-квоту на бытовой флуд и шутки.
+    """
+    if not text or is_trivial_message(text) or is_adversarial_injection_message(text):
+        return False
+    if is_injection_or_toxic_sentence(text):
+        return False
+    try:
+        import dental_vocab
+        if dental_vocab.has_dental_term(text):
+            return True
+    except Exception:
+        pass
+    return bool(_CLINICAL_PRACTICE_BRAND_RE.search(text))
+
+
 def is_trivial_message(text: str) -> bool:
     """Проверяет, является ли сообщение тривиальным (приветствие, спасибки, команды)."""
     if not text:
@@ -1018,10 +1057,7 @@ def format_clinician_memory_prompt(
         return "Клинический профиль доктора формируется (первые обращения)."
 
     content = sanitize_user_input_xml("\n".join(body))
-    res = f"""=== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ И КЛИНИЧЕСКИЙ ПРОФИЛЬ ВРАЧА ===
-[Справочная информация для ассистента: этот блок сформирован и непрерывно актуализируется ИИ на основе анализа сообщений доктора в чате и истории общения в ЛС. Память содержит его подтвержденную специализацию, используемые протоколы/материалы и обсуждавшиеся клинические случаи. Опирайся на эти знания, веди диалог на равных коллега-коллеге и не переспрашивай то, что уже известно.
-КРИТИЧЕСКИЙ ЗАПРЕТ ГАЛЛЮЦИНАЦИЙ: Категорически запрещено додумывать неподтвержденные предпочтения врача (не утверждай, что доктор использует методику, если он только задавал вопрос о ней; не считай названный материал единственным любимым, если врач прямо не заявил об этом)]:
-{content}"""
+    res = f"{header_intro}{content}"
     if len(res) > max_chars:
         res = html_safe.clip_at_sentence_text(res, max_chars)
     return res
@@ -1182,8 +1218,8 @@ async def update_clinician_memory_async(
         "имплант", "канал", "мв2", "mb2", "апекс", "силер", "обтурац", "протокол", "пульпит",
         "периодонтит", "кариес", "коронк", "винир", "эндокоронк", "зуб", "зуба", "зубе", "зубы"
     ))
-    has_rich_case = len(user_message) > 250 or has_tooth_fdi or has_clinical_keywords
-    effective_cooldown = 3.0 if has_rich_case else _PM_MEMORY_COOLDOWN
+    is_rich_cooldown_case = len(user_message) > 250 or has_tooth_fdi or has_clinical_keywords
+    effective_cooldown = 3.0 if is_rich_cooldown_case else _PM_MEMORY_COOLDOWN
 
     if now - last_ts < effective_cooldown:
         logger.debug(f"PM clinician memory update for {user_id} throttled by cooldown.")
@@ -1205,12 +1241,6 @@ async def update_clinician_memory_async(
         # либо это первое сообщение или объемный/содержательный клинический кейс (FDI зубы, патологии, протоколы)
         is_first_time = not current_summary
         is_interval = (current_pm_count % PM_UPDATE_EVERY_N_MESSAGES == 0)
-        has_tooth_fdi = bool(re.search(r'(?<!\d)[1-4][1-8](?!\d)', user_message))
-        has_clinical_keywords = any(w in user_message.lower() for w in (
-            "снимок", "рентген", "клкт", "оптг", "визиограф", "прицельн", "пациент", "кейс", "bopt", "ids",
-            "имплант", "канал", "мв2", "mb2", "апекс", "силер", "обтурац", "протокол", "пульпит",
-            "периодонтит", "кариес", "коронк", "винир", "эндокоронк", "зуб", "зуба", "зубе", "зубы"
-        ))
         is_explicit_case = any(w in user_message.lower() for w in ("клинический случай", "разбор кейса", "жалобы:", "анамнез:"))
         has_rich_case = (len(user_message) > 250 and (has_tooth_fdi or has_clinical_keywords)) or is_explicit_case
 
@@ -1507,7 +1537,23 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
                 continue
             last_processed_id = msgs[-1]["msg_id"]
 
-            msgs_text = "\n".join([f"- {m['text']}" for m in msgs])
+            # Pre-LLM Clinical Gate: не тратим LLM-квоту на бытовой флуд, зарплатные шутки и болтовню о боте.
+            clinical_msgs = [m for m in msgs if has_clinical_profile_signal(m.get("text", ""))]
+            if not clinical_msgs:
+                await database.save_user_memory(
+                    user_id=user_id,
+                    group_message_count=mem.get("group_message_count", 0) + len(msgs),
+                    last_group_analyzed_id=last_processed_id,
+                    username=sender_username,
+                    first_name=sender_name
+                )
+                logger.info(
+                    f"Group memory daemon: skipping LLM for doctor {user_id} ({sender_name}) — "
+                    f"{len(msgs)} msgs had no clinical signal; advanced cursor to {last_processed_id}"
+                )
+                continue
+
+            msgs_text = "\n".join([f"- {m['text']}" for m in clinical_msgs])
 
             # Промпт для дешёвой нейронки
             prompt = f"""Ты — клинический аналитик сообщества StomChat/EndoChat.
@@ -1583,8 +1629,8 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
             new_facts = parsed.get("new_facts", [])
 
             final_spec = resolve_clinician_specialty(current_spec, new_spec, is_group_daemon=True)
-            final_grp_summary = new_grp_summary if new_grp_summary else current_group_summary
-            final_grp_summary = deduplicate_clinical_summary(final_grp_summary)
+            cleaned_new_summary = deduplicate_clinical_summary(new_grp_summary) if new_grp_summary else ""
+            final_grp_summary = cleaned_new_summary if cleaned_new_summary else deduplicate_clinical_summary(current_group_summary)
 
             current_facts = clean_clinician_facts(current_facts)
             if isinstance(new_facts, list):

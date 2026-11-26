@@ -381,14 +381,15 @@ def _ffmpeg_spy(file_path, out_path, args):
 _gc._ffmpeg_to = _ffmpeg_spy
 
 check("штатные для API форматы перечислены",
-      ".ogg" in _gc._WHISPER_NATIVE_EXTENSIONS and ".opus" in _gc._WHISPER_NATIVE_EXTENSIONS,
-      "голосовые Telegram — это ogg/opus, они и есть основной вход")
+      ".ogg" in _gc._WHISPER_NATIVE_EXTENSIONS and ".mp3" in _gc._WHISPER_NATIVE_EXTENSIONS
+      and ".opus" not in _gc._WHISPER_NATIVE_EXTENSIONS,
+      "голосовые Telegram — это .ogg; голый .opus/oga Groq отклоняет с HTTP 400 и он должен перекодироваться")
 check("потолок загрузки объявлен и ниже провайдерских 25 МБ",
       0 < _gc._WHISPER_MAX_UPLOAD_BYTES <= 25 * 1024 * 1024,
       f"got {_gc._WHISPER_MAX_UPLOAD_BYTES}")
 
 for _label, _name, _size in (("голосовое ogg", "voice.ogg", 20 * 1024),
-                             ("диктовка opus", "dict.opus", 1024 * 1024),
+                             ("диктовка m4a", "dict.m4a", 1024 * 1024),
                              ("лекция mp3", "lecture.mp3", 5 * 1024 * 1024),
                              ("готовый wav", "already.wav", 2 * 1024 * 1024)):
     _src_path = _fake_audio(_name, _size)

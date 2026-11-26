@@ -796,6 +796,53 @@ async def guard(make_awaitable, op, chat_id=None, timeout=DEFAULT_TIMEOUT_SECOND
 # --- Тонкие обёртки под самые частые места правки -------------------------------
 # Ровно чтобы adoption был заменой одной строки. Логики здесь нет, вся она в guard.
 
+def _sanitize_telegram_html(text: str) -> str:
+    """Санитизирует Markdown-утечки и невалидные для Telegram HTML теги (<p>, <br>, <hr>), балансируя разметку."""
+    s_text = str(text)
+    had_block_tags = bool(re.search(r'<(?:p|br|hr)\b', s_text, re.IGNORECASE))
+    if had_block_tags:
+        s_text = re.sub(r'<p[^>]*>\s*</p>', '\n', s_text, flags=re.IGNORECASE)
+        s_text = re.sub(r'</p>\s*<p[^>]*>', '\n\n', s_text, flags=re.IGNORECASE)
+        s_text = re.sub(r'<p[^>]*>', '', s_text, flags=re.IGNORECASE)
+        s_text = re.sub(r'</p>', '\n\n', s_text, flags=re.IGNORECASE)
+        s_text = re.sub(r'<br\s*/?>', '\n', s_text, flags=re.IGNORECASE)
+        s_text = re.sub(r'<hr\s*/?>', '\n━━━━━━━━━━\n', s_text, flags=re.IGNORECASE)
+
+    if "**" in s_text or re.search(r'(?m)^\s*\*\s+', s_text):
+        protected = []
+
+        def _stash(m):
+            idx = len(protected)
+            protected.append(m.group(0))
+            return f"\x00TGPROT{idx}\x00"
+
+        s_text = re.sub(
+            r'<(pre|code|a)\b[^>]*>[\s\S]*?</\1>',
+            _stash,
+            s_text,
+            flags=re.IGNORECASE,
+        )
+        s_text = re.sub(r'(?m)^\s*\*\s+', '• ', s_text)
+        s_text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s_text)
+        s_text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s_text)
+        s_text = re.sub(r'\*\*', '', s_text)
+        for idx, orig in enumerate(protected):
+            s_text = s_text.replace(f"\x00TGPROT{idx}\x00", orig)
+
+    if had_block_tags:
+        s_text = re.sub(r'\n{3,}', '\n\n', s_text).strip('\n')
+
+    if "<" in s_text and ">" in s_text:
+        try:
+            from html_safe import balance_html
+            body, unclosed = balance_html(s_text)
+            s_text = body + "".join(f"</{tag}>" for tag in reversed(unclosed))
+        except Exception:
+            pass
+
+    return s_text
+
+
 async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
                        op="send_message", logger=None, **kwargs):
     if not text or not (str(text) if text is not None else "").strip():
@@ -803,13 +850,7 @@ async def send_message(client, chat_id, text, timeout=DEFAULT_TIMEOUT_SECONDS,
         log.warning("tg_safety.send_message: aborted sending empty message to chat_id=%s op=%s", chat_id, op)
         return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
     if text and str(kwargs.get("parse_mode", "")).lower() == "html":
-        s_text = str(text)
-        if "**" in s_text or re.search(r'(?m)^\s*\*\s+', s_text):
-            s_text = re.sub(r'(?m)^\s*\*\s+', '• ', s_text)
-            s_text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s_text)
-            s_text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s_text)
-            s_text = re.sub(r'\*\*', '', s_text)
-            text = s_text
+        text = _sanitize_telegram_html(text)
     return await guard(
         lambda: client.send_message(entity=chat_id, message=text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,
@@ -829,13 +870,7 @@ async def edit_message(client, chat_id, message_id, text=None,
         log.warning("tg_safety.edit_message: aborted editing empty message for chat_id=%s msg_id=%s op=%s", chat_id, message_id, op)
         return TgOutcome(ok=False, chat_id=chat_id, op=op, reason=REASON_TERMINAL, error=ValueError("Empty message text"))
     if text and str(kwargs.get("parse_mode", "")).lower() == "html":
-        s_text = str(text)
-        if "**" in s_text or re.search(r'(?m)^\s*\*\s+', s_text):
-            s_text = re.sub(r'(?m)^\s*\*\s+', '• ', s_text)
-            s_text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', s_text)
-            s_text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', s_text)
-            s_text = re.sub(r'\*\*', '', s_text)
-            text = s_text
+        text = _sanitize_telegram_html(text)
     return await guard(
         lambda: client.edit_message(chat_id, message_id, text, **kwargs),
         op=op, chat_id=chat_id, timeout=timeout, logger=logger,

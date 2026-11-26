@@ -261,9 +261,18 @@ async def row_exists(msg_id):
 
 async def drain_background(timeout=30):
     """Дожидается задач, поставленных runtime_guard.create_task."""
+    try:
+        import reaction_engine
+        reaction_engine.stop_engine_worker()
+    except Exception:
+        pass
+    await asyncio.sleep(0)
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
-        pending = [task for task in list(runtime_guard._ACTIVE_TASKS) if not task.done()]
+        pending = [
+            task for task in list(runtime_guard._ACTIVE_TASKS)
+            if not task.done() and task.get_name() != "reaction_engine_worker"
+        ]
         if not pending:
             return
         left = deadline - asyncio.get_running_loop().time()
@@ -583,7 +592,7 @@ async def run():
     clear_state()
     reset_whisper()
     real_save = database.save_message
-    failures = {"left": 1}
+    failures = {"left": 2}
 
     async def flaky_save(**kw):
         if failures["left"] > 0:

@@ -132,13 +132,13 @@ async def run():
     # Обе ветки обязаны использовать один и тот же запрос: иначе номер
     # страницы означает у них разные статьи.
     source = open(os.path.join(_ORIGINAL_CWD, "assistant.py"), encoding="utf-8").read()
-    save_block = source.split('if data_str.startswith("wiki_save:")', 1)[1].split("return", 1)[0]
+    save_block = source.split('if data_str.startswith("wiki_save:")', 1)[1].split("\n    if data_str.startswith(", 1)[0]
     check("обработчик закладки ходит тем же запросом",
           "query_wiki_fact_page" in save_block, "используется другая выборка")
     check("старая загрузка всего раздела в закладке не осталась",
           "query_wiki_subtopic(" not in save_block)
 
-    page_block = source.split('if data_str.startswith("wiki_page:")', 1)[1].split("return", 1)[0]
+    page_block = source.split('if data_str.startswith("wiki_page:")', 1)[1].split("# WIKI BOOKMARK SAVE CALLBACK", 1)[0]
     check("страница статьи тоже ходит постранично", "query_wiki_fact_page" in page_block)
 
 

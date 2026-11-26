@@ -199,11 +199,11 @@ def is_clinical_rescue_candidate(
     # Текстовое сообщение без медиа
     if len(clean) < 15:
         return False
-    has_clin_kw = any(k in clean for k in CLINICAL_KEYWORDS)
     # Чистый текст без медиа ОБЯЗАН содержать вопросительный знак или явный маркер вопроса/просьбы о помощи.
-    # Категорически запрещено считать любое 40-символьное клиническое утверждение или совет врача вопросом!
+    # Используем word-aware has_dental_term (через dental_vocab) вместо голого substring-поиска по CLINICAL_KEYWORDS,
+    # чтобы 'кто', 'доктор', 'больше', 'выбор' не давали ложных срабатываний.
     has_q = ("?" in clean) or any(m in clean for m in QUESTION_MARKERS)
-    return has_q and (has_clin_text or has_clin_kw)
+    return has_q and has_clin_text
 
 
 @contextlib.contextmanager

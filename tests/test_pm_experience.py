@@ -189,7 +189,7 @@ async def run():
           any("не удалось" in s.lower() or "не смог" in s.lower() for s in SENT + EDITED),
           f"got {SENT + EDITED}")
 
-    print("\n[3] Рейт-лимит объясняется, а не глотает сообщение")
+    print("\n[3] Рейт-лимит дозирует очередь, а не глотает сообщение")
     reset()
     first = FakeEvent(FakeMessage(text="смотрите, случай:"))
     await assistant.handle_private_message(FakeBot(), first)
@@ -199,18 +199,21 @@ async def run():
     SENT.clear()
     second = FakeEvent(FakeMessage(text="37-й, боль при накусывании, что делать?"))
     await assistant.handle_private_message(FakeBot(), second)
-    check("врач предупреждён, а не проигнорирован", len(SENT) == 1, f"отправлено: {len(SENT)}")
-    check("в предупреждении объяснено, что делать",
-          SENT and ("одним сообщением" in SENT[0] or "Секунду" in SENT[0]),
+    check("врач предупреждён и его вопрос не выброшен (FIFO pacing)",
+          any("Секунду" in s for s in SENT) and any("Ответ ассистента" in s for s in SENT),
+          f"отправлено: {SENT}")
+    check("в предупреждении объяснено, что запрос в обработке",
+          SENT and ("Секунду" in SENT[0] or "одним сообщением" in SENT[0]),
           f"got {SENT[0][:100] if SENT else None}")
 
-    print("\n[4] Предупреждение не превращается в спам")
+    print("\n[4] Предупреждение о паузе не превращается в спам")
     SENT.clear()
     for _ in range(4):
         await assistant.handle_private_message(
             FakeBot(), FakeEvent(FakeMessage(text="и ещё вопрос")))
-    check("на серию сообщений предупреждение одно", len(SENT) == 0,
-          f"отправлено ещё {len(SENT)} предупреждений")
+    pacing_notices = [s for s in SENT if "Секунду" in s or "обрабатываю ваш запрос" in s]
+    check("на серию сообщений предупреждение о паузе не спамит (<= 1 за серию)", len(pacing_notices) <= 1,
+          f"отправлено {len(pacing_notices)} предупреждений: {pacing_notices}")
 
     print("\n[5] Потерянное сообщение всё равно попадает в историю")
     history = await database.get_last_pm_messages(USER, limit=20)

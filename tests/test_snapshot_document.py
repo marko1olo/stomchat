@@ -62,7 +62,12 @@ SENT = []
 
 
 async def fake_enqueue(messages, msg_id, text, *args, **kw):
-    ENQUEUED.append({"msg_id": msg_id, "count": len(messages), "text": text})
+    ENQUEUED.append({
+        "msg_id": msg_id,
+        "count": len(messages),
+        "text": text,
+        "trigger_assistant": kw.get("trigger_assistant"),
+    })
 
 
 async def fake_send_message(entity=None, message=None, reply_to=None, parse_mode=None, **kw):
@@ -195,11 +200,12 @@ async def run():
     check("has_media не выставлен", row is not None and not row[0], f"got {row}")
     check("в очередь анализа не поставлен", ENQUEUED == [], f"got {ENQUEUED}")
 
-    print("\n[6] Подпись-команда по-прежнему отменяет авто-анализ")
+    print("\n[6] Подпись-команда индексирует медиа без двойного авто-ответа ассистента")
     main.PROCESSED_MSG_IDS.clear()
     ENQUEUED.clear()
     await main.handle_new_message(Event(doc_message(7104, "image/jpeg", caption="/итог"), Sender()))
-    check("команда не запускает vision", ENQUEUED == [], f"got {ENQUEUED}")
+    check("команда не запускает триггер ассистента по медиа",
+          len(ENQUEUED) == 1 and ENQUEUED[0].get("trigger_assistant") is False, f"got {ENQUEUED}")
     row = await media_flag(7104)
     check("но медиа в базе отмечено", row is not None and bool(row[0]), f"got {row}")
 

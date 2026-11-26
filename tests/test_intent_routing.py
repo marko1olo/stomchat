@@ -339,6 +339,19 @@ class TestAnesthesiaInstantCalculator(unittest.TestCase):
 class TestPrivateMessageRoutingIntegration(unittest.IsolatedAsyncioTestCase):
     """Integration test for PM dispatch via handle_private_message."""
 
+    def setUp(self):
+        self._orig_state_path = assistant.STATE_PATH
+        self._orig_state_tmp = assistant.STATE_TMP_PATH
+        self._orig_state_bak = assistant.STATE_BAK_PATH
+        assistant.STATE_PATH = os.path.join(_TMPDIR, "assistant_state.json")
+        assistant.STATE_TMP_PATH = assistant.STATE_PATH + ".tmp"
+        assistant.STATE_BAK_PATH = assistant.STATE_PATH + ".bak"
+
+    def tearDown(self):
+        assistant.STATE_PATH = self._orig_state_path
+        assistant.STATE_TMP_PATH = self._orig_state_tmp
+        assistant.STATE_BAK_PATH = self._orig_state_bak
+
     async def test_zero_slash_calc_instant_dispatch(self):
         mock_bot = AsyncMock()
         mock_event = MagicMock()
@@ -514,6 +527,79 @@ class TestIntentRouterGroupTriageAndParity(unittest.TestCase):
             slot3 = await mgr.acquire_triage_slot(chat_id, sender_id=3, cooldown_seconds=10.0)
             self.assertFalse(slot3)
         asyncio.run(_test())
+
+    def test_false_positive_regression_guards(self):
+        import config
+        import intent_router
+        import inflight_triage
+        import reaction_engine
+        import clinical_anatomy_guard
+
+        # 1. intent_router: бытовые/клинические слова не должны провоцировать арбитраж или блокироваться как жалоба на бота
+        self.assertFalse(intent_router.detect_clinical_dispute("У пациентки ужасно болит зуб 36").should_intervene)
+        self.assertFalse(intent_router.detect_clinical_dispute("Выброси старую лампу, купи нормальную").should_intervene)
+        with patch.object(config, "SUMMON_ONLY_GROUP_MODE", False), patch.object(config, "ENABLE_PASSIVE_TEXT", True):
+            should_eng, reason = intent_router.should_passively_engage(
+                text="Хватит ли 15 минут экспозиции гипохлорита в канале?",
+                has_media=False,
+                is_group=True,
+            )
+            self.assertTrue(should_eng, f"Unexpectedly blocked clinical question: {reason}")
+
+            # 2. Обращение к другому @username блокируется даже при пустом BOT_USERNAME
+            with patch.object(config, "BOT_USERNAME", ""):
+                ok, rsn = intent_router.should_passively_engage(
+                    text="@colleague посмотри снимок 36 зуба пожалуйста",
+                    has_media=False,
+                    is_group=True,
+                )
+                self.assertFalse(ok)
+                self.assertEqual(rsn, "addressed_to_other_user")
+
+        # 3. inflight_triage: перенос неразобранных фоллоу-апов не падает с AttributeError
+        async def _check_inflight():
+            mgr = inflight_triage.InFlightManager()
+            s1 = await mgr.register_session(-1001, 42, 100, "Зуб 36")
+            s1.record_followup(101, "и еще свищ на десне", has_media=False)
+            s2 = await mgr.register_session(-1001, 42, 102, "Зуб 36 и свищ")
+            restored = s2.pop_unprocessed_followups()
+            self.assertTrue(any(f["msg_id"] == 101 and "свищ" in f["text"] for f in restored))
+
+            from types import SimpleNamespace
+
+            async def _mock_llm(prompt, ctx, timeout=25.0):
+                return SimpleNamespace(text='{"action":"SUPPLEMENT","merged_query":"Адентия 3.6: имплант или мост?","reason":"added clinical choice"}'), None
+
+            triage_res = await inflight_triage.run_inflight_followup_triage(
+                original_query="Пациент с адентией 3.6",
+                followups=[{"text": "ну что, имплант ставить или мостовидный?"}],
+                generate_gemini_fn=_mock_llm,
+            )
+            self.assertEqual(triage_res["action"], "SUPPLEMENT")
+        asyncio.run(_check_inflight())
+
+        # 4. reaction_engine: клинические вопросы, уступы и JSON с хвостом
+        self.assertFalse(reaction_engine.is_meta_or_bot_complaint("Хватит ли 2 мм феррула под коронку?"))
+        self.assertTrue(reaction_engine.is_meta_or_bot_complaint("Хватит!"))
+        self.assertFalse(reaction_engine.is_clinical_complication("Отпрепарировали ступенчатый уступ под циркон"))
+        self.assertTrue(reaction_engine.is_clinical_complication("Образовалась ступенька в МВ2"))
+        self.assertFalse(reaction_engine.is_question_or_doubt("Как же круто лег композит"))
+        self.assertFalse(reaction_engine.is_question_or_doubt("https://example.com/path?utm_source=tg посмотрите кейс"))
+        self.assertTrue(reaction_engine.is_question_or_doubt("Как обойти ступеньку? У зуба 36 изгиб"))
+        parsed = reaction_engine.parse_batch_reactions_json('[{"msg_id": 55, "reaction": "👍", "reason": "ok"}] [note]')
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["msg_id"], 55)
+
+        # 5. clinical_anatomy_guard: смешанный кейс верхней и нижней челюсти в одном тексте
+        ok_mixed, viol_mixed = clinical_anatomy_guard.verify_and_guard_anatomy(
+            "Зуб 16: пройден небный канал. Зуб 36: обработаны медиальный и дистальный каналы."
+        )
+        self.assertTrue(ok_mixed, f"False positive cross-jaw violations: {viol_mixed}")
+        ok_bad, viol_bad = clinical_anatomy_guard.verify_and_guard_anatomy(
+            "Зуб 16: пройден небный канал. Зуб 36: обнаружен небный корень."
+        )
+        self.assertFalse(ok_bad)
+        self.assertTrue(viol_bad)
 
 
 if __name__ == "__main__":

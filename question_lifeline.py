@@ -61,7 +61,7 @@ NON_CLINICAL_STOPWORDS = [
 ]
 
 _EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
-    r'(?i)(?:'
+    r'(?i)(?:'
     r'не\s+является\s+[^.\n]{0,40}(?:медицинск\w*|стоматолог\w*|клиническ\w*|диагностик\w*|снимк\w*|рентген\w*)|'
     r'не\s+относит\w*\s+к\s+[^.\n]{0,30}(?:медицин\w*|стоматолог\w*)|'
     r'не\s+имеет\s+отношения\s+к\s+[^.\n]{0,30}(?:медицин\w*|стоматолог\w*)|'
@@ -71,12 +71,12 @@ _EXPLICIT_NON_DENTAL_MEDIA_RE = re.compile(
     r'скриншот\w*\s+[^.\n]{0,30}(?:интерфейс\w*|приложен\w*|соцсет\w*|социальн\w*\s+сет\w*|профил\w*|переписк\w*|чат\w*|экран\w*|сайт\w*|мессенджер\w*|бот\w*|канал\w*|программ\w*)|'
     r'интерфейс\w*\s+[^.\n]{0,30}(?:цифров\w*|программн\w*|telegram|телеграм|бот\w*|мессенджер\w*|приложен\w*|комплекс\w*)|'
     r'карточк\w*\s+спикер\w*|рекламн\w*\s+баннер\w*|афиш\w*|презентационн\w*\s+карточк\w*|'
-    r'мем|мем[а-яё]*|комикс\w*|карикатур\w*|юмористическ\w*|'
-    r'чек|квитанци\w*|накладн\w*|банковск\w*\s+(?:перевод|чек|выписк\w*)|прайс[- ]?лист\w*|'
-    r'фотографи\w*\s+(?:человек\w*|лиц\w*|селфи)|портрет|'
+    r'\bмем\b|\bмем[а-яё]{1,4}\b|комикс\w*|карикатур\w*|юмористическ\w*|'
+    r'\bчек\b|квитанци\w*|накладн\w*|банковск\w*\s+(?:перевод|чек|выписк\w*)|прайс[- ]?лист\w*|'
+    r'фотографи\w*\s+(?:человек\w*|лиц\w*|селфи)|\bпортрет\w*|'
     r'(?:медицинск\w*|анатомическ\w*|стоматологическ\w*|зубочелюстн\w*|зубн\w*|внутриротов\w*|рентгенолог\w*)\s+[^.\n]{0,60}(?:структур\w*|объект\w*|патолог\w*|элемент\w*|снимк\w*|ряд\w*|данные)\s+[^.\n]{0,40}(?:не\s+дифференциру\w*|не\s+визуализиру\w*|отсутству\w*|не\s+обнаружен\w*)|'
     r'(?:зуб\w*|коронков\w*|корнев\w*|периодонт\w*|костн\w*\s+ткан\w*|рентгенограмм\w*)\s+[^.\n]{0,40}(?:на\s+(?:изображени\w*|снимк\w*|кадр\w*)\s+)?отсутству\w*'
-    r')'
+    r')'
 )
 
 def is_explicitly_non_dental_media(description: Optional[str]) -> bool:
@@ -123,9 +123,17 @@ def is_clinical_question_candidate(
     if media_description and is_explicitly_non_dental_media(media_description):
         return False
 
-    # Проверка клинической специфики (по списку ключевых слов или единому словарю триажа)
-    has_clinical_term = any(kw in lower for kw in CLINICAL_KEYWORDS) or has_dental_term(clean_text)
-    has_clin_desc = bool(media_description and (any(kw in media_description.lower() for kw in CLINICAL_KEYWORDS) or has_dental_term(media_description)))
+    # Проверка клинической специфики строго через единый word-aware словарь dental_vocab
+    # (исключает ложные срабатывания 'кт' внутри 'доктор/кто' и 'боль' внутри 'больше').
+    has_clinical_term = has_dental_term(clean_text)
+    has_clin_desc = False
+    if media_description:
+        try:
+            from assistant import strip_vision_negations
+            cleaned_desc = strip_vision_negations(media_description)
+        except Exception:
+            cleaned_desc = media_description
+        has_clin_desc = has_dental_term(cleaned_desc)
 
     # Ликвидация слепого пролезания с медиа:
     if not has_clinical_term:
@@ -465,13 +473,6 @@ async def generate_lifeline_response(
     Генерирует теплое, коллегиальное, практическое сообщение первого ответа.
     Строго без менторства, кафедральной воды и нудных лекций.
     """
-    fallback_text = (
-        "Вопрос очень практический.\n\n"
-        "В подобных клинических ситуациях первичный ориентир — "
-        "сохранение анатомии и работа под увеличением (микроскоп, предварительно "
-        "изогнутые ручные файлы #08–#10, обильная ирригация NaOCl и ЭДТА без избыточного давления)."
-    )
-
     if llm_caller is None:
         return None
 

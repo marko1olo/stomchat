@@ -181,7 +181,3 @@ DIALOGUE_THREAD_DEBOUNCE_SECONDS = 35
 GROQ_WHISPER_MODEL = get_env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 WHISPER_PROMPT = get_env("WHISPER_PROMPT", "стоматология, зуб, препарирование, пульпит, кариес")
 ENABLE_AUDIO_VOLUMEDETECT = True
-
-
-
-print("Конфигурация загружена.")

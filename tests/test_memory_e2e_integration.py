@@ -50,24 +50,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# ---------------------------------------------------------------------------
-# Изоляция окружения: временный каталог для базы данных, логов и сторожей
-# ---------------------------------------------------------------------------
-_TMPDIR = tempfile.mkdtemp(prefix="stomchat_e2e_mem_")
-
 import config  # noqa: E402
-
-config.DB_PATH = os.path.join(_TMPDIR, "test_e2e.db")
-os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "test_e2e.log")
-
 import runtime_guard  # noqa: E402
-
-runtime_guard.HEARTBEAT_PATH = os.path.join(_TMPDIR, "hb.json")
-runtime_guard.SUMMARY_STATUS_PATH = os.path.join(_TMPDIR, "status.json")
-runtime_guard.WATCHDOG_DUMP_PATH = os.path.join(_TMPDIR, "dump.txt")
-runtime_guard.start_watchdog = lambda *a, **k: None
-runtime_guard.stop_watchdog = lambda *a, **k: None
-
 import database  # noqa: E402
 import summarizer  # noqa: E402
 import user_memory  # noqa: E402
@@ -836,18 +820,56 @@ async def main_e2e() -> None:
         print(f"\n[ОШИБКИ] Провалено проверок: {len(FAIL)}")
         for f_name in FAIL:
             print(f"  - {f_name}")
-        sys.exit(1)
+        return False
     else:
         print("\n[УСПЕХ] Все сквозные сценарии, проверки памяти и стресс-тесты завершились успешно!")
-        sys.exit(0)
+        return True
+
+
+def run_e2e_isolated(shutdown_executor: bool = False) -> bool:
+    PASS.clear()
+    FAIL.clear()
+    tmpdir = tempfile.mkdtemp(prefix="stomchat_e2e_mem_")
+    old_db = config.DB_PATH
+    old_log = os.environ.get("STOMCHAT_LOG_PATH")
+    old_hb = runtime_guard.HEARTBEAT_PATH
+    old_st = runtime_guard.SUMMARY_STATUS_PATH
+    old_wd = runtime_guard.WATCHDOG_DUMP_PATH
+    old_start = runtime_guard.start_watchdog
+    old_stop = runtime_guard.stop_watchdog
+
+    config.DB_PATH = os.path.join(tmpdir, "test_e2e.db")
+    os.environ["STOMCHAT_LOG_PATH"] = os.path.join(tmpdir, "test_e2e.log")
+    runtime_guard.HEARTBEAT_PATH = os.path.join(tmpdir, "hb.json")
+    runtime_guard.SUMMARY_STATUS_PATH = os.path.join(tmpdir, "status.json")
+    runtime_guard.WATCHDOG_DUMP_PATH = os.path.join(tmpdir, "dump.txt")
+    runtime_guard.start_watchdog = lambda *a, **k: None
+    runtime_guard.stop_watchdog = lambda *a, **k: None
+    try:
+        return bool(asyncio.run(main_e2e()))
+    finally:
+        config.DB_PATH = old_db
+        if old_log is None:
+            os.environ.pop("STOMCHAT_LOG_PATH", None)
+        else:
+            os.environ["STOMCHAT_LOG_PATH"] = old_log
+        runtime_guard.HEARTBEAT_PATH = old_hb
+        runtime_guard.SUMMARY_STATUS_PATH = old_st
+        runtime_guard.WATCHDOG_DUMP_PATH = old_wd
+        runtime_guard.start_watchdog = old_start
+        runtime_guard.stop_watchdog = old_stop
+        if shutdown_executor:
+            try:
+                database._DB_EXECUTOR.shutdown(wait=True)
+            except Exception:
+                pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_memory_e2e_integration_suite():
+    assert run_e2e_isolated(shutdown_executor=False), f"Failed E2E checks: {FAIL}"
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_e2e())
-    finally:
-        try:
-            database._DB_EXECUTOR.shutdown(wait=True)
-        except Exception:
-            pass
-        shutil.rmtree(_TMPDIR, ignore_errors=True)
+    ok = run_e2e_isolated(shutdown_executor=True)
+    sys.exit(0 if ok else 1)

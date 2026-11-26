@@ -2865,7 +2865,7 @@ class PollEngine:
                     candidate = await generate_poll_content(
                         triage=triage,
                         llm_caller=active_llm,
-                        timeout=60.0,
+                        timeout=150.0,
                         critique=last_critique,
                         recent_polls=recent_polls
                     )

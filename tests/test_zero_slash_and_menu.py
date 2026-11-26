@@ -271,8 +271,8 @@ async def run_all_tests():
             reply_texts.append(btn.text)
 
     check("Нижняя кнопка «💊 Препараты и дозы» есть в ReplyKeyboardMarkup", any("Препараты" in t or "Калькулятор" in t for t in reply_texts))
-    check("Нижняя кнопка «🔍 Найти статью» есть в ReplyKeyboardMarkup", any("Найти" in t or "Поиск" in t for t in reply_texts))
-    check("Нижняя кнопка «⭐ Закладки» есть в ReplyKeyboardMarkup", any("Закладки" in t for t in reply_texts))
+    check("Нижняя кнопка «🛠 Chairside инструменты» есть в ReplyKeyboardMarkup", any("Chairside" in t or "инструменты" in t for t in reply_texts))
+    check("Нижняя кнопка «🦷 Зубная формула FDI» есть в ReplyKeyboardMarkup", any("FDI" in t or "формула" in t for t in reply_texts))
     check("Нижняя кнопка «⌨️ Меню» есть в ReplyKeyboardMarkup", any("меню" in t.lower() for t in reply_texts))
 
     print("\n" + "=" * 65)
