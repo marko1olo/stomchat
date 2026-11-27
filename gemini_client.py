@@ -632,7 +632,8 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
                 m_mod = re.search(r"\bmodel\s*:\s*([a-z0-9._/-]+)", err_msg)
                 if m_mod:
                     eff_model = m_mod.group(1)
-            applied_cd = _parse_retry_delay_seconds(err_msg, default=600, cap=3600)
+            max_cap = 300 if provider == "groq" else 600
+            applied_cd = _parse_retry_delay_seconds(err_msg, default=300, cap=max_cap)
             set_model_key_cooldown(provider, eff_model, api_key, seconds=applied_cd)
             alive = len(available_keys(provider, pool, model_name=eff_model)[0]) if pool else 0
             # Если Google вернул PerProjectPerModel и почти не осталось живых ключей для этой модели,

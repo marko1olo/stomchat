@@ -4118,6 +4118,23 @@ def clean_html_formatting(text, allow_long: bool = False):
         text = text.replace(k, v)
     text = text.replace('__A_CLOSE__', '</a>')
 
+    # Очистка и санитизация <code> тегов: тег <code> зарезервирован строго под записи 043/у и рецепты Rp.
+    def _clean_code_tags(m):
+        inner = m.group(1)
+        # Telegram API категорически запрещает вложенные <b>/<i> внутри <code>
+        clean_inner = re.sub(r'</?[bi]>', '', inner)
+        inner_lower = clean_inner.lower()
+        is_legit_code = (
+            len(clean_inner) < 40
+            or any(k in inner_lower for k in ("043", "мис", "ident", "инфодент", "rp:", "rp.", "диагноз:", "ds:", "жалобы:", "анамнез:", "назначено:"))
+            or clean_inner.strip().startswith("/")
+        )
+        if is_legit_code:
+            return f"<code>{clean_inner}</code>"
+        return clean_inner
+
+    text = re.sub(r'<code>([\s\S]*?)</code>', _clean_code_tags, text)
+
     # Разворачивание чрезмерно длинного жирного заголовка в начале (>45 символов)
     text = _unwrap_oversized_opening_bold(text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
@@ -4484,6 +4501,14 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
             if _TOXIC_PRACTICE_RE.search(draft_reply):
                 logger.error("VALIDATOR UNAVAILABLE: blocked toxic clinical practice in draft fail-open (%s)", detail)
                 return False, f"validator_unavailable: toxic_practice_blocked ({detail})"
+            try:
+                import clinical_anatomy_guard
+                anat_ok, anat_errors = clinical_anatomy_guard.check_anatomical_integrity(draft_reply)
+                if not anat_ok:
+                    logger.warning("VALIDATOR UNAVAILABLE and anatomical guard failed: %s", anat_errors)
+                    return False, f"validator_unavailable: anatomical_integrity_blocked ({anat_errors})"
+            except Exception as _cg_err:
+                logger.warning("clinical_anatomy_guard check error during validator unavailable: %s", _cg_err)
 
             # [MED-04 NOTE] Validator unavailable + invited=True: allowing draft.
             # RATIONALE (deliberate product decision, see comment block above):
@@ -4635,6 +4660,8 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
             return _unavailable(error or "empty response")
 
         text = (getattr(response, "text", None) or "").strip()
+        # Санитизация дефисов перед строкой в некорректном JSON
+        text = re.sub(r':\s*[-–—]\s*"', ': "', text)
         data = user_memory._extract_json_object(text)
         if data is None:
             return _unavailable(f"no JSON object in verdict: {text[:120]!r}")
@@ -6109,8 +6136,8 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         is_group = bool(event.chat_id and event.chat_id < 0)
         sender_id = getattr(event, "sender_id", None)
-        # In public groups, enforce author group cooldown even if is_dialogue is True, unless explicitly @mentioned
-        if is_group and not is_direct_mention:
+        # In public groups, enforce author group cooldown unless explicitly @mentioned or actively engaged in dialogue
+        if is_group and not is_direct_mention and not is_dialogue:
             if sender_id and is_author_group_cooldown_active(sender_id):
                 logger.info("Author group cooldown active for sender %s in public group (< 10 min). Suppressing reply.", sender_id)
                 return False
@@ -16401,7 +16428,9 @@ async def handle_group_direct_ask(bot_client, event, question):
     if not inflight_mgr.has_active_session(chat_id, event.sender_id) and not inflight_mgr.has_waiter(chat_id, event.sender_id):
         cooldown = check_user_cooldown(chat_id, event.sender_id, "direct_ask", seconds=30)
         if cooldown > 0:
-            await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
+            logger.info("Direct ask on cooldown (%ss) for sender %s in chat %s", cooldown, event.sender_id, chat_id)
+            if chat_id > 0:
+                await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
             return
 
     # Получаем стиль отправителя для применения его предпочтений в группе
@@ -21525,6 +21554,7 @@ async def check_and_send_pm_pings(bot_client):
 3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
    • Обращения «коллега», «коллеги», «дорогой коллега». Обращайся напрямую по существу ситуации, без шаблонных приветствий.
    • Канцелярщина и анкетный тон («Каков текущий уровень...», «Отмечаете ли пациентка...», «Отмечаете ли...», «каковы результаты...»), а также клиентский сервис («как дела», «куда вы пропали», «я ждал ответа», «надеюсь у вас всё хорошо»).
+   • СТРОГИЙ ЗАПРЕТ СМЕШИВАНИЯ КЕЙСОВ: задавай вопрос ИСКЛЮЧИТЕЛЬНО по последнему активному случаю из «Последние сообщения диалога». КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО подтягивать факты, номера зубов или прошлые операции (гемостаз, резекцию, периостотомию, имплантацию) из архивного профиля врача, если они не упоминались в текущих репликах!
    • Несогласованное склонение и лишние пересказы уже сказанного.
    • Длинные поучения, лекции, общие рассуждения.
    • Смайлики и эмодзи.

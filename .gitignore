@@ -31,6 +31,8 @@ banned_models.json
 banned_models.json.tmp
 key_cooldowns.json
 key_cooldowns.json.tmp
+model_key_cooldowns.json
+model_key_cooldowns.json.tmp
 model_failures.json
 model_failures.json.tmp
 

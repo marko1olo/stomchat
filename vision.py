@@ -365,6 +365,21 @@ def extract_fallback_short_caption(text: str, max_len: int = 160) -> str:
     return candidate.strip()
 
 
+
+def clean_vision_artifacts(text: str) -> str:
+    """Очищает текст от служебных меток модели зрения, XML-псевдотегов и сырых JSON-блоков."""
+    if not text:
+        return ""
+    # 1. Удаляем XML-псевдотеги и плейсхолдеры промпта (<разбор>, <до 120 симв>, <108 симв>, <метаданные> и т.д.)
+    text = re.sub(r'</?(?:разбор|до\s*\d+\s*симв|\d+\s*симв|мета[лд]анные|metadata|clinical_protocol)[^>]*>', '', text, flags=re.IGNORECASE)
+    # 2. Удаляем любые сырые JSON блоки с метаданными modality
+    text = re.sub(r'\{\s*"modality"\s*:\s*["\'][^"\']+["\'][\s\S]*?\}', '', text, flags=re.IGNORECASE)
+    # 3. Удаляем служебные заголовки секций
+    text = re.sub(r'\[(?:ПОДРОБНОЕ\s+ОПИСАНИЕ|КРАТКАЯ\s+ПОДПИСЬ|МЕТАДАННЫЕ|METADATA)\]', '', text, flags=re.IGNORECASE)
+    # 4. Удаляем каркасные рубрикаторы (### Разбор снимков, ### Структурированный синтез, [КРАТКАЯ ПОДПИСЬ])
+    text = re.sub(r'#{1,6}\s*(?:Разбор\s+снимков|Структурированный\s+синтез|Клиническое\s+описание)', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
 def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
     """
     Разбирает ответ модели зрения на два компонента:
@@ -397,6 +412,9 @@ def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
             short_part = text[s_match.end():d_match.start()].strip()
             detailed_part = text[d_match.end():].strip()
 
+        detailed_part = clean_vision_artifacts(detailed_part)
+        short_part = clean_vision_artifacts(short_part)
+
         short_part = re.sub(r"^[\"«']\s*|\s*[\"»']$", "", short_part).strip()
         if len(short_part) > 180:
             short_part = extract_fallback_short_caption(short_part, max_len=180)
@@ -406,18 +424,20 @@ def parse_dual_vision_description(raw_text: str) -> tuple[str, str]:
         return detailed_part, short_part
 
     if d_match and not s_match:
-        detailed_part = text[d_match.end():].strip()
+        detailed_part = clean_vision_artifacts(text[d_match.end():].strip())
         short_part = extract_fallback_short_caption(detailed_part, max_len=180)
         return detailed_part, short_part
 
     if s_match and not d_match:
-        short_part = text[s_match.end():].strip()
+        short_part = clean_vision_artifacts(text[s_match.end():].strip())
         short_part = re.sub(r"^[\"«']\s*|\s*[\"»']$", "", short_part).strip()
-        return text, short_part
+        detailed_part = clean_vision_artifacts(text)
+        return detailed_part, short_part
 
-    detailed = text
+    detailed = clean_vision_artifacts(text)
     short = extract_fallback_short_caption(detailed)
     return detailed, short
+
 
 
 
@@ -629,7 +649,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 f"КАТЕГОРИЧЕСКИЙ ВЫКОС ДЕЖУРНЫХ РОБОТИЗИРОВАННЫХ ФРАЗ («На представленном снимке визуализируется», «Следует отметить, что», «В целом можно сказать»): дай четкую, емкую клиническую картину для доктора с модальности и FDI. "
                 f"ПРАВИЛА ДОСТОВЕРНОСТИ: Отделяй наблюдение от истолкования; НЕ ставь диагноз по одному снимку; при помехах — недоступность обзора (полноценный ответ); без фантомных чисел (миллиметры, длина, дефект), если не читаются на снимке. Для фото 3-6 фраз. "
                 f"{clinical_cognitive_core.VISION_COGNITIVE_ARCHITECTURE} "
-                f"СТРОГО НА РУССКОМ:\n[ПОДРОБНОЕ ОПИСАНИЕ]\n<разбор>\n[КРАТКАЯ ПОДПИСЬ]\n<до 120 симв>\n[МЕТАДАННЫЕ]\n"
+                f"СТРОГО НА РУССКОМ В ТРЕХ СЕКЦИЯХ БЕЗ XML-ТЕГОВ И БЕЗ СЛУЖЕБНЫХ ПЛЕЙСХОЛДЕРОВ:\n"f"[ПОДРОБНОЕ ОПИСАНИЕ]\n(здесь подробный клинический разбор)\n"f"[КРАТКАЯ ПОДПИСЬ]\n(здесь краткая подпись без кавычек)\n"f"[МЕТАДАННЫЕ]\n"
                 f'{{"modality":"PERIAPICAL_XRAY|CBCT|PANORAMIC_OPG|CLINICAL_PHOTO|NON_DENTAL","has_clinical_doubt":bool,"target_tooth":11-48|null,"doubt_subject":str|null,"recommended_quadrant":2|3|4|null}}'
             )
 

@@ -4167,6 +4167,7 @@ async def sync_history():
                 )
             else:
                 logger.info(f"🚀 Обрабатываем последнее пропущенное сообщение msg_id={last_synced_message.id}...")
+                assistant.REPLIED_MSG_IDS[last_synced_message.id] = True
                 adapter_event = TelethonEventAdapter(last_synced_message)
                 runtime_guard.create_task(handle_new_message(adapter_event), name=f"sync_process_{last_synced_message.id}")
     else:
