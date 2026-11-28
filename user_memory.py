@@ -468,11 +468,13 @@ _PURE_META_FACT_RE = re.compile(
 
 _HALLUCINATED_INVERTED_FACT_RE = re.compile(
     r'(?i)\b('
-    r'владеет\s+(?:техникой|методикой|протоколом)\s+[^\.\n]{3,120}\s+(?:с\s+использованием\s+ориентиров|с\s+соблюдением\s+протокола\s+безопасности|аспирационн[а-яё]*\s+проб[а-яё]*)|'
+    r'владеет\s+(?:техникой|методикой|протоколом)\s+[^\.\n]{1,120}?(?:торусальн[а-яё]*|мандибулярн[а-яё]*|анестези[а-яё]*|ориентир[а-яё]*|аспирационн[а-яё]*|протокола\s+безопасности)|'
     r'внедрение\s+в\s+протокол\s+диагностики\s+обязательного\s+использования\s+прикусных\s+снимков|'
     r'активное\s+использование\s+методов\s+трансиллюминации|'
     r'приоритет\s+критического\s+анализа\s+анамнеза|'
-    r'ценит\s+перфекционизм\s+и\s+следование\s+строгим\s+литературным'
+    r'ценит\s+перфекционизм\s+и\s+следование\s+строгим\s+литературным|'
+    r'рекоменду[а-яё]*\s+(?:вертикальн[а-яё]*\s+конденсаци[а-яё]*|system\s+b|ah\s+plus|спиртов[а-яё]*\s+протокол|протокол[а-яё]*)|'
+    r'предлага[а-яё]*\s+(?:спиртов[а-яё]*\s+протокол|силер[а-яё]*|обтураци[а-яё]*)'
     r')\b'
 )
 
@@ -510,6 +512,8 @@ def clean_clinician_facts(facts: list) -> list:
         if any(bad in lower_f for bad in _FORBIDDEN_FACT_SUBSTRINGS):
             continue
         if lower_f.startswith(("бот ", "ассистент ", "ии ", "система ", "консилиум ответил", "чат-бот")):
+            continue
+        if lower_f.startswith(("рекомендует ", "предлагает ", "советует ", "рекомендовано ", "предложено ")):
             continue
         if any(bot_tok in lower_f for bot_tok in (
             "stomchat", "endochat", "endohelper", "бот отвечает", "ассистент дал",
@@ -610,8 +614,11 @@ def resolve_clinician_specialty(current_spec: str, new_spec: str, is_group_daemo
         logger.info(f"Preserving specific specialty '{cur}' against generic/non-specific overwrite '{new_s}'")
         return cur
 
-    # Защита 2: в фоновом демоне группы не меняем подтвержденную узкую специализацию на общую терапию
-    if is_group_daemon and cur_has_specific and not new_has_specific:
+    # Защита 2: в фоновом демоне группы (is_group_daemon) запрещено перезаписывать
+    # подтвержденную узкую специализацию другой специализацией из-за смены топика беседы
+    if is_group_daemon and cur_has_specific and cur_lower != new_lower:
+        if cur_lower in new_lower:
+            return new_s
         logger.info(f"Group daemon: preserving specific specialty '{cur}' against chatter drift '{new_s}'")
         return cur
 

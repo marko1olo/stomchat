@@ -588,6 +588,221 @@ def run_anti_inversion_and_attribution_integrity_tests():
           "Интересующие темы и клинические вопросы:" in um_src)
 
 
+def run_advanced_anti_inversion_suite():
+    print("\n[Suite 10] Advanced Anti-Inversion & Doubt/Complication Isolation")
+
+    # Test 10.1: Assistant lecture isolation - recommended protocols must not be attributed to doctor
+    assistant_lecture_facts = [
+        "Рекомендует вертикальную конденсацию System B и силер AH Plus",
+        "Предлагает спиртовой протокол перед внесением бонда",
+        "Владеет методикой проведения торусальной анестезии с соблюдением ориентиров",
+        "Внедрение в протокол диагностики обязательного использования прикусных снимков",
+        "Активное использование методов трансиллюминации",
+        "Ценит перфекционизм и следование строгим литературным протоколам",
+        # Doctor's real inquiries & complications:
+        "Интересуется техникой обхода ступеньки в канале зуба 1.6",
+        "Запрашивал тактику при выведении гипохлорита натрия за апекс",
+        "Уточняет возможность фиксации СВШ на Fuji Plus",
+        # Doctor's genuine confirmed practice:
+        "Работает с микроскопом Zeiss Extaro 300",
+        "Использует коффердам Nic Tone для изоляции"
+    ]
+    cleaned = user_memory.clean_clinician_facts(assistant_lecture_facts)
+
+    check("Anti-Inversion: Лекция ассистента про System B отсечена",
+          not any("system b" in f.lower() or "вертикальную конденсацию" in f.lower() for f in cleaned))
+    check("Anti-Inversion: Рекомендация спиртового протокола отсечена",
+          not any("спиртовой протокол" in f.lower() for f in cleaned))
+    check("Anti-Inversion: Галлюцинация владения торусальной анестезией отсечена",
+          not any("торусальн" in f.lower() and "владеет" in f.lower() for f in cleaned))
+    check("Anti-Inversion: Лекции про прикусные снимки и трансиллюминацию отсечены",
+          not any("прикусных" in f.lower() or "трансиллюминаци" in f.lower() for f in cleaned))
+    check("Anti-Inversion: Запросы доктора сохранены в исходной модальности интереса",
+          any("ступеньки" in f for f in cleaned) and any("выведении гипохлорита" in f for f in cleaned))
+    check("Anti-Inversion: Реальное оснащение доктора сохранено (Zeiss, Nic Tone)",
+          any("Zeiss Extaro 300" in f for f in cleaned) and any("Nic Tone" in f for f in cleaned))
+
+    # Test 10.2: Quackery and pseudoscience rejection (EBM compliance)
+    quack_facts = [
+        "Лечит пульпит чесноком на десну",
+        "Применяет заговоры от зубной боли вместо анестезии",
+        "Использует уринотерапию при альвеолите",
+        "Полоскание керосином при периодонтите",
+        "Применяет гомеопатические шарики для дезинфекции каналов",
+        "Использует биорезонансную диагностику кариеса",
+        # Valid clinical facts:
+        "Применяет гидроксид кальция Calasept для временной дезинфекции каналов"
+    ]
+    cleaned_quack = user_memory.clean_clinician_facts(quack_facts)
+    check("EBM Defense: Все 6 псевдонаучных и мракобесных практик полностью отсечены",
+          len(cleaned_quack) == 1 and "Calasept" in cleaned_quack[0])
+
+    # Test 10.3: Few-shot anti-inversion prompt invariants
+    import inspect
+    um_src = inspect.getsource(user_memory.update_clinician_memory_async)
+    check("Промпт ЛС: Содержит few-shot контрастную пару 'BAD vs GOOD'",
+          "FEW-SHOT КОНТРАСТНЫЕ ПАРЫ" in um_src)
+    check("Промпт ЛС: Содержит запрет 'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать, что врач владеет техникой'",
+          "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать, что врач «владеет техникой»" in um_src)
+    check("Промпт ЛС: Содержит директиву EBM и запрет мракобесия",
+          "ДОКАЗАТЕЛЬНАЯ МЕДИЦИНА И СТРОГИЙ ЗАПРЕТ ПСЕВДОНАУКИ" in um_src)
+
+
+def run_advanced_specialty_drift_and_staleness_suite():
+    print("\n[Suite 11] Advanced Specialty Drift & Staleness Protection")
+
+    # Test 11.1: Multi-level hierarchy protection against generic downgrade
+    test_hierarchy_pairs = [
+        ("Хирург-имплантолог", "Стоматолог", "Хирург-имплантолог"),
+        ("Стоматолог-ортопед", "Врач-стоматолог общей практики", "Стоматолог-ортопед"),
+        ("Эндодонтист", "Стоматолог", "Эндодонтист"),
+        ("Ортодонт-гнатолог", "Стоматолог", "Ортодонт-гнатолог"),
+        ("Детский стоматолог", "Врач-стоматолог", "Детский стоматолог"),
+        ("Челюстно-лицевой хирург", "Стоматолог", "Челюстно-лицевой хирург"),
+        ("Пародонтолог", "Врач", "Пародонтолог"),
+    ]
+    for cur_spec, new_cand, expected in test_hierarchy_pairs:
+        res = user_memory.resolve_clinician_specialty(cur_spec, new_cand, is_group_daemon=False)
+        check(f"Hierarchy Guard: '{cur_spec}' НЕ деградирует до '{new_cand}'", res == expected)
+
+    # Test 11.2: Group chat daemon immunity against topic switching
+    # В групповом чате обсуждение пломб не должно делать хирурга терапевтом
+    daemon_tests = [
+        ("Хирург-имплантолог", "Стоматолог-терапевт", "Хирург-имплантолог"),
+        ("Стоматолог-ортопед", "Стоматолог-терапевт", "Стоматолог-ортопед"),
+        ("Эндодонтист", "Стоматолог-ортопед", "Эндодонтист"),
+        ("Ортодонт", "Хирург", "Ортодонт"),
+    ]
+    for cur_spec, chatter_spec, expected in daemon_tests:
+        res = user_memory.resolve_clinician_specialty(cur_spec, chatter_spec, is_group_daemon=True)
+        check(f"Daemon Immunity: '{cur_spec}' защищен от дрейфа при топике '{chatter_spec}'", res == expected)
+
+    # Test 11.3: Cross-specialty combination in PM mode
+    combined_res = user_memory.resolve_clinician_specialty(
+        current_spec="Стоматолог-ортопед",
+        new_spec="Хирург-имплантолог",
+        is_group_daemon=False
+    )
+    check("Multi-Specialty Combination: 'Стоматолог-ортопед' + 'Хирург-имплантолог' объединяются через запятую",
+          "Стоматолог-ортопед" in combined_res and "Хирург-имплантолог" in combined_res)
+
+    # Test 11.4: Strict rejection of malicious, administrative, and non-dental candidates
+    forbidden_candidates = [
+        "Главный врач клиники",
+        "Директор стоматологии",
+        "Администратор",
+        "Разработчик",
+        "Бот",
+        "Пациент",
+        "Студент 3 курса",
+        "Целитель-травник",
+        "Гомеопат",
+        "Шаман",
+        "DROP TABLE user_memories",
+        "<script>alert(1)</script>",
+        "Специализация: не определена",
+        "нет сведений",
+    ]
+    for bad_spec in forbidden_candidates:
+        is_valid = user_memory.is_valid_specialty_candidate(bad_spec)
+        check(f"Candidate Rejection: '{bad_spec[:30]}' отклонен валидатором", not is_valid)
+        res_resolved = user_memory.resolve_clinician_specialty("Стоматолог-ортопед", bad_spec)
+        check(f"Resolver Defense: '{bad_spec[:30]}' не затер текущую специализацию",
+              res_resolved == "Стоматолог-ортопед")
+
+    # Test 11.5: Cross-session FDI Tooth Isolation
+    # Зубы из кейса А (4.6) не должны смешиваться с кейсом Б (1.1)
+    case_memory = {
+        "specialty": "Стоматолог-терапевт",
+        "clinical_summary": (
+            "Специализация: Стоматолог-терапевт.\n\n"
+            "Кейсы:\n"
+            "• Зуб 4.6: эндодонтическое перелечивание, распломбирован резорцин, найден МВ2.\n"
+            "• Зуб 1.1: эстетическая реставрация режущего края по силиконовому ключу."
+        ),
+        "group_summary": "",
+        "facts_json": json.dumps([
+            "Кейс 4.6: распломбировка резорцина в мезиальных каналах",
+            "Кейс 1.1: реставрация дефекта IV класса по Black"
+        ])
+    }
+    prompt = user_memory.format_clinician_memory_prompt(8888, case_memory)
+    check("FDI Isolation: Зуб 4.6 привязан к эндодонтии", "4.6" in prompt and "резорцин" in prompt)
+    check("FDI Isolation: Зуб 1.1 привязан к эстетической реставрации", "1.1" in prompt and "реставрация" in prompt)
+    check("FDI Isolation: Зубы не подменили друг друга",
+          prompt.find("4.6") != -1 and prompt.find("1.1") != -1)
+
+
+# ======================================================================
+# PYTEST TEST SUITE DEFINITIONS
+# ======================================================================
+
+def test_state_atomicity_and_vps():
+    FAIL.clear()
+    run_state_atomicity_and_vps_tests()
+    assert not FAIL, f"Failures in state atomicity & VPS tests: {FAIL}"
+
+
+def test_clinical_drift_prevention():
+    FAIL.clear()
+    run_clinical_drift_prevention_tests()
+    assert not FAIL, f"Failures in clinical drift prevention tests: {FAIL}"
+
+
+def test_fact_sanitization_and_anti_injection():
+    FAIL.clear()
+    run_fact_sanitization_and_anti_injection_tests()
+    assert not FAIL, f"Failures in fact sanitization & anti-injection tests: {FAIL}"
+
+
+def test_clean_portrait():
+    FAIL.clear()
+    run_clean_portrait_tests()
+    assert not FAIL, f"Failures in clean portrait tests: {FAIL}"
+
+
+def test_clinician_memory_sanitization_and_protection():
+    FAIL.clear()
+    run_clinician_memory_sanitization_and_protection_tests()
+    assert not FAIL, f"Failures in clinician memory sanitization & protection tests: {FAIL}"
+
+
+def test_fdi_teeth_and_case_tracking():
+    FAIL.clear()
+    run_fdi_teeth_and_case_tracking_tests()
+    assert not FAIL, f"Failures in FDI teeth & case tracking tests: {FAIL}"
+
+
+def test_offtopic_and_noise_sanitization():
+    FAIL.clear()
+    run_offtopic_and_noise_sanitization_tests()
+    assert not FAIL, f"Failures in offtopic & noise sanitization tests: {FAIL}"
+
+
+def test_history_budget_and_markup_balancing():
+    FAIL.clear()
+    run_history_budget_and_markup_balancing_tests()
+    assert not FAIL, f"Failures in history budget & markup balancing tests: {FAIL}"
+
+
+def test_anti_inversion_and_attribution_integrity():
+    FAIL.clear()
+    run_anti_inversion_and_attribution_integrity_tests()
+    assert not FAIL, f"Failures in anti-inversion & attribution integrity tests: {FAIL}"
+
+
+def test_advanced_anti_inversion_and_doubt_isolation():
+    FAIL.clear()
+    run_advanced_anti_inversion_suite()
+    assert not FAIL, f"Failures in advanced anti-inversion suite: {FAIL}"
+
+
+def test_advanced_specialty_drift_and_staleness_protection():
+    FAIL.clear()
+    run_advanced_specialty_drift_and_staleness_suite()
+    assert not FAIL, f"Failures in advanced specialty drift & staleness protection: {FAIL}"
+
+
 def main():
     print("=" * 70)
     print("  RED TEAM INQUISITOR AUDIT: MEMORY & PERSISTENT STATE INVARIANTS")
@@ -603,6 +818,8 @@ def main():
     run_offtopic_and_noise_sanitization_tests()
     run_history_budget_and_markup_balancing_tests()
     run_anti_inversion_and_attribution_integrity_tests()
+    run_advanced_anti_inversion_suite()
+    run_advanced_specialty_drift_and_staleness_suite()
 
     print("\n" + "=" * 70)
     print(f"  ИТОГОВЫЙ СТАТУС: PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
