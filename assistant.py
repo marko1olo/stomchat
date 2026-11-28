@@ -189,6 +189,24 @@ def acquire_group_reply_lock(chat_id: int, msg_ids):
             _IN_FLIGHT_GROUP_REPLIES.discard(k)
 
 
+def mark_group_reply_in_flight(chat_id: int, msg_ids) -> list:
+    """Добавляет ключи сообщений в in-flight множество и возвращает их."""
+    if isinstance(msg_ids, int):
+        ids = [msg_ids]
+    else:
+        ids = list(msg_ids)
+    keys = [(chat_id, mid) for mid in ids if mid]
+    for k in keys:
+        _IN_FLIGHT_GROUP_REPLIES.add(k)
+    return keys
+
+
+def unmark_group_reply_in_flight(keys: list):
+    """Удаляет ключи сообщений из in-flight множества."""
+    for k in keys:
+        _IN_FLIGHT_GROUP_REPLIES.discard(k)
+
+
 def is_group_reply_in_flight(chat_id: int, msg_ids) -> bool:
     """Проверяет, генерируется ли прямо сейчас ответ для любого из указанных msg_id."""
     if isinstance(msg_ids, int):
@@ -16225,7 +16243,8 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 
     cooldown = check_user_cooldown(chat_id, event.sender_id, "summary", seconds=30)
     if cooldown > 0:
-        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
+        if chat_id > 0:
+            await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед использованием команды.", reply_to=msg_id)
         return
 
     status_msg = await bot_client.send_message(entity=chat_id, message="📝 <i>Собираю и анализирую историю обсуждения... Подождите.</i>", reply_to=msg_id, parse_mode='html')
@@ -16377,7 +16396,7 @@ async def handle_group_summary(bot_client, event, reply_to_msg_id):
 
 
 async def handle_group_direct_ask(bot_client, event, question):
-    """Ответ на прямой клинический вопрос пользователя в группе."""
+    """Ответ на прямой клинический вопрос пользователя в группе с защитой от дублирования."""
     sender_id = getattr(event, "sender_id", None)
     sender = getattr(event, "_sender", None)
     if is_bot_sender(sender_id, sender=sender, event=event):
@@ -16399,6 +16418,14 @@ async def handle_group_direct_ask(bot_client, event, question):
         logger.info("Direct ask already in flight for msg_id=%s or reply_to=%s, skipping duplicate invocation", msg_id, reply_to_msg_id_check)
         return
 
+    flight_keys = mark_group_reply_in_flight(chat_id, all_check_ids)
+    try:
+        await _execute_group_direct_ask(bot_client, event, question, chat_id, msg_id, reply_to_msg_id_check)
+    finally:
+        unmark_group_reply_in_flight(flight_keys)
+
+
+async def _execute_group_direct_ask(bot_client, event, question, chat_id, msg_id, reply_to_msg_id_check):
     if await check_and_apply_silence(event, question or getattr(getattr(event, "message", None), "message", ""), getattr(event, "reply_to_msg_id", None)):
         return
 
@@ -17255,7 +17282,8 @@ async def handle_group_quiz(bot_client, event):
 
     cooldown = check_user_cooldown(chat_id, event.sender_id, "quiz", seconds=60)
     if cooldown > 0:
-        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией новой викторины.", reply_to=msg_id)
+        if chat_id > 0:
+            await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией новой викторины.", reply_to=msg_id)
         return
 
     status_msg = await bot_client.send_message(entity=chat_id, message="🎲 <i>Конструирую клиническую задачу... Подождите.</i>", reply_to=msg_id, parse_mode='html')
@@ -17411,11 +17439,12 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
 
     cooldown = check_user_cooldown(chat_id, event.sender_id, "native_poll", seconds=30)
     if cooldown > 0:
-        await bot_client.send_message(
-            entity=chat_id,
-            message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией нового опроса.",
-            reply_to=msg_id
-        )
+        if chat_id > 0:
+            await bot_client.send_message(
+                entity=chat_id,
+                message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед генерацией нового опроса.",
+                reply_to=msg_id
+            )
         return
 
     # Dedup guard: если сегодня опрос уже был отправлен планировщиком — не дублируем.
@@ -20882,7 +20911,8 @@ async def handle_term_explainer(bot_client, event, term):
 
     cooldown = check_user_cooldown(chat_id, event.sender_id, "what", seconds=30)
     if cooldown > 0:
-        await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед повторным запросом термина.", reply_to=msg_id)
+        if chat_id > 0:
+            await bot_client.send_message(entity=chat_id, message=f"⚠️ Пожалуйста, подождите {cooldown} сек перед повторным запросом термина.", reply_to=msg_id)
         return
 
     # Термин уходит в промпт как есть, поэтому его длина ограничена: запрос на
@@ -20956,7 +20986,8 @@ async def handle_group_calc(bot_client, event, calc_arg: str = ""):
 
     cooldown = check_user_cooldown(chat_id, getattr(event, "sender_id", 0), "calc", seconds=10)
     if cooldown > 0:
-        await bot_client.send_message(entity=chat_id, message=f"⏳ <i>Пожалуйста, подождите {cooldown} сек.</i>", reply_to=msg_id, parse_mode='html')
+        if chat_id > 0:
+            await bot_client.send_message(entity=chat_id, message=f"⏳ <i>Пожалуйста, подождите {cooldown} сек.</i>", reply_to=msg_id, parse_mode='html')
         return
 
     calc_arg = (calc_arg or "").strip()
